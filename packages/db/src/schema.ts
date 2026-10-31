@@ -81,6 +81,23 @@ export const passkeys = sqliteTable(
   (t) => [index("passkeys_user_idx").on(t.userId)],
 );
 
+/**
+ * Pending WebAuthn challenges, keyed by the SHA-256 of the browser's challenge cookie. A ceremony
+ * consumes its row with `DELETE … RETURNING`, so each challenge works once. `user_id` is the
+ * account the ceremony is for; on a claim that account doesn't exist yet, so it has no foreign key.
+ */
+export const webauthnChallenges = sqliteTable(
+  "webauthn_challenges",
+  {
+    idHash: text("id_hash").primaryKey(),
+    kind: text("kind", { enum: ["claim", "recovery", "login"] }).notNull(),
+    challenge: text("challenge").notNull(),
+    userId: text("user_id"),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [index("webauthn_challenges_expires_idx").on(t.expiresAt)],
+);
+
 /** SHA-256 hashes of ≥128-bit recovery codes, compared in constant time (ADR 0010 D2). */
 export const recoveryCodes = sqliteTable(
   "recovery_codes",
