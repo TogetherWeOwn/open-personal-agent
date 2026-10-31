@@ -11,14 +11,13 @@ const server = createTestHarness({
 });
 
 describe("built Worker", () => {
-  beforeAll(() => server.listen());
-  afterAll(() => server.close());
-
-  it("applies the D1 migrations", async () => {
+  beforeAll(async () => {
+    await server.listen();
     await server.getWorker().applyD1Migrations("DB");
   });
+  afterAll(() => server.close());
 
-  it("answers /api/health", async () => {
+  it("answers /api/health with the migrated schema", async () => {
     const res = await server.fetch("/api/health");
     expect(await res.json()).toMatchObject({
       status: "degraded",
