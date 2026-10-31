@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: Apache-2.0
+import fs from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { deployCloudflare } from "../deploy-cloudflare.mjs";
+
+const REPO = path.resolve(import.meta.dirname, "../..");
+const TOKEN = "cf-token-canary-7f3a";
+const ACCOUNT = "acc123";
+
+/** A temp repo root plus fakes for wrangler, the Cloudflare API and the terminal. */
+function setup({ deployedTag = null, existingSecrets = [], forbidden = [] } = {}) {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "opa-deploy-"));
+  fs.cpSync(path.join(REPO, "wrangler.jsonc"), path.join(root, "wrangler.jsonc"));
+  fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
+  const calls = [];
+  const out = [];
+  const terminal = [];
+  let canary = 0;
+  const canaries = [];
+  const deps = {
+    env: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, PATH: process.env.PATH },
+    root,
+    nodeVersion: "22.12.0",
+    randomBytes: (n) => {
+      const value = Buffer.alloc(n, 0xa0 + canary++);
+      canaries.push(value.toString("base64"));
+      return value;
+    },
+    sleep: async () => {},
+    stdout: (text) => out.push(text),
+    tty: () => (text) => terminal.push(text),
+    run: async (cmd, args, { env, input }) => {
+      const sub = cmd === "pnpm" ? args : args.slice(1);
+      calls.push({ argv: [cmd, ...args], env, input, sub: sub.join(" ") });
+      if (sub[0] === "auth")
+        return { code: 0, output: JSON.stringify({ type: "api_token", token: TOKEN }) };
+      if (sub[0] === "deploy" && sub[1] === "--dry-run") {
+        fs.mkdirSync(sub[3], { recursive: true });
+        fs.writeFileSync(path.join(sub[3], "index.js"), "export default {}");
+      }
+      if (sub[0] === "deploy" && sub[1] !== "--dry-run" && forbidden.includes("deploy")) {
+        return { code: 1, output: "Authentication error [code: 10000] (403)" };
+      }
+      if (sub[0] === "d1") return { code: 0, output: "✅ No migrations to apply!" };
+      if (sub[0] === "secret" && sub[1] === "list") {
+        return { code: 0, output: JSON.stringify(existingSecrets.map((name) => ({ name }))) };
+      }
+      return { code: 0, output: "" };
+    },
+    fetch: async (url) => {
+      const p = new URL(url).pathname.replace("/client/v4", "");
+      const reply = (status, body) => ({ status, ok: status < 300, json: async () => body });
+      const ok = (result) => reply(200, { success: true, result });
+      if (url.endsWith("/api/health")) return reply(200, { status: "ok" });
+      if (forbidden.some((f) => p.includes(f))) return reply(403, { success: false, errors: [] });
+      if (p === "/user/tokens/verify") return ok({ status: "active" });
+      if (p.endsWith("/workers/subdomain")) return ok({ subdomain: "me" });
+      if (p.endsWith("/deployments")) {
+        if (!deployedTag) return reply(404, { success: false });
+        return ok({ deployments: [{ versions: [{ version_id: "v2", percentage: 100 }] }] });
+      }
+      if (p.endsWith("/versions")) {
+        return ok({
+          items: [
+            { id: "v2", number: 2, annotations: { "workers/triggered_by": "secret" } },
+            { id: "v1", number: 1, annotations: { "workers/tag": deployedTag } },
+          ],
+        });
+      }
+      return ok([]);
+    },
+  };
+  const filesText = () => {
+    const texts = [];
+    const walk = (p) => {
+      if (fs.statSync(p).isDirectory()) for (const e of fs.readdirSync(p)) walk(path.join(p, e));
+      else texts.push(fs.readFileSync(p, "utf8"));
+    };
+    walk(root);
+    return texts.join("\n");
+  };
+  /** Fails if a canary secret or the token shows up in stdout, an argv, a child env or a file. */
+  const expectNoLeaks = (calls) => {
+    const channels = [out.join(""), JSON.stringify(calls), filesText()];
+    for (const secret of [...canaries, TOKEN]) {
+      for (const channel of channels) expect(channel).not.toContain(secret);
+    }
+  };
+  return { deps, calls, out, terminal, canaries, expectNoLeaks };
+}
+
+describe("deploy:cloudflare", () => {
+  it("dry run with canary secrets leaks nothing to stdout, argv, env or files", async () => {
+    const t = setup();
+    const result = await deployCloudflare(["--dry-run", "--name", "opa-v-20261031-abc123"], t.deps);
+    expect(result.dryRun).toBe(true);
+    expect(t.canaries).toHaveLength(3);
+    t.expectNoLeaks(t.calls);
+    expect(t.terminal).toEqual([]);
+    const subs = t.calls.map((c) => c.sub);
+    expect(subs.filter((s) => /^deploy(?! --dry-run)|^secret|^d1/.test(s))).toEqual([]);
+  });
+
+  it("deploys, pipes secrets on stdin only, and shows the setup link on the terminal", async () => {
+    const t = setup();
+    const result = await deployCloudflare(["--name", "opa-v-20261031-abc123"], t.deps);
+    expect(result.changed).toEqual(["worker", "secrets"]);
+    const bulk = t.calls.find((c) => c.sub.startsWith("secret bulk"));
+    expect(Object.keys(JSON.parse(bulk.input))).toEqual([
+      "OPA_MASTER_KEY",
+      "OPA_SESSION_SECRET",
+      "OPA_SETUP_TOKEN",
+    ]);
+    t.expectNoLeaks([...t.calls.filter((c) => c !== bulk), bulk.argv, bulk.env]);
+    expect(t.terminal.join("")).toContain(
+      `https://opa-v-20261031-abc123.me.workers.dev/setup#token=${t.canaries[2]}`,
+    );
+  });
+
+  it("re-run with nothing changed is a no-op that reports up to date", async () => {
+    const first = setup();
+    const { tag } = await deployCloudflare(["--dry-run"], first.deps);
+    const existingSecrets = ["OPA_MASTER_KEY", "OPA_SESSION_SECRET", "OPA_SETUP_TOKEN"];
+    const t = setup({ deployedTag: tag, existingSecrets });
+    const result = await deployCloudflare([], t.deps);
+    expect(result.changed).toEqual([]);
+    expect(t.out.join("")).toContain("Up to date: nothing changed.");
+    const subs = t.calls.map((c) => c.sub);
+    expect(subs.some((s) => /^deploy -c/.test(s) || s.startsWith("secret bulk"))).toBe(false);
+    expect(t.canaries).toEqual([]);
+  });
+
+  it("never regenerates an existing OPA_MASTER_KEY", async () => {
+    const t = setup({ existingSecrets: ["OPA_MASTER_KEY"] });
+    await deployCloudflare([], t.deps);
+    const bulk = t.calls.find((c) => c.sub.startsWith("secret bulk"));
+    expect(Object.keys(JSON.parse(bulk.input))).toEqual(["OPA_SESSION_SECRET", "OPA_SETUP_TOKEN"]);
+  });
+
+  it("names a missing permission with its permissions.json entry", async () => {
+    await expect(deployCloudflare([], setup({ forbidden: ["/r2/buckets"] }).deps)).rejects.toThrow(
+      /missing permission "Workers R2 Storage Edit" \(account\).*entry "r2"/,
+    );
+    const t = setup({ forbidden: ["deploy"] });
+    await expect(deployCloudflare([], t.deps)).rejects.toThrow(/entry "workers-scripts"/);
+  });
+
+  it("prefixes the Workflow name and rejects unsafe names", async () => {
+    const t = setup();
+    await deployCloudflare(["--dry-run", "--name", "opa-v-1"], t.deps);
+    const file = path.join(t.deps.root, ".wrangler/opa-deploy/opa-v-1/wrangler.json");
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).workflows[0].name).toBe(
+      "opa-v-1-task-workflow",
+    );
+    await expect(deployCloudflare(["--name", "Bad_Name"], t.deps)).rejects.toThrow(/invalid name/);
+  });
+});
