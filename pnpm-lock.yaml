@@ -58,6 +58,8 @@ importers:
         specifier: 4.13.14
         version: 4.13.14
 
+  packages/core: {}
+
   packages/db:
     dependencies:
       drizzle-orm:
@@ -67,6 +69,12 @@ importers:
       drizzle-kit:
         specifier: 0.31.11
         version: 0.31.11
+
+  packages/providers:
+    dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 
