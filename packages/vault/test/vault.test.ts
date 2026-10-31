@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// R7 M2-8 and M2-8+, and the ADR 0010 D4.1 tests M2-8+V1, V2 and V7 to V9.
+// R7 M2-8 and M2-8+, and the ADR 0010 D4.1 tests M2-8+V1 to V3 and V6 to V10.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createVault, decrypt, encrypt, type Purpose, type Vault } from "../src/index";
+import * as surface from "../src/index";
+import {
+  createVault,
+  decrypt,
+  encrypt,
+  type Purpose,
+  retireEpoch,
+  rewrap,
+  type Vault,
+} from "../src/index";
 import { importKek } from "../src/kek";
 import { MemoryStore } from "./memory-store";
 
@@ -31,6 +40,7 @@ function only<T>(rows: T[]): T {
 let store: MemoryStore;
 let key1: string;
 let vault: Vault;
+const rotated = () => createVault({ masterKey: `2:${newKey()}`, previousMasterKey: key1, store });
 beforeEach(async () => {
   store = new MemoryStore();
   key1 = newKey();
@@ -120,6 +130,38 @@ describe("D4.1 key hygiene", () => {
     await expect(get(relabelled)).rejects.toMatchObject(FAILED);
   });
 
+  it("V3: every encryption and re-wrap uses a fresh 96-bit IV", async () => {
+    const ivs = new Set<string>();
+    const putSecret = store.putSecret.bind(store);
+    store.putSecret = async (row) => {
+      expect(row.iv.length).toBe(12);
+      ivs.add(b64(row.iv));
+      return putSecret(row);
+    };
+    for (let i = 0; i < 10_000; i++) await put(vault);
+    expect(ivs.size).toBe(10_000);
+    const before = b64(only(store.keys).iv);
+    await rewrap(await rotated(), { caller });
+    expect(b64(only(store.keys).iv)).not.toBe(before);
+  }, 30_000);
+
+  it("V6: exports exactly the D4.1 #5 names, and no call returns key material", async () => {
+    const names = ["createVault", "decrypt", "encrypt", "retireEpoch", "rewrap"];
+    expect(Object.keys(surface).sort()).toEqual(names);
+    expect(Reflect.ownKeys(vault)).toEqual([]);
+    expect(Object.getPrototypeOf(vault)).toBeNull();
+    const next = await rotated();
+    const results: unknown[] = [await put(vault), await get(vault), await rewrap(next, { caller })];
+    results.push(await retireEpoch(next, 1, { caller }));
+    for (const value of results.flatMap((r) =>
+      r && typeof r === "object" ? Object.values(r) : r,
+    )) {
+      expect(value).not.toBeInstanceOf(CryptoKey);
+      expect(value).not.toBeInstanceOf(ArrayBuffer);
+      expect(ArrayBuffer.isView(value)).toBe(false);
+    }
+  });
+
   it("V7: each call writes one audit row, and decrypt fails closed without one", async () => {
     await put(vault);
     await get(vault);
@@ -195,5 +237,36 @@ describe("D4.1 key hygiene", () => {
       for (const value of forbidden) expect(text).not.toContain(value);
     }
     for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("V10: PREV decrypts and re-wraps old epochs; a retired epoch no longer decrypts", async () => {
+    await put(vault);
+    await put(vault, { userId: "u2" });
+    const oldRows = store.keys.map((k) => ({ ...k }));
+    const key2 = `2:${newKey()}`;
+    const migrating = await createVault({ masterKey: key2, previousMasterKey: key1, store });
+    expect(await get(migrating)).toBe(CANARY);
+    await expect(retireEpoch(migrating, 1, { caller })).rejects.toThrow("epoch_in_use");
+    await expect(retireEpoch(migrating, 2, { caller })).rejects.toThrow("epoch_current");
+
+    expect(await rewrap(migrating, { caller })).toEqual({ rewrapped: 2 });
+    expect(store.keys.map((k) => k.kekVersion)).toEqual([2, 2]);
+    expect(await get(migrating, { userId: "u2" })).toBe(CANARY);
+    await put(migrating, { userId: "u3" });
+    expect(store.keys.find((k) => k.userId === "u3")?.kekVersion).toBe(2);
+    await retireEpoch(migrating, 1, { caller });
+    expect(store.audits.at(-1)).toMatchObject({
+      action: "vault.retire_epoch",
+      detail: "kek_version=1",
+    });
+
+    // With PREV removed, or the epoch retired, an old copy of the DEKs (Time Travel) fails.
+    const after = await createVault({ masterKey: key2, store });
+    expect(await get(after)).toBe(CANARY);
+    store.keys = oldRows;
+    await expect(get(after)).rejects.toMatchObject(FAILED);
+    await expect(get(migrating)).rejects.toMatchObject(FAILED);
+    // And no fresh DEK silently replaces the unreadable one.
+    await expect(put(after, { id: "s9" })).rejects.toThrow("encrypt_failed");
   });
 });

@@ -37,7 +37,7 @@ export interface SealedSecret {
 /** An `audit_log` row; `module` is the calling module. */
 export interface VaultAuditRow {
   userId: string | null;
-  action: "vault.encrypt" | "vault.decrypt";
+  action: "vault.encrypt" | "vault.decrypt" | "vault.rewrap" | "vault.retire_epoch";
   module: string;
   targetId: string | null;
   result: "ok" | "denied" | "error";
@@ -46,8 +46,12 @@ export interface VaultAuditRow {
 
 export interface VaultStore {
   userKeys(userId: string): Promise<WrappedDek[]>;
+  userKeysAt(kekVersion: number, limit: number): Promise<WrappedDek[]>;
+  countUserKeys(kekVersion: number): Promise<number>;
   /** Inserts the row unless the user already has one for that epoch. */
   insertUserKey(row: WrappedDek): Promise<void>;
+  /** Atomically inserts `row` (unless present) and deletes the user's `oldKekVersion` row. */
+  replaceUserKey(row: WrappedDek, oldKekVersion: number): Promise<void>;
   getSecret(userId: string, secretId: string): Promise<SealedSecret | null>;
   /** Inserts or replaces the user's row with this id; rejects if it writes nothing. */
   putSecret(row: SealedSecret): Promise<void>;
@@ -140,6 +144,62 @@ export async function decrypt(vault: Vault, scope: UserScope, input: SecretRef):
     const dek = await userDek(state, scope.userId, false);
     const aad = encodeAad(scope.userId, secretId, purpose, binding, row.version);
     return new TextDecoder().decode(await gcm("decrypt", dek, row.iv, aad, row.ciphertext));
+  });
+}
+
+/** Re-wraps every older-epoch DEK under the current KEK. Secrets keep their DEKs, untouched. */
+export async function rewrap(
+  vault: Vault,
+  options: { caller: string },
+): Promise<{ rewrapped: number }> {
+  const state = stateOf(vault);
+  const { current, store } = state;
+  let rewrapped = 0;
+  for (const old of state.keks.values()) {
+    if (old === current) continue;
+    for (let rows = await store.userKeysAt(old.version, 100); rows.length > 0; ) {
+      for (const row of rows) {
+        // Extractable only for this re-wrap; the key never leaves the function.
+        const dek = await unwrapDek(old, row, true);
+        await store.replaceUserKey(await wrapDek(current, row.userId, dek), old.version);
+        rewrapped++;
+      }
+      rows = await store.userKeysAt(old.version, 100);
+    }
+  }
+  const detail = `kek_version=${current.version} rewrapped=${rewrapped}`;
+  await record(state, {
+    userId: null,
+    action: "vault.rewrap",
+    module: options.caller,
+    targetId: null,
+    result: "ok",
+    detail,
+  });
+  return { rewrapped };
+}
+
+/**
+ * Stops this vault using an old KEK epoch once no DEK references it. The operator then deletes
+ * `OPA_MASTER_KEY_PREV`; after that, old copies of the data (Time Travel) can't be decrypted.
+ */
+export async function retireEpoch(
+  vault: Vault,
+  kekVersion: number,
+  options: { caller: string },
+): Promise<void> {
+  const state = stateOf(vault);
+  if (kekVersion === state.current.version) throw vaultError("epoch_current");
+  if ((await state.store.countUserKeys(kekVersion)) > 0) throw vaultError("epoch_in_use");
+  state.keks.delete(kekVersion);
+  const detail = `kek_version=${kekVersion}`;
+  await record(state, {
+    userId: null,
+    action: "vault.retire_epoch",
+    module: options.caller,
+    targetId: null,
+    result: "ok",
+    detail,
   });
 }
 

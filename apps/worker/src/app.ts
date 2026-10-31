@@ -12,6 +12,14 @@ app.get("/api/health", async (c) => {
   return c.json(health, health.status === "ok" ? 200 : 503);
 });
 
+// Secret routes fail closed when the vault didn't start: no fallback key and no plaintext mode
+// (ADR 0010 D4.1 #7).
+app.use("/api/secrets/*", async (c, next) => {
+  if (c.env.VAULT) return next();
+  c.header("Cache-Control", "no-store");
+  return c.json({ error: "vault_unavailable" }, 503);
+});
+
 // The claim flow (M2-09) takes over `/setup` once the deployment is ready; until then the SPA
 // serves it.
 app.get("/setup", async (c) => {

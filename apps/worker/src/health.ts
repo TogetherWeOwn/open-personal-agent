@@ -60,9 +60,13 @@ export async function checkHealth(env: Env): Promise<Health> {
   const workflow = typeof env.TASK_WORKFLOW?.create === "function";
   const ai = typeof env.AI?.run === "function";
 
-  const secrets = Object.fromEntries(
-    REQUIRED_SECRETS.map((name) => [name, typeof env[name] === "string" && env[name] !== ""]),
-  ) as Record<SecretName, boolean>;
+  const isSet = (value: string | undefined) => typeof value === "string" && value !== "";
+  const secrets: Record<SecretName, boolean> = {
+    // The app never sees the master key (ADR 0010 D4.1 #1); a vault that started proves it valid.
+    OPA_MASTER_KEY: env.VAULT !== null,
+    OPA_SESSION_SECRET: isSet(env.OPA_SESSION_SECRET),
+    OPA_SETUP_TOKEN: isSet(env.OPA_SETUP_TOKEN),
+  };
   // A newer schema is fine: migrations stay compatible with the previous Worker (ADR 0004).
   const current = applied !== null && applied >= SCHEMA_VERSION;
   const checks = { database, storage, durableObject, workflow, ai };
