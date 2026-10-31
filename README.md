@@ -18,12 +18,13 @@ pnpm dev                         # http://localhost:8787
 and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
 reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
 
-| Command               | What it does                                                       |
-| --------------------- | ------------------------------------------------------------------ |
-| `pnpm test`           | Vitest: unit tests in Node and Worker tests in the Workers runtime |
-| `pnpm lint`           | Biome lint and format check                                        |
-| `pnpm typecheck`      | `tsc --noEmit` in every package                                    |
-| `pnpm deploy:dry-run` | Builds and bundles the Worker without deploying it                 |
+| Command                           | What it does                                                              |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
+| `pnpm lint`                       | Biome lint and format check                                               |
+| `pnpm typecheck`                  | `tsc --noEmit` in every package                                           |
+| `pnpm deploy:dry-run`             | Builds and bundles the Worker without deploying it                        |
+| `pnpm --filter @opa/web test:e2e` | Playwright: axe, keyboard send and screenshot baselines (`visual` CI job) |
 
 ## Layout
 

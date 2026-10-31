@@ -1,0 +1,38 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+@import "tailwindcss";
+
+/*
+ * Semantic tokens (UX direction §7.4) with their light and dark values; `color-scheme` picks one.
+ * Tailwind's default font stack is system fonts, so nothing loads remotely.
+ */
+@theme {
+  --color-surface: light-dark(#faf8f5, #1a1815);
+  --color-surface-raised: light-dark(#ffffff, #24211d);
+  --color-surface-sunken: light-dark(#f1ede6, #13110f);
+  --color-text: light-dark(#1f1c18, #f1ece4);
+  --color-text-muted: light-dark(#5e574d, #b3aa9d);
+  --color-border: light-dark(#d9d2c7, #3d3832);
+  --color-border-strong: light-dark(#8a8173, #7d7467);
+  --color-accent: light-dark(#9c4221, #e8916b);
+  --color-accent-contrast: light-dark(#ffffff, #1a1815);
+  --color-user-bubble: light-dark(#efe6dc, #2f2a24);
+  --color-danger: light-dark(#a1261b, #f08a7e);
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  @apply bg-surface font-sans text-base/normal text-text antialiased;
+}
+
+/* One focus style, keyed off React Aria's keyboard-only flag. */
+[data-focus-visible] {
+  @apply outline-2 outline-offset-2 outline-accent;
+}
+
+/* The streaming caret: silent for screen readers, and steady so reduced motion needs no case. */
+.caret::after {
+  content: "▍" / "";
+}
