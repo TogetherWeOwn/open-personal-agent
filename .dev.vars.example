@@ -1,0 +1,13 @@
+# Local secrets for `pnpm dev`. Copy this file to `.dev.vars` and fill in each value.
+# Generate a value with: node -e "console.log(crypto.getRandomValues(Buffer.alloc(32)).toString('base64'))"
+# On Cloudflare these are Worker secrets, set by `pnpm deploy:cloudflare`. Never commit real values.
+
+# Deployment key-encryption key (KEK): 32 random bytes, base64. It wraps every user's data key.
+# Losing it makes stored per-user secrets unrecoverable, so back it up.
+OPA_MASTER_KEY=
+
+# Secret for signing session state: 32 random bytes, base64.
+OPA_SESSION_SECRET=
+
+# One-time token that claims a fresh deployment at /setup: 32 random bytes, base64.
+OPA_SETUP_TOKEN=

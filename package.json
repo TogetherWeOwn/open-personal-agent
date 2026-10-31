@@ -1,0 +1,35 @@
+{
+  "name": "open-personal-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "An open-source personal AI assistant you deploy to your own Cloudflare account.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TogetherWeOwn/open-personal-agent.git"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "pnpm --filter @opa/web build",
+    "dev": "pnpm build && wrangler dev --local",
+    "dev:web": "pnpm --filter @opa/web dev",
+    "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "@cloudflare/workers-types": "5.20261031.1",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5",
+    "wrangler": "4.156.0"
+  }
+}
