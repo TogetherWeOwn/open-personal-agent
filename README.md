@@ -24,6 +24,9 @@ reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxyi
 | `pnpm lint`           | Biome lint and format check                                        |
 | `pnpm typecheck`      | `tsc --noEmit` in every package                                    |
 | `pnpm deploy:dry-run` | Builds and bundles the Worker without deploying it                 |
+| `pnpm test:harness`   | Boots the dry-run bundle with `createTestHarness` (run it after)   |
+| `pnpm check`          | Ports rule, dependency guard, builder independence, supply chain   |
+| `pnpm notices`        | Writes `dist/THIRD_PARTY_NOTICES.md` for production dependencies   |
 
 ## Layout
 
