@@ -4,10 +4,10 @@ import { exports, env as workerEnv } from "cloudflare:workers";
 import { SCHEMA_VERSION } from "@opa/db";
 import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
-import type { Env } from "../src/env";
 import type { Health } from "../src/health";
+import { appEnv, type WorkerEnv } from "../src/index";
 
-const env = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
+const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 
 const SECRETS = {
   OPA_MASTER_KEY: "test-master-key",
@@ -17,8 +17,8 @@ const SECRETS = {
 const TABLES = `audit_log conversations messages passkeys recovery_codes schema_version secrets
   sessions setup_state usage user_keys users`.split(/\s+/);
 
-async function health(bindings: Env = env): Promise<[number, Health]> {
-  const res = await app.request("/api/health", {}, bindings);
+async function health(bindings: WorkerEnv = env): Promise<[number, Health]> {
+  const res = await app.request("/api/health", {}, appEnv(bindings));
   return [res.status, await res.json()];
 }
 
@@ -113,7 +113,7 @@ describe("after migrations", () => {
   });
 
   it("reports degraded, with no error detail, when a binding fails", async () => {
-    const res = await app.request("/api/health", {}, { ...env, ...SECRETS, DB: broken });
+    const res = await app.request("/api/health", {}, appEnv({ ...env, ...SECRETS, DB: broken }));
     const text = await res.text();
     expect(res.status).toBe(503);
     expect(JSON.parse(text)).toMatchObject({ status: "degraded", checks: { database: false } });
@@ -121,7 +121,7 @@ describe("after migrations", () => {
   });
 
   it("doesn't ask for migrations when the database is unreachable", async () => {
-    const res = await app.request("/setup", {}, { ...env, DB: broken });
+    const res = await app.request("/setup", {}, appEnv({ ...env, DB: broken }));
     expect(res.status).toBe(503);
     const html = await res.text();
     expect(html).toContain("npx wrangler secret put OPA_SETUP_TOKEN");
