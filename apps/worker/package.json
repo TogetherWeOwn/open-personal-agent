@@ -1,0 +1,13 @@
+{
+  "name": "@opa/worker",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "hono": "4.13.14"
+  }
+}

@@ -1,0 +1,8 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Dependency lifecycle scripts run only for this allowlist (ADR 0010 D12).
+onlyBuiltDependencies:
+  - esbuild
+  - workerd

@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: Apache-2.0
+// One Worker for the whole app (ADR 0001, ADR 0002). Resource IDs are omitted on purpose:
+// wrangler provisions D1 and R2 on the first deploy, named after the Worker.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "opa",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-10-23",
+  "assets": {
+    "directory": "apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/agents/*", "/hooks/*"]
+  },
+  "d1_databases": [{ "binding": "DB", "migrations_dir": "migrations" }],
+  "r2_buckets": [{ "binding": "FILES" }],
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [{ "name": "ASSISTANT", "class_name": "Assistant" }]
+  },
+  "workflows": [
+    { "name": "opa-task-workflow", "binding": "TASK_WORKFLOW", "class_name": "TaskWorkflow" }
+  ],
+  // Declarative lifecycle for the classes this Worker exports (replaces `migrations`).
+  "exports": {
+    "Assistant": { "type": "durable-object", "storage": "sqlite" },
+    "TaskWorkflow": { "type": "workflow", "name": "opa-task-workflow" }
+  },
+  "triggers": { "crons": ["*/10 * * * *"] }
+}
