@@ -14,20 +14,8 @@ const SECRETS = {
   OPA_SESSION_SECRET: "test-session-secret",
   OPA_SETUP_TOKEN: "test-setup-token",
 };
-const TABLES = [
-  "audit_log",
-  "conversations",
-  "messages",
-  "passkeys",
-  "recovery_codes",
-  "schema_version",
-  "secrets",
-  "sessions",
-  "setup_state",
-  "usage",
-  "user_keys",
-  "users",
-];
+const TABLES = `audit_log conversations messages passkeys recovery_codes schema_version secrets
+  sessions setup_state usage user_keys users`.split(/\s+/);
 
 async function health(bindings: Env = env): Promise<[number, Health]> {
   const res = await app.request("/api/health", {}, bindings);
@@ -62,6 +50,12 @@ describe("an unmigrated deployment with no secrets", () => {
   });
 });
 
+const broken = {
+  prepare() {
+    throw new Error("secret-looking detail");
+  },
+} as unknown as D1Database;
+
 describe("after migrations", () => {
   beforeAll(async () => {
     await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -78,6 +72,20 @@ describe("after migrations", () => {
       applied: SCHEMA_VERSION,
       current: true,
     });
+  });
+
+  it("keeps audit rows when their user is deleted", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO users (id, display_name, role) VALUES ('u1', 'A', 'owner')"),
+      env.DB.prepare(
+        "INSERT INTO audit_log (user_id, action, module, result) VALUES ('u1', 'claim', 'test', 'ok')",
+      ),
+      env.DB.prepare("DELETE FROM users WHERE id = 'u1'"),
+    ]);
+    const row = await env.DB.prepare(
+      "SELECT user_id FROM audit_log WHERE action = 'claim'",
+    ).first();
+    expect(row).toEqual({ user_id: null });
   });
 
   it("still asks for the missing secrets, and only those", async () => {
@@ -97,23 +105,14 @@ describe("after migrations", () => {
   it("reports ok when configured and every binding answers", async () => {
     const ai = { run: async () => ({}) } as unknown as Ai;
     const [status, body] = await health({ ...env, ...SECRETS, AI: ai });
-    expect(body.checks).toEqual({
-      database: true,
-      storage: true,
-      durableObject: true,
-      workflow: true,
-      ai: true,
-    });
+    expect(Object.values(body.checks)).toEqual([true, true, true, true, true]);
     expect(body.status).toBe("ok");
     expect(status).toBe(200);
+    // Presence only: no secret value appears in the response.
+    for (const value of Object.values(SECRETS)) expect(JSON.stringify(body)).not.toContain(value);
   });
 
   it("reports degraded, with no error detail, when a binding fails", async () => {
-    const broken = {
-      prepare() {
-        throw new Error("secret-looking detail");
-      },
-    } as unknown as D1Database;
     const res = await app.request("/api/health", {}, { ...env, ...SECRETS, DB: broken });
     const text = await res.text();
     expect(res.status).toBe(503);
@@ -121,9 +120,11 @@ describe("after migrations", () => {
     expect(text).not.toContain("secret-looking detail");
   });
 
-  it("never returns secret values", async () => {
-    const [, body] = await health({ ...env, ...SECRETS });
-    const text = JSON.stringify(body);
-    for (const value of Object.values(SECRETS)) expect(text).not.toContain(value);
+  it("doesn't ask for migrations when the database is unreachable", async () => {
+    const res = await app.request("/setup", {}, { ...env, DB: broken });
+    expect(res.status).toBe(503);
+    const html = await res.text();
+    expect(html).toContain("npx wrangler secret put OPA_SETUP_TOKEN");
+    expect(html).not.toContain("migrations apply");
   });
 });

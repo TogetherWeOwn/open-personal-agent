@@ -7,7 +7,7 @@ CREATE TABLE `audit_log` (
 	`result` text NOT NULL,
 	`detail` text,
 	`created_at` integer DEFAULT (unixepoch('subsec') * 1000) NOT NULL,
-	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE set null
 );
 --> statement-breakpoint
 CREATE INDEX `audit_log_user_idx` ON `audit_log` (`user_id`,`created_at`);--> statement-breakpoint

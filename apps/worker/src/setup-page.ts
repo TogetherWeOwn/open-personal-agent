@@ -12,16 +12,16 @@ export function finishSetupPage(health: Health): string {
     .filter(([, present]) => !present)
     .map(([name]) => name);
   const steps: string[] = [];
-  if (!health.schema.current) {
+  // An unreachable database also leaves the version unknown; that isn't a missing migration.
+  if (health.checks.database && !health.schema.current) {
     steps.push(`<li><p>Create the database tables:</p><pre><code>${MIGRATE}</code></pre></li>`);
   }
   if (missing.length > 0) {
     const names = missing.map((name) => `<code>${name}</code>`).join(", ");
     const puts = missing.map((name) => `npx wrangler secret put ${name}`).join("\n");
     steps.push(
-      `<li><p>Set the missing secrets: ${names}. Re-running <code>pnpm deploy:cloudflare</code> ` +
-        "generates them and never replaces a secret that already exists. To set one by hand, " +
-        "run its command below and paste 32 random bytes, base64-encoded, when it asks:</p>" +
+      `<li><p>Set the missing secrets: ${names}. Run each command below and paste 32 random ` +
+        "bytes, base64-encoded, when it asks:</p>" +
         `<pre><code>${puts}</code></pre></li>`,
     );
   }
@@ -44,7 +44,7 @@ pre{background:#f2f2f2;padding:.75rem;overflow-x:auto;white-space:pre-wrap}
 <ol>
 ${steps.join("\n")}
 </ol>
-<p>If you deployed under a different Worker name, add <code>--name &lt;your-worker-name&gt;</code> to each command. For local development, copy <code>.dev.vars.example</code> to <code>.dev.vars</code>, fill in each value and restart <code>pnpm dev</code>.</p>
+<p>If you deployed under a different Worker name, add <code>--name &lt;your-worker-name&gt;</code> to each <code>wrangler secret put</code> command. For local development, copy <code>.dev.vars.example</code> to <code>.dev.vars</code>, fill in each value and restart <code>pnpm dev</code>.</p>
 </main>
 </body>
 </html>

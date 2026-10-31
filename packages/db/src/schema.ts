@@ -130,14 +130,14 @@ export const secrets = sqliteTable(
 );
 
 /**
- * Append-only audit trail (ADR 0010 D11). `user_id` is null only for deployment-level events
- * that happen before any user exists, such as a rejected setup claim.
+ * Append-only audit trail (ADR 0010 D11). `user_id` is null for deployment-level events, such as
+ * a rejected setup claim, and for rows whose user was deleted: deleting a user keeps the trail.
  */
 export const auditLog = sqliteTable(
   "audit_log",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
     action: text("action").notNull(),
     module: text("module").notNull(),
     targetId: text("target_id"),
