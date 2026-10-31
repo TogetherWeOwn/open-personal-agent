@@ -7,9 +7,14 @@ export function App() {
   const [health, setHealth] = useState<Health>("checking");
 
   useEffect(() => {
+    // `/api/health` answers 503 with a JSON body while setup is unfinished or a check fails.
     fetch("/api/health")
-      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
-      .then((body: { status?: string }) => setHealth(body.status === "ok" ? "ok" : "unavailable"))
+      .then((res) => res.json())
+      .then((body: { status?: string }) => {
+        // The Worker serves the Finish setup page there, with the commands to run.
+        if (body.status === "setup_required") window.location.replace("/setup");
+        else setHealth(body.status === "ok" ? "ok" : "unavailable");
+      })
       .catch(() => setHealth("unavailable"));
   }, []);
 
