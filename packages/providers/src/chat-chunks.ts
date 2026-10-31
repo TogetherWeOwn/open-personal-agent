@@ -34,7 +34,12 @@ export const aborted = () => error("aborted", "The request was cancelled");
 /** Feed chunks in order with `push`, then call `finish` once the stream ends. */
 export class ChatChunkAccumulator {
   private usage: ModelUsage | undefined;
-  private finishReason: FinishReason = "stop";
+  private finishReason: FinishReason | undefined;
+
+  /** The upstream sent a finish reason, so the reply is complete. */
+  get finished(): boolean {
+    return this.finishReason !== undefined;
+  }
 
   push(chunk: RawChatChunk): ModelEvent[] {
     const events: ModelEvent[] = [];
@@ -62,7 +67,7 @@ export class ChatChunkAccumulator {
   }
 
   finish(): ModelEvent[] {
-    const done: ModelEvent = { type: "done", finishReason: this.finishReason };
+    const done: ModelEvent = { type: "done", finishReason: this.finishReason ?? "stop" };
     return this.usage ? [{ type: "usage", usage: this.usage }, done] : [done];
   }
 }
@@ -74,9 +79,13 @@ export async function* replayChunks(
   redact: (text: string) => string,
 ): AsyncGenerator<ModelEvent> {
   const acc = new ChatChunkAccumulator();
+  let sawDone = false;
   try {
     for await (const payload of data) {
-      if (payload === "[DONE]") break;
+      if (payload === "[DONE]") {
+        sawDone = true;
+        break;
+      }
       let chunk: RawChatChunk & { response?: string };
       try {
         chunk = JSON.parse(payload);
@@ -96,5 +105,8 @@ export async function* replayChunks(
     yield signal?.aborted ? aborted() : error("network", "The stream was interrupted");
     return;
   }
-  yield* signal?.aborted ? [aborted()] : acc.finish();
+  if (signal?.aborted) yield aborted();
+  else if (!sawDone && !acc.finished) {
+    yield error("network", "The stream ended before the model finished");
+  } else yield* acc.finish();
 }

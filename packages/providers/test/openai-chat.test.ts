@@ -92,7 +92,7 @@ describe("openai-chat requests", () => {
     expect(events).toEqual([{ type: "error", code, message: "Bad key [redacted]", status }]);
   });
 
-  it("reports a network failure and a cancelled stream", async () => {
+  it("reports a network failure", async () => {
     const down = provider("https://x.test/v1", () => {
       throw new TypeError("fetch failed");
     });
@@ -107,6 +107,48 @@ describe("openai-chat requests", () => {
       controller.abort();
     }
     expect(seen).toEqual(["text.delta", "error"]);
+  });
+
+  it("reports a stream that ends before the model finished", async () => {
+    const cut = openaiText.slice(0, openaiText.indexOf('"finish_reason":"stop"') - 60);
+    const events = await replay(provider("https://x.test/v1", sse(cut)).p.stream(hello));
+    expect(events.at(-1)).toBe("error network: The stream ended before the model finished");
+  });
+
+  it("stops delivering buffered deltas once cancelled", async () => {
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const { p } = provider("https://x.test/v1", sse(openaiText, 1 << 16));
+    for await (const event of p.stream({ ...hello, signal: controller.signal })) {
+      seen.push(event.type);
+      controller.abort();
+    }
+    expect(seen).toEqual(["text.delta", "error"]);
+  });
+
+  it("refuses redirects and empty bodies", async () => {
+    const moved = () =>
+      new Response(null, { status: 307, headers: { location: "https://y.test" } });
+    const redirect = provider("https://x.test/v1", moved);
+    expect(await replay(redirect.p.stream(hello))).toEqual([
+      "error bad_request: The provider redirected the request; check the base URL",
+    ]);
+    expect(redirect.calls[0]?.init.redirect).toBe("manual");
+    await expect(redirect.p.listModels()).rejects.toThrow("HTTP 307");
+    const empty = provider("https://x.test/v1", () => new Response(null));
+    expect(await replay(empty.p.stream(hello))).toEqual([
+      "error bad_response: The provider returned no stream",
+    ]);
+  });
+
+  it("rejects base URLs that would misroute or expose the key", () => {
+    const make = (baseUrl: string, apiKey?: string) => () =>
+      createOpenAIChatProvider({ providerId: "x", baseUrl, ...(apiKey ? { apiKey } : {}) });
+    expect(make("https://x.test/v1?api-version=1")).toThrow("query");
+    expect(make("http://models.example.test/v1", KEY)).toThrow("https");
+    expect(make("http://models.example.test/v1")).not.toThrow();
+    expect(make("http://127.0.0.1:8080/v1", KEY)).not.toThrow();
+    expect(make("http://[::1]:8080/v1", KEY)).not.toThrow();
   });
 
   it("lists models", async () => {

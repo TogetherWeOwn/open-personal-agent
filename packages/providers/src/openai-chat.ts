@@ -17,9 +17,19 @@ export interface OpenAIChatOptions {
   fetch?: typeof fetch;
 }
 
+const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/;
+
 export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvider {
   canonicalOrigin(options.baseUrl);
-  const base = options.baseUrl.replace(/\/+$/, "");
+  const url = new URL(options.baseUrl);
+  if (url.search || url.hash) throw new Error("Base URL must not have a query or fragment");
+  // Over plain HTTP a key is readable in transit, so only loopback servers may take one.
+  if (options.apiKey && url.protocol === "http:" && !LOOPBACK.test(url.hostname)) {
+    throw new Error("A base URL that takes an API key must use https");
+  }
+  let path = url.pathname;
+  while (path.endsWith("/")) path = path.slice(0, -1);
+  const base = url.origin + path;
   const compat = resolveCompat(base, options.compat);
   const doFetch = options.fetch ?? fetch;
   const redact = (text: string) =>
@@ -31,7 +41,7 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
     id: options.providerId,
 
     async listModels() {
-      const res = await doFetch(`${base}/models`, { headers });
+      const res = await doFetch(`${base}/models`, { headers, redirect: "manual" });
       if (!res.ok) throw new Error(`Listing models failed with HTTP ${res.status}`);
       const body = (await res.json()) as { data?: { id: string }[] };
       return (body.data ?? []).map((m) => ({ id: m.id, label: m.id }));
@@ -58,6 +68,8 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
           method: "POST",
           headers,
           body: JSON.stringify(body),
+          // A followed redirect would carry the key to another origin.
+          redirect: "manual",
           ...(request.signal ? { signal: request.signal } : {}),
         });
       } catch {
@@ -66,8 +78,12 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
           : error("network", "Could not reach the provider");
         return;
       }
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         yield await httpError(res, redact);
+        return;
+      }
+      if (!res.body) {
+        yield error("bad_response", "The provider returned no stream");
         return;
       }
       yield* replayChunks(sseData(res.body, request.signal), request.signal, redact);
@@ -76,6 +92,13 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
 }
 
 async function httpError(res: Response, redact: (text: string) => string): Promise<ModelEvent> {
+  if (res.status >= 300 && res.status < 400) {
+    return error(
+      "bad_request",
+      "The provider redirected the request; check the base URL",
+      res.status,
+    );
+  }
   const code: ModelErrorCode =
     res.status === 401 || res.status === 403
       ? "auth"
