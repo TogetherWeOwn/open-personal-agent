@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: Apache-2.0
+// Schema v0 (ADR 0004, ADR 0010). Every user-data table carries `user_id NOT NULL`, and its
+// indexes lead with `user_id`. Times are Unix epoch milliseconds. Generate migrations with
+// `pnpm --filter @opa/db generate`; never edit an applied migration.
+import { sql } from "drizzle-orm";
+import {
+  blob,
+  check,
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
+
+const now = sql`(unixepoch('subsec') * 1000)`;
+const createdAt = () => integer("created_at").notNull().default(now);
+const userId = () =>
+  text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" });
+
+/** One row per applied schema version; the app reads `max(version)`. */
+export const schemaVersion = sqliteTable("schema_version", {
+  version: integer("version").primaryKey(),
+  appliedAt: integer("applied_at").notNull().default(now),
+});
+
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(),
+  displayName: text("display_name").notNull(),
+  role: text("role", { enum: ["owner", "member"] }).notNull(),
+  createdAt: createdAt(),
+  updatedAt: integer("updated_at").notNull().default(now),
+});
+
+/** Single row (`id = 1`). Holds `sha256(OPA_SETUP_TOKEN)` as it was at claim time (ADR 0010 D2). */
+export const setupState = sqliteTable(
+  "setup_state",
+  {
+    id: integer("id").primaryKey(),
+    claimTokenHash: text("claim_token_hash"),
+    claimedByUserId: text("claimed_by_user_id").references(() => users.id),
+    claimedAt: integer("claimed_at"),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [check("setup_state_single_row", sql`${t.id} = 1`)],
+);
+
+/** Session IDs are stored only as hashes. 30 days idle, 90 days absolute (ADR 0010 D2). */
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdAt: createdAt(),
+    lastSeenAt: integer("last_seen_at").notNull().default(now),
+    expiresAt: integer("expires_at").notNull(),
+    revokedAt: integer("revoked_at"),
+  },
+  (t) => [index("sessions_user_idx").on(t.userId, t.expiresAt)],
+);
+
+/** WebAuthn credentials; `id` is the base64url credential ID. */
+export const passkeys = sqliteTable(
+  "passkeys",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    webauthnUserId: text("webauthn_user_id").notNull(),
+    publicKey: blob("public_key", { mode: "buffer" }).notNull(),
+    counter: integer("counter").notNull().default(0),
+    transports: text("transports"),
+    deviceType: text("device_type", { enum: ["singleDevice", "multiDevice"] }).notNull(),
+    backedUp: integer("backed_up", { mode: "boolean" }).notNull().default(false),
+    name: text("name"),
+    createdAt: createdAt(),
+    lastUsedAt: integer("last_used_at"),
+  },
+  (t) => [index("passkeys_user_idx").on(t.userId)],
+);
+
+/** SHA-256 hashes of ≥128-bit recovery codes, compared in constant time (ADR 0010 D2). */
+export const recoveryCodes = sqliteTable(
+  "recovery_codes",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    codeHash: text("code_hash").notNull(),
+    createdAt: createdAt(),
+    usedAt: integer("used_at"),
+  },
+  (t) => [index("recovery_codes_user_idx").on(t.userId, t.codeHash)],
+);
+
+/** Each user's DEK, AES-GCM-wrapped under KEK epoch `kek_version` with AAD `user_id|kek_version`. */
+export const userKeys = sqliteTable(
+  "user_keys",
+  {
+    userId: userId(),
+    kekVersion: integer("kek_version").notNull(),
+    wrappedDek: blob("wrapped_dek", { mode: "buffer" }).notNull(),
+    iv: blob("iv", { mode: "buffer" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.kekVersion] })],
+);
+
+/**
+ * Envelope-encrypted per-user secrets (ADR 0010 D4). AAD is
+ * `user_id|secret_id|purpose|binding|version`; `binding` includes the provider origin.
+ */
+export const secrets = sqliteTable(
+  "secrets",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    purpose: text("purpose").notNull(),
+    binding: text("binding").notNull(),
+    version: integer("version").notNull().default(1),
+    ciphertext: blob("ciphertext", { mode: "buffer" }).notNull(),
+    iv: blob("iv", { mode: "buffer" }).notNull(),
+    last4: text("last4"),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+    lastUsedAt: integer("last_used_at"),
+  },
+  (t) => [index("secrets_user_idx").on(t.userId, t.purpose)],
+);
+
+/**
+ * Append-only audit trail (ADR 0010 D11). `user_id` is null only for deployment-level events
+ * that happen before any user exists, such as a rejected setup claim.
+ */
+export const auditLog = sqliteTable(
+  "audit_log",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    module: text("module").notNull(),
+    targetId: text("target_id"),
+    result: text("result", { enum: ["ok", "denied", "error"] }).notNull(),
+    detail: text("detail"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("audit_log_user_idx").on(t.userId, t.createdAt)],
+);
+
+export const conversations = sqliteTable(
+  "conversations",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    title: text("title"),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+    archivedAt: integer("archived_at"),
+  },
+  (t) => [index("conversations_user_idx").on(t.userId, t.updatedAt)],
+);
+
+export const messages = sqliteTable(
+  "messages",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    role: text("role", { enum: ["user", "assistant", "system", "tool"] }).notNull(),
+    status: text("status", { enum: ["complete", "streaming", "interrupted", "error"] })
+      .notNull()
+      .default("complete"),
+    content: text("content").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("messages_user_conversation_idx").on(t.userId, t.conversationId, t.seq)],
+);
+
+/** One row per model call; cost is in millionths of a US dollar. */
+export const usage = sqliteTable(
+  "usage",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    providerId: text("provider_id").notNull(),
+    model: text("model").notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
+    costMicroUsd: integer("cost_micro_usd").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [index("usage_user_idx").on(t.userId, t.createdAt)],
+);
