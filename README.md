@@ -35,11 +35,8 @@ pnpm wrangler login            # or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCO
 pnpm deploy:cloudflare         # --name <prefix> (or OPA_PREFIX) to deploy under another name
 ```
 
-It checks the token, builds, deploys, migrates, generates the three secrets, waits for
-`/api/health` and prints the URL, plus a one-time setup link on your terminal. A re-run upgrades,
-or prints "Up to date". `--dry-run` changes nothing on Cloudflare. A scoped token needs exactly the
-`required` entries in [`deploy/permissions.json`](deploy/permissions.json); preflight names any
-that are missing.
+A re-run upgrades, or prints "Up to date"; `--dry-run` changes nothing on Cloudflare. A scoped
+token needs the `required` entries in [`deploy/permissions.json`](deploy/permissions.json).
 
 ## Layout
 

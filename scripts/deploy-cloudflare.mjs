@@ -16,6 +16,7 @@ const SECRET_NAMES = ["OPA_MASTER_KEY", "OPA_SESSION_SECRET", "OPA_SETUP_TOKEN"]
 // Leaves room for the `-task-workflow` suffix inside Cloudflare's 64-character name limit.
 const NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const API = "https://api.cloudflare.com/client/v4";
+const DASH = "https://dash.cloudflare.com";
 const COST_LINE =
   "Cost: Workers Paid is required ($5/month baseline). Usage above the included amounts is " +
   "metered; Workers AI, storage and Containers are billed separately.";
@@ -36,19 +37,23 @@ export function defaultDeps() {
   };
 }
 
-/** Runs a child process with piped stdio, so wrangler never prompts. */
+/** Runs a child with piped stdio, so wrangler never prompts. Only `stdout` is parsed as JSON. */
 function runProcess(cmd, args, { cwd, env, input, onOutput }) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, env, stdio: "pipe" });
     let output = "";
+    let stdout = "";
     const collect = (chunk) => {
       output += chunk;
       onOutput?.(String(chunk));
     };
-    child.stdout.on("data", collect);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      collect(chunk);
+    });
     child.stderr.on("data", collect);
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code, output }));
+    child.on("close", (code) => resolve({ code, output, stdout }));
     child.stdin.end(input ?? "");
   });
 }
@@ -131,12 +136,17 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
 
   const childEnv = { ...deps.env, CI: "1" };
   const exec = async (cmd, args, { input, quiet = false, step } = {}) => {
-    const result = await deps.run(cmd, args, {
-      cwd: deps.root,
-      env: childEnv,
-      input,
-      onOutput: quiet ? undefined : (chunk) => deps.stdout(scrub(chunk)),
-    });
+    // Scrub whole lines only, so a value split across output chunks is still caught.
+    let pending = "";
+    const print = (chunk) => {
+      pending += chunk;
+      const end = pending.lastIndexOf("\n") + 1;
+      if (end) deps.stdout(scrub(pending.slice(0, end)));
+      pending = pending.slice(end);
+    };
+    const onOutput = quiet ? undefined : print;
+    const result = await deps.run(cmd, args, { cwd: deps.root, env: childEnv, input, onOutput });
+    if (pending) deps.stdout(scrub(pending));
     if (result.code !== 0 && step) {
       const text = result.output;
       const hint = permissions.filter((p) => p.steps?.includes(step)).map(describe);
@@ -145,8 +155,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
       }
       if (/workers paid|paid plan|upgrade your plan/i.test(text)) {
         throw new DeployError(
-          "Workers Paid ($5/month) is required for Durable Objects and Workflows: " +
-            "https://dash.cloudflare.com/?to=/:account/workers/plans",
+          `Workers Paid ($5/month) is required: ${DASH}/?to=/:account/workers/plans`,
         );
       }
       throw new DeployError(`${step} failed (exit ${result.code}); see the output above`);
@@ -162,23 +171,15 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
     throw new DeployError(`Node.js 22.12 or newer is required (found ${deps.nodeVersion})`);
   }
   const auth = await wrangler(["auth", "token", "--json"], { quiet: true });
-  let token = null;
-  let tokenType = null;
-  if (auth.code === 0) {
-    const parsed = JSON.parse(auth.output.slice(auth.output.indexOf("{")));
-    if (parsed.type === "api_key") {
-      throw new DeployError("use CLOUDFLARE_API_TOKEN instead of a global API key and email");
-    }
-    ({ token, type: tokenType } = parsed);
-    secrets.add(token);
-  } else if (!dryRun) {
-    throw new DeployError(
-      "not logged in: run `pnpm wrangler login`, or set CLOUDFLARE_API_TOKEN to a token " +
-        "minted from deploy/permissions.json",
-    );
-  } else {
-    log("No Cloudflare credentials: skipping the account checks.");
+  const credentials = auth.code === 0 ? JSON.parse(auth.stdout) : null;
+  if (credentials?.type === "api_key")
+    throw new DeployError("use CLOUDFLARE_API_TOKEN, not an API key");
+  if (!credentials && !dryRun) {
+    throw new DeployError("not logged in: run `pnpm wrangler login` or set CLOUDFLARE_API_TOKEN");
   }
+  if (!credentials) log("No Cloudflare credentials: skipping the account checks.");
+  const token = credentials?.token;
+  if (token) secrets.add(token);
   const apiBase = deps.env.CLOUDFLARE_API_BASE_URL ?? API;
   const api = async (p) => {
     const res = await deps.fetch(`${apiBase}${p}`, {
@@ -194,15 +195,12 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
     if (!accountId) {
       const res = await api("/accounts?per_page=50");
       const accounts = res.ok ? res.body.result : [];
-      if (accounts.length !== 1) {
-        throw new DeployError(
-          `set CLOUDFLARE_ACCOUNT_ID: the token sees ${accounts.length} accounts`,
-        );
-      }
+      if (accounts.length !== 1)
+        throw new DeployError(`set CLOUDFLARE_ACCOUNT_ID (${accounts.length} found)`);
       accountId = accounts[0].id;
     }
     childEnv.CLOUDFLARE_ACCOUNT_ID = accountId;
-    if (tokenType === "api_token") {
+    if (credentials.type === "api_token") {
       let verify = await api("/user/tokens/verify");
       if (!verify.ok) verify = await api(`/accounts/${accountId}/tokens/verify`);
       if (!verify.ok || verify.body.result?.status !== "active") {
@@ -214,10 +212,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
     for (const p of permissions.filter((entry) => entry.required && entry.check)) {
       const res = await api(p.check.replace("{account_id}", accountId));
       if (res.body.errors?.some((e) => e.code === 10042)) {
-        throw new DeployError(
-          "R2 is not enabled on this account. Enable it once in the dashboard, then re-run: " +
-            `https://dash.cloudflare.com/${accountId}/r2/overview`,
-        );
+        throw new DeployError(`R2 is not enabled: enable it at ${DASH}/${accountId}/r2/overview`);
       }
       if (res.status === 401 || res.status === 403) missing.push(describe(p));
       else if (!res.ok) throw new DeployError(`preflight read ${p.id} failed (HTTP ${res.status})`);
@@ -228,8 +223,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
     const sub = await api(`/accounts/${accountId}/workers/subdomain`);
     if (!sub.ok || !sub.body.result?.subdomain) {
       throw new DeployError(
-        "this account has no workers.dev subdomain yet. Register one under Workers & Pages in " +
-          `the dashboard, then re-run: https://dash.cloudflare.com/${accountId}/workers-and-pages`,
+        `no workers.dev subdomain: register one at ${DASH}/${accountId}/workers`,
       );
     }
     url = `https://${name}.${sub.body.result.subdomain}.workers.dev`;
@@ -255,9 +249,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
   if (current === tag) log("Worker: up to date.");
   else if (dryRun) log(`Worker: would deploy version ${tag}.`);
   else {
-    await wrangler(["deploy", "-c", config.file, "--tag", tag, "--message", "deploy:cloudflare"], {
-      step: "deploy",
-    });
+    await wrangler(["deploy", "-c", config.file, "--tag", tag], { step: "deploy" });
     changed.push("worker");
   }
 
@@ -277,7 +269,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
       quiet: true,
       step: "secrets",
     });
-    existing = JSON.parse(res.output.slice(res.output.indexOf("["))).map((s) => s.name);
+    existing = JSON.parse(res.stdout).map((s) => s.name);
   }
   const generated = {};
   for (const secret of SECRET_NAMES.filter((n) => !existing.includes(n))) {
@@ -294,6 +286,18 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
     });
     log(`Secrets: set ${names.join(", ")}.`);
     changed.push("secrets");
+  }
+  // Shown before the health wait, so a slow first boot can't lose the only copy.
+  if (generated.OPA_SETUP_TOKEN && url && !dryRun) {
+    const terminal = deps.tty(deps.env);
+    if (terminal) {
+      terminal(
+        `One-time setup link (shown once, opens /setup): ${url}/setup#token=${generated.OPA_SETUP_TOKEN}\n`,
+      );
+    } else {
+      log(`No terminal, so no setup link. Set a new token with \`pnpm wrangler secret put`);
+      log(`OPA_SETUP_TOKEN --name ${name}\`, then open ${url}/setup#token=<that value>.`);
+    }
   }
 
   // Step 8: wait for /api/health.
@@ -317,31 +321,26 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
         : "Up to date: nothing changed.",
   );
   if (url) log(`URL: ${url}`);
-  if (generated.OPA_SETUP_TOKEN && url && !dryRun) {
-    const terminal = deps.tty(deps.env);
-    if (terminal) {
-      terminal(
-        `One-time setup link (shown once, opens /setup): ${url}/setup#token=${generated.OPA_SETUP_TOKEN}\n`,
-      );
-    } else {
-      log(`No terminal, so no setup link. Set a new token with \`pnpm wrangler secret put`);
-      log(`OPA_SETUP_TOKEN --name ${name}\`, then open ${url}/setup#token=<that value>.`);
-    }
-  }
   log(COST_LINE);
   return { name, tag, changed, dryRun };
 }
 
-/** The tag of the newest tagged version, if the active deployment runs it or a later version. */
+/**
+ * The tag of the newest tagged version, if the active deployment runs it or a newer version
+ * reached only through secret changes (step 7). Anything else means drift, so redeploy.
+ */
 async function deployedTag(api, accountId, name) {
   const base = `/accounts/${accountId}/workers/scripts/${name}`;
   const deployments = await api(`${base}/deployments`);
   if (deployments.status === 404) return null;
   const active = deployments.body.result?.deployments?.[0]?.versions ?? [];
   const versions = (await api(`${base}/versions`)).body.result?.items ?? [];
+  versions.sort((a, b) => b.number - a.number);
   const tagged = versions.find((v) => v.annotations?.["workers/tag"]);
   const running = versions.filter((v) => active.some((a) => a.version_id === v.id));
   if (!tagged || running.length !== 1 || running[0].number < tagged.number) return null;
+  const between = versions.filter((v) => v.number > tagged.number && v.number <= running[0].number);
+  if (between.some((v) => v.annotations?.["workers/triggered_by"] !== "secret")) return null;
   return tagged.annotations["workers/tag"];
 }
 
