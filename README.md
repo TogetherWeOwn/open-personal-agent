@@ -6,7 +6,7 @@ An open-source personal AI assistant that you deploy to your own Cloudflare acco
 
 ## Develop locally
 
-Requirements: Node.js 22 or newer, and pnpm (`corepack enable`).
+Requirements: Node.js 22.12 or newer, and pnpm (`corepack enable`).
 
 ```sh
 pnpm install
@@ -15,7 +15,8 @@ pnpm dev                         # http://localhost:8787
 ```
 
 `pnpm dev` builds the web app and runs the Worker locally with `wrangler dev`. It serves the app
-and `GET /api/health` without a Cloudflare account.
+and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
+reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
 
 | Command               | What it does                                                       |
 | --------------------- | ------------------------------------------------------------------ |
