@@ -1,0 +1,6 @@
+{
+  "name": "spike-b-better-auth",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-23",
+  "d1_databases": [{ "binding": "DB", "database_name": "spike-b", "database_id": "local" }]
+}

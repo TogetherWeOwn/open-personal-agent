@@ -1,0 +1,29 @@
+{
+  "name": "spike-m2-08-passkeys",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "size": "node size.mjs"
+  },
+  "dependencies": {
+    "@better-auth/passkey": "1.7.14",
+    "@simplewebauthn/server": "14.0.3",
+    "better-auth": "1.7.14",
+    "hono": "4.13.14"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "@cloudflare/workers-types": "5.20261031.1",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5",
+    "wrangler": "4.156.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
+  }
+}
