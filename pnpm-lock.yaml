@@ -68,6 +68,8 @@ importers:
         specifier: 0.31.11
         version: 0.31.11
 
+  packages/vault: {}
+
 packages:
 
   '@biomejs/biome@2.6.4':
