@@ -36,9 +36,9 @@ export class ChatChunkAccumulator {
   private usage: ModelUsage | undefined;
   private finishReason: FinishReason | undefined;
 
-  /** The upstream sent a finish reason, so the reply is complete. */
-  get finished(): boolean {
-    return this.finishReason !== undefined;
+  /** The reply is complete: a finish reason arrived, plus usage when it was requested. */
+  complete(expectUsage: boolean): boolean {
+    return this.finishReason !== undefined && (!expectUsage || this.usage !== undefined);
   }
 
   push(chunk: RawChatChunk): ModelEvent[] {
@@ -72,11 +72,17 @@ export class ChatChunkAccumulator {
   }
 }
 
+export interface ReplayOptions {
+  signal?: AbortSignal | undefined;
+  redact?: (text: string) => string;
+  /** Usage was requested, so a stream that ends without it (and without `[DONE]`) is cut off. */
+  expectUsage: boolean;
+}
+
 /** Turns the SSE `data` payloads of a chat stream into normalized events. */
 export async function* replayChunks(
   data: AsyncIterable<string>,
-  signal: AbortSignal | undefined,
-  redact: (text: string) => string,
+  { signal, redact = (text) => text, expectUsage }: ReplayOptions,
 ): AsyncGenerator<ModelEvent> {
   const acc = new ChatChunkAccumulator();
   let sawDone = false;
@@ -106,7 +112,7 @@ export async function* replayChunks(
     return;
   }
   if (signal?.aborted) yield aborted();
-  else if (!sawDone && !acc.finished) {
+  else if (!sawDone && !acc.complete(expectUsage)) {
     yield error("network", "The stream ended before the model finished");
   } else yield* acc.finish();
 }

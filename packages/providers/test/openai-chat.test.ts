@@ -110,9 +110,18 @@ describe("openai-chat requests", () => {
   });
 
   it("reports a stream that ends before the model finished", async () => {
-    const cut = openaiText.slice(0, openaiText.indexOf('"finish_reason":"stop"') - 60);
-    const events = await replay(provider("https://x.test/v1", sse(cut)).p.stream(hello));
-    expect(events.at(-1)).toBe("error network: The stream ended before the model finished");
+    const midReply = openaiText.slice(0, openaiText.indexOf('"finish_reason":"stop"') - 60);
+    // Cut after the finish reason but before the usage chunk the request asked for.
+    const beforeUsage = openaiText.slice(0, openaiText.indexOf('"choices":[],"usage"') - 90);
+    for (const cut of [midReply, beforeUsage]) {
+      const events = await replay(provider("https://x.test/v1", sse(cut)).p.stream(hello));
+      expect(events.at(-1)).toBe("error network: The stream ended before the model finished");
+    }
+    // Without a usage request, a finish reason is enough.
+    const noUsage = provider("https://x.test/v1", sse(beforeUsage), {
+      supportsUsageInStreaming: false,
+    });
+    expect((await replay(noUsage.p.stream(hello))).at(-1)).toBe("done stop");
   });
 
   it("stops delivering buffered deltas once cancelled", async () => {

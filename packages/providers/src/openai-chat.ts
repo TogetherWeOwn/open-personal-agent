@@ -86,7 +86,11 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
         yield error("bad_response", "The provider returned no stream");
         return;
       }
-      yield* replayChunks(sseData(res.body, request.signal), request.signal, redact);
+      yield* replayChunks(sseData(res.body, request.signal), {
+        signal: request.signal,
+        redact,
+        expectUsage: compat.supportsUsageInStreaming,
+      });
     },
   };
 }

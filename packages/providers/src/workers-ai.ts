@@ -44,7 +44,11 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
         yield error("bad_response", "Workers AI did not return a stream");
         return;
       }
-      yield* replayChunks(sseData(body, request.signal), request.signal, (text) => text);
+      // Workers AI ends every stream with usage and `[DONE]`.
+      yield* replayChunks(sseData(body, request.signal), {
+        signal: request.signal,
+        expectUsage: true,
+      });
     },
   };
 }
