@@ -36,6 +36,10 @@ test("an unhealthy server shows an alert; a draft stays with its chat", async ({
   await page.getByRole("textbox", { name: "Message" }).fill("Draft for the first chat");
   await page.getByRole("button", { name: "New chat" }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("");
+  await page.getByRole("option").last().click();
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(
+    "Draft for the first chat",
+  );
 });
 
 test("Stop ends a reply", async ({ page }) => {

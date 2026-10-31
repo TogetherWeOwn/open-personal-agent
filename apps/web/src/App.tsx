@@ -22,6 +22,7 @@ export function App({ transport }: { transport: ChatTransport }) {
   if (!active) throw new Error("no conversation");
 
   const [healthy, setHealthy] = useState(true);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
   useEffect(() => {
@@ -95,9 +96,10 @@ export function App({ transport }: { transport: ChatTransport }) {
             Your assistant's server isn't responding properly, so replies may fail.
           </p>
         )}
-        <Thread key={`thread-${active.id}`} conversation={active} />
+        <Thread key={active.id} conversation={active} />
         <Composer
-          key={`composer-${active.id}`}
+          text={drafts[active.id] ?? ""}
+          setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
           busy={state.pending !== null}
           onSend={send}
           onStop={stop}

@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useState } from "react";
 import { Button, Form, TextArea } from "react-aria-components";
 
 interface Props {
   busy: boolean;
+  /** The draft belongs to the conversation, so the app holds it. */
+  text: string;
+  setText: (text: string) => void;
   onSend: (text: string) => boolean;
   onStop: () => void;
 }
 
 /** Enter sends and Shift+Enter starts a new line. While a reply streams, Send becomes Stop.
  * `onSend` returns false when it did not send, so the draft stays. */
-export function Composer({ busy, onSend, onStop }: Props) {
-  const [text, setText] = useState("");
+export function Composer({ busy, text, setText, onSend, onStop }: Props) {
   const submit = () => {
     if (onSend(text)) setText("");
   };
