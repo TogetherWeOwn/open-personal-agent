@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { Button, Heading } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
@@ -20,6 +20,16 @@ export function App({ transport }: { transport: ChatTransport }) {
   const cancel = useRef<(() => void) | null>(null);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
+
+  // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
+  useEffect(() => {
+    fetch("/api/health")
+      .then((res) => res.json())
+      .then((body: { status?: string }) => {
+        if (body.status === "setup_required") window.location.replace("/setup");
+      })
+      .catch(() => {});
+  }, []);
 
   const open = (action: ChatAction) => {
     dispatch(action);
