@@ -40,7 +40,10 @@ export function checkWorkflow(path, yaml) {
   if (!/^permissions:[ \t]*\n[ \t]+contents:[ \t]*read[ \t]*\n(?![ \t])/m.test(yaml)) {
     problems.push(`${path}: top-level permissions must be exactly "contents: read"`);
   }
-  if (/write-all/.test(yaml)) problems.push(`${path}: grants write-all`);
+  // Any permissions block, job-level included, may narrow access but never grant write.
+  for (const m of yaml.matchAll(/^([ \t]*)permissions:(.*)\n((?:\1[ \t]+.*(?:\n|$))*)/gm)) {
+    if (/write/.test(m[2] + m[3])) problems.push(`${path}: a permissions block grants write`);
+  }
   return [...problems, ...checkPins(path, yaml)];
 }
 
@@ -48,7 +51,11 @@ export function checkWorkflow(path, yaml) {
 export function checkPins(path, yaml) {
   const problems = [];
   yaml.split("\n").forEach((line, i) => {
-    const ref = /^\s*(?:-\s*)?uses:\s*["']?([^"'\s#]+)/.exec(line)?.[1];
+    const value = /^\s*(?:-\s*)?uses:(.*)$/.exec(line)?.[1];
+    const ref = value
+      ?.replace(/\s#.*$/, "")
+      .trim()
+      .replace(/^["']|["']$/g, "");
     if (ref === undefined || ref.startsWith("./")) return;
     const pinned = ref.startsWith("docker://")
       ? /@sha256:[0-9a-f]{64}$/.test(ref)

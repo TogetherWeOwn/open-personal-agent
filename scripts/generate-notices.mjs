@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Generates THIRD_PARTY_NOTICES.md for the production dependencies in the lockfile (ADR 0011 #1),
 // with each package's licence and NOTICE text. Fails on a missing or disallowed licence.
-// Usage: node scripts/generate-notices.mjs [output path, default dist/THIRD_PARTY_NOTICES.md]
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

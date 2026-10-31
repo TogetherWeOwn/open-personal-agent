@@ -37,15 +37,18 @@ describe("boundaries", () => {
       expect(ports("packages/core/test/a.test.ts", text)).toBe(0);
     }
     expect(ports("packages/db/src/a.ts", 'await import("node:crypto")')).toBe(1);
+    expect(
+      findPortViolations(file("packages/db/src/a.ts", 'x;\nawait import(\n  "node:fs"\n)')),
+    ).toEqual(['packages/db/src/a.ts:2: imports "node:fs" (ports rule, ADR 0011 #4)']);
     expect(ports("packages/db/src/a.ts", 'import { z } from "zod";')).toBe(0);
   });
 
   it("rejects tooling in dependencies but allows it in devDependencies", () => {
     const text = JSON.stringify({
-      dependencies: { hono: "1", vitest: "1", "@types/node": "1" },
+      dependencies: { hono: "1", vitest: "1", "@types/node": "1", "drizzle-kit": "1" },
       devDependencies: { wrangler: "1" },
     });
-    expect(findDependencyViolations(file("package.json", text))).toHaveLength(2);
+    expect(findDependencyViolations(file("package.json", text))).toHaveLength(3);
   });
 });
 
@@ -67,10 +70,16 @@ describe("supply chain", () => {
     expect(checkWorkflow("ci.yml", wf("      - uses: actions/checkout@v7"))).toEqual([
       'ci.yml:5: "actions/checkout@v7" is not pinned to a full SHA',
     ]);
-    expect(checkWorkflow("ci.yml", wf("").replace("read\n", "read\n  actions: write\n"))).toEqual([
+    expect(checkWorkflow("ci.yml", wf("").replace("read\n", "read\n  actions: read\n"))).toEqual([
       'ci.yml: top-level permissions must be exactly "contents: read"',
     ]);
     expect(checkWorkflow("ci.yml", `on: ${join("pull_request", "_target")}\n`)).toHaveLength(2);
+    const jobWrite = wf("  a:\n    permissions:\n      contents: write\n    steps: []\n");
+    expect(checkWorkflow("ci.yml", jobWrite)).toEqual(["ci.yml: a permissions block grants write"]);
+    expect(checkWorkflow("ci.yml", wf("  a:\n    permissions: write-all\n"))).toHaveLength(1);
+    expect(checkWorkflow("ci.yml", wf("      - uses:\n          actions/checkout@v7"))).toEqual([
+      'ci.yml:5: "" is not pinned to a full SHA',
+    ]);
   });
 });
 

@@ -21,19 +21,17 @@ export function findPortViolations(files) {
   const problems = [];
   for (const { path, text } of files) {
     if (!PORTABLE_SOURCES.test(path)) continue;
-    text.split("\n").forEach((line, i) => {
-      for (const [, specifier] of line.matchAll(SPECIFIER)) {
-        if (isRuntimeSpecific(specifier)) {
-          problems.push(`${path}:${i + 1}: imports "${specifier}" (ports rule, ADR 0011 #4)`);
-        }
-      }
-    });
+    for (const { 1: specifier, index } of text.matchAll(SPECIFIER)) {
+      if (!isRuntimeSpecific(specifier)) continue;
+      const line = text.slice(0, index).split("\n").length; // whole-text match: multi-line imports
+      problems.push(`${path}:${line}: imports "${specifier}" (ports rule, ADR 0011 #4)`);
+    }
   }
   return problems;
 }
 
 const TOOLING =
-  /^(?:@?vitest|@playwright|playwright|wrangler|miniflare|typescript|vite|msw|jest|eslint)(?:\/|$)|^@(?:biomejs|vitejs|types)\/|^@cloudflare\/(?:vitest-plugin|workers-types)$|^@anthropic-ai\/claude-|^@openai\/codex$/;
+  /^(?:@?vitest|@playwright|playwright|wrangler|miniflare|typescript|vite|msw|jest|eslint|drizzle-kit)(?:\/|$)|^@(?:biomejs|vitejs|types)\/|^@cloudflare\/(?:vitest-plugin|workers-types)$|^@anthropic-ai\/claude-|^@openai\/codex$/;
 
 /** Tooling listed under `dependencies` in any workspace package.json. */
 export function findDependencyViolations(manifests) {
