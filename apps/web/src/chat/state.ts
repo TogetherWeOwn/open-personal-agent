@@ -49,8 +49,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ? c
           : {
               ...c,
-              title:
-                c.title === NEW_TITLE ? (text.split("\n", 1)[0]?.slice(0, 40) ?? text) : c.title,
+              title: c.messages.length ? c.title : (text.split("\n", 1)[0]?.slice(0, 40) ?? text),
               messages: [
                 ...c.messages,
                 { id: action.id, role: "user", text, status: "done" } as const,

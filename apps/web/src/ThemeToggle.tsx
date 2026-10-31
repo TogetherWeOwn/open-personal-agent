@@ -5,7 +5,15 @@ import { ToggleButton } from "react-aria-components";
 // The OS picks light or dark (styles.css) until the user chooses; the choice is kept locally.
 const KEY = "opa-theme";
 const html = document.documentElement.style;
-html.colorScheme = localStorage.getItem(KEY) ?? "";
+// Storage can be blocked (it throws then); the theme then follows the OS and isn't remembered.
+const storage = (fn: () => void) => {
+  try {
+    fn();
+  } catch {}
+};
+storage(() => {
+  html.colorScheme = localStorage.getItem(KEY) ?? "";
+});
 
 export function ThemeToggle({ className }: { className: string }) {
   const [dark, setDark] = useState(() =>
@@ -18,7 +26,7 @@ export function ThemeToggle({ className }: { className: string }) {
       isSelected={dark}
       onChange={(next) => {
         html.colorScheme = next ? "dark" : "light";
-        localStorage.setItem(KEY, html.colorScheme);
+        storage(() => localStorage.setItem(KEY, html.colorScheme));
         setDark(next);
       }}
       className={className}

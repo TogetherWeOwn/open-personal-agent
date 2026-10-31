@@ -3,8 +3,9 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
 // The chat loads nothing from another origin (ADR 0010 D7).
-test.beforeEach(({ page, baseURL }) => {
+test.beforeEach(async ({ page, baseURL }) => {
   page.on("request", (req) => expect(new URL(req.url()).origin).toBe(baseURL));
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
 });
 
 /** Tabs to the composer, types, presses Enter and waits for the whole reply. */
@@ -23,6 +24,17 @@ test("a keyboard-only send streams a reply and announces it", async ({ page }) =
   await sendByKeyboard(page, "Plan my week");
   await expect(page.getByRole("main").getByRole("heading")).toHaveText("Plan my week");
   await expect(page.getByRole("status")).toContainText("Assistant replied: ");
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("");
+});
+
+test("an unhealthy server shows an alert; a draft stays with its chat", async ({ page }) => {
+  await page.route("/api/health", (route) =>
+    route.fulfill({ status: 503, json: { status: "degraded" } }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("isn't responding properly");
+  await page.getByRole("textbox", { name: "Message" }).fill("Draft for the first chat");
+  await page.getByRole("button", { name: "New chat" }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("");
 });
 

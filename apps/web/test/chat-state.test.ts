@@ -31,6 +31,13 @@ describe("chatReducer", () => {
     expect(done.announcement).toBe("Assistant replied: Hi.");
   });
 
+  it("titles a chat from its first message only, even when that message is the default title", () => {
+    const first: ChatAction = { type: "send", id: "m1", text: "New chat" };
+    const state = run(first, ev("turn.completed"), { type: "send", id: "m2", text: "More" });
+    expect(state.conversations[0]?.title).toBe("New chat");
+    expect(state.conversations[0]?.messages).toHaveLength(4);
+  });
+
   it("marks a stopped or failed reply, and ignores sends while one streams", () => {
     expect(
       run(send, { type: "send", id: "m2", text: "again" }).conversations[0]?.messages.length,

@@ -21,14 +21,17 @@ export function App({ transport }: { transport: ChatTransport }) {
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
+  const [healthy, setHealthy] = useState(true);
+
   // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
   useEffect(() => {
     fetch("/api/health")
       .then((res) => res.json())
       .then((body: { status?: string }) => {
         if (body.status === "setup_required") window.location.replace("/setup");
+        else setHealthy(body.status === "ok");
       })
-      .catch(() => {});
+      .catch(() => setHealthy(false));
   }, []);
 
   const open = (action: ChatAction) => {
@@ -87,8 +90,18 @@ export function App({ transport }: { transport: ChatTransport }) {
             {active.title}
           </Heading>
         </header>
-        <Thread key={active.id} conversation={active} />
-        <Composer busy={state.pending !== null} onSend={send} onStop={stop} />
+        {!healthy && (
+          <p role="alert" className="border-b border-border bg-surface-sunken px-4 py-2 text-sm">
+            Your assistant's server isn't responding properly, so replies may fail.
+          </p>
+        )}
+        <Thread key={`thread-${active.id}`} conversation={active} />
+        <Composer
+          key={`composer-${active.id}`}
+          busy={state.pending !== null}
+          onSend={send}
+          onStop={stop}
+        />
       </main>
       <div role="status" className="sr-only">
         {state.announcement}
