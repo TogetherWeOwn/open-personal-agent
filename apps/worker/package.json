@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@opa/db": "workspace:*",
+    "@opa/log": "workspace:*",
     "hono": "4.13.14"
   }
 }

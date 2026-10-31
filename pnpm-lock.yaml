@@ -54,6 +54,9 @@ importers:
       '@opa/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@opa/log':
+        specifier: workspace:*
+        version: link:../../packages/log
       hono:
         specifier: 4.13.14
         version: 4.13.14
@@ -67,6 +70,8 @@ importers:
       drizzle-kit:
         specifier: 0.31.11
         version: 0.31.11
+
+  packages/log: {}
 
 packages:
 
