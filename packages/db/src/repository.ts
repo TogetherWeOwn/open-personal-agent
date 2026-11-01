@@ -420,20 +420,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         }
         const key = fileKey(input.id);
         const sizeBytes = new TextEncoder().encode(input.content).length;
-        await FILES.put(key, input.content, { httpMetadata: { contentType: input.mediaType } });
+        // The row first: a taken ID fails here, before the put could overwrite that file's bytes.
+        await db.insert(artifacts).values({
+          id: input.id,
+          userId,
+          conversationId,
+          taskId,
+          turnId,
+          name: input.name,
+          mediaType: input.mediaType,
+          sizeBytes,
+        });
         try {
-          await db.insert(artifacts).values({
-            id: input.id,
-            userId,
-            conversationId,
-            taskId,
-            turnId,
-            name: input.name,
-            mediaType: input.mediaType,
-            sizeBytes,
-          });
+          await FILES.put(key, input.content, { httpMetadata: { contentType: input.mediaType } });
         } catch (err) {
-          await FILES.delete(key).catch(() => {});
+          await db
+            .delete(artifacts)
+            .where(eq(artifacts.id, input.id))
+            .catch(() => {});
           throw err;
         }
       };
@@ -1131,9 +1135,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          */
         artifacts: {
           save: saveArtifact,
-          /** Newest first, a page at a time; `conversationId` narrows to one chat's files. */
+          /**
+           * Newest first, a page at a time; `conversationId` narrows to one chat's files. The
+           * cursor is the last row's `createdAt` and `id`, matching the sort, so a page that ends
+           * inside a same-millisecond tie still reaches the rest of it.
+           */
           list: async (
-            options: { conversationId?: string; before?: number } = {},
+            options: { conversationId?: string; before?: number; beforeId?: string } = {},
           ): Promise<ArtifactRow[]> =>
             artifactRows()
               .where(
@@ -1142,9 +1150,17 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   options.conversationId !== undefined
                     ? eq(artifacts.conversationId, options.conversationId)
                     : undefined,
-                  options.before !== undefined
-                    ? lt(artifacts.createdAt, options.before)
-                    : undefined,
+                  options.before === undefined
+                    ? undefined
+                    : options.beforeId === undefined
+                      ? lt(artifacts.createdAt, options.before)
+                      : or(
+                          lt(artifacts.createdAt, options.before),
+                          and(
+                            eq(artifacts.createdAt, options.before),
+                            lt(artifacts.id, options.beforeId),
+                          ),
+                        ),
                 ),
               )
               .orderBy(desc(artifacts.createdAt), desc(artifacts.id))
@@ -1160,15 +1176,22 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               : undefined,
           /** The stored bytes, or `null` when the object is gone. */
           getObject: (id: string) => FILES.get(fileKey(id)),
-          /** Deletes the row and its object; `false` when it isn't the user's. */
+          /**
+           * Deletes the object, then the row; `false` when it isn't the user's. The row goes last
+           * so a failed object delete leaves the file listed, and the delete can be retried.
+           */
           remove: async (id: string) => {
             if (!isId(id)) return false;
-            const gone = await db
-              .delete(artifacts)
+            const own = await db
+              .select({ id: artifacts.id })
+              .from(artifacts)
               .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId)))
-              .returning({ id: artifacts.id });
-            if (!gone.length) return false;
+              .limit(1);
+            if (!own.length) return false;
             await FILES.delete(fileKey(id));
+            await db
+              .delete(artifacts)
+              .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId)));
             return true;
           },
         },
