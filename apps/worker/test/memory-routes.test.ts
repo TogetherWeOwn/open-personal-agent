@@ -34,6 +34,14 @@ const web = { source: "web", ref: "https://example.com", excerpt: "remember this
 const memoryOf = (userId: string) =>
   createRepository(env).forUser(scopeFromSession({ userId })).memory;
 
+/** The details of the user's audit rows for one action, oldest first. */
+const audited = async (userId: string, action: string) =>
+  (
+    await db
+      .prepare("SELECT detail FROM audit_log WHERE user_id = ? AND action = ? ORDER BY id")
+      .bind(userId, action)
+      .all<{ detail: string }>()
+  ).results.map((r) => JSON.parse(r.detail));
 const add = async (br: Browser, text: string) =>
   (await (await br.req("/api/memory", { body: { text } })).json<{ memory: Note }>()).memory;
 const list = async (br: Browser, q = "") =>
@@ -93,7 +101,7 @@ describe("memory notes", () => {
   });
 
   it("deletes one note, then bulk deletes and reports the ones it could not", async () => {
-    const { browser } = await claim();
+    const { browser, owner } = await claim();
     const one = await add(browser, "Likes tea");
     expect((await browser.req(`/api/memory/${one.id}`, { method: "DELETE" })).status).toBe(204);
     expect(await list(browser)).toEqual([]);
@@ -107,6 +115,8 @@ describe("memory notes", () => {
     expect(await res.json()).toEqual({ deleted: [a.id, b.id], failed: [missing] });
     expect(await list(browser)).toEqual([]);
     expect((await browser.req("/api/memory/delete", { body: { ids: [] } })).status).toBe(400);
+    // Each deletion is in the Activity log by count, never by text (M3-19 AC3).
+    expect(await audited(owner, "memory.forget")).toEqual([{ notes: 1 }, { notes: 2 }]);
   });
 });
 
@@ -154,6 +164,30 @@ describe("memory proposals", () => {
       "Sam lives in Oslo",
       "Sam lives in Paris",
     ]);
+
+    // An accepted delete proposal is a deletion in the Activity log too (M3-19 AC3).
+    const oslo = (await list(browser)).find((m) => m.text === "Sam lives in Oslo")?.id ?? "";
+    const forget = await memory.forget(tainted, [oslo], web);
+    const forgetId = forget.status === "proposed" ? forget.proposal.memoryId : "";
+    expect(
+      (await browser.req(`/api/memory/proposals/${forgetId}/accept`, { body: {} })).status,
+    ).toBe(204);
+    expect((await list(browser)).map((m) => m.text)).toEqual(["Sam lives in Paris"]);
+    expect(await audited(owner, "memory.forget")).toEqual([{ notes: 1 }]);
+  });
+
+  it("deletes nothing when its audit row can't be written", async () => {
+    const { browser, owner } = await claim();
+    const note = await add(browser, "Likes tea");
+    await db.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const res = await browser.req(`/api/memory/${note.id}`, { method: "DELETE" });
+      expect(res.status).toBe(500);
+    } finally {
+      await db.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect((await list(browser)).map((m) => m.id)).toEqual([note.id]);
+    expect(await audited(owner, "memory.forget")).toEqual([]);
   });
 });
 
@@ -208,7 +242,7 @@ describe("memory export", () => {
 
 describe("memory settings", () => {
   it("learns from chats by default and saves a change", async () => {
-    const { browser } = await claim();
+    const { browser, owner } = await claim();
     expect(await (await browser.req("/api/settings/memory")).json()).toEqual({
       learnFromChats: true,
     });
@@ -225,6 +259,26 @@ describe("memory settings", () => {
       body: { learnFromChats: "no" },
     });
     expect(bad.status).toBe(400);
+    expect(await audited(owner, "settings.memory")).toEqual([
+      { learnFromChats: { from: true, to: false } },
+    ]);
+  });
+
+  it("doesn't change the setting when its audit row can't be written", async () => {
+    const { browser } = await claim();
+    await db.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const put = await browser.req("/api/settings/memory", {
+        method: "PUT",
+        body: { learnFromChats: false },
+      });
+      expect(put.status).toBe(500);
+    } finally {
+      await db.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect(await (await browser.req("/api/settings/memory")).json()).toEqual({
+      learnFromChats: true,
+    });
   });
 
   it("takes remember from the turn's tools while Learn from our chats is off", async () => {

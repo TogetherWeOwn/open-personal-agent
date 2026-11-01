@@ -144,6 +144,21 @@ describe("POST /api/exports", () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "workflow_unavailable" });
   });
+
+  it("logs no start for a run that never started, and leaves no export blocking the next", async () => {
+    const { browser, key } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
+    const failing = {
+      create: async () => {
+        throw new Error("no capacity");
+      },
+    };
+    const broken = new Browser({ ...env, EXPORT_WORKFLOW: failing as never });
+    broken.cookies.set(SESSION_COOKIE, browser.cookies.get(SESSION_COOKIE) as string);
+    expect((await postExport(broken)).status).toBe(503);
+    expect(await count("audit_log", "action = 'export.start'")).toBe(0);
+    expect((await postExport(browser)).status).toBe(201);
+  });
 });
 
 describe("GET /api/exports", () => {
@@ -191,6 +206,14 @@ describe("GET /api/exports/:id", () => {
     const view = new DataView(bytes.buffer);
     expect(view.getUint32(bytes.length - 22, true)).toBe(0x06054b50);
     expect(new TextDecoder().decode(bytes)).toContain("conversations.json");
+    // The start and the download are both in the Activity log (M3-19 AC3).
+    const audit = await db
+      .prepare("SELECT action, target_id FROM audit_log WHERE module = 'exports' ORDER BY id")
+      .all();
+    expect(audit.results).toEqual([
+      { action: "export.start", target_id: created.id },
+      { action: "export.download", target_id: created.id },
+    ]);
   });
 
   it("refuses what is not a downloadable row", async () => {

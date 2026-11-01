@@ -2,6 +2,12 @@
 import type { HarnessEvent, TurnFailure, TurnLimit } from "@opa/core";
 import type { ConversationSummary, StoredAttachment, StoredMessage } from "./transport";
 
+/** A step's payload shapes, so the turn model never imports the policy package. */
+type StepPayload = Extract<HarnessEvent, { type: "step.started" }>["payload"];
+type ToolCalledPayload = Extract<HarnessEvent, { type: "tool.called" }>["payload"];
+type TaintSource = Extract<HarnessEvent, { type: "context.tainted" }>["payload"]["source"];
+type UsageEntry = Extract<HarnessEvent, { type: "usage.updated" }>["payload"];
+
 /** The statuses D1 stores, so a loaded message keeps its own. */
 type Status = StoredMessage["status"];
 /**
@@ -25,7 +31,91 @@ export type Conversation = {
   stale: number;
   /** The chat's own model (M3-06 AC3); null follows the Chat role. */
   model: { provider: string; model: string } | null;
+  /** The live timeline of each turn this tab has seen (M3-09 AC1-3, 5); settled turns keep
+   * their summary and cards for the session, since the server trims settled turns from its
+   * log and a reload can't rebuild them. */
+  turns: Turn[];
+  /**
+   * Sends waiting in this conversation's FIFO (M3-09 AC4). Kept on the conversation, not on
+   * the turn that was running when they arrived: a send parked behind another chat's run
+   * logs under that run, but bubbles in its own thread.
+   */
+  queued: QueuedSend[];
 };
+
+/** One row of the turn timeline (M3-09 AC1): a model step, possibly around one tool call. */
+export interface TurnStep {
+  stepId: string;
+  label: string;
+  status: "running" | "ok" | "error" | "denied";
+  toolCallId: string | null;
+  /** How long the step ran, once `step.completed` names it. */
+  durationMs: number | null;
+}
+
+/** One tool card's facts (M3-09 AC3): canonical arguments, secrets as references. */
+export interface TurnTool {
+  toolCallId: string;
+  stepId: string | null;
+  tool: string;
+  args: string;
+  risk: ToolCalledPayload["risk"];
+  status: "running" | "ok" | "error";
+  preview: string | null;
+  bytes: number | null;
+  error?: string;
+}
+
+/** Where outside content entered the context (M3-09 AC5, SEC-5). */
+export interface TurnTaint {
+  stepId: string;
+  kind: TaintSource["kind"];
+  label: string;
+}
+
+/** A send that waits in the conversation's FIFO (M3-09 AC4). */
+export interface QueuedSend {
+  messageId: string;
+  text: string;
+  position: number;
+}
+
+/** How the turn ended, in the thread's status vocabulary (m3-ux §1.3). */
+export type TurnOutcome =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "waiting"
+  | "limited";
+
+/**
+ * The turn model (m3-ux §3.1): the assistant reply's timeline. `messageId` is the reply the
+ * timeline belongs to; steps and tools arrive in socket order, so array order is time order.
+ * Waiting sends live on the conversation (`Conversation.queued`), not here.
+ */
+export interface Turn {
+  turnId: string;
+  messageId: string;
+  /**
+   * When this tab first saw the turn, for the elapsed header (M3-09 AC1). A tab that adopts
+   * the turn mid-run shows a shorter "Worked for" than the tab that sent it; the envelope
+   * carries no timestamp, so per-tab time is the honest one for now.
+   */
+  startedAt: number;
+  outcome: TurnOutcome;
+  steps: TurnStep[];
+  tools: TurnTool[];
+  taint: TurnTaint[];
+  usage: UsageEntry[];
+  /** Steer texts that joined the turn, in arrival order. */
+  steered: { messageId: string; text: string }[];
+  /** `task.promoted`: the run continues server-side if the tab closes. */
+  promotedTaskId: string | null;
+  /** When the turn last changed, for the 10 s "still working" timer (M3-09 AC1). */
+  updatedAt: number;
+}
 
 export interface ChatState {
   conversations: Conversation[];
@@ -97,6 +187,23 @@ const blank = (id: string): Conversation => ({
   messages: [],
   stale: 0,
   model: null,
+  turns: [],
+  queued: [],
+});
+
+/** A turn shell for a turn this tab meets mid-run; steps fill it in as they arrive. */
+const shellTurn = (turnId: string, messageId: string): Turn => ({
+  turnId,
+  messageId,
+  startedAt: Date.now(),
+  outcome: "running",
+  steps: [],
+  tools: [],
+  taint: [],
+  usage: [],
+  steered: [],
+  promotedTaskId: null,
+  updatedAt: Date.now(),
 });
 
 export const initialState = (id: string): ChatState => ({
@@ -172,6 +279,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             id,
             title: title || NEW_TITLE,
             messages: known.get(id)?.messages ?? [],
+            turns: known.get(id)?.turns ?? [],
+            queued: known.get(id)?.queued ?? [],
             stale: (known.get(id)?.stale ?? 0) + 1,
             // The server's pin wins; a summary without one (the mock transport) keeps this tab's.
             model: model === undefined ? (known.get(id)?.model ?? null) : model,
@@ -213,10 +322,46 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 }
 
+/**
+ * Timeline events that adopt a running turn this tab meets mid-reply: its `turn.started`
+ * went to another tab or a dropped socket, but its reply streams here, so both tabs show the
+ * same live timeline (M3-09 AC6). `message.delta` keeps its own adoption below; `turn.*` keeps
+ * the stale mark, since a turn ending unseen leaves nothing to stream into.
+ */
+const ADOPTABLE: ReadonlySet<HarnessEvent["type"]> = new Set([
+  "step.started",
+  "step.completed",
+  "tool.called",
+  "tool.result",
+  "context.tainted",
+  "usage.updated",
+  "turn.steered",
+  "approval.requested",
+  "approval.resolved",
+  "limit.reached",
+  "task.promoted",
+]);
+
 function onEvent(state: ChatState, event: HarnessEvent): ChatState {
   const { pending } = state;
+  // Queue events name the queued send's conversation, which may differ from the running
+  // turn they log under (M3-09 AC4): a send parked behind another chat's run lands in its
+  // own conversation's queue, whether or not this tab watches the running turn. They carry
+  // their own address, so they apply with no running turn — a dequeue that lands after the
+  // run's end still takes its bubble back.
+  if (event.type === "turn.queued") {
+    const { conversationId, messageId, text, position } = event.payload;
+    return update(state, conversationId, (c) =>
+      c.queued.some((q) => q.messageId === messageId)
+        ? {}
+        : { queued: [...c.queued, { messageId, text, position }] },
+    );
+  }
+  if (event.type === "turn.dequeued") {
+    return clearQueued(state, event.payload.conversationId, event.payload.messageId);
+  }
   if (event.type === "turn.started") {
-    const { messageId } = event.payload;
+    const { messageId, sendMessageId } = event.payload;
     const turn = {
       conversationId: event.sessionId,
       turnId: event.turnId,
@@ -226,16 +371,23 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     if (pending?.turnId === null && pending.conversationId === event.sessionId) {
       // The turn this tab sent: its reply takes the server's message ID.
       const next = updateMessage(state, pending, () => ({ id: messageId }));
-      return { ...next, pending: turn, announcement: "Assistant is working." };
+      const started = addTurn(
+        next,
+        event.sessionId,
+        shellTurn(event.turnId, messageId),
+        sendMessageId,
+      );
+      return { ...started, pending: turn, announcement: "Assistant is working." };
     }
     if (pending) return state;
     // Another tab's turn. Its user message comes with the next load of the conversation.
     const reply: Message = { id: messageId, role: "assistant", text: "", status: "streaming" };
+    const next = toTop(state, event.sessionId, (c) => ({
+      messages: [...c.messages, reply],
+      stale: c.stale + 1,
+    }));
     return {
-      ...toTop(state, event.sessionId, (c) => ({
-        messages: [...c.messages, reply],
-        stale: c.stale + 1,
-      })),
+      ...addTurn(next, event.sessionId, shellTurn(event.turnId, messageId), sendMessageId),
       pending: turn,
       announcement: "Assistant is working.",
     };
@@ -261,8 +413,18 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     pending && (event.turnId === "" ? pending.turnId === null : event.turnId === pending.turnId);
   if (!ours) {
     // A turn that was already running when this tab (re)connected: stream into its reply.
-    const last = state.conversations.find((c) => c.id === event.sessionId)?.messages.at(-1);
-    if (!pending && event.type === "message.delta" && last?.status === "streaming") {
+    // A reply a tracked turn already owns belongs to that turn (a late approval for an older
+    // turn never hijacks the streaming reply), so only an unowned reply adopts.
+    const conversation = state.conversations.find((c) => c.id === event.sessionId);
+    const last = conversation?.messages.at(-1);
+    const owner = conversation?.turns.find((t) => t.messageId === last?.id);
+    if (
+      !pending &&
+      event.turnId &&
+      last?.status === "streaming" &&
+      (!owner || owner.turnId === event.turnId) &&
+      (event.type === "message.delta" || ADOPTABLE.has(event.type))
+    ) {
       const adopted = {
         conversationId: event.sessionId,
         turnId: event.turnId,
@@ -287,60 +449,261 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
   }
   switch (event.type) {
     case "status":
-      return { ...seen, announcement: event.payload.text };
+      return touchTurn({ ...seen, announcement: event.payload.text }, event);
     case "message.delta":
-      return updateMessage(seen, pending, (m) => ({ text: m.text + event.payload.text }));
+      return touchTurn(
+        updateMessage(seen, pending, (m) => ({ text: m.text + event.payload.text })),
+        event,
+      );
     case "message.completed": {
       // An adopted reply's text from `base` is only the segment's tail: the whole segment
       // replaces it, once; later segments streamed whole here.
       const { base, ...unbased } = seen.pending ?? pending;
       const next = base === undefined ? seen : { ...seen, pending: unbased };
       const from = (text: string) => (base === undefined ? text : text.slice(0, base));
-      return {
-        ...updateMessage(next, pending, (m) => ({
-          text: withSegment(from(m.text), event.payload.text),
-        })),
-        announcement: `Assistant replied: ${event.payload.text}`,
-      };
+      return touchTurn(
+        {
+          ...updateMessage(next, pending, (m) => ({
+            text: withSegment(from(m.text), event.payload.text),
+          })),
+          announcement: `Assistant replied: ${event.payload.text}`,
+        },
+        event,
+      );
     }
     case "turn.completed":
-      return finish(seen, "complete", seen.announcement);
+      return finish(seen, "complete", seen.announcement, {}, "succeeded");
     // `turn.cancelled` is the user's Stop; `turn.interrupted` is the server going away
     // mid-reply (M3-03 AC6). On screen both are the same cut-short reply.
     case "turn.cancelled":
+      return finish(seen, "interrupted", "The reply stopped before it finished.", {}, "cancelled");
     case "turn.interrupted":
-      return finish(seen, "interrupted", "The reply stopped before it finished.");
+      return finish(
+        seen,
+        "interrupted",
+        "The reply stopped before it finished.",
+        {},
+        "interrupted",
+      );
     case "turn.failed": {
       const { message, code } = event.payload;
-      return finish(seen, "error", `Something went wrong: ${message}`, code && { failure: code });
+      return finish(
+        seen,
+        "error",
+        `Something went wrong: ${message}`,
+        code ? { failure: code } : {},
+        "failed",
+      );
     }
     // The turn stopped without settling: it waits in D1 for a decision or a Continue, and its
     // reply stays `streaming`, so its later deltas stream into the same message. The approval
     // card reads D1, not this event, and announces itself (approvals/store.ts); the composer
-    // frees up either way, and "working" is no longer true.
+    // frees up either way, and "working" is no longer true. The timeline still records the
+    // waiting outcome, so the turn's status chip survives the approval round-trip.
     case "approval.requested":
-      return { ...seen, pending: null, announcement: "" };
+      return { ...setOutcome(seen, event, "waiting"), pending: null, announcement: "" };
     case "limit.reached":
-      return { ...seen, pending: null, announcement: "The assistant stopped at a limit." };
+      return {
+        ...setOutcome(seen, event, "limited"),
+        pending: null,
+        announcement: "The assistant stopped at a limit.",
+      };
     case "usage.updated":
-      return seen;
-    // The remaining M3 events (steps, tools, taint, and the queue's own announcements) get
-    // their timeline with the cards that render them (M3-09b for the queue); until then they
-    // leave the thread as it is.
+      return updateTurn(seen, event, (t) => ({ ...t, usage: [...t.usage, event.payload] }));
     case "step.started":
+      return updateTurn(seen, event, (t) => startStep(t, event.payload));
     case "step.completed":
+      return updateTurn(seen, event, (t) => ({
+        ...t,
+        steps: t.steps.map((s) =>
+          s.stepId === event.payload.stepId
+            ? { ...s, status: event.payload.status, durationMs: event.payload.durationMs }
+            : s,
+        ),
+      }));
     case "tool.called":
+      return updateTurn(seen, event, (t) => callTool(t, event.payload));
     case "tool.result":
-    case "approval.resolved":
+      return updateTurn(seen, event, (t) => ({
+        ...t,
+        tools: t.tools.map((tool) =>
+          tool.toolCallId === event.payload.toolCallId
+            ? {
+                ...tool,
+                status: event.payload.ok ? ("ok" as const) : ("error" as const),
+                preview: event.payload.preview,
+                bytes: event.payload.bytes,
+                ...(event.payload.error === undefined ? {} : { error: event.payload.error }),
+              }
+            : tool,
+        ),
+      }));
     case "context.tainted":
+      return updateTurn(seen, event, (t) => ({
+        ...t,
+        taint: [
+          ...t.taint,
+          {
+            stepId: event.payload.stepId,
+            kind: event.payload.source.kind,
+            label: event.payload.source.label,
+          },
+        ],
+      }));
+    case "turn.steered":
+      return updateTurn(seen, event, (t) => ({
+        ...t,
+        steered: [...t.steered, { ...event.payload }],
+      }));
     case "task.promoted":
+      return updateTurn(seen, event, (t) => ({
+        ...t,
+        promotedTaskId: event.payload.taskId,
+      }));
+    case "approval.resolved":
+      // The turn continues after the decision; a late approval appends at the end, never
+      // re-planning the old turn (M3-07 AC14), so the timeline just resumes running.
+      return updateTurn(seen, event, (t) => ({
+        ...t,
+        outcome: t.outcome === "waiting" ? ("running" as const) : t.outcome,
+      }));
+    // The artifact and memory cards that render these belong to M3-10 and M3-15; the turn
+    // model leaves them for those cards.
     case "artifact.created":
     case "memory.proposed":
-    case "turn.queued":
-    case "turn.steered":
-    case "turn.dequeued":
       return seen;
   }
+}
+
+/**
+ * Appends a turn to its conversation, replacing a shell with the same ID. A start that
+ * answers an admitted send names it, so exactly its waiting bubble clears as its turn
+ * starts (M3-09 AC4). A start with no send — a fresh send, or a late approval moved to a
+ * new turn — leaves the queue alone instead of guessing at its head.
+ */
+function addTurn(
+  state: ChatState,
+  conversationId: string,
+  turn: Turn,
+  sendMessageId?: string,
+): ChatState {
+  return update(state, conversationId, (c) => ({
+    turns: [...c.turns.filter((t) => t.turnId !== turn.turnId), turn],
+    queued:
+      sendMessageId === undefined
+        ? c.queued
+        : c.queued.filter((q) => q.messageId !== sendMessageId),
+  }));
+}
+
+/**
+ * The event's turn, creating its shell when this tab meets the turn mid-stream. Null when the
+ * event belongs to no turn this tab tracks, and the thread stays as it is.
+ */
+function ensureTurn(
+  state: ChatState,
+  event: HarnessEvent,
+): { state: ChatState; turn: Turn } | null {
+  const at = state.pending;
+  if (!at || at.turnId !== event.turnId || !event.turnId) return null;
+  const conversation = state.conversations.find((c) => c.id === at.conversationId);
+  if (!conversation) return null;
+  const found = conversation.turns.find((t) => t.turnId === event.turnId);
+  if (found) return { state, turn: found };
+  const turn = shellTurn(event.turnId, at.messageId);
+  return {
+    state: update(state, conversation.id, (c) => ({ turns: [...c.turns, turn] })),
+    turn,
+  };
+}
+
+/**
+ * Events only a progressing loop emits: a step, a tool call, taint, a steer joining, or the
+ * reply moving. A turn paused at an approval or a limit that receives one has resumed, so it
+ * runs again — even when the resume carried no explicit outcome event (M3-09 AC1). Usage and
+ * status can flush while paused, so they never resume a turn on their own.
+ */
+const PROGRESS: ReadonlySet<HarnessEvent["type"]> = new Set([
+  "step.started",
+  "step.completed",
+  "tool.called",
+  "tool.result",
+  "context.tainted",
+  "turn.steered",
+  "message.delta",
+  "message.completed",
+]);
+
+/**
+ * Runs `mutate` on the event's turn and stamps it, so the "still working" timer restarts on
+ * every visible change (M3-09 AC1). Events for untracked turns leave the thread as it is.
+ */
+function updateTurn(
+  state: ChatState,
+  event: HarnessEvent,
+  mutate: (turn: Turn) => Turn,
+): ChatState {
+  const ensured = ensureTurn(state, event);
+  const at = ensured?.state.pending;
+  if (!ensured || !at) return state;
+  const mutated = mutate(ensured.turn);
+  const outcome =
+    (mutated.outcome === "waiting" || mutated.outcome === "limited") && PROGRESS.has(event.type)
+      ? ("running" as const)
+      : mutated.outcome;
+  const turn = { ...mutated, outcome, updatedAt: Date.now() };
+  return update(ensured.state, at.conversationId, (c) => ({
+    turns: c.turns.map((t) => (t.turnId === at.turnId ? turn : t)),
+  }));
+}
+
+/**
+ * Takes a queued send out of its conversation's queue. Queue events carry their own
+ * conversation, so a dequeue logged under another turn — or after the run's end, with no
+ * running turn at all — still finds the entry (M3-09 AC4).
+ */
+function clearQueued(state: ChatState, conversationId: string, messageId: string): ChatState {
+  return update(state, conversationId, (c) => ({
+    queued: c.queued.filter((q) => q.messageId !== messageId),
+  }));
+}
+
+/** Stamps the event's turn without changing it: the reply moved, so the run is visibly alive. */
+const touchTurn = (state: ChatState, event: HarnessEvent): ChatState =>
+  updateTurn(state, event, (t) => t);
+
+/** Names the turn's outcome, creating its shell first when this tab adopted the turn. */
+const setOutcome = (state: ChatState, event: HarnessEvent, outcome: TurnOutcome): ChatState =>
+  updateTurn(state, event, (t) => ({ ...t, outcome }));
+
+/** Records a starting step, linking a tool call that already arrived to its step. */
+function startStep(turn: Turn, payload: StepPayload): Turn {
+  const { stepId, label, toolCallId } = payload;
+  const link = toolCallId ?? null;
+  const steps = turn.steps.some((s) => s.stepId === stepId)
+    ? turn.steps.map((s) => (s.stepId === stepId ? { ...s, label, status: "running" as const } : s))
+    : [
+        ...turn.steps,
+        { stepId, label, status: "running" as const, toolCallId: link, durationMs: null },
+      ];
+  const tools = link
+    ? turn.tools.map((t) => (t.toolCallId === link && !t.stepId ? { ...t, stepId } : t))
+    : turn.tools;
+  return { ...turn, steps, tools };
+}
+
+/** Records a tool call, linking the step that already named it. */
+function callTool(turn: Turn, payload: ToolCalledPayload): Turn {
+  const { toolCallId, tool, args, risk } = payload;
+  if (turn.tools.some((t) => t.toolCallId === toolCallId)) return turn;
+  const stepId = turn.steps.find((s) => s.toolCallId === toolCallId)?.stepId ?? null;
+  return {
+    ...turn,
+    tools: [
+      ...turn.tools,
+      { toolCallId, stepId, tool, args, risk, status: "running", preview: null, bytes: null },
+    ],
+  };
 }
 
 /**
@@ -394,8 +757,29 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     messages.splice(at + 1, 0, line);
   }
   const next = update(state, id, () => ({ messages, stale: 0 }));
-  // The turn ended while this tab was disconnected.
-  return reply && reply.status !== "streaming" ? { ...next, pending: null } : next;
+  // The turn ended while this tab was disconnected: the terminal event trimmed with the
+  // settled turn, so the load is the only word. A tracked turn still marked live settles
+  // with its reply — complete reads succeeded, error reads failed, and an interrupted
+  // reply reads interrupted, since D1 cannot tell a cancel from an interruption (M3-09 AC1).
+  // Turns the tab already settled keep their outcome.
+  if (!reply || reply.status === "streaming") return next;
+  const outcome =
+    reply.status === "complete"
+      ? ("succeeded" as const)
+      : reply.status === "error"
+        ? ("failed" as const)
+        : ("interrupted" as const);
+  return {
+    ...update(next, id, (c) => ({
+      turns: c.turns.map((t) =>
+        t.messageId === reply.id &&
+        (t.outcome === "running" || t.outcome === "waiting" || t.outcome === "limited")
+          ? { ...t, outcome, updatedAt: Date.now() }
+          : t,
+      ),
+    })),
+    pending: null,
+  };
 }
 
 function finish(
@@ -403,10 +787,18 @@ function finish(
   status: Status,
   announcement: string,
   patch: Partial<Message> | undefined = {},
+  outcome: TurnOutcome,
 ): ChatState {
   if (!state.pending) return state;
+  const { conversationId, turnId } = state.pending;
+  const next = updateMessage(state, state.pending, () => ({ status, ...patch }));
+  if (!turnId) return { ...next, pending: null, announcement };
   return {
-    ...updateMessage(state, state.pending, () => ({ status, ...patch })),
+    ...update(next, conversationId, (c) => ({
+      turns: c.turns.map((t) =>
+        t.turnId === turnId ? { ...t, outcome, updatedAt: Date.now() } : t,
+      ),
+    })),
     pending: null,
     announcement,
   };

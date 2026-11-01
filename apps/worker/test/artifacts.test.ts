@@ -189,6 +189,13 @@ describe("Outputs", () => {
     expect(await list(alice)).toEqual([]);
     expect(await env.FILES.head("u/alice/files/a1")).toBeNull();
     expect((await get(alice, "/api/artifacts/a1", "DELETE")).status).toBe(404);
+    // One deletion in the Activity log, by name (M3-19 AC3); the refused retry adds none.
+    const audit = await db
+      .prepare("SELECT user_id, target_id, detail FROM audit_log WHERE action = 'artifact.delete'")
+      .all();
+    expect(audit.results).toEqual([
+      { user_id: "alice", target_id: "a1", detail: JSON.stringify({ name: "x.txt" }) },
+    ]);
   });
 
   it("answers 404 for another user's artifact on every route, and changes nothing", async () => {

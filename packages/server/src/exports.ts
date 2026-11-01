@@ -71,6 +71,8 @@ exportRoutes.post("/", async (c) => {
     await user.exports.finishFailed(id, "the export could not start").catch(() => {});
     return c.json({ error: "start_failed" }, 503);
   }
+  // Logged once the run has started (M3-19 AC3): a start that failed was no export.
+  await user.audit.add({ action: "export.start", module: "exports", targetId: id });
   const row = await user.exports.get(id);
   c.header("Cache-Control", "no-store");
   return c.json(row ? present(row) : { id }, 201);
@@ -95,5 +97,6 @@ exportRoutes.get("/:id", async (c) => {
     return c.json({ error: "expired" }, 410);
   const object = await user.exports.getObject(user.exports.key(row.id));
   if (!object?.body) return c.json({ error: "not_found" }, 404);
+  await user.audit.add({ action: "export.download", module: "exports", targetId: row.id });
   return userContent(object.body, "application/zip", `export-${row.id}.zip`);
 });

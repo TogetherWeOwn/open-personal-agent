@@ -7,6 +7,7 @@
 import type { Memory, WriteOutcome } from "@opa/db/memory";
 import { createRepository, isId } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
+import { changes } from "./audit";
 import type { AppEnv } from "./env";
 import { hasAccountStepUp } from "./session";
 
@@ -137,7 +138,13 @@ memoryRoutes.post("/proposals/:id/:decision", async (c) => {
  */
 memoryRoutes.get("/export", async (c) => {
   if (!hasAccountStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
-  const { rows, links } = await userOf(c).memory.dump();
+  const user = userOf(c);
+  const { rows, links } = await user.memory.dump();
+  await user.audit.add({
+    action: "export.memory",
+    module: "memory",
+    detail: { notes: rows.length },
+  });
   const exportedAt = new Date().toISOString();
   c.header(
     "Content-Disposition",
@@ -236,6 +243,12 @@ memorySettings.get("/", async (c) => {
 memorySettings.put("/", async (c) => {
   const value = (await c.req.json().catch(() => null))?.learnFromChats;
   if (typeof value !== "boolean") return c.json({ error: "invalid_setting" }, 400);
-  await userOf(c).settings.save({ learnFromChats: value });
+  const user = userOf(c);
+  const from = (await user.settings.get())?.learnFromChats ?? true;
+  const detail = changes({ learnFromChats: from }, { learnFromChats: value });
+  await user.settings.save(
+    { learnFromChats: value },
+    { audit: detail ? { action: "settings.memory", module: "settings", detail } : undefined },
+  );
   return c.json({ learnFromChats: value });
 });

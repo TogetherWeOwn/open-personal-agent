@@ -2,8 +2,9 @@
 // Every signed-in URL (m3-ux §1.2). A new screen replaces its placeholder here, and nothing else
 // changes: `App` renders whatever the matching route names. A route without a `screen` is the chat,
 // which stays mounted behind the others so drafts and streams survive.
-import type { ComponentType, ReactNode } from "react";
+import type { ComponentType } from "react";
 import { Link } from "react-aria-components";
+import { ActivityLog } from "./activity/ActivityLog";
 import { ApprovalLink, Inbox } from "./approvals/Inbox";
 import { Memory } from "./memory/Memory";
 import { Waiting } from "./memory/Waiting";
@@ -25,15 +26,6 @@ export interface Route {
 }
 
 const link = "font-medium text-accent underline underline-offset-2";
-
-/** A screen not built yet: its title and the empty state m3-ux gives it. */
-const placeholder = (title: string, empty: string, body?: string, action?: ReactNode) => () => (
-  <Page title={title}>
-    <EmptyState title={empty} action={action}>
-      {body}
-    </EmptyState>
-  </Page>
-);
 
 const go = (href: string, label: string) => (
   <Link href={href} className={link}>
@@ -120,11 +112,7 @@ export const routes: Route[] = [
   { path: "/activity/tasks/:taskId", nav: "activity", screen: TaskDetails },
   { path: "/activity/outputs", nav: "activity", screen: Outputs },
   { path: "/activity/outputs/:outputId", nav: "activity", screen: Output },
-  {
-    path: "/activity/log",
-    nav: "activity",
-    screen: placeholder("Activity log", "Nothing has happened yet."),
-  },
+  { path: "/activity/log", nav: "activity", screen: ActivityLog },
   { path: "/memory", nav: "memory", screen: Memory },
   { path: "/memory/waiting", nav: "memory", screen: waiting },
   {

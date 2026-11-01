@@ -54,6 +54,8 @@ export interface ChatTransport {
   ): void;
   /** Stops the running turn, which then ends with `turn.cancelled`. */
   cancel(): void;
+  /** Takes a waiting send back; the server answers with `turn.dequeued` (M3-09 AC4). */
+  dequeue(conversationId: string, messageId: string): void;
   conversations(): Promise<ConversationSummary[]>;
   /** `null` when the conversation isn't on the server (yet). */
   messages(conversationId: string): Promise<StoredMessage[] | null>;

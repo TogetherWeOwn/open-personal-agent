@@ -49,7 +49,9 @@ for (const colorScheme of ["light", "dark"] as const) {
         log.getByRole("link", { name: /Image: evil\.example\/pixel\.png/ }),
       ).toBeVisible();
       await expect(log.getByText("click me")).not.toHaveAttribute("href");
-      expect(await log.locator("img, svg, script, iframe, object, embed").count()).toBe(0);
+      // Scoped to the reply itself: the run's timeline above it (M3-09) carries its own icons.
+      const reply = log.getByText("Assistant", { exact: true }).locator("xpath=..");
+      expect(await reply.locator("img, svg, script, iframe, object, embed").count()).toBe(0);
       await expect(log.getByRole("region", { name: "Table" })).toBeVisible();
 
       // Following a `javascript:` attempt does nothing; the page stays put.
