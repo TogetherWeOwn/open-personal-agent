@@ -67,19 +67,29 @@ const PREVIEWABLE = /^(?:text\/(?:plain|html)|image\/(?:svg\+xml|png|jpeg|gif|we
 
 /**
  * User- or model-produced content (D5). CSP `sandbox` without `allow-same-origin` gives it an
- * opaque origin, so its scripts can't reach the session, the API or the app.
+ * opaque origin, so its scripts can't reach the session, the API or the app. `download` forces
+ * the save-as path for any type; `frame` lets this app's own pages show it in an iframe (the
+ * Outputs preview, M3-11), which is otherwise refused like every other response.
  */
-export function userContent(body: BodyInit, contentType: string, filename: string): Response {
+export function userContent(
+  body: BodyInit,
+  contentType: string,
+  filename: string,
+  options: { download?: boolean; frame?: boolean } = {},
+): Response {
   const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
-  const inline = PREVIEWABLE.test(type);
+  const inline = !options.download && PREVIEWABLE.test(type);
   const ascii = filename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "download";
   const charset = type.startsWith("text/") ? "; charset=utf-8" : "";
+  const csp = "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'";
   return new Response(body, {
     headers: {
       "Content-Type": inline ? type + charset : "application/octet-stream",
       "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
-      "Content-Security-Policy":
-        "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'",
+      "Content-Security-Policy": options.frame
+        ? `${csp}; frame-ancestors 'self'`
+        : `${csp}; frame-ancestors 'none'`,
+      ...(options.frame ? { "X-Frame-Options": "SAMEORIGIN" } : {}),
       "Cache-Control": "private, no-store",
     },
   });
