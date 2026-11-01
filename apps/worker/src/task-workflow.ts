@@ -29,7 +29,7 @@ import {
   type TurnState,
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
-import { type ChatModelError, resolveChatModel } from "./chat-model";
+import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
 import { type AssistantTaskRpc, createWorkflowTaskContext, redactSecrets } from "./task-context";
@@ -390,6 +390,7 @@ function modelErrorMessage(error: ChatModelError): string {
       ai_unavailable: "The model isn't available right now.",
       vault_unavailable: "The model isn't available right now.",
       key_required: "The model key needs to be entered again.",
+      vault_reset_required: "The saved model keys need to be reset in Settings.",
       invalid_base_url: "The model isn't available right now.",
     } satisfies Record<ChatModelError, string>
   )[error];
