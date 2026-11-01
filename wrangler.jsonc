@@ -35,5 +35,8 @@
     "Assistant": { "type": "durable-object", "storage": "sqlite" },
     "TaskWorkflow": { "type": "workflow", "name": "opa-task-workflow" }
   },
-  "triggers": { "crons": ["*/10 * * * *"] }
+  "triggers": { "crons": ["*/10 * * * *"] },
+  // Invocation logs record each request's URL and are off (ADR 0010 D11). The app's own
+  // allowlist logger (packages/log) writes the request log instead.
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
 }

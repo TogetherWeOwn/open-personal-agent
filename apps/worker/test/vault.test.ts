@@ -7,13 +7,13 @@ import {
   waitOnExecutionContext,
 } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
+import { d1VaultStore } from "@opa/db/vault-store";
 import { decrypt, encrypt, rewrap, type UserScope, type Vault } from "@opa/vault";
 import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
 import { newSession, SESSION_COOKIE } from "../src/auth";
 import { compose, type WorkerEnv } from "../src/compose";
 import worker from "../src/index";
-import { d1VaultStore } from "../src/vault-store";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
@@ -49,8 +49,12 @@ beforeAll(async () => {
   await env.DB.prepare(
     "INSERT INTO setup_state (id, claimed_by_user_id, claimed_at) VALUES (1, 'u1', 0)",
   ).run();
-  const { cookie, insert } = await newSession(env.DB, "u1");
-  await insert.run();
+  const { cookie, row } = await newSession("u1");
+  await env.DB.prepare(
+    "INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+  )
+    .bind(row.id, row.userId, row.tokenHash, row.expiresAt)
+    .run();
   session = cookie;
 });
 
@@ -201,7 +205,7 @@ describe("the D1 vault store", () => {
       .bind(junk, junk)
       .run();
     const row = { userId: "u1", kekVersion: 2, wrappedDek: junk, iv: junk };
-    await expect(d1VaultStore(env.DB).replaceUserKey(row, 1)).rejects.toThrow();
+    await expect(d1VaultStore(env).replaceUserKey(row, 1)).rejects.toThrow();
     const rows = await env.DB.prepare(
       "SELECT kek_version FROM user_keys WHERE user_id = 'u1' ORDER BY 1",
     ).all();

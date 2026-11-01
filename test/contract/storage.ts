@@ -27,6 +27,20 @@ export function databaseContract(name: string, db: () => D1Database) {
       expect(await select.bind(2).first()).toBeNull();
     });
 
+    it("reports changes for writes that return rows, and none for reads", async () => {
+      const t = await table();
+      const insert = db().prepare(`INSERT INTO ${t} (name) VALUES ('a'), ('b') RETURNING id`);
+      const inserted = await insert.run();
+      expect([inserted.results, inserted.meta.changes, inserted.meta.last_row_id]).toEqual([
+        [{ id: 1 }, { id: 2 }],
+        2,
+        2,
+      ]);
+      const updated = await db().prepare(`UPDATE ${t} SET name = 'c' RETURNING id`).all();
+      expect(updated.meta.changes).toBe(2);
+      expect((await db().prepare(`SELECT id FROM ${t}`).all()).meta.changes).toBe(0);
+    });
+
     it("binds booleans as 0/1, reads blobs as byte arrays and rejects undefined", async () => {
       const t = await table();
       const insert = db().prepare(`INSERT INTO ${t} (flag, data) VALUES (?, ?)`);

@@ -15,6 +15,7 @@ const app = createNodeApp({
   migrationsDir: resolve(root, "migrations"),
   assetsDir: resolve(root, "apps/web/dist"),
   vars: process.env,
+  publicOrigin: process.env.OPA_PUBLIC_ORIGIN,
 });
 
 // Loopback by default: put a TLS-terminating proxy in front to expose it.
@@ -24,10 +25,7 @@ const server = serve({ fetch: app.fetch, hostname, port }, (info) => {
   console.log(`Open Personal Agent on http://${hostname}:${info.port}`);
 });
 
+// Finish in-flight requests before closing the database; a second signal exits at once.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    server.close();
-    app.db.close();
-    process.exit(0);
-  });
+  process.once(signal, () => server.close(() => app.db.close()));
 }

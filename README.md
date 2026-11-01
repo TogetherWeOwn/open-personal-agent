@@ -31,7 +31,8 @@ SQLite (`node:sqlite`) for the database, a local directory for files, and the sa
 applied on start. Run `pnpm build`, then `pnpm start:node` with the three secrets from
 `.dev.vars.example` in the environment. Data goes to `.opa-data/` (set `OPA_DATA_DIR` to move it).
 It listens on `127.0.0.1:8787` (`OPA_HOST`, `PORT`); put a TLS-terminating proxy in front to
-expose it. Workers AI and background tasks are Cloudflare-only for now, so `/api/health` reports
+expose it, and set `OPA_PUBLIC_ORIGIN` to the address browsers use (`https://agent.example`) or
+setup and login fail with `bad_origin`. Workers AI and background tasks are Cloudflare-only for now, so `/api/health` reports
 `degraded` on Node.
 
 On Node, model providers can't reach private, loopback, link-local or cloud-metadata addresses, so

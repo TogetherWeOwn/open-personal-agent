@@ -97,6 +97,9 @@ importers:
       '@opa/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@opa/log':
+        specifier: workspace:*
+        version: link:../../packages/log
       '@opa/vault':
         specifier: workspace:*
         version: link:../../packages/vault
@@ -111,6 +114,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@opa/vault':
+        specifier: workspace:*
+        version: link:../vault
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@cloudflare/workers-types@5.20261031.1)
@@ -118,6 +124,8 @@ importers:
       drizzle-kit:
         specifier: 0.31.11
         version: 0.31.11
+
+  packages/log: {}
 
   packages/providers:
     dependencies:
