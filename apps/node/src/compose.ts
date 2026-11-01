@@ -9,7 +9,6 @@ import { compose, type WorkerEnv } from "@opa/worker/compose";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
-import { modelFetch } from "./egress";
 import "./workers-globals";
 import { migrate } from "./migrate";
 
@@ -24,10 +23,7 @@ export interface NodeOptions {
   migrationsDir: string;
   /** The built SPA (`apps/web/dist`). */
   assetsDir: string;
-  /**
-   * Read for the secrets in `.dev.vars.example` and `OPA_ALLOW_PRIVATE_MODEL_HOSTS`, usually
-   * `process.env`.
-   */
+  /** Read for the secrets in `.dev.vars.example`, usually `process.env`. */
   vars: Record<string, string | undefined>;
 }
 
@@ -56,7 +52,6 @@ export function createNodeApp({ dataDir, migrationsDir, assetsDir, vars }: NodeO
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
     // The per-user assistant, in process. It has no state until the chat transport lands.
     ASSISTANT: { idFromName: (name: string) => name, get: () => ({ ping: async () => "pong" }) },
-    MODEL_FETCH: modelFetch({ allowPrivate: vars.OPA_ALLOW_PRIVATE_MODEL_HOSTS === "1" }),
     OPA_MASTER_KEY: vars.OPA_MASTER_KEY,
     OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,

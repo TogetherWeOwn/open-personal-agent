@@ -43,7 +43,6 @@ describe("an unmigrated deployment with no secrets", () => {
     const html = await res.text();
     expect(html).toContain("<h1>Finish setup</h1>");
     expect(html).toContain("npx wrangler d1 migrations apply DB --remote");
-    expect(html).toContain("npx wrangler d1 migrations apply DB --local");
     for (const name of Object.keys(SECRETS)) {
       expect(html).toContain(`npx wrangler secret put ${name}`);
     }

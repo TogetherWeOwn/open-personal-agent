@@ -15,12 +15,6 @@ export interface Bindings {
   TASK_WORKFLOW: Workflow;
   OPA_SESSION_SECRET?: string;
   OPA_SETUP_TOKEN?: string;
-  /**
-   * The fetch for model-provider calls. Node's composition root sets an SSRF-guarded one
-   * (ADR 0010 D8); on Workers it is unset and the runtime's fetch, which can't reach a private
-   * network, is used.
-   */
-  MODEL_FETCH?: typeof fetch;
 }
 
 /** What the HTTP app sees. `VAULT` is `null` unless `VAULT_STATUS` is `ok`. */

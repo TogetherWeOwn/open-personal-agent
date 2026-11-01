@@ -14,10 +14,9 @@ cp .dev.vars.example .dev.vars   # then fill in the three values
 pnpm dev                         # http://localhost:8787
 ```
 
-`pnpm dev` builds the web app, applies `migrations/` to the local database and runs the Worker
-locally with `wrangler dev`. It serves the app and `GET /api/health` without a Cloudflare account.
-It serves the web app as built, so for live reload of web changes run `pnpm dev:web` alongside it
-(Vite on port 5173, proxying `/api`).
+`pnpm dev` builds the web app and runs the Worker locally with `wrangler dev`. It serves the app
+and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
+reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
 
 `pnpm dev` also starts a mock OpenAI-compatible model server at `http://127.0.0.1:8788/v1`
 (`pnpm dev:mock-model` starts it alone). It answers `GET /models` and streams an echo of your last
@@ -35,10 +34,6 @@ It listens on `127.0.0.1:8787` (`OPA_HOST`, `PORT`); put a TLS-terminating proxy
 expose it. Workers AI and background tasks are Cloudflare-only for now, so `/api/health` reports
 `degraded` on Node.
 
-On Node, model providers can't reach private, loopback, link-local or cloud-metadata addresses, so
-a base URL can't be used to read your network. To use a model server on the same machine or LAN
-(Ollama, the mock server), set `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`.
-
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
 | `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
@@ -54,8 +49,8 @@ a base URL can't be used to read your network. To use a model server on the same
 `GET /api/health` reports the schema version, each binding (D1, R2, the Durable Object, the
 Workflow, Workers AI) and whether each secret is set, as booleans. While the database is
 unmigrated or a secret is missing, it answers `setup_required` and `/setup` shows a **Finish
-setup** page with the commands to run. `pnpm dev` applies the migrations locally on every start;
-to apply them without starting it, run `npx wrangler d1 migrations apply DB --local`.
+setup** page with the commands to run. Locally, apply the migrations with
+`npx wrangler d1 migrations apply DB --local`.
 
 ### Database changes
 
