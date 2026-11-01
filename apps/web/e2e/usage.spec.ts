@@ -180,7 +180,10 @@ test("leads with today, the month and its projection, then the seven categories"
   const where = page.getByRole("region", { name: "Where it goes" }).getByRole("listitem");
   await expect(where).toHaveCount(7);
   await expect(where.nth(0)).toContainText("$5.00 a monthBilled by Cloudflare, price as of Nov 1");
-  await expect(where.nth(1)).toContainText("Included in Workers Paid");
+  await expect(where.nth(1)).toContainText(
+    "Included in Workers PaidWorkers requests aren't counted here",
+  );
+  await expect(where.nth(2)).not.toContainText("Workers requests");
   await expect(where.nth(3)).toContainText("about $3.40 this month");
   await expect(where.nth(4)).toContainText("ComputersComputers your assistant can work on.");
   await expect(where.nth(4)).toContainText("None configured");

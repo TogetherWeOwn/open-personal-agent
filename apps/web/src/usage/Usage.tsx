@@ -112,7 +112,18 @@ function Stale({ date }: { date: string }) {
 function CategoryFigures({ category: k, currency }: { category: Category; currency: string }) {
   if (k.status === "none-configured")
     return <span className="text-text-muted">None configured</span>;
-  if (k.status === "included") return <span>Included in Workers Paid</span>;
+  if (k.status === "included")
+    return (
+      <span>
+        Included in Workers Paid
+        {/* No meter counts Workers requests; the row's dashboard link has them. */}
+        {k.id === "cloudflare" && (
+          <span className="block text-sm text-text-muted">
+            Workers requests aren't counted here
+          </span>
+        )}
+      </span>
+    );
   if (k.status === "over-allowance")
     return (
       <span>

@@ -144,7 +144,7 @@ export function breakdowns(rows: Breakdowns, first: string, last: string, dateOf
 
 /**
  * PRD §15's seven categories in its order (A-Co4). Only AI models are in the ledger; Cloudflare's
- * own services are included in Workers Paid until a meter (M3-16 AC3) passes its included amount;
+ * own services are included in Workers Paid until a meter (M3-16 AC3) goes past its included amount;
  * past it Cloudflare bills the excess, at a cost the app can't see. `meters` is null for a member,
  * or when they can't be read, and then the plan's inclusion is all Usage can say.
  */
@@ -157,7 +157,7 @@ function categories(
   const none = { status: "none-configured" as const, label: null };
   // d1_cap is a hard limit, not an included amount, and Workers AI's overage is the AI category's.
   const covered = (ids: MeterId[]) =>
-    meters?.some((m) => ids.includes(m.id) && m.used >= m.limit)
+    meters?.some((m) => ids.includes(m.id) && m.used > m.limit)
       ? {
           status: "over-allowance" as const,
           label: "Over the Workers Paid allowance, billed by Cloudflare",

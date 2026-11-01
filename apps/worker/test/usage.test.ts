@@ -174,11 +174,15 @@ describe("usage ledger", () => {
   it("marks a category billed once one of its meters passes the included amount", async () => {
     const { browser } = await claim();
     const now = Date.now();
-    // Workflows steps at the month's included 500,000 (prices.json), nothing stored past its own.
+    // Workflows steps at the month's included 500,000 (prices.json): all of it is still included.
     await db
       .prepare("INSERT INTO meters (meter, day, amount) VALUES ('workflow_steps', ?, 500000)")
       .bind(now - (now % DAY))
       .run();
+    const at = await (await browser.req("/api/usage")).json<UsageBody>();
+    expect(at.categories[1]).toMatchObject({ id: "cloudflare", status: "included" });
+    // One step past it is billed; storage is still under its own.
+    await db.prepare("UPDATE meters SET amount = 500001 WHERE meter = 'workflow_steps'").run();
     const body = await (await browser.req("/api/usage")).json<UsageBody>();
     expect(body.categories.slice(1, 3)).toMatchObject([
       {
