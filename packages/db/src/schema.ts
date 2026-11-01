@@ -11,6 +11,7 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 const now = sql`(unixepoch('subsec') * 1000)`;
@@ -182,6 +183,11 @@ export const conversations = sqliteTable(
     id: text("id").primaryKey(),
     userId: userId(),
     title: text("title"),
+    /** The conversation's own model (M3-06 AC3); null follows the Chat role. */
+    modelProvider: text("model_provider").references(() => modelProviders.id, {
+      onDelete: "set null",
+    }),
+    model: text("model"),
     createdAt: createdAt(),
     updatedAt: integer("updated_at").notNull().default(now),
     archivedAt: integer("archived_at"),
@@ -237,19 +243,45 @@ export const usage = sqliteTable(
 );
 
 /**
- * One row per user: onboarding answers and the chat model. The key itself lives envelope-encrypted
- * in `secrets` (ADR 0010 D4), bound to `provider_id` and the origin of `base_url` (ADR 0006 #5).
+ * A user's saved model providers (M3-06). The key lives envelope-encrypted in `secrets` (ADR 0010
+ * D4), bound to `provider_id` and the origin of `base_url` (ADR 0006 #5). The Workers AI starter
+ * is a row too, with no URL and no key. `model` is the one saved and tested with it.
+ */
+export const modelProviders = sqliteTable(
+  "model_providers",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    kind: text("kind", { enum: ["openai-chat", "workers-ai"] }).notNull(),
+    providerId: text("provider_id"),
+    baseUrl: text("base_url"),
+    model: text("model"),
+    keySecretId: text("key_secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [
+    index("model_providers_user_idx").on(t.userId, t.createdAt),
+    // Each key belongs to one provider, so removing a provider can remove its key.
+    uniqueIndex("model_providers_key_idx").on(t.keySecretId),
+  ],
+);
+
+const providerRef = (name: string) =>
+  text(name).references(() => modelProviders.id, { onDelete: "set null" });
+
+/**
+ * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
+ * a model; a null Background role means the cheapest configured one. Embedding has no column
+ * until it has a user (ADR 0008).
  */
 export const userSettings = sqliteTable("user_settings", {
   userId: userId().primaryKey(),
   about: text("about"),
-  modelKind: text("model_kind", { enum: ["openai-chat", "workers-ai"] }),
-  providerId: text("provider_id"),
-  baseUrl: text("base_url"),
-  model: text("model"),
-  modelKeySecretId: text("model_key_secret_id").references(() => secrets.id, {
-    onDelete: "set null",
-  }),
+  chatProvider: providerRef("chat_provider"),
+  chatModel: text("chat_model"),
+  backgroundProvider: providerRef("background_provider"),
+  backgroundModel: text("background_model"),
   onboardedAt: integer("onboarded_at"),
   updatedAt: integer("updated_at").notNull().default(now),
 });

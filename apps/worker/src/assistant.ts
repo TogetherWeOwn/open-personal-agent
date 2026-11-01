@@ -109,7 +109,8 @@ export class Assistant extends Agent<Bindings> {
     if (!(await this.#sessionLive(connection))) return;
     const chat = this.#chat;
     // Picked before `open`, so a send that can't run never creates an empty conversation.
-    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
+    const pick = { conversationId };
+    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat", pick);
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
       return reject(connection, conversationId, message);
