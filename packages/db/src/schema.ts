@@ -448,6 +448,40 @@ export const tasks = sqliteTable(
 );
 
 /**
+ * The Node step journal (M3-23b): one row per completed step of a task run, keyed by the
+ * Workflow instance and the step name. A resumed run replays these rows instead of re-running
+ * their functions, the way the Workflow engine replays `step.do` on Cloudflare. Only the Node
+ * journal writes here; the tables ship in the shared migration so both roots stay on one schema.
+ */
+export const taskSteps = sqliteTable(
+  "task_steps",
+  {
+    instanceId: text("instance_id").notNull(),
+    name: text("name").notNull(),
+    output: text("output").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.instanceId, t.name] })],
+);
+
+/**
+ * Events the Node journal waits on (M3-23b): `waitForEvent` consumes the oldest matching row
+ * for its instance and type, so each event wakes exactly one wait. Producers (approval resume
+ * in M3-23a, tests) post with `postTaskEvent`.
+ */
+export const taskEvents = sqliteTable(
+  "task_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    instanceId: text("instance_id").notNull(),
+    type: text("type").notNull(),
+    payload: text("payload").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("task_events_instance_idx").on(t.instanceId, t.id)],
+);
+
+/**
  * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
  * a model; a null Background role means the cheapest configured one. Embedding has no column
  * until it has a user (ADR 0008).
