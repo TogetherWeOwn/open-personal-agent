@@ -74,6 +74,12 @@ type OutputRef = { [OUTPUT_REF]: string; bytes: number };
 const isOutputRef = (v: unknown): v is OutputRef =>
   typeof v === "object" && v !== null && typeof (v as OutputRef)[OUTPUT_REF] === "string";
 
+/** Persisted in place of a step's output when its guard stopped it before `fn` ran. */
+const STOPPED = "__opaStepStopped";
+type Stopped = { [STOPPED]: "cancelled" | "duration" };
+const isStopped = (v: unknown): v is Stopped =>
+  typeof v === "object" && v !== null && typeof (v as Stopped)[STOPPED] === "string";
+
 const TERMINAL: readonly TaskStatus[] = ["succeeded", "failed", "cancelled", "interrupted"];
 const DEFAULT_STEP = {
   retries: { limit: 3, delayMs: 1_000, backoff: "exponential" as const },
@@ -105,16 +111,15 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
    * The guard inside every step, run before the step acts: a cancelled (or already finished)
    * task's step does nothing, and a task past its duration stops. A cancel that lands after
    * this check is mid-step by definition: the step finishes, and the next step's guard stops
-   * the run (M3-12 AC3).
+   * the run (M3-12 AC3). A stop is returned, not thrown: the engine would retry a throw and
+   * hand back a serialized error, while a returned marker persists, replays the same, and is
+   * turned into the real error outside the step.
    */
-  async function guard(): Promise<void> {
+  async function guard(): Promise<Stopped | null> {
     const status = await deps.readStatus();
-    if (status === undefined || TERMINAL.includes(status)) {
-      throw new TaskCancelledError(deps.taskId);
-    }
-    if (now() - deps.startedAt > durationMs) {
-      throw new TaskLimitError("duration", `${durationMs} ms`);
-    }
+    if (status === undefined || TERMINAL.includes(status)) return { [STOPPED]: "cancelled" };
+    if (now() - deps.startedAt > durationMs) return { [STOPPED]: "duration" };
+    return null;
   }
 
   const budget: TaskBudget = {
@@ -141,7 +146,8 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
         name,
         { ...DEFAULT_STEP, ...options },
         async (): Promise<JsonValue> => {
-          await guard();
+          const stopped = await guard();
+          if (stopped) return stopped;
           const value = redactSecrets(await fn(idempotencyKey(name)), secrets);
           const json = JSON.stringify(value);
           const bytes = new TextEncoder().encode(json).length;
@@ -151,6 +157,10 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
           return { [OUTPUT_REF]: id, bytes };
         },
       );
+      if (isStopped(persisted)) {
+        if (persisted[STOPPED] === "cancelled") throw new TaskCancelledError(deps.taskId);
+        throw new TaskLimitError("duration", `${durationMs} ms`);
+      }
       if (!isOutputRef(persisted)) return persisted as T;
       // The object is immutable under its key, so reading it back outside a step replays to
       // the same value; a step here would just persist the large output it exists to avoid.

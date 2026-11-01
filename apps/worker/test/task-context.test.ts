@@ -112,6 +112,12 @@ describe("cancel discipline (AC3)", () => {
     expect(ran).not.toHaveBeenCalled();
   });
 
+  it("a stop persists as the step's output, so the engine neither retries nor re-reads it", async () => {
+    const { ctx, stepper } = await context({}, "cancelled");
+    await expect(ctx.step("s1", async () => "done")).rejects.toBeInstanceOf(TaskCancelledError);
+    expect(stepper.persisted.get("s1")).toEqual({ __opaStepStopped: "cancelled" });
+  });
+
   it("gives each step its idempotency key and refuses a reused name", async () => {
     const { ctx } = await context();
     const key = await ctx.step("llm:1", async (k) => k);
