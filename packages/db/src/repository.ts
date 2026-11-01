@@ -1116,6 +1116,31 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .orderBy(approvals.position)
               : Promise.resolve([]),
           /**
+           * Every item that can still take a decision (M3-07 AC8): pending, unexpired, and not
+           * on a cancelled or finished task. Each with its conversation's title, soonest expiry
+           * first, a batch's items in their stored order. At most `limit` rows.
+           */
+          pending: (now: number, limit = 500) =>
+            db
+              .select({ row: approvals, conversationTitle: conversations.title })
+              .from(approvals)
+              .innerJoin(conversations, eq(conversations.id, approvals.conversationId))
+              .where(
+                and(
+                  eq(approvals.userId, userId),
+                  eq(approvals.status, "pending"),
+                  gt(approvals.expiresAt, now),
+                  sql`(${approvals.taskId} IS NULL OR EXISTS (SELECT 1 FROM ${tasks} WHERE ${tasks.id} = ${approvals.taskId} AND ${tasks.status} <> 'cancelled' AND ${tasks.finishedAt} IS NULL))`,
+                ),
+              )
+              .orderBy(
+                approvals.expiresAt,
+                desc(approvals.createdAt),
+                approvals.batchId,
+                approvals.position,
+              )
+              .limit(limit),
+          /**
            * Starts a step-up ceremony over the batch's pending items (W3): the nonce, the digest
            * it was issued for, its expiry and the session that asked, on every pending row,
            * replacing any earlier ceremony. `false` unless exactly `pending` items are pending

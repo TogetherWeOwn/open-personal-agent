@@ -267,6 +267,94 @@ describe("approve and deny (M3-07 AC10)", () => {
   });
 });
 
+/** `GET /api/approvals`, as the Inbox reads it. */
+async function pending(br: Browser | { cookie: string }) {
+  const cookie =
+    "cookies" in br ? [...br.cookies].map(([k, v]) => `${k}=${v}`).join("; ") : br.cookie;
+  return workerApp.request(`${ORIGIN}/api/approvals?status=pending`, { headers: { cookie } }, env);
+}
+
+describe("the pending list (M3-07 AC8)", () => {
+  it("lists a stopped turn's batch as its card shows it, and drops it once decided", async () => {
+    const { browser, batchId, approvalId, done } = await stopAt("consequential");
+    const res = await pending(browser);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const { batches } = await res.json<{ batches: Record<string, unknown>[] }>();
+    expect(batches).toEqual([
+      {
+        batchId,
+        conversationId: "conv-1",
+        conversationTitle: "Mail my friend",
+        taskId: null,
+        createdAt: expect.any(Number),
+        expiresAt: expect.any(Number),
+        items: [
+          {
+            approvalId,
+            tool: "send",
+            args: '{"to":"friend@example.com"}',
+            target: "example.com",
+            risk: "consequential",
+            rule: "default_consequential",
+            scopes: ["once", "hour", "destination"],
+            expiresAt: expect.any(Number),
+          },
+        ],
+      },
+    ]);
+    // Nothing that binds or steps up leaves the server.
+    expect(JSON.stringify(batches)).not.toMatch(/nonce|bindingHash|binding_hash|canonical/);
+    await call(browser, `/api/approvals/${batchId}`, {
+      decisions: [{ approvalId, decision: "deny" }],
+    });
+    await done();
+    expect(await (await pending(browser)).json()).toEqual({ batches: [] });
+  });
+
+  it("keeps a multi-action batch together, in its stored order", async () => {
+    const { browser, batchId, ids } = await stopAt("consequential", 3);
+    const { batches } = await (await pending(browser)).json<{
+      batches: { batchId: string; items: { approvalId: string }[] }[];
+    }>();
+    expect(batches.map((b) => b.batchId)).toEqual([batchId]);
+    expect(batches[0]?.items.map((i) => i.approvalId)).toEqual(ids);
+  });
+
+  it("leaves out expired items and a cancelled task's", async () => {
+    const { browser, owner } = await claim();
+    const insert = (batch: string, task: string | null, expiresAt: number) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, task_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+           VALUES (?, ?, 0, ?, 'c-task', ?, ?, 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}`, owner, task ? null : "turn-1", task, expiresAt);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-task', ?)").bind(owner),
+      db
+        .prepare(
+          "INSERT INTO tasks (id, user_id, conversation_id, workflow_instance_id, kind, mode, status, finished_at) VALUES ('t1', ?, 'c-task', 'inst-1', 'turn', 'background', 'cancelled', 1)",
+        )
+        .bind(owner),
+      insert("b_cancelled", "t1", Date.now() + 60_000),
+      insert("b_expired", null, Date.now() - 1),
+      insert("b_live", null, Date.now() + 60_000),
+    ]);
+    const { batches } = await (await pending(browser)).json<{ batches: { batchId: string }[] }>();
+    expect(batches.map((b) => b.batchId)).toEqual(["b_live"]);
+  });
+
+  it("answers only for the session's user, and only with a session", async () => {
+    await stopAt("consequential");
+    await db
+      .prepare("INSERT INTO users (id, display_name, role) VALUES ('b', 'B', 'member')")
+      .run();
+    expect(await (await pending(await sessionHeaders("b"))).json()).toEqual({ batches: [] });
+    expect((await pending({ cookie: "" })).status).toBe(401);
+  });
+});
+
 describe("isolation (M3-21a cases for the approvals routes)", () => {
   it("answers 404 for another user's batch on every route and changes nothing", async () => {
     const { send, batchId, approvalId } = await stopAt("irreversible");

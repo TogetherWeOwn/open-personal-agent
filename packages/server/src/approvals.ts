@@ -2,13 +2,15 @@
 // Approve, deny and step-up (M3-07 AC3, AC4, AC10, AC11): `POST /api/approvals/:batchId`, behind
 // the session guard and the exact-Origin check like every write, and never a WebSocket frame. The
 // route loads the batch from D1, checks it is the session user's and, for a task, that the task
-// isn't cancelled, before it records anything or wakes the run that waits on it.
+// isn't cancelled, before it records anything or wakes the run that waits on it. `GET` lists what
+// still waits for the user, for the Inbox and its badge (AC8).
 //
 // A batch with an irreversible item needs a passkey assertion over a challenge derived from the
 // exact decision set and a fresh server nonce (crypto review W1-W5): `POST .../options` issues
 // it and the decision POST consumes it. Nothing else counts: not the account step-up window,
 // not a fresh login, not an assertion for another batch or another ceremony kind (D1). And an
 // approval assertion never opens the account window either (D2).
+import type { ApprovalItem } from "@opa/core";
 import { type ApprovalRow, createRepository, isBatchId } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import {
@@ -143,11 +145,74 @@ function grantFor(row: ApprovalRow, scope: ApprovalScope, now: number): Standing
   }
 }
 
+/** A batch waiting for the user, as `GET /api/approvals` lists it. */
+export type PendingBatch = {
+  batchId: string;
+  conversationId: string;
+  conversationTitle: string | null;
+  taskId: string | null;
+  createdAt: number;
+  expiresAt: number; // the batch expires as a unit: its soonest item
+  items: ApprovalItem[];
+};
+
+/**
+ * One row as its card shows it: the arguments exactly as bound (the canonical envelope's), so the
+ * user judges what would run. Never the nonce, the binding hash or the step-up columns.
+ */
+function itemOf(row: ApprovalRow): ApprovalItem {
+  let args = "{}";
+  try {
+    args = JSON.stringify((JSON.parse(row.canonical) as { args?: unknown }).args ?? {});
+  } catch {}
+  return {
+    approvalId: row.approvalId,
+    tool: row.tool,
+    args,
+    ...(row.target ? { target: row.target } : {}),
+    risk: row.risk as ApprovalItem["risk"],
+    rule: row.rule as ApprovalItem["rule"],
+    ...(row.taint ? { taint: JSON.parse(row.taint) as NonNullable<ApprovalItem["taint"]> } : {}),
+    scopes: JSON.parse(row.scopes) as ApprovalScope[],
+    expiresAt: row.expiresAt,
+  };
+}
+
 export function approvalRoutes(forward: ApprovalForward) {
   const routes = new Hono<AppEnv>();
   routes.use(async (c, next) => {
     c.header("Cache-Control", "no-store");
     return next();
+  });
+
+  /**
+   * What the Inbox and its badge read (AC8): every batch still waiting for the user, across
+   * conversations and tasks, each item as its card shows it. Read from D1, never from events.
+   */
+  routes.get("/", async (c) => {
+    if ((c.req.query("status") ?? "pending") !== "pending") {
+      return c.json({ error: "invalid_status" }, 400);
+    }
+    const user = createRepository(c.env).forUser(c.var.session.scope);
+    const batches = new Map<string, PendingBatch>();
+    for (const { row, conversationTitle } of await user.approvals.pending(Date.now())) {
+      let batch = batches.get(row.batchId);
+      if (!batch) {
+        batch = {
+          batchId: row.batchId,
+          conversationId: row.conversationId,
+          conversationTitle,
+          taskId: row.taskId,
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt,
+          items: [],
+        };
+        batches.set(row.batchId, batch);
+      }
+      batch.expiresAt = Math.min(batch.expiresAt, row.expiresAt);
+      batch.items.push(itemOf(row));
+    }
+    return c.json({ batches: [...batches.values()] });
   });
 
   /**
