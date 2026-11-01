@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-2 (setup claim) and TWO-375 M2-12 (POST-only setup, recovery mode on rotation).
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { env as workerEnv } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { app } from "../src/app";
+import { describe, expect, it } from "vitest";
 import {
   base64url,
   CHALLENGE_COOKIE,
@@ -13,68 +10,20 @@ import {
   sha256,
 } from "../src/auth";
 import type { Env } from "../src/env";
-import { SoftPasskey } from "./helpers/softauthn";
+import { Browser, count, db, env, freshDatabase, passkey, TABLES, TOKEN } from "./helpers/app";
 
-const ORIGIN = "https://opa.test";
-const TOKEN = "setup-token-0123456789abcdefghijklmn";
 const ROTATED = "rotated-token-0123456789abcdefghijklm";
 const THIRD = "third-token-0123456789abcdefghijklmnop";
-const base = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
-const env: Env = {
-  ...base,
-  OPA_MASTER_KEY: "test-master-key",
-  OPA_SESSION_SECRET: "test-session-secret",
-  OPA_SETUP_TOKEN: TOKEN,
-  ASSETS: { fetch: async () => new Response("spa") } as unknown as Fetcher,
-};
 const rotated: Env = { ...env, OPA_SETUP_TOKEN: ROTATED };
-const db = env.DB;
-const TABLES =
-  "setup_state used_setup_tokens webauthn_challenges sessions passkeys recovery_codes conversations audit_log users";
 
 type Options = { options: { challenge: string } };
 type Result = { mode: string; recoveryCodes: string[] };
 
-/** A tiny browser: keeps cookies and sends its Origin on writes. */
-class Browser {
-  cookies = new Map<string, string>();
-  setCookies: string[] = [];
-  constructor(readonly bindings: Env = env) {}
-
-  async req(path: string, init: { body?: unknown; origin?: string } = {}) {
-    const method = init.body === undefined ? "GET" : "POST";
-    const headers: Record<string, string> = {
-      cookie: [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "),
-    };
-    if (method === "POST") headers.origin = init.origin ?? ORIGIN;
-    const body = init.body === undefined ? null : JSON.stringify(init.body);
-    const res = await app.request(`${ORIGIN}${path}`, { method, headers, body }, this.bindings);
-    this.setCookies = res.headers.getSetCookie();
-    for (const cookie of this.setCookies) {
-      const [name = "", value = ""] = (cookie.split(";")[0] ?? "").split("=");
-      if (value === "" || /max-age=0/i.test(cookie)) this.cookies.delete(name);
-      else this.cookies.set(name, value);
-    }
-    return res;
-  }
-
-  options(token: string) {
-    return this.req("/setup/options", { body: { token } });
-  }
-
-  /** Runs both setup steps with a new passkey and returns the final response. */
-  async setup(token: string, opts: { uv?: boolean; origin?: string; key?: SoftPasskey } = {}) {
-    const res = await this.options(token);
-    if (res.status !== 200) return res;
-    const { options } = await res.json<Options>();
-    const credential = await (opts.key ?? passkey()).create(options, opts);
-    return this.req("/setup", { body: { token, credential } });
-  }
-}
-
-const passkey = () => new SoftPasskey("opa.test", ORIGIN);
-const count = (table: string, where = "1") =>
-  db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${where}`).first<number>("n");
+/** The loser of a race gets 409 at the batch, or 403 if the winner committed before it got there. */
+const ONE_WINS = [
+  [200, 403],
+  [200, 409],
+];
 
 /** Two browsers both fetch options, then both finish at once. Returns the sorted statuses. */
 async function race(token: string, bindings: Env): Promise<number[]> {
@@ -89,10 +38,7 @@ async function race(token: string, bindings: Env): Promise<number[]> {
   return results.map((r) => r.status).sort();
 }
 
-beforeAll(() => applyD1Migrations(db, base.TEST_MIGRATIONS));
-beforeEach(async () => {
-  await db.batch(TABLES.split(" ").map((table) => db.prepare(`DELETE FROM ${table}`)));
-});
+freshDatabase();
 
 describe("before the claim", () => {
   it("answers 403 on every route except /setup and /api/health", async () => {
@@ -225,7 +171,7 @@ describe("the claim", () => {
   });
 
   it("lets exactly one of two concurrent claims win", async () => {
-    expect(await race(TOKEN, env)).toEqual([200, 409]);
+    expect(ONE_WINS).toContainEqual(await race(TOKEN, env));
     expect(await count("users")).toBe(1);
     expect(await count("passkeys")).toBe(1);
   });
@@ -322,7 +268,7 @@ describe("recovery after the token rotates", () => {
 
   it("lets exactly one of two concurrent recoveries win", async () => {
     expect((await new Browser().setup(TOKEN)).status).toBe(200);
-    expect(await race(ROTATED, rotated)).toEqual([200, 409]);
+    expect(ONE_WINS).toContainEqual(await race(ROTATED, rotated));
     expect(await count("passkeys")).toBe(1);
     expect(await count("recovery_codes")).toBe(10);
   });
