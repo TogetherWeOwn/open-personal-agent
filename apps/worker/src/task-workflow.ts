@@ -22,13 +22,17 @@ import {
 } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
 import {
+  applyStoredDecisions,
+  bindBatch,
   continueTurn,
   type LimitKind,
   LimitStop,
+  type LoopEvent,
   type LoopHost,
   type LoopTool,
   newTurn,
   runTurn,
+  type StoredApproval,
   type ToolOutput,
   type TurnState,
 } from "@opa/harness-builtin";
@@ -61,6 +65,9 @@ export interface TaskTurnState {
   paused?: { kind: LimitKind | "steps" | "duration"; detail: string; final?: boolean };
 }
 
+/** What an approved call returns when a rerun step finds it may already have acted. */
+const OUTCOME_UNKNOWN =
+  "The call may already have run, and its outcome is unknown, so it wasn't run again.";
 /** How long a task paused by a limit waits for Continue before its run ends (it stays paused). */
 export const PAUSE_WAIT_MS = 7 * 86_400_000;
 const SLOW_DOWN = "Not run: too many tool calls in the last minute. Try again in a minute.";
@@ -163,7 +170,15 @@ export async function executeTask(
     const budgetMicroUsd = initial.budgetMicroUsd;
     const reserved = ctx;
     await ctx.step("task:budget", async () => await reserved.budget.start(budgetMicroUsd));
-    const outcome = await driveLoop(ctx, user, task.id, picked, deps.taskTools, now, paused);
+    const outcome = await driveLoop(
+      ctx,
+      user,
+      { taskId: task.id, userId: minted.scope.userId, conversationId: task.conversationId },
+      picked,
+      deps.taskTools,
+      now,
+      paused,
+    );
     await stepper.do("task:finish", {}, async () => {
       await user.tasks.finish(task.id, outcome.status, outcome.error);
       return null;
@@ -204,7 +219,7 @@ export async function executeTask(
 async function driveLoop(
   ctx: TaskContext,
   user: ScopedUser,
-  taskId: string,
+  task: { taskId: string; userId: string; conversationId: string },
   picked: {
     provider: ModelProvider;
     model: string;
@@ -215,6 +230,7 @@ async function driveLoop(
   now: () => number,
   paused: { ms: number },
 ): Promise<{ status: "succeeded" | "failed" | "budget_limited"; error?: string }> {
+  const { taskId } = task;
   const billingId = picked.billingId ?? picked.provider.id;
   let llmSeq = 0;
   let toolSeq = 0;
@@ -266,26 +282,43 @@ async function driveLoop(
       })(),
   };
 
+  // The batch whose approved calls this segment runs, and those that came back unknown.
+  let batch: string | null = null;
+  const unknown = new Set<string>();
   const registry = new ToolRegistry<LoopTool>();
   for (const tool of taskTools) {
     registry.register({
       manifest: tool.manifest,
       ...(tool.target ? { target: tool.target } : {}),
-      execute: async (input) => {
+      execute: async (input, _signal, call) => {
         toolSeq += 1;
-        // Only a read retries: a write that acted and then failed must not act again. (Steps
-        // are still at-least-once: an engine crash mid-step reruns it.)
-        // The per-minute tool limit is counted in the same step, so a replay never counts twice;
-        // a refused call doesn't run, and the loop stops with `tool_rate` (COST-2).
-        const out = await ctx.step(
+        const under = call?.approved && batch ? { batchId: batch, id: call.toolCallId } : null;
+        // Only a read retries: a write that acted and then failed must not act again. Steps are
+        // still at-least-once (an engine crash mid-step reruns it), so an approved call first
+        // marks its row dispatched inside this step: a rerun finds it so and doesn't run the
+        // call again (crypto review W3), unless it is a read, which may run twice. A step that
+        // completed replays from its record.
+        // The per-minute tool limit is counted in the same step, first, so a replay never counts
+        // twice; a refused call doesn't run, and the loop stops with `tool_rate` (COST-2).
+        const read = tool.manifest.riskClass === "read";
+        const out = (await ctx.step(
           `tool:${toolSeq}`,
-          async (key): Promise<ToolOutput> =>
-            (await ctx.budget.allowToolCall(key))
-              ? tool.execute(input, new AbortController().signal)
-              : { ok: false, content: SLOW_DOWN, slowDown: true },
-          tool.manifest.riskClass === "read" ? undefined : { retries: { limit: 0, delayMs: 0 } },
-        );
-        return out as ToolOutput;
+          async (key): Promise<ToolOutput> => {
+            if (!(await ctx.budget.allowToolCall(key))) {
+              return { ok: false, content: SLOW_DOWN, slowDown: true };
+            }
+            if (
+              under &&
+              !(await user.approvals.dispatch(under.batchId, `appr_${under.id}`, read))
+            ) {
+              return { ok: false, content: OUTCOME_UNKNOWN };
+            }
+            return tool.execute(input, new AbortController().signal);
+          },
+          read ? undefined : { retries: { limit: 0, delayMs: 0 } },
+        )) as ToolOutput;
+        if (under && !out.ok && out.content === OUTCOME_UNKNOWN) unknown.add(under.id);
+        return out;
       },
     });
   }
@@ -302,6 +335,8 @@ async function driveLoop(
     newId: () => `${ctx.instanceId}_s${++ids}`,
   };
 
+  const context = { kind: "task", id: taskId, conversationId: task.conversationId } as const;
+  const expect = { userId: task.userId, context, tools: registry };
   for (let cycle = 0; ; cycle += 1) {
     const loaded = await ctx.step(`task:load:${cycle}`, async () => {
       // After an approval wait the task is running again; markRunning never revives an ending.
@@ -312,11 +347,58 @@ async function driveLoop(
     const state = parseState(loaded);
     if (!state) return { status: "failed", error: "the task's turn state could not be read" };
     const turn = state.turn;
+    // A stopped batch resumes from its rows in D1, never from an event's payload (M3-07 AC10,
+    // M3-12 AC3): the decisions, and the arguments bound in each row's envelope.
+    if (turn.pending) {
+      const { batchId } = turn.pending;
+      batch = batchId;
+      const rows = await ctx.step(`task:decisions:${cycle}`, async () =>
+        (await user.approvals.batch(batchId)).map(storedApproval),
+      );
+      const applied = await applyStoredDecisions(turn, rows, expect, now());
+      if (applied.waiting) {
+        // Woken before the decision: the load marked the task running, so it says waiting
+        // again, where a compromise signal (AC13) and the UI look for it.
+        const rewaited = await ctx.step(`task:rewait:${cycle}`, async () =>
+          user.tasks.saveState(taskId, loaded as string, "waiting_for_approval"),
+        );
+        if (!rewaited) throw new TaskCancelledError(taskId);
+        await waitForDecision(ctx, cycle, turn, now);
+        continue;
+      }
+      host.approvals = {
+        // Each a step, so a replay returns what happened instead of claiming again.
+        claim: (toolCallId) =>
+          ctx.step(`task:claim:${cycle}:${toolCallId}`, async () => {
+            const refused = applied.refused.get(toolCallId);
+            const id = `appr_${toolCallId}`;
+            if (refused) {
+              await user.approvals.finish(batchId, id, { status: "denied", reason: refused });
+              return "The approval doesn't hold for this call, so it didn't run.";
+            }
+            const row = await user.approvals.claim(batchId, id, now());
+            return row ? null : "The approval is no longer valid, so the call didn't run.";
+          }),
+        finish: async (toolCallId, outcome) => {
+          await ctx.step(`task:approval-end:${cycle}:${toolCallId}`, async () => {
+            const ended = unknown.has(toolCallId)
+              ? { status: "failed" as const, reason: "outcome_unknown" }
+              : outcome;
+            await user.approvals.finish(batchId, `appr_${toolCallId}`, ended);
+            return null;
+          });
+        },
+      };
+    } else {
+      batch = null;
+      delete host.approvals;
+    }
     // Continued after an execution limit: a fresh allowance of calls and tools for the turn.
     if (state.paused?.kind === "calls" || state.paused?.kind === "tools") continueTurn(turn);
     let limit: { kind: LimitKind; detail: string } | undefined;
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
+    let asked: LoopEvent | null = null;
     for (;;) {
       const next = await gen.next();
       if (next.done) {
@@ -324,7 +406,9 @@ async function driveLoop(
         break;
       }
       if (next.value.type === "limit.reached") limit = next.value.payload;
-      ctx.progress(next.value);
+      // The card goes out once its rows exist, so a decision never finds no batch.
+      if (next.value.type === "approval.requested") asked = next.value;
+      else ctx.progress(next.value);
     }
     const saved = await ctx.step(`task:save:${cycle}`, async () => {
       const paused = outcome === "limit_reached" ? limit : undefined;
@@ -347,18 +431,52 @@ async function driveLoop(
       if (outcome === "cancelled") throw new TaskCancelledError(taskId);
       return { status: "failed", error: "the model call failed" };
     }
-    // Wait for the approval decision, then loop: the next load reads what was decided from
-    // D1 (M3-07's route writes it there), never from this event's payload (AC3). A timeout
-    // just wakes the loop, which expires the batch itself.
-    const expiresAt = turn.pending?.items[0]?.expiresAt ?? now();
-    await ctx
-      .waitForEvent(`task:approval:${cycle}`, {
-        type: "approval",
-        timeoutMs: Math.max(1_000, expiresAt - now()),
-      })
-      .catch(() => ({ payload: null }));
+    const pending = turn.pending;
+    if (asked && pending) {
+      await ctx.step(`task:approvals:${cycle}`, async () => {
+        // A retried step may find the batch it already wrote.
+        if ((await user.approvals.batch(pending.batchId)).length > 0) return null;
+        const rows = await bindBatch({ userId: task.userId, tools: registry, pending, context });
+        if (!(await user.approvals.create(rows))) throw new TaskCancelledError(taskId);
+        return null;
+      });
+      ctx.progress(asked);
+    }
+    await waitForDecision(ctx, cycle, turn, now);
   }
 }
+
+/**
+ * Waits for the approvals route's wake-up, then loops: the next load reads what was decided
+ * from D1, never this event's payload (M3-12 AC3). A timeout just wakes the loop, which expires
+ * the batch itself.
+ */
+async function waitForDecision(
+  ctx: TaskContext,
+  cycle: number,
+  turn: TurnState,
+  now: () => number,
+): Promise<void> {
+  const expiresAt = Math.min(...(turn.pending?.items.map((i) => i.expiresAt) ?? [now()]));
+  await ctx
+    .waitForEvent(`task:approval:${cycle}`, {
+      type: "approval",
+      timeoutMs: Math.max(1_000, expiresAt - now()),
+    })
+    .catch(() => ({ payload: null }));
+}
+
+/** A row as the resume reads it: never its ceremony columns, which must not reach a step output. */
+const storedApproval = (r: StoredApproval): StoredApproval => ({
+  approvalId: r.approvalId,
+  toolCallId: r.toolCallId,
+  tool: r.tool,
+  status: r.status,
+  scope: r.scope,
+  canonical: r.canonical,
+  bindingHash: r.bindingHash,
+  expiresAt: r.expiresAt,
+});
 
 /**
  * Pauses a task at a limit: `budget_limited` ("Paused: budget", or "Paused: limit" for an

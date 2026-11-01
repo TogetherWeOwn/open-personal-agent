@@ -224,6 +224,22 @@ describe("the approvals store", () => {
     expect(await alice.approvals.claim("batch_4", "appr_c", now + 120_000)).toBeUndefined();
   });
 
+  it("dispatches a claimed call once; a second dispatch finds it already handed off (W3)", async () => {
+    await alice.approvals.create([item("appr_d", 0, { batchId: "batch_5" })]);
+    const now = Date.now();
+    const approve = { decision: "approve", scope: "once", detail: {} } as const;
+    await alice.approvals.decide("batch_5", [{ approvalId: "appr_d", ...approve }], now);
+    expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(false); // not claimed yet
+    await alice.approvals.claim("batch_5", "appr_d", now);
+    expect(await bob.approvals.dispatch("batch_5", "appr_d")).toBe(false);
+    expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(true);
+    expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(false);
+    expect(await alice.approvals.dispatch("batch_5", "appr_d", true)).toBe(true); // a read reruns
+    const unknown = { status: "failed", reason: "outcome_unknown" } as const;
+    expect(await alice.approvals.finish("batch_5", "appr_d", unknown)).toBe(true);
+    expect(await status("appr_d", "batch_5")).toBe("failed");
+  });
+
   it("lets a D1 failure during a claim reach the caller, leaving the row approved", async () => {
     await alice.approvals.create([item("appr_a", 0)]);
     const now = Date.now();
@@ -246,7 +262,7 @@ describe("the approvals store", () => {
     expect((await alice.approvals.claim("batch_1", "appr_a", now))?.status).toBe("executing");
   });
 
-  it("expires every pending approval on a compromise signal, and cancels tasks waiting (AC13)", async () => {
+  it("expires every approval not yet run on a compromise signal, and cancels tasks waiting (AC13)", async () => {
     await db
       .prepare(
         "INSERT INTO tasks (id, user_id, conversation_id, kind, mode, status) VALUES ('t1', 'alice', 'c1', 'chat', 'background', 'waiting_for_approval')",
@@ -257,9 +273,20 @@ describe("the approvals store", () => {
       item("appr_t", 0, { batchId: "batch_t", turnId: null, taskId: "t1" }),
     ]);
     await bob.approvals.create([item("appr_b", 0, { batchId: "batch_b", conversationId: "c2" })]);
+    // Approved but not yet claimed: it hasn't run, so it expires too and can't be claimed after.
+    await alice.approvals.create([item("appr_p", 0, { batchId: "batch_p" })]);
+    const approve = {
+      approvalId: "appr_p",
+      decision: "approve",
+      scope: "once",
+      detail: {},
+    } as const;
+    await alice.approvals.decide("batch_p", [approve], Date.now());
     await alice.approvals.beginStepUp("batch_1", 1, ceremony, Date.now());
     await systemStore(env).sessions.revokeAll("alice", Date.now());
     expect(await status("appr_a")).toBe("expired");
+    expect(await status("appr_p", "batch_p")).toBe("expired");
+    expect(await alice.approvals.claim("batch_p", "appr_p", Date.now())).toBeUndefined();
     expect(await status("appr_t", "batch_t")).toBe("expired");
     expect(await status("appr_b", "batch_b")).toBe("pending"); // another user's stays
     const task = await db.prepare("SELECT status FROM tasks WHERE id = 't1'").first("status");

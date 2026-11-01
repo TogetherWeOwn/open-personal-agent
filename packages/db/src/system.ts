@@ -92,16 +92,17 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       );
   /**
    * A possible-compromise signal (M3-07 AC13): recovery-code redemption, recovery with the setup
-   * token, "sign out everywhere" and, with M3-19, passkey removal. Every pending approval of the
-   * user expires, interactive and background, with its ceremony burned, and every task waiting
-   * on one is cancelled as on expiry. Part of the signal's own batch, so the two can't diverge.
+   * token, "sign out everywhere" and, with M3-19, passkey removal. Every approval of the user
+   * that hasn't run yet, pending or approved but unclaimed, expires, interactive and background,
+   * with its ceremony burned, and every task waiting on one is cancelled as on expiry. Part of
+   * the signal's own batch, so the two can't diverge.
    */
   const expireApprovals = (userId: string, now: number, signal: string) => [
     db
       .prepare(
         `UPDATE approvals SET status = 'expired', reason = ?, decided_at = ?, nonce = NULL,
            step_up_digest = NULL, step_up_expires_at = NULL, step_up_session_id = NULL
-         WHERE user_id = ? AND status = 'pending'`,
+         WHERE user_id = ? AND status IN ('pending', 'approved')`,
       )
       .bind(`signal:${signal}`, now, userId),
     db
