@@ -248,4 +248,13 @@ test("the source chat link opens that chat, not the one that was open", async ({
   await page.getByRole("link", { name: "Open source chat" }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${trip}$`));
   await expect(page.getByRole("main").getByRole("heading")).toHaveText("Plan the Orkney trip");
+
+  // Picking another chat leaves the source chat's address, so a reload can't reopen it.
+  await page.getByRole("button", { name: "New chat" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await page.goBack();
+  await expect(page.getByRole("main").getByRole("heading")).toHaveText("Plan the Orkney trip");
+  await page.getByRole("option", { name: /Work notes/ }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("main").getByRole("heading")).toHaveText("Work notes");
 });
