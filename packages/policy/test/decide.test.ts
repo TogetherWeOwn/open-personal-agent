@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type ApprovalScope,
   decide,
+  defaultChoice,
   grantMatches,
   type PolicyInput,
   RISK_CLASSES,
@@ -167,6 +168,15 @@ describe("decide", () => {
       outcome: "allow",
       egress: false,
     });
+  });
+});
+
+describe("defaultChoice", () => {
+  it("mirrors the decide defaults: reads and reversible writes run, the rest ask", () => {
+    expect(defaultChoice("read")).toBe("auto");
+    expect(defaultChoice("write_reversible")).toBe("auto");
+    expect(defaultChoice("consequential")).toBe("ask");
+    expect(defaultChoice("irreversible")).toBe("ask");
   });
 });
 

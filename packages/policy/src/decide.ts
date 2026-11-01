@@ -74,6 +74,16 @@ export function grantMatches(grant: StandingGrant, input: PolicyInput): boolean 
   }
 }
 
+/**
+ * The choice an untouched tool behaves as, for Settings › Apps & tools (M3-19 AC1): reads and
+ * reversible writes run; anything with outside effects, or that can't be undone, asks first.
+ * Mirrors the `default_*` arms of `decide` below — a tainted turn can still ask on top, which
+ * the page's "still asks first" note says.
+ */
+export function defaultChoice(risk: RiskClass): "auto" | "ask" {
+  return risk === "read" || risk === "write_reversible" ? "auto" : "ask";
+}
+
 export function decide(input: PolicyInput): PolicyDecision {
   const risk = input.manifest.riskClass;
   const egress = hasEgress(input.manifest);

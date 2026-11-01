@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings › Computer (M3-19 AC1, m3-ux §3.9): this deployment runs Configuration A — no
-// computer — so the page explains what that means instead of offering one. Computers arrive
-// with M4; until then the Config B/C docs say what changes.
-import { Heading, Link } from "react-aria-components";
-
-const link = "font-medium text-accent underline underline-offset-2";
+// computer — so the page explains what that means instead of offering one. Configurations B
+// and C build on an M4 computer, so until one lands there is nothing to set up.
+import { Heading } from "react-aria-components";
 
 export function Computer() {
   return (
@@ -20,15 +18,8 @@ export function Computer() {
       </p>
       <p>
         A computer — a sandboxed browser and shell of your own, in the M4 milestone — would let it
-        click through sites and run programs. Until then, Configurations B and C are described in
-        the{" "}
-        <Link
-          href="https://github.com/TogetherWeOwn/open-personal-agent/tree/main/docs"
-          className={link}
-        >
-          deployment docs
-        </Link>
-        .
+        click through sites and run programs. Configurations B and C need one, so until it lands
+        there is nothing to set up.
       </p>
     </section>
   );

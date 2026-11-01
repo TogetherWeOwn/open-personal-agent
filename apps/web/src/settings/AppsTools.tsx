@@ -5,11 +5,11 @@
 // asking" runs the 5-minute account step-up, then retries the change once.
 import { useEffect, useState } from "react";
 import { Heading, Radio, RadioGroup } from "react-aria-components";
-import { settingsApi, settingsError } from "../models/settings-api";
+import { settingsApi } from "../models/settings-api";
 import { Button } from "../ui";
 import { withAccountStepUp } from "./step-up";
 
-import { type RiskClass, riskClassLabel, type ToolOverride } from "./tool-copy";
+import { type RiskClass, riskClassLabel, type ToolOverride, toolError } from "./tool-copy";
 
 export interface ToolRow {
   name: string;
@@ -17,6 +17,8 @@ export interface ToolRow {
   riskClass: RiskClass;
   egress: boolean;
   override: ToolOverride;
+  /** The choice an untouched tool behaves as, so the page can show the effective default. */
+  default: Choice;
   locked: boolean;
 }
 
@@ -44,7 +46,7 @@ export function AppsTools() {
         if (live) setTools(tools);
       })
       .catch((e) => {
-        if (live) setError(settingsError(e));
+        if (live) setError(toolError(e));
       });
     return () => {
       live = false;
@@ -62,7 +64,7 @@ export function AppsTools() {
       setTools((prev) => prev?.map((t) => (t.name === tool.name ? updated : t)) ?? null);
     } catch (e) {
       // A dismissed passkey prompt rejects here: the choice stays where it was.
-      setError(settingsError(e));
+      setError(toolError(e));
     } finally {
       setPending(null);
     }
@@ -109,13 +111,15 @@ export function AppsTools() {
             <p className={hint}>{tool.description}</p>
             <RadioGroup
               aria-label={`How ${tool.name} asks you`}
-              value={tool.override}
+              value={tool.override ?? tool.default}
               onChange={(v) => change(tool, v as Choice)}
               isDisabled={pending === tool.name}
               className="flex flex-col gap-2"
             >
               {CHOICES.map(({ value, label }) => {
                 const locked = value === "auto" && tool.locked;
+                // An untouched tool behaves as its default: show it selected and say so.
+                const isDefault = tool.override === null && value === tool.default;
                 return (
                   <div key={value}>
                     <Radio
@@ -124,6 +128,7 @@ export function AppsTools() {
                       className="flex min-h-11 items-center gap-2"
                     >
                       {label}
+                      {isDefault && <span className={hint}>(default)</span>}
                       {locked && <span className={hint}>— locked: this can't be undone</span>}
                     </Radio>
                     {value === "auto" && !locked && (
