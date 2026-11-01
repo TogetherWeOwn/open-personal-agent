@@ -8,11 +8,15 @@ import { navigate } from "../router";
 import { Button, Disclosure, EmptyState, Page, Skeleton } from "../ui";
 import { ApprovalCard } from "./ApprovalCard";
 import type { PendingBatch } from "./api";
+import { plain } from "./copy";
 import { ApprovalReceipt } from "./ItemBody";
 import { refreshApprovals, useApprovals, wantFocus } from "./store";
 
 const link = "font-medium text-accent underline underline-offset-2";
 const PAGE = 20;
+
+/** The chat a request came from, by its name without hidden characters, so it can't reorder. */
+const chatOf = (batch: PendingBatch) => plain(batch.conversationTitle ?? "") || "your chat";
 
 /** Where a request came from: its chat, through its deep link, and its task if it has one. */
 function Origin({ batch }: { batch: PendingBatch }) {
@@ -20,7 +24,7 @@ function Origin({ batch }: { batch: PendingBatch }) {
   return (
     <p className="flex flex-wrap gap-x-3 text-sm">
       <Link href={`/approvals/${encodeURIComponent(first)}`} className={link}>
-        Open in {batch.conversationTitle || "your chat"}
+        Open in {chatOf(batch)}
       </Link>
       {batch.taskId && (
         <Link href={`/activity/tasks/${encodeURIComponent(batch.taskId)}`} className={link}>
@@ -74,7 +78,7 @@ export function Inbox() {
               key={b.batchId}
               batch={b}
               context={<Origin batch={b} />}
-              where={b.conversationTitle || "your chat"}
+              where={chatOf(b)}
               idPrefix="inbox-approval"
             />
           ))}

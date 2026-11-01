@@ -55,6 +55,15 @@ async function stub(page: Page, batches: Record<string, unknown>[]): Promise<Stu
 
 const inbox = (page: Page) => page.getByRole("region", { name: /^Needs your OK/ });
 
+test("a chat's name can't hide characters that reorder its line", async ({ page }) => {
+  await stub(page, [batch(1, "c1", { conversationTitle: "Trip\u202e\u200b plans" })]);
+  await page.goto("/inbox");
+  const card = inbox(page).getByRole("region", { name: /^Send email/ });
+  await expect(card.getByRole("link", { name: "Open in Trip plans" })).toBeVisible();
+  await expect(card).toHaveAccessibleName("Send email · Needs your OK in Trip plans");
+  expect(await card.textContent()).not.toMatch(/[\u202e\u200b]/);
+});
+
 test("lists what waits across chats, badges it, and acts in place", async ({ page }) => {
   const s = await stub(page, [batch(1), batch(2, "c2", { taskId: "t2" })]);
   await page.goto("/inbox");
