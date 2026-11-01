@@ -106,6 +106,11 @@ describe("model settings", () => {
     expect(body).toMatchObject({ ok: true, tools: true });
     expect(body.latencyMs).toBeTypeOf("number");
     expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8788/v1/chat/completions");
+    // No usage came back, so the ledger keeps the call unpriced, billed by the endpoint's host.
+    const ledger = "SELECT provider_id, cost_micro_usd FROM usage WHERE model = 'echo'";
+    expect((await env.DB.prepare(ledger).all()).results).toEqual([
+      { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
+    ]);
   });
 
   it("takes plain HTTP to a LAN host on Node with private hosts allowed", async () => {
@@ -194,8 +199,9 @@ describe("model settings", () => {
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
     expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
     // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
-    expect(JSON.parse(await dump("usage"))).toMatchObject([
-      { provider_id: "workers-ai", input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
+    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
+    expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
+      { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
     ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);

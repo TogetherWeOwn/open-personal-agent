@@ -70,21 +70,27 @@ usageRoutes.get("/", async (c) => {
   const today = since(c.req.query("today"), utcDay, now, DAY + 2 * 3_600_000);
   const month = since(c.req.query("month"), utcMonth, now, 32 * DAY);
   const repo = createRepository(c.env);
-  const usage = repo.forUser(c.var.session.scope).usage;
-  const [todayRows, monthRows, neuronsUsed] = await Promise.all([
-    usage.totals(today),
-    usage.totals(month),
-    repo.deployment.workersAiNeurons(utcDay), // Cloudflare's allowance runs on UTC days
+  const user = repo.forUser(c.var.session.scope);
+  const [todayRows, monthRows, profile] = await Promise.all([
+    user.usage.totals(today),
+    user.usage.totals(month),
+    user.profile(),
   ]);
+  // The allowance is the Cloudflare account's, so its total includes everyone's calls; only the
+  // owner, who runs the account, sees it. A member's view would reveal others' activity.
+  const allowance =
+    profile?.role === "owner"
+      ? {
+          neuronsPerDay: workersAiAllowance.neuronsPerDay,
+          neuronsUsed: await repo.deployment.workersAiNeurons(utcDay), // UTC days, as Cloudflare
+          resetsAt: utcDay + DAY,
+        }
+      : null;
   c.header("Cache-Control", "no-store");
   return c.json({
     currency: "USD",
     today: period(todayRows, now),
     month: period(monthRows, now),
-    allowance: {
-      neuronsPerDay: workersAiAllowance.neuronsPerDay,
-      neuronsUsed,
-      resetsAt: utcDay + DAY,
-    },
+    allowance,
   });
 });

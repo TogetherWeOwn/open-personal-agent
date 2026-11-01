@@ -6,7 +6,7 @@ import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
 import { describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { workerApp } from "../src/worker-app";
-import { Browser, claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
+import { Browser, claim, db, env, freshDatabase, ORIGIN, sessionHeaders } from "./helpers/app";
 
 freshDatabase();
 
@@ -15,7 +15,7 @@ interface Period {
   unpricedCalls: number;
   groups: { lines: unknown[] }[];
 }
-type UsageBody = { today: Period; month: Period; allowance: { resetsAt: number } };
+type UsageBody = { today: Period; month: Period; allowance: { resetsAt: number } | null };
 
 const USAGE = { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 400, reasoningTokens: 0 };
 
@@ -78,7 +78,7 @@ describe("usage ledger", () => {
     ]);
     expect(body.month).toEqual(body.today);
     expect(body.allowance).toMatchObject({ neuronsPerDay: 10000, neuronsUsed: 130 });
-    expect(body.allowance.resetsAt % 86_400_000).toBe(0);
+    expect((body.allowance?.resetsAt ?? 1) % 86_400_000).toBe(0);
   });
 
   it("flags a price checked more than 90 days ago and keeps other users' calls out", async () => {
@@ -93,6 +93,10 @@ describe("usage ledger", () => {
     ]);
     const body = await (await browser.req("/api/usage")).json<UsageBody>();
     expect(body.today.costMicroUsd).toBe(5);
+    // The allowance total includes everyone's calls, so a member doesn't get it.
+    const member = { headers: await sessionHeaders("other") };
+    const theirs = await workerApp.request(`${ORIGIN}/api/usage`, member, env);
+    expect((await theirs.json<UsageBody>()).allowance).toBeNull();
     expect(body.today.groups[0]?.lines).toMatchObject([
       { name: "GPT-4.1", priceVerifiedAt: "2020-01-01", stale: true },
     ]);

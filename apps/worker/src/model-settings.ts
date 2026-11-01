@@ -169,9 +169,10 @@ settings.post("/model/test", async (c) => {
     ),
   );
   const failure = await Promise.race([consume(), timedOut]);
-  // The test is a real, billed call, so it goes in the ledger like a chat turn.
+  // The test is a real, billed call, so it goes in the ledger like a chat turn, unpriced when
+  // the provider reported no usage.
   const call = { providerId: resolved.billingId ?? provider.id, model, usage };
-  if (usage) await createRepository(c.env).forUser(c.var.session.scope).usage.record(call);
+  await createRepository(c.env).forUser(c.var.session.scope).usage.record(call);
   if (failure) {
     // The provider writes this text. If it echoes any 8 characters of the key, drop it: a saved
     // key never returns to the browser, even in part beyond its last 4 (ADR 0010 D4).
