@@ -127,8 +127,8 @@ describe("journal events", () => {
     // A new journal object over the same database and instance: a resumed run. The event
     // row is gone, but the wait replays its payload from the journal.
     const resumed = createSqliteJournal({ db, instanceId: "events-resume", pollIntervalMs: 1 });
-    expect(
-      await resumed.waitForEvent("approval:1", { type: "approval", timeoutMs: 50 }),
-    ).toEqual({ payload: { decision: "approve" } });
+    expect(await resumed.waitForEvent("approval:1", { type: "approval", timeoutMs: 50 })).toEqual({
+      payload: { decision: "approve" },
+    });
   });
 });
