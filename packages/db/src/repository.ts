@@ -94,6 +94,15 @@ export interface DataBindings<Stub, Id> {
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
     /**
+     * Lists objects under a prefix, a page at a time, for the retention sweep (M3-18). Absent where
+     * the store has no listing (Node); the sweep then leaves those objects alone.
+     */
+    list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
+      objects: { key: string; size: number; uploaded: Date }[];
+      truncated: boolean;
+      cursor?: string;
+    }>;
+    /**
      * R2's multipart upload, for streaming a body whose length is not known up front: `put`
      * there takes only a known-length stream. Absent where the store streams any body (Node).
      */

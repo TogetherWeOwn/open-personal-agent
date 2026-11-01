@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { runRetention } from "@opa/server/retention";
 import { runRotation } from "@opa/server/vault-rotation";
 import { compose, type WorkerEnv } from "./compose";
 import { workerApp } from "./worker-app";
@@ -17,8 +18,11 @@ export default {
   async fetch(request, env, ctx) {
     return workerApp.fetch(request, await compose(env), ctx);
   },
-  // The */10 reconciler (ADR 0003 #4). For now it runs a pending key rotation (crypto review C-1).
+  // The */10 reconciler (ADR 0003 #4): a pending key rotation (crypto review C-1) and retention
+  // (M3-18). Each part logs its own failure, so one never stops the other.
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(compose(env).then(runRotation));
+    const composed = compose(env);
+    ctx.waitUntil(composed.then(runRotation));
+    ctx.waitUntil(composed.then((e) => runRetention(e)));
   },
 } satisfies ExportedHandler<WorkerEnv>;
