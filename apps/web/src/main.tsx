@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import "./styles.css";
 import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
-import { RouterProvider } from "react-aria-components";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { Setup } from "./auth/Setup";
@@ -9,8 +8,7 @@ import { SignIn } from "./auth/SignIn";
 import { createMockTransport } from "./chat/mock-transport";
 import { createSocketTransport } from "./chat/socket-transport";
 import { Onboarding } from "./onboarding/Onboarding";
-import { Settings } from "./settings/Settings";
-import { Usage } from "./usage/Usage";
+import { Router } from "./router";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
@@ -36,7 +34,7 @@ function fragmentToken(hash: string): string {
 const transport =
   import.meta.env.VITE_MOCK_CHAT === "1" ? createMockTransport() : createSocketTransport();
 
-type View = "setup" | "sign-in" | "onboarding" | "chat" | "usage";
+type View = "setup" | "sign-in" | "onboarding" | "app";
 
 /** Who is asking decides the screen. Anything but a signed-in user is kept from the chat. */
 async function route(): Promise<View | null> {
@@ -49,12 +47,11 @@ async function route(): Promise<View | null> {
   }
   if (!me?.ok) return "sign-in";
   if (window.location.pathname === "/onboarding") return "onboarding";
-  if (window.location.pathname === "/usage") return "usage";
   const settings = await fetch("/api/settings").catch(() => null);
   const { onboarded } = ((await settings?.json().catch(() => null)) ?? {}) as {
     onboarded?: boolean;
   };
-  if (onboarded !== false) return "chat";
+  if (onboarded !== false) return "app";
   window.history.replaceState(null, "", "/onboarding");
   return "onboarding";
 }
@@ -76,40 +73,14 @@ function Root() {
   if (view === "setup") return <Setup initialToken={setupToken} />;
   if (view === "sign-in") return <SignIn />;
   if (view === "onboarding") return <Onboarding />;
-  if (view === "chat" || view === "usage") return <Shell initialPath={window.location.pathname} />;
+  if (view === "app")
+    return (
+      <Router>
+        <App transport={transport} />
+      </Router>
+    );
   return null;
 }
-
-/**
- * The signed-in app. Links move between the chat, `/usage` and `/settings/*` without a reload, and
- * the chat stays mounted (hidden) meanwhile, so its conversations and drafts survive the trip.
- */
-function Shell({ initialPath }: { initialPath: string }) {
-  const [path, setPath] = useState(initialPath);
-  useEffect(() => {
-    const back = () => setPath(window.location.pathname);
-    window.addEventListener("popstate", back);
-    return () => window.removeEventListener("popstate", back);
-  }, []);
-  const navigate = (href: string) => {
-    window.history.pushState(null, "", href);
-    setPath(new URL(href, window.location.href).pathname);
-  };
-  const usage = path === "/usage";
-  const settings = path.startsWith("/settings")
-    ? path === "/settings/agent-engine"
-      ? ("agent-engine" as const)
-      : ("models" as const)
-    : null;
-  return (
-    <RouterProvider navigate={navigate}>
-      <div hidden={usage || settings !== null}>
-        <App transport={transport} onNavigate={navigate} visible={!usage && settings === null} />
-      </div>
-      {usage && <Usage />}
-      {settings && <Settings page={settings} />}
-    </RouterProvider>
-  );
 }
 
 createRoot(root).render(

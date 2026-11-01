@@ -34,8 +34,10 @@ import {
   setConversationModel,
   settingsApi,
 } from "./models/settings-api";
+import { hasNavigated, match, navigate, usePath } from "./router";
+import { NotFound, routes } from "./routes";
 import { ThemeToggle } from "./ThemeToggle";
-import { Banner, Button, buttonClass } from "./ui";
+import { APP_NAME, Banner, Button, buttonClass, pageTitle } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -71,6 +73,16 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
+  const path = usePath();
+  const matched = match(routes, path);
+  const Screen = matched ? matched.route.screen : NotFound;
+  const chat = !Screen;
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!chat) return;
+    document.title = pageTitle("Chat");
+    if (hasNavigated()) heading.current?.focus();
+  }, [chat]);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
@@ -344,8 +356,10 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     setThreadOpen(true);
   };
 
+  // The route table serves /settings/models in-app, so stay client-side. A full load only ever
+  // happens if the app stands alone without the Router (link fallback / tests).
   const goModels = () =>
-    onNavigate ? onNavigate("/settings/models") : window.location.assign("/settings/models");
+    onNavigate ? onNavigate("/settings/models") : navigate("/settings/models");
 
   // A new chat's first message is on its way, so the chat isn't on the server yet.
   const starting =
@@ -397,9 +411,13 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
 
   return (
-    <div className="flex h-dvh">
+    <>
+      {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
+      <div hidden={!chat} className="flex h-dvh">
       <header className="sr-only">
-        <h1>Open Personal Agent</h1>
+        <h1 ref={heading} tabIndex={-1}>
+          {APP_NAME}
+        </h1>
       </header>
       <aside
         aria-label="Conversations"
@@ -469,10 +487,12 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
           onRetry={retryFile}
         />
       </main>
+      </div>
+      {!chat && <Screen params={matched?.params ?? {}} />}
       <div role="status" className="sr-only">
         {state.announcement}
       </div>
-    </div>
+    </>
   );
 }
 
