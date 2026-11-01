@@ -6,8 +6,8 @@ import type { AppEnv } from "./env";
 import { checkHealth, setupRequired } from "./health";
 import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
-import { claimGuard, setup, setupOpen } from "./setup";
-import { finishSetupPage } from "./setup-page";
+import { claimGuard, setup, setupPageState } from "./setup";
+import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
 
 export const app = new Hono<AppEnv>();
 
@@ -41,11 +41,15 @@ app.use("/api/secrets/*", async (c, next) => {
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 app.get("/setup", async (c) => {
   c.header("Cache-Control", "no-store");
-  if (await setupRequired(c.env)) {
+  // Plain HTML with no script, for the states the SPA can't help with.
+  const page = (html: string, status: 403 | 503) => {
     c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
-    return c.html(finishSetupPage(await checkHealth(c.env)), 503);
-  }
-  if (!(await setupOpen(c.env))) return c.json({ error: "already_claimed" }, 403);
+    return c.html(html, status);
+  };
+  if (await setupRequired(c.env)) return page(finishSetupPage(await checkHealth(c.env)), 503);
+  const state = await setupPageState(c.env);
+  if (state === "weak_token") return page(weakSetupTokenPage(), 403);
+  if (state === "closed") return page(alreadySetUpPage(), 403);
   return c.env.ASSETS.fetch(c.req.raw);
 });
 

@@ -67,10 +67,13 @@ async function readState(env: Env): Promise<SetupState> {
   return { mode: "recovery", ownerId: row.claimed_by_user_id, hash };
 }
 
-/** For `GET /setup`: whether the claim or recovery page may be shown. */
-export async function setupOpen(env: Env): Promise<boolean> {
-  if (weakToken(env.OPA_SETUP_TOKEN ?? "")) return false;
-  return (await readState(env)).mode !== "closed";
+/**
+ * For `GET /setup`: which page to show. A weak secret keeps `/setup` closed whatever the state;
+ * the setup POSTs already name it in their 503.
+ */
+export async function setupPageState(env: Env): Promise<"open" | "closed" | "weak_token"> {
+  if (weakToken(env.OPA_SETUP_TOKEN ?? "")) return "weak_token";
+  return (await readState(env)).mode === "closed" ? "closed" : "open";
 }
 
 /**
