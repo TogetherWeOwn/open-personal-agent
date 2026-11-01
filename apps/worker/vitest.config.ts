@@ -2,13 +2,6 @@
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineProject } from "vitest/config";
 
-declare global {
-  // Node's ImportMeta field; this Workers-typed project doesn't load Node's types.
-  interface ImportMeta {
-    readonly dirname: string;
-  }
-}
-
 // readD1Migrations resolves relative paths from the cwd, so anchor it to this file. Vite rewrites
 // the literal `import.meta.dirname` to this file's directory when it bundles the config.
 const migrationsDir = `${import.meta.dirname}/../../migrations`;
@@ -18,7 +11,11 @@ export default defineProject({
     cloudflareTest(async () => ({
       // Tests never reach Cloudflare: the AI binding is remote-only, so it stays unbound here.
       remoteBindings: false,
-      wrangler: { configPath: "../../wrangler.jsonc" },
+      // Wrangler reads `.dev.vars.test` before `.dev.vars` (and then skips `.env`), so the empty
+      // committed one keeps a developer's local secrets out of tests that need them unset. There is
+      // no `env.test` in wrangler.jsonc on purpose (named environments don't inherit bindings), so
+      // the "No environment found" warning is expected and harmless.
+      wrangler: { configPath: "../../wrangler.jsonc", environment: "test" },
       // Tests apply these themselves, so they can also check the unmigrated state.
       miniflare: {
         bindings: {

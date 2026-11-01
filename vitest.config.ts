@@ -15,6 +15,7 @@ export default defineConfig({
         },
       },
       "apps/worker",
+      "apps/node",
       {
         // Black-box tests of the built Worker: run `pnpm deploy:dry-run` first.
         test: { name: "harness", include: ["test/harness/**/*.test.ts"], hookTimeout: 60_000 },

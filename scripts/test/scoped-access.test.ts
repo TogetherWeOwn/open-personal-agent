@@ -24,7 +24,9 @@ describe("scoped-access lint", () => {
         lint("apps/worker/src/a.ts", text),
         lint("packages/db/src/a.ts", text),
         lint("apps/worker/test/a.ts", text),
-      ]).toEqual([1, 0, 0]);
+        lint("apps/node/src/compose.ts", text),
+        lint("apps/node/src/d1.ts", text),
+      ]).toEqual([1, 0, 0, 0, 1]);
     }
     for (const text of [
       "interface B {\n  DB: D1Database;\n}",
@@ -46,6 +48,8 @@ describe("scoped-access lint", () => {
       ["packages/core/src/a.ts", `"${KEY}_PREV"`, 1],
       ["apps/worker/src/compose.ts", `env.${KEY}`, 0],
       ["apps/worker/src/index.ts", `env.${KEY}`, 1],
+      ["apps/node/src/compose.ts", `vars.${KEY}`, 0],
+      ["apps/node/src/main.ts", `vars.${KEY}`, 1],
       ["packages/vault/src/kek.ts", `env.${KEY}`, 0],
       ["apps/worker/src/app.ts", ENV_IMPORT, 1],
       ["apps/worker/src/app.ts", 'import * as cf from "cloudflare:workers";', 1],

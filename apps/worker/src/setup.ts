@@ -14,7 +14,7 @@ import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { Env } from "./env";
-import { checkHealth } from "./health";
+import { setupRequired } from "./health";
 
 type Mode = "claim" | "recovery" | "closed";
 interface SetupState {
@@ -67,10 +67,13 @@ async function readState(env: Env): Promise<SetupState> {
   return { mode: "recovery", ownerId: row.claimed_by_user_id, hash };
 }
 
-/** For `GET /setup`: whether the claim or recovery page may be shown. */
-export async function setupOpen(env: Env): Promise<boolean> {
-  if (weakToken(env.OPA_SETUP_TOKEN ?? "")) return false;
-  return (await readState(env)).mode !== "closed";
+/**
+ * For `GET /setup`: which page to show. A weak secret keeps `/setup` closed whatever the state;
+ * the setup POSTs already name it in their 503.
+ */
+export async function setupPageState(env: Env): Promise<"open" | "closed" | "weak_token"> {
+  if (weakToken(env.OPA_SETUP_TOKEN ?? "")) return "weak_token";
+  return (await readState(env)).mode === "closed" ? "closed" : "open";
 }
 
 /**
@@ -84,7 +87,7 @@ async function authorize(
   if (c.req.header("Origin") !== new URL(c.req.url).origin) {
     return c.json({ error: "bad_origin" }, 403);
   }
-  if ((await checkHealth(c.env)).status === "setup_required") {
+  if (await setupRequired(c.env)) {
     return c.json({ error: "setup_required" }, 503);
   }
   const secret = c.env.OPA_SETUP_TOKEN ?? "";
