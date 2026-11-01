@@ -97,7 +97,9 @@ export class Limits {
 
   /**
    * Releases a turn's reservation and counts what the call cost. With no usage reported, the
-   * whole reservation counts, so a provider that reports none can't spend past the cap.
+   * whole reservation counts, so a provider that reports none can't spend past the cap. Only a
+   * held reservation is charged, so settling twice (a recovery after the turn settled) charges
+   * once, and a call that started before midnight UTC is charged to its own day, not the next.
    */
   settle(
     turnId: string,
@@ -119,7 +121,8 @@ export class Limits {
   #end(turnId: string, charge: (reserved: number) => number) {
     this.#calls.delete(turnId);
     const spend = this.#spend();
-    const { [turnId]: reserved = 0, ...held } = spend.held;
+    const { [turnId]: reserved, ...held } = spend.held;
+    if (reserved === undefined) return;
     this.kv.put("spend", { ...spend, spentMicroUsd: spend.spentMicroUsd + charge(reserved), held });
   }
 }

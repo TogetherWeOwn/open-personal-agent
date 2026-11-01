@@ -114,10 +114,6 @@ export class Assistant extends Agent<Bindings> {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
       return reject(connection, conversationId, message);
     }
-    const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
-    if (!(await chat.open(conversationId, title))) {
-      return reject(connection, conversationId, "That conversation doesn't exist.");
-    }
     const { provider, model } = picked;
     const turn: TurnRecord = {
       conversationId,
@@ -129,12 +125,17 @@ export class Assistant extends Agent<Bindings> {
       usage: null,
       called: false,
     };
-    // The model context comes from D1, never from memory, so it survives an eviction.
+    // The model context comes from D1, never from memory, so it survives an eviction. A new
+    // conversation has none yet.
     const messages = ((await chat.listMessages(conversationId)) ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }))
       .concat({ role: "user", content: text });
-    // Reserved before anything is written, so a refused send leaves no trace in the conversation.
+    // Checkpoint before the reservation and the first write, so a recovery can always name the
+    // turn and release what it holds.
+    stash(turn);
+    // Reserved before anything is written, so a refused send leaves no trace, not even a
+    // conversation.
     const chars = messages.reduce((sum, m) => sum + m.content.length, 0);
     const reservation = this.limits.reserve(turn.turnId, turn.providerId, model, chars);
     if (!reservation) {
@@ -142,10 +143,13 @@ export class Assistant extends Agent<Bindings> {
       return reject(connection, conversationId, message, "limit_reached");
     }
     const emit = this.#emitter(conversationId, turn.turnId);
+    const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
     try {
+      if (!(await chat.open(conversationId, title))) {
+        this.limits.release(turn.turnId);
+        return reject(connection, conversationId, "That conversation doesn't exist.");
+      }
       await picked.used?.();
-      // Checkpoint before the first write, so a recovery can always name the turn.
-      stash(turn);
       await chat.startTurn(conversationId, text, turn.replyId);
     } catch (err) {
       this.limits.release(turn.turnId); // no call was made
@@ -214,7 +218,9 @@ export class Assistant extends Agent<Bindings> {
     if (ctx.name !== "chat-turn") return;
     const turn = ctx.snapshot as TurnRecord | null;
     if (!turn) return;
+    // Settling twice charges once, so a recovery after the turn settled costs nothing more.
     if (turn.called) this.limits.settle(turn.turnId, turn.providerId, turn.model, turn.usage);
+    else this.limits.release(turn.turnId);
     await this.#chat.settle(turn, "interrupted"); // the ledger keeps any usage already reported
     this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
   }

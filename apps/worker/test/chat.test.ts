@@ -216,10 +216,15 @@ describe("chat transport", () => {
     const { owner } = await claim();
     const turn = { conversationId: "c5", turnId: "t", replyId: "r", providerId: "p", model: "m" };
     const ctx = { name: "chat-turn", snapshot: { ...turn, reply: "", usage: null, called: false } };
-    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
-      i.onFiberRecovered(ctx as never),
-    );
+    const day = Date.now() - (Date.now() % 86_400_000);
+    const spend = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
+      state.storage.kv.put("spend", { day, spentMicroUsd: 0, held: { t: 500 } });
+      await i.onFiberRecovered(ctx as never);
+      return state.storage.kv.get("spend");
+    });
     expect([await count("messages", "1"), await count("usage", "1")]).toEqual([0, 0]);
+    // It never called the model, so its reservation is released without a charge.
+    expect(spend).toEqual({ day, spentMicroUsd: 0, held: {} });
   });
 
   it("names the DO from the session, never from the request", async () => {
@@ -336,6 +341,7 @@ describe("turn and spend limits (M2-22)", () => {
     ]);
     expect(maxTokens).toEqual([]);
     expect(await count("messages")).toBe(0);
+    expect(await count("conversations")).toBe(0);
   });
 
   it("caps max_tokens from the budget left and charges the call's cost", async () => {

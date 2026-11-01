@@ -106,11 +106,23 @@ describe("daily spend", () => {
     expect(spent(store)).toBe(r?.reservedMicroUsd);
   });
 
+  it("charges a turn once, however often it settles (a recovery after the turn settled)", () => {
+    const { limits: l, store } = limits();
+    l.reserve("t1", PROVIDER, MODEL, 2000);
+    l.settle("t1", PROVIDER, MODEL, USAGE);
+    l.settle("t1", PROVIDER, MODEL, USAGE);
+    l.settle("t1", PROVIDER, MODEL, null);
+    expect(spent(store)).toBe(1000 * 2 + 500 * 8);
+  });
+
   it("starts each UTC day from zero, and reserves nothing for an unpriced model", () => {
     const { limits: l, store, clock } = limits();
     l.reserve("t1", PROVIDER, MODEL, 2000);
     l.settle("t1", PROVIDER, MODEL, USAGE);
+    l.reserve("late", PROVIDER, MODEL, 2000);
     clock.now += DAY;
+    // A call that started yesterday counts there, not against today's budget.
+    l.settle("late", PROVIDER, MODEL, USAGE);
     l.reserve("t2", PROVIDER, MODEL, 2000);
     l.settle("t2", PROVIDER, MODEL, { ...USAGE, outputTokens: 0 });
     expect(spent(store)).toBe(1000 * 2);

@@ -128,7 +128,8 @@ and the Cloudflare dashboard under **Billing** are the final word.
 Each user can start up to 30 chat turns a minute and spend up to $5 a day (UTC) at published
 prices. Every model call reserves its worst case before it starts, so replies running at once can't
 pass the limit. Models without a price on file are not counted; the Usage page lists their calls
-as unpriced. Changing the limit in Settings and spending warnings are planned, not in this release.
+as unpriced. A priced call whose provider reports no token counts uses up its whole reservation,
+though Usage lists it as unpriced. Changing the limit in Settings and spending warnings are planned, not in this release.
 
 What each binding in `wrangler.jsonc` uses (CI checks that every binding has a row here):
 
