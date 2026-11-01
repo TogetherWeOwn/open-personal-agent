@@ -89,17 +89,18 @@ describe("mock OpenAI-compatible server", () => {
       }
       return events;
     }
-    for (const [i, text] of ["first", "second"].entries()) {
+    for (const [, text] of ["first", "second"].entries()) {
       const callEvents = await turn(text);
       const calls = callEvents.filter((e) => e.type === "tool_call");
       expect(calls).toHaveLength(1);
       expect(callEvents.at(-1)).toEqual({ type: "done", finishReason: "tool_calls" });
+      const { id, name, arguments: args } = calls[0].toolCall;
       history.push({
         role: "assistant",
-        toolCalls: [{ id: `call_${i + 1}`, name: "lookup", arguments: "{}" }],
+        toolCalls: [{ id, name, arguments: args }],
         content: "",
       });
-      history.push({ role: "tool", toolCallId: `call_${i + 1}`, content: "found it" });
+      history.push({ role: "tool", toolCallId: id, content: "found it" });
 
       // The follow-up carrying the tool result echoes instead of calling again.
       const echoEvents = [];
