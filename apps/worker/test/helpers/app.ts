@@ -42,7 +42,11 @@ type Options = { options: { challenge: string } };
 export class Browser {
   cookies = new Map<string, string>();
   setCookies: string[] = [];
-  constructor(readonly bindings: Env = env) {}
+  /** `ip` is sent as `CF-Connecting-IP`, as Cloudflare would. */
+  constructor(
+    readonly bindings: Env = env,
+    readonly ip?: string,
+  ) {}
 
   async req(
     path: string,
@@ -52,6 +56,7 @@ export class Browser {
     const headers: Record<string, string> = {
       cookie: [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "),
     };
+    if (this.ip) headers["cf-connecting-ip"] = this.ip;
     const origin = init.origin === undefined ? ORIGIN : init.origin;
     if (method !== "GET" && origin !== null) headers.origin = origin;
     const body = init.body === undefined ? null : JSON.stringify(init.body);
@@ -93,8 +98,9 @@ export async function claim() {
   const browser = new Browser();
   const res = await browser.setup(TOKEN, { key });
   if (res.status !== 200) throw new Error(`claim failed: ${res.status}`);
+  const { recoveryCodes: codes } = await res.json<{ recoveryCodes: string[] }>();
   const owner = (await db.prepare("SELECT id FROM users").first<string>("id")) as string;
-  return { key, browser, owner };
+  return { key, browser, owner, codes };
 }
 
 /** Signs `userId` in without a passkey: a live `sessions` row, and the headers that carry it. */

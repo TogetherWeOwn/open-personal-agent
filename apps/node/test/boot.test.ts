@@ -29,6 +29,7 @@ beforeAll(async () => {
       PORT: "0",
       OPA_DATA_DIR: dataDir,
       OPA_PUBLIC_ORIGIN: PUBLIC,
+      OPA_CLIENT_IP_HEADER: "X-Real-IP",
       ...SECRETS,
     },
     stdio: ["ignore", "pipe", "inherit"],
@@ -104,5 +105,18 @@ describe("apps/node", () => {
     expect([missing.status, await missing.json()]).toEqual([404, { error: "not_found" }]);
     // The token is spent: a second claim is refused.
     expect((await req("/setup/options", { token })).status).not.toBe(200);
+  });
+
+  it("limits recovery codes per address from the configured proxy header", async () => {
+    const attempt = (ip: string) =>
+      fetch(`${base}/api/auth/recover/options`, {
+        method: "POST",
+        body: JSON.stringify({ code: "not-a-code" }),
+        headers: { origin: PUBLIC, "x-real-ip": ip },
+      }).then((res) => res.status);
+    for (let i = 0; i < 5; i++) expect(await attempt("192.0.2.1")).toBe(403);
+    expect(await attempt("192.0.2.1")).toBe(429);
+    // Another client behind the same proxy has its own limit.
+    expect(await attempt("192.0.2.2")).toBe(403);
   });
 });

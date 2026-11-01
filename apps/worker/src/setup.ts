@@ -5,11 +5,6 @@
 // the operator rotates the secret, `/setup` reopens in recovery mode for the new token only. Every
 // token that claimed or recovered is recorded, so putting an old one back never reopens `/setup`.
 import { systemStore } from "@opa/db/system";
-import {
-  generateRegistrationOptions,
-  type RegistrationResponseJSON,
-  verifyRegistrationResponse,
-} from "@simplewebauthn/server";
 import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
@@ -34,7 +29,6 @@ const MIN_TOKEN_LENGTH = 22;
  * length has far more distinct characters than this, except with negligible probability.
  */
 const MIN_DISTINCT_CHARS = 8;
-const encoder = new TextEncoder();
 
 /** 403 on every route except the public list until the deployment is claimed (R7 M2-2). */
 export const claimGuard: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
@@ -112,14 +106,7 @@ setup.post("/options", async (c) => {
   const mode = state.mode as "claim" | "recovery";
   // Recovery keeps the owner's account, so the new passkey replaces the old one on the device.
   const userId = state.ownerId ?? crypto.randomUUID();
-  const options = await generateRegistrationOptions({
-    rpName: "Open Personal Agent",
-    rpID: new URL(c.req.url).hostname,
-    userName: "owner",
-    userID: encoder.encode(userId) as Uint8Array<ArrayBuffer>,
-    attestationType: "none",
-    authenticatorSelection: { residentKey: "required", userVerification: "required" },
-  });
+  const options = await auth.registrationOptions(c.req.url, userId);
   const cookie = await auth.putChallenge(
     systemStore(c.env),
     mode,
@@ -146,32 +133,17 @@ setup.post("/", async (c) => {
   const userId = challenge?.user_id;
   if (!challenge || !userId) return c.json({ error: "no_challenge" }, 400);
 
-  const url = new URL(c.req.url);
-  const verification = await verifyRegistrationResponse({
-    response: state.body.credential as RegistrationResponseJSON,
-    expectedChallenge: challenge.challenge,
-    expectedOrigin: url.origin,
-    expectedRPID: url.hostname,
-    requireUserVerification: true,
-  }).catch(() => null);
-  if (!verification?.verified) return c.json({ error: "not_verified" }, 400);
+  const { credential } = state.body;
+  const passkey = await auth.verifyPasskey(c.req.url, credential, challenge.challenge, userId);
+  if (!passkey) return c.json({ error: "not_verified" }, 400);
 
-  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
   const codes = Array.from({ length: auth.RECOVERY_CODE_COUNT }, auth.newRecoveryCode);
   const codeHashes = await Promise.all(codes.map(auth.hashRecoveryCode));
   const session = await auth.newSession(userId);
   const owner = {
     userId,
     tokenHash: state.hash,
-    passkey: {
-      id: credential.id,
-      webauthnUserId: auth.base64url(encoder.encode(userId)),
-      publicKey: credential.publicKey,
-      counter: credential.counter,
-      transports: (credential.transports ?? []).join(","),
-      deviceType: credentialDeviceType,
-      backedUp: credentialBackedUp,
-    },
+    passkey,
     recoveryCodes: codeHashes.map((hash) => ({ id: auth.randomId(), hash })),
     session: session.row,
     now: Date.now(),

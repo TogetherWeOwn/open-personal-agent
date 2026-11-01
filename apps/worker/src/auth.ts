@@ -2,7 +2,12 @@
 // Auth primitives shared by the claim (M2-09) and login (M2-10): random IDs, SHA-256 hashing,
 // single-use WebAuthn challenges, session rows and recovery codes (ADR 0010 D2). Every secret
 // value is ≥128 bits of randomness, so a plain SHA-256 is the right hash; nothing stores plaintext.
-import type { ChallengeKind, NewSession, SystemStore } from "@opa/db/system";
+import type { ChallengeKind, NewPasskey, NewSession, SystemStore } from "@opa/db/system";
+import {
+  generateRegistrationOptions,
+  type RegistrationResponseJSON,
+  verifyRegistrationResponse,
+} from "@simplewebauthn/server";
 
 export const SESSION_COOKIE = "__Host-opa_session";
 export const CHALLENGE_COOKIE = "__Host-opa_webauthn";
@@ -112,4 +117,44 @@ export function newRecoveryCode(): string {
 /** Hashes a recovery code as typed: case, spaces and dashes don't matter. */
 export function hashRecoveryCode(code: string): Promise<string> {
   return sha256(code.toLowerCase().replace(/[\s-]/g, ""));
+}
+
+/** Registration options for a new passkey of `userId`, the owner's account on this deployment. */
+export function registrationOptions(url: string, userId: string) {
+  return generateRegistrationOptions({
+    rpName: "Open Personal Agent",
+    rpID: new URL(url).hostname,
+    userName: "owner",
+    userID: encoder.encode(userId) as Uint8Array<ArrayBuffer>,
+    attestationType: "none",
+    authenticatorSelection: { residentKey: "required", userVerification: "required" },
+  });
+}
+
+/** Verifies a registration response with user verification. `null` if it doesn't verify. */
+export async function verifyPasskey(
+  requestUrl: string,
+  response: unknown,
+  challenge: string,
+  userId: string,
+): Promise<NewPasskey | null> {
+  const url = new URL(requestUrl);
+  const verification = await verifyRegistrationResponse({
+    response: response as RegistrationResponseJSON,
+    expectedChallenge: challenge,
+    expectedOrigin: url.origin,
+    expectedRPID: url.hostname,
+    requireUserVerification: true,
+  }).catch(() => null);
+  if (!verification?.verified) return null;
+  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+  return {
+    id: credential.id,
+    webauthnUserId: base64url(encoder.encode(userId)),
+    publicKey: credential.publicKey,
+    counter: credential.counter,
+    transports: (credential.transports ?? []).join(","),
+    deviceType: credentialDeviceType,
+    backedUp: credentialBackedUp,
+  };
 }
