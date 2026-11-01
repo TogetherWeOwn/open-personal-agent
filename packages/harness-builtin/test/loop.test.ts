@@ -523,6 +523,41 @@ describe("taint", () => {
     expect(item?.taint).toEqual({ kind: "tool", label: "fetch" });
     expect(state.taint.taint).toBe("untrusted");
   });
+
+  it("taints the turn that offers a third party's tool, once, before the first call is decided", async () => {
+    const plugin = { ...tool("lookup", "read"), author: "third_party" as const };
+    const own = { ...tool("note", "read"), author: "first_party" as const };
+    const fetch = tool("fetch", "read", undefined, true);
+    const { provider } = scripted([{ calls: [["fetch", { q: "evil.example" }]] }]);
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, [own, plugin, fetch]), state);
+    expect(outcome).toBe("awaiting_approval");
+    expect(ofType(events, "context.tainted").map((e) => e.payload.source)).toEqual([
+      { kind: "tool", label: "lookup description" },
+    ]);
+    expect(fetch.inputs).toEqual([]);
+    const [item] = ofType(events, "approval.requested")[0]?.payload.items ?? [];
+    expect(item).toMatchObject({ tool: "fetch", rule: "floor_tainted_egress", scopes: ["once"] });
+    // The next model call of the same turn doesn't add the description again.
+    resolveApprovals(
+      state,
+      ofType(events, "approval.requested")[0]?.payload.batchId ?? "",
+      [{ approvalId: item?.approvalId ?? "", decision: "deny", scope: "once" }],
+      NOW,
+    );
+    await drain(host(provider, [own, plugin, fetch]), state);
+    expect(state.taint.sources).toEqual([{ kind: "tool", label: "lookup description" }]);
+  });
+
+  it("leaves a turn of first-party tools trusted", async () => {
+    const fetch = { ...tool("fetch", "read", undefined, true), author: "first_party" as const };
+    const { provider } = scripted([{ calls: [["fetch", { q: "example.com" }]] }]);
+    const state = newTurn();
+    const { events } = await drain(host(provider, [fetch]), state);
+    // The fetch ran untainted; only its result taints what comes after.
+    expect(fetch.inputs).toEqual([{ q: "example.com" }]);
+    expect(ofType(events, "approval.requested")).toEqual([]);
+  });
 });
 
 describe("failures", () => {

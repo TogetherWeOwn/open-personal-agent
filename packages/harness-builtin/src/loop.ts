@@ -53,6 +53,11 @@ export type ToolOutput = {
 export interface LoopTool extends RegisteredTool {
   /** What the call reaches, e.g. a URL's host: shown on the card and matched by grants. */
   target?(input: Record<string, unknown>): string | undefined;
+  /**
+   * Who wrote the manifest's description. A third party's (an MCP server's or a plugin's, M5) is
+   * untrusted text the model reads (R7 §5.9), so a turn that offers the tool is tainted.
+   */
+  author?: "first_party" | "third_party";
   execute(input: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput>;
 }
 
@@ -227,6 +232,18 @@ export async function* runTurn(
     yield ev("step.completed", { stepId, status, durationMs: 0 });
   }
 
+  /** Adds what joined the context to the turn's taint, announcing the first untrusted source. */
+  function* addTaint(event: ContextEvent): Generator<LoopEvent> {
+    const was = state.taint.taint;
+    state.taint = addContext(state.taint, event);
+    const source = state.taint.sources[0];
+    if (was === "trusted" && state.taint.taint === "untrusted" && source) {
+      // `context.tainted` names web, file or tool; an untrusted memory arrives through a tool.
+      const kind = source.kind === "memory" ? "tool" : source.kind;
+      yield ev("context.tainted", { stepId, source: { kind, label: source.label } });
+    }
+  }
+
   /** The policy decision, or `null` if the host couldn't read the policy (fail closed). */
   function decision(tool: LoopTool, manifest: ToolManifest, input: Record<string, unknown>) {
     try {
@@ -280,14 +297,7 @@ export async function* runTurn(
         stepId = id;
         yield* result(run.call, o.ok, o.content);
         if (o.ok && o.artifact) yield ev("artifact.created", o.artifact);
-        const was = state.taint.taint;
-        state.taint = addContext(state.taint, o.context ?? { kind: "tool", label: run.call.name });
-        const source = state.taint.sources[0];
-        if (was === "trusted" && state.taint.taint === "untrusted" && source) {
-          // `context.tainted` names web, file or tool; an untrusted memory arrives through a tool.
-          const kind = source.kind === "memory" ? "tool" : source.kind;
-          yield ev("context.tainted", { stepId, source: { kind, label: source.label } });
-        }
+        yield* addTaint(o.context ?? { kind: "tool", label: run.call.name });
         const status = o.ok ? "ok" : "error";
         yield ev("step.completed", { stepId: id, status, durationMs: o.ended - began });
       }
@@ -367,6 +377,14 @@ export async function* runTurn(
     const tools = host.tools
       .manifests()
       .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+    // A third party's description is in the context from this call on, so it taints the turn
+    // before anything the call asks for is decided.
+    for (const { name } of tools) {
+      const label = `${name} description`;
+      if (host.tools.get(name)?.tool.author !== "third_party") continue;
+      if (state.taint.sources.some((s) => s.kind === "tool" && s.label === label)) continue;
+      yield* addTaint({ kind: "tool", label });
+    }
     let text = "";
     const calls: ModelToolCall[] = [];
     let usage: ModelUsage | null = null;
