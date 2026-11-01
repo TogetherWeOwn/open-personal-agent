@@ -14,9 +14,10 @@ cp .dev.vars.example .dev.vars   # then fill in the three values
 pnpm dev                         # http://localhost:8787
 ```
 
-`pnpm dev` builds the web app and runs the Worker locally with `wrangler dev`. It serves the app
-and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
-reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
+`pnpm dev` builds the web app, applies `migrations/` to the local database and runs the Worker
+locally with `wrangler dev`. It serves the app and `GET /api/health` without a Cloudflare account.
+It serves the web app as built, so for live reload of web changes run `pnpm dev:web` alongside it
+(Vite on port 5173, proxying `/api`).
 
 `pnpm dev` also starts a mock OpenAI-compatible model server at `http://127.0.0.1:8788/v1`
 (`pnpm dev:mock-model` starts it alone). It answers `GET /models` and streams an echo of your last
@@ -50,8 +51,8 @@ setup and login fail with `bad_origin`. Workers AI and background tasks are Clou
 `GET /api/health` reports the schema version, each binding (D1, R2, the Durable Object, the
 Workflow, Workers AI) and whether each secret is set, as booleans. While the database is
 unmigrated or a secret is missing, it answers `setup_required` and `/setup` shows a **Finish
-setup** page with the commands to run. Locally, apply the migrations with
-`npx wrangler d1 migrations apply DB --local`.
+setup** page with the commands to run. `pnpm dev` applies the migrations locally on every start;
+to apply them without starting it, run `npx wrangler d1 migrations apply DB --local`.
 
 ### Database changes
 
@@ -73,6 +74,17 @@ pnpm deploy:cloudflare         # --name <prefix> (or OPA_PREFIX) to deploy under
 
 A re-run upgrades, or prints "Up to date"; `--dry-run` changes nothing on Cloudflare. A scoped
 token needs the `required` entries in [`deploy/permissions.json`](deploy/permissions.json).
+
+### Deploy button (experimental)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/TogetherWeOwn/open-personal-agent)
+
+The button copies this repo into your GitHub account and deploys it with Workers Builds, which
+runs `pnpm run deploy` again on every push. It is experimental until the checks in
+[`deploy/BUTTON.md`](deploy/BUTTON.md) pass. If you're not asked for the three `OPA_*` secrets,
+`/setup` shows the **Finish setup** page with the commands that set them. Workflow names are
+unique per account, and the button probably keeps `opa-task-workflow` unprefixed, so plan on one
+button deploy per account; to run more than one, use `pnpm deploy:cloudflare --name <prefix>`.
 
 ## Layout
 
