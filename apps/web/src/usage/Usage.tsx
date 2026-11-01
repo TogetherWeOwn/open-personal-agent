@@ -184,7 +184,9 @@ export function Usage() {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const month = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-    fetch(`/api/usage?today=${today}&month=${month}`)
+    // The zone puts each day's calls on this calendar, DST included.
+    const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    fetch(`/api/usage?today=${today}&month=${month}&tz=${tz}`)
       .then((res) => (res.ok ? res.json() : Promise.reject()))
       .then(setData, () => setFailed(true));
     getSpending().then(setSpending, () => {}); // only the 50% line needs it

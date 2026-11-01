@@ -167,8 +167,8 @@ export function Onboarding() {
           <span className="font-semibold">Try without a key</span>
           <span className="text-sm text-text-muted">
             Starter model on Cloudflare Workers AI. It is metered: your Cloudflare account has a
-            free daily allowance. Settings › Spending shows what you've used and what it costs per
-            100 messages.
+            free daily allowance. Usage shows what you've used, and Settings › Models what it costs
+            per 100 messages.
           </span>
         </Radio>
         <Radio value="subscription" className={card}>

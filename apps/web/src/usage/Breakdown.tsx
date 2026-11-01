@@ -246,11 +246,7 @@ export function Breakdown({ data }: { data: UsageData }) {
     <p className="text-sm">
       {num.format(period.unpricedCalls)}{" "}
       {period.unpricedCalls === 1 ? "message has" : "messages have"} no price on file, so the total
-      leaves it out. You can set a price in{" "}
-      <Link href="/settings/models" className={link}>
-        Settings › Models
-      </Link>
-      .
+      leaves {period.unpricedCalls === 1 ? "it" : "them"} out. The provider's own bill has the cost.
     </p>
   );
   const byPeriod = (body: ReactNode) => (
