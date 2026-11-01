@@ -687,7 +687,7 @@ export function memoryRecallContract(name: string, migrated: () => Promise<D1Dat
       expect(await memory.recall(" - ")).toEqual({ memories: [], tainted: false, tokens: 0 });
     });
 
-    it("skips an oversized top match and returns nothing for a zero limit", async () => {
+    it("skips an oversized top match, honors a zero limit, and clamps a negative limit", async () => {
       const { memory } = await user();
       // The newer huge row fuses first (recency wins its tie), but the budget fits only the
       // smaller row, so packing skips the huge row instead of stopping.
@@ -702,6 +702,9 @@ export function memoryRecallContract(name: string, migrated: () => Promise<D1Dat
         tainted: false,
         tokens: 0,
       });
+      // A negative limit keeps the minimum-one clamp, matching `search`.
+      const negative = await memory.recall("big", { limit: -1 });
+      expect(negative.memories.map((m) => m.text)).toEqual([huge]);
     });
 
     it("taints only below user trust and misses another user's rows", async () => {
