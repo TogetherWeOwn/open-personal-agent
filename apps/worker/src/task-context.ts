@@ -7,6 +7,7 @@
 // (AC4). The adapter takes a structural stepper, so tests drive it without the Workflow engine.
 import {
   type JsonValue,
+  redactSecrets,
   STEP_OUTPUT_INLINE_MAX_BYTES,
   TASK_LIMITS,
   type TaskBudget,
@@ -217,28 +218,6 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
         .catch(() => {}); // progress is best-effort; the task's state lives in D1
     },
   };
-}
-
-/**
- * Replaces every exact occurrence of a guarded secret in a step output's strings, object keys
- * included. Step outputs
- * are persisted (and replayed from storage), so a provider or tool that echoes a key back —
- * the failure M3-06a had to guard in the Test reply — must not fix it in durable state.
- */
-export function redactSecrets<T>(value: T, secrets: readonly string[]): T {
-  if (secrets.length === 0) return value;
-  if (typeof value === "string") {
-    let out: string = value;
-    for (const secret of secrets) out = out.split(secret).join("[redacted]");
-    return out as T;
-  }
-  if (Array.isArray(value)) return value.map((v) => redactSecrets(v, secrets)) as T;
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [redactSecrets(k, secrets), redactSecrets(v, secrets)]),
-    ) as T;
-  }
-  return value;
 }
 
 /** The storage id of a step's offloaded output: the hex SHA-256 of its idempotency key. */

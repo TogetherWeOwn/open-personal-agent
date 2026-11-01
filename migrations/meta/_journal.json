@@ -71,6 +71,13 @@
       "when": 1793528114183,
       "tag": "0009_tasks",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1793529182768,
+      "tag": "0010_task_journal",
+      "breakpoints": true
     }
   ]
 }

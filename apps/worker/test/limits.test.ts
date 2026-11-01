@@ -359,6 +359,19 @@ describe("monthly hard cap (COST-4)", () => {
       "maxOutputTokens",
     );
   });
+  it("keeps a task's budget through a month-long pause at the hard cap", () => {
+    const { limits: l, clock } = limits(Date.UTC(2027, 0, 1, 0, 30));
+    l.startTask("t1");
+    l.reserve("k", PROVIDER, MODEL, 2000);
+    l.settle("k", PROVIDER, MODEL, null);
+    l.setSettings({ hardCapMicroUsd: l.totals().monthMicroUsd });
+    const bg = { taskId: "t1", background: true };
+    expect(l.reserveFor("b1", PROVIDER, MODEL, 2000, 0, bg)).toMatchObject({
+      limit: "monthly_hard",
+    });
+    clock.now = Date.UTC(2027, 1, 1, 0, 1); // 31 days later: the cap lifts
+    expect(l.reserveFor("b2", PROVIDER, MODEL, 2000, 0, bg)).toHaveProperty("maxOutputTokens");
+  });
 });
 
 describe("concurrent calls over the daily cap (A-Co5)", () => {
