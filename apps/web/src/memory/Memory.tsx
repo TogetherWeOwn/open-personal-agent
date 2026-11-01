@@ -58,21 +58,44 @@ interface Held {
 
 /** The most IDs one delete request takes (the server's limit). */
 const BATCH = 1000;
+/** What browsers let keepalive requests carry in flight at once (64 KiB), with some to spare. */
+const KEEPALIVE_BYTES = 60_000;
 
-/** Sends a delete in batches the server accepts; `keepalive` lets it finish as the page unloads. */
-async function send(ids: string[], keepalive = false) {
-  const missed: string[] = [];
-  for (let i = 0; i < ids.length; i += BATCH) {
-    const res = await fetch("/api/memory/delete", {
-      method: "POST",
-      keepalive,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ids: ids.slice(i, i + BATCH) }),
-    });
-    if (!res.ok) throw new Error(String(res.status));
-    missed.push(...((await res.json()) as { failed: string[] }).failed);
-  }
-  return missed;
+/**
+ * Sends a delete in batches the server accepts, all started at once so a page that is going away
+ * still sends every one. Each goes with `keepalive` while the browser's allowance lasts, so it
+ * finishes if the page unloads. Returns the IDs that weren't deleted and whether any batch failed
+ * outright; a failed batch never hides what the others deleted.
+ */
+async function send(ids: string[]) {
+  let allowance = KEEPALIVE_BYTES;
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += BATCH) batches.push(ids.slice(i, i + BATCH));
+  const results = await Promise.allSettled(
+    batches.map(async (batch) => {
+      const body = JSON.stringify({ ids: batch });
+      const keepalive = body.length <= allowance;
+      if (keepalive) allowance -= body.length;
+      const res = await fetch("/api/memory/delete", {
+        method: "POST",
+        keepalive,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      return ((await res.json()) as { failed: string[] }).failed;
+    }),
+  );
+  const missed = results.flatMap((r, i) =>
+    r.status === "fulfilled" ? r.value : (batches[i] ?? []),
+  );
+  return { missed, offline: results.some((r) => r.status === "rejected") };
+}
+
+/** "'A', 'B' and 3 more": a few names, then a count. */
+function names(texts: string[]) {
+  const shown = texts.slice(0, 3).map(quote).join(", ");
+  return texts.length > 3 ? `${shown} and ${texts.length - 3} more` : shown;
 }
 
 export function Memory() {
@@ -116,45 +139,49 @@ export function Memory() {
   }, [query, load]);
 
   // The held delete goes out when the toast closes, and also if the screen or page goes away.
-  // The toast closes with it, so a page restored from the back/forward cache can't send it twice.
+  // The toast closes with it, so a page restored from the back/forward cache can't send it twice;
+  // the restored page asks the server again, so a delete that failed on the way out shows.
   const heldRef = useRef<Held | null>(null);
   heldRef.current = held;
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
   useEffect(() => {
     const flush = () => {
       const h = heldRef.current;
       if (!h) return;
       heldRef.current = null;
-      send(h.ids, true).catch(() => {});
+      void send(h.ids);
       setHeld(null);
       setNotes((all) => all?.filter((n) => !h.ids.includes(n.id)) ?? null);
     };
+    const restored = (e: PageTransitionEvent) => {
+      if (e.persisted) void load(shownRef.current);
+    };
     window.addEventListener("pagehide", flush);
+    window.addEventListener("pageshow", restored);
     return () => {
       window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pageshow", restored);
       flush();
     };
-  }, []);
+  }, [load]);
 
   const commit = async (h: Held) => {
     setHeld(null);
     heldRef.current = null;
-    try {
-      const missed = await send(h.ids);
-      setNotes((all) => all?.filter((n) => !h.ids.includes(n.id) || missed.includes(n.id)) ?? null);
-      if (missed.length > 0) {
-        const names = (notes ?? []).filter((n) => missed.includes(n.id)).map((n) => quote(n.text));
-        setProblem(
-          `Deleted ${h.ids.length - missed.length} of ${h.ids.length}. I couldn't delete ${names.join(", ")}.`,
-        );
-        setSelected(new Set(missed));
-        setSelecting(true);
-      }
-    } catch {
-      setProblem("I couldn't delete that. Check your connection and try again.");
-      if (h.bulk) {
-        setSelected(new Set(h.ids));
-        setSelecting(true);
-      }
+    const { missed, offline } = await send(h.ids);
+    setNotes((all) => all?.filter((n) => !h.ids.includes(n.id) || missed.includes(n.id)) ?? null);
+    if (missed.length === 0) return;
+    const none = offline && missed.length === h.ids.length;
+    const kept = (notes ?? []).filter((n) => missed.includes(n.id)).map((n) => n.text);
+    setProblem(
+      none
+        ? "I couldn't delete that. Check your connection and try again."
+        : `Deleted ${h.ids.length - missed.length} of ${h.ids.length}. I couldn't delete ${names(kept)}.`,
+    );
+    if (h.bulk || !none) {
+      setSelected(new Set(missed));
+      setSelecting(true);
     }
   };
 
