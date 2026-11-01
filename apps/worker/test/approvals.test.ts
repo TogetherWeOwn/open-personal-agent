@@ -398,6 +398,33 @@ describe("the pending list (M3-07 AC8)", () => {
     expect((await decide("deny")).status).toBe(200);
   });
 
+  it("shows the target the call is bound to, from the envelope, not the row's copy", async () => {
+    const { browser, owner } = await claim();
+    const insert = (batch: string, target: string | null, canonical: string) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, target, canonical, binding_hash, expires_at)
+           VALUES (?, ?, 0, ?, 'c-t', 'turn-1', 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', ?, ?, 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}`, owner, target, canonical, Date.now() + 60_000);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-t', ?)").bind(owner),
+      insert("b_bound", "shown.example", '{"args":{},"target":"bound.example"}'),
+      insert("b_none", "shown.example", '{"args":{},"target":null}'),
+      insert("b_damaged", "shown.example", "{not json"),
+    ]);
+    const { batches } = await (await pending(browser)).json<{
+      batches: { batchId: string; items: { target?: string }[] }[];
+    }>();
+    const targets = Object.fromEntries(batches.map((b) => [b.batchId, b.items[0]?.target]));
+    // A damaged envelope keeps the row's copy; execution can't open it, so it is denied anyway.
+    expect(targets).toEqual({
+      b_bound: "bound.example",
+      b_none: undefined,
+      b_damaged: "shown.example",
+    });
+  });
+
   it("limits by batch, never cutting one, and keeps a batch's items in their stored order", async () => {
     const { owner } = await claim();
     const now = Date.now();
