@@ -2014,6 +2014,51 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         audit: {
           list: () =>
             db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
+          /**
+           * One page of the activity log (M3-19 AC3), newest first, from `since` on and before
+           * row `before`. `actions` narrows to those actions; `text` matches the action, target
+           * or detail literally (LIKE's wildcards escaped), or any of `textActions`; `hide` drops
+           * an action with a given result.
+           */
+          page: (o: {
+            since: number;
+            before?: number | undefined;
+            limit: number;
+            actions?: readonly string[] | undefined;
+            text?: string | undefined;
+            textActions?: readonly string[] | undefined;
+            hide?: readonly { action: string; result?: string }[];
+          }) => {
+            const like = o.text && `%${o.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+            const matches = (column: SQLiteColumn) => sql`${column} LIKE ${like} ESCAPE '\\'`;
+            return db
+              .select()
+              .from(auditLog)
+              .where(
+                and(
+                  eq(auditLog.userId, userId),
+                  gte(auditLog.createdAt, o.since),
+                  o.before === undefined ? undefined : lt(auditLog.id, o.before),
+                  o.actions ? inArray(auditLog.action, [...o.actions]) : undefined,
+                  like
+                    ? or(
+                        matches(auditLog.action),
+                        matches(auditLog.targetId),
+                        matches(auditLog.detail),
+                        o.textActions?.length
+                          ? inArray(auditLog.action, [...o.textActions])
+                          : undefined,
+                      )
+                    : undefined,
+                  ...(o.hide ?? []).map(
+                    (h) =>
+                      sql`NOT (${auditLog.action} = ${h.action}${h.result === undefined ? sql`` : sql` AND ${auditLog.result} = ${h.result}`})`,
+                  ),
+                ),
+              )
+              .orderBy(desc(auditLog.id))
+              .limit(o.limit);
+          },
         },
         /**
          * Saved model providers (M3-06). A foreign key proves only that a row exists, so every

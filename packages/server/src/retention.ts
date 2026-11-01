@@ -86,8 +86,10 @@ export async function runRetention(env: Pick<AppPorts, "DB" | "FILES">, now = Da
   try {
     if (await store.sweptSince(now - (now % DAY_MS))) return;
     const totals = await store.sweep(now);
-    const count = totals.conversations + totals.toolOutputs + totals.proposals + totals.stepOutputs;
-    log.info("retention.sweep", { count, status: totals.failed ? "partial" : "ok" });
+    const { conversations, toolOutputs, proposals, stepOutputs, auditRows } = totals;
+    const count = conversations + toolOutputs + proposals + stepOutputs + (auditRows ?? 0);
+    const partial = totals.failed || auditRows === null;
+    log.info("retention.sweep", { count, status: partial ? "partial" : "ok" });
   } catch (error) {
     log.error("retention.sweep", { errorName: (error as Error).name });
   }

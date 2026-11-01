@@ -2,7 +2,7 @@
 // Retention (COST-10, M3-18): the settings, the daily sweep with its counts (AC1), the reconciler's
 // upload collection (AC2), and the rule that a chat with a live task is never deleted (AC3).
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import { DAY_MS, LIVE_TASK_STATUSES, retentionStore } from "@opa/db/retention";
+import { AUDIT_DAYS, DAY_MS, LIVE_TASK_STATUSES, retentionStore } from "@opa/db/retention";
 import { runRetention } from "@opa/server/retention";
 import { describe, expect, it } from "vitest";
 import { claim, count, db, env, freshDatabase } from "./helpers/app";
@@ -214,6 +214,7 @@ describe("the daily sweep", () => {
         toolOutputs: 0,
         proposals: 0,
         stepOutputs: 0,
+        auditRows: 0,
         users: 2,
         failed: 0,
       },
@@ -404,6 +405,29 @@ describe("the daily sweep", () => {
       },
       expect.objectContaining({ userId: null, result: "error", conversations: 1, failed: 1 }),
     ]);
+  });
+
+  it("removes activity-log rows older than 365 days, everyone's, and keeps the rest (M3-19 AC3)", async () => {
+    await user("u1");
+    const row = (userId: string | null, action: string, at: number) =>
+      db
+        .prepare(
+          "INSERT INTO audit_log (user_id, action, module, result, created_at) VALUES (?, ?, 'test', 'ok', ?)",
+        )
+        .bind(userId, action, at);
+    await db.batch([
+      row("u1", "old", NOW - (AUDIT_DAYS + 1) * DAY_MS),
+      row(null, "old", NOW - (AUDIT_DAYS + 30) * DAY_MS),
+      row("u1", "kept", NOW - (AUDIT_DAYS - 1) * DAY_MS),
+      row(null, "kept", NOW - DAY_MS),
+    ]);
+    expect(await store().sweep(NOW)).toMatchObject({ auditRows: 2, failed: 0 });
+    const left = await db
+      .prepare("SELECT action FROM audit_log WHERE module = 'test'")
+      .all<{ action: string }>();
+    expect(left.results.map((r) => r.action)).toEqual(["kept", "kept"]);
+    const [deployment] = (await sweepRows()).filter((r) => r.userId === null);
+    expect(deployment).toMatchObject({ result: "ok", auditRows: 2 });
   });
 
   it("keeps an abandoned upload's row when its object can't be deleted, for the next tick", async () => {

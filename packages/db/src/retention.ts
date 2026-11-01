@@ -86,6 +86,11 @@ const CLOCK_SLACK_MS = 3_600_000;
 
 export const sweepAction = "retention.sweep";
 
+/** The activity log keeps this many days (M3-19 AC3); the daily sweep removes older rows. */
+export const AUDIT_DAYS = 365;
+/** Audit rows are small, so more at a time than the user's data. */
+const AUDIT_BATCH = 500;
+
 /** The tool messages' content in a task's saved state, replaced by a line that says why. */
 export function removeToolOutputs(state: string, days: number): string | null {
   let parsed: unknown;
@@ -263,6 +268,33 @@ export function retentionStore({ DB, FILES }: Bindings) {
     return removed;
   };
 
+  /**
+   * Deletes every audit row older than `cutoff`, users' and the deployment's alike, oldest first
+   * in rounds. Row IDs only grow, so each round's scan stops at the first young row.
+   */
+  const sweepAudit = async (cutoff: number) => {
+    let total = 0;
+    for (let round = 0; round < SWEEP_ROUNDS; round++) {
+      const result = await db
+        .delete(auditLog)
+        .where(
+          inArray(
+            auditLog.id,
+            db
+              .select({ id: auditLog.id })
+              .from(auditLog)
+              .where(lt(auditLog.createdAt, cutoff))
+              .orderBy(auditLog.id)
+              .limit(AUDIT_BATCH),
+          ),
+        );
+      const n = result.meta.changes;
+      total += n;
+      if (n < AUDIT_BATCH) break;
+    }
+    return total;
+  };
+
   return {
     /** Whether a sweep has run since `since`: the sweep's deployment row says so. */
     sweptSince: async (since: number) =>
@@ -347,14 +379,21 @@ export function retentionStore({ DB, FILES }: Bindings) {
           });
         }
       }
+      // The activity log's own retention: one deployment-wide pass, counted in the totals row.
+      let auditRows: number | null = null;
+      try {
+        auditRows = await sweepAudit(now - AUDIT_DAYS * DAY_MS);
+      } catch {
+        // Retried tomorrow, like a user's failed sweep; `null` in the row says it didn't run.
+      }
       await db.insert(auditLog).values({
         userId: null,
         action: sweepAction,
         module: "retention",
-        result: failed ? "error" : "ok",
-        detail: JSON.stringify({ ...totals, users: rows.length, failed }),
+        result: failed || auditRows === null ? "error" : "ok",
+        detail: JSON.stringify({ ...totals, auditRows, users: rows.length, failed }),
       });
-      return { ...totals, users: rows.length, failed };
+      return { ...totals, auditRows, users: rows.length, failed };
     },
 
     /**
