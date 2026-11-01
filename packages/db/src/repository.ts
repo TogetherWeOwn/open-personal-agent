@@ -1311,10 +1311,15 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * reload), each with its conversation's title. At most `limit` batches, never part of
            * one: the latest decided first, a batch's items together in their stored order. What
            * happened after the decision (a run, a re-check's refusal) doesn't change what the
-           * user answered: the row's `scope` is set exactly when they approved.
+           * user answered: the row's `scope` is set exactly when they approved. An expiry also
+           * stamps `decided_at`, so an expired row counts only if they had approved it first.
            */
           decided: (since: number, limit = 100) => {
-            const mine = and(eq(approvals.userId, userId), gte(approvals.decidedAt, since));
+            const mine = and(
+              eq(approvals.userId, userId),
+              gte(approvals.decidedAt, since),
+              or(sql`${approvals.status} <> 'expired'`, isNotNull(approvals.scope)),
+            );
             const batch = db
               .select({
                 batchId: approvals.batchId,

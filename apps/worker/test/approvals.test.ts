@@ -518,25 +518,36 @@ describe("the decided list (receipts after a reload)", () => {
 
   it("leaves out what the user never answered, and the latest decided comes first", async () => {
     const { browser, owner } = await claim();
-    const insert = (batch: string, status: string, scope: string | null, at: number | null) =>
+    const insert = (
+      batch: string,
+      status: string,
+      scope: string | null,
+      at: number | null,
+      reason: string | null = null,
+    ) =>
       db
         .prepare(
-          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at, status, scope, decided_at)
-           VALUES (?, ?, 0, ?, 'c-dec', 'turn-1', 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?, ?, ?, ?)`,
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at, status, scope, decided_at, reason)
+           VALUES (?, ?, 0, ?, 'c-dec', 'turn-1', 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?, ?, ?, ?, ?)`,
         )
-        .bind(batch, `appr_${batch}`, owner, Date.now() + 60_000, status, scope, at);
+        .bind(batch, `appr_${batch}`, owner, Date.now() + 60_000, status, scope, at, reason);
     await db.batch([
       db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-dec', ?)").bind(owner),
       insert("b_pending", "pending", null, null),
-      insert("b_expired", "expired", null, null),
+      // Timed out or expired by a sign-out, unanswered: both stamp `decided_at`.
+      insert("b_expired", "expired", null, 4_000, "expired"),
+      insert("b_signal", "expired", null, 4_000, "signal:sign_out_everywhere"),
       insert("b_early", "denied", null, 1_000),
       // Approved, then refused by the re-check: the user still approved it.
       insert("b_late", "denied", "once", 2_000),
+      // Approved, then expired by a sign-out before it ran: the user still approved it.
+      insert("b_signed_out", "expired", "once", 3_000, "signal:sign_out_everywhere"),
     ]);
     const { batches } = await (await decided(browser)).json<{
       batches: { batchId: string; decisions: { decision: string }[] }[];
     }>();
     expect(batches.map((b) => [b.batchId, b.decisions[0]?.decision])).toEqual([
+      ["b_signed_out", "approve"],
       ["b_late", "approve"],
       ["b_early", "deny"],
     ]);
