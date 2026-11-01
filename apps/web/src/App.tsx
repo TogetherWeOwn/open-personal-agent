@@ -355,7 +355,12 @@ export function App({ transport }: AppProps) {
     dispatch(action);
     setThreadOpen(true);
     setSheet(false);
-    if (!chat) navigate("/");
+    // Decide from the address bar, not this render's `chat`: RAC caches a ListBoxItem's
+    // `onPress` from an earlier render, so the closure can still say "chat" on /inbox.
+    // Reading the live path also makes a second call (selection change, then press) a no-op
+    // once the first has navigated, so Back isn't given a duplicate `/` entry.
+    const here = match(routes, window.location.pathname);
+    if (!here || here.route.screen) navigate("/");
   };
 
   // The route table serves /settings/models in-app, so stay client-side.

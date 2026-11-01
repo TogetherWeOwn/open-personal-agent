@@ -123,12 +123,39 @@ test("on a tablet the conversation list opens as a sheet", async ({ page }) => {
   await expect(page.getByRole("option")).toHaveCount(0);
 });
 
-test("the account menu switches the theme", async ({ page }) => {
+test("the account menu switches the theme, and back", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");
   await page.getByRole("button", { name: "Account" }).click();
   await page.getByRole("menuitem", { name: "Switch to dark theme" }).click();
   await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("menuitem", { name: "Switch to light theme" }).click();
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+});
+
+test("in the sidebar, picking a chat from another screen lands on Chat and Back returns", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  const sidebar = page.getByRole("complementary", { name: "Conversations" });
+  await sidebar.getByRole("button", { name: "New chat" }).click();
+  await expect(sidebar.getByRole("option")).toHaveCount(2);
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await nav.getByRole("link", { name: "Inbox" }).click();
+  await expect(h1(page)).toHaveText("Inbox");
+  // The already-selected conversation is the case a stale press handler used to swallow.
+  await sidebar.locator('[role="option"][aria-selected="true"]').click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await page.goBack();
+  await expect(h1(page)).toHaveText("Inbox");
+  await sidebar.locator('[role="option"][aria-selected="false"]').click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await page.goBack();
+  await expect(h1(page)).toHaveText("Inbox");
 });
 
 for (const colorScheme of ["light", "dark"] as const) {
