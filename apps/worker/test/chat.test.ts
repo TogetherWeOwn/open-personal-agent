@@ -974,6 +974,55 @@ describe("approvals in the DO host (M3-07a)", () => {
     await vi.waitFor(() => expect(send.inputs).toEqual([{ q: "b" }]), SOCKET_WAIT);
   });
 
+  it("keeps queued batches in order when the first one's resume fails", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const replies = ["a", "b", "c"].map((q) => ({ calls: [["send", { q }]] }));
+    await useModel(owner, replying([...(replies as Reply[]), { text: "Sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    const batches = async (n: number) => {
+      await vi.waitFor(
+        () => expect(tab.events.filter((e) => e.type === "approval.requested")).toHaveLength(n),
+        SOCKET_WAIT,
+      );
+      return tab.events
+        .filter(
+          (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+            e.type === "approval.requested",
+        )
+        .map((e) => e.payload);
+    };
+    tab.send?.("conv-oa", "Send a");
+    await batches(1);
+    tab.send?.("conv-ob", "Send b");
+    await batches(2);
+    tab.send?.("conv-oc", "Send c");
+    const [a, b, c] = await batches(3);
+    if (!a || !b || !c) throw new Error("missing batches");
+    for (const x of [b, c]) await decideInD1(x.batchId, x.items[0]?.approvalId ?? "", "approved");
+    // B and C queue behind A's resume; B's resume then fails once, on a vault hiccup. Its
+    // failure must not let C run ahead of it.
+    const queue = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
+      const resolve = i.resolveModel;
+      let failed = false;
+      i.resolveModel = async (...args) => {
+        if (failed) return resolve(...args);
+        failed = true;
+        throw new Error("vault hiccup");
+      };
+      await Promise.all([a, b, c].map((x) => i.resumeBatch(x.batchId)));
+      await vi.waitFor(() => expect(failed).toBe(true));
+      await vi.waitFor(() =>
+        expect(state.storage.kv.get("approvals:queue")).toEqual([b.batchId, c.batchId]),
+      );
+      i.resolveModel = resolve;
+      return state.storage.kv.get("approvals:queue");
+    });
+    expect(queue).toEqual([b.batchId, c.batchId]);
+    expect(send.inputs).toEqual([]);
+  });
+
   it("refuses an approved call whose tool changed since it was approved (AC12)", async () => {
     const { browser, owner } = await claim();
     const send = loopTool("send", "consequential");

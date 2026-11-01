@@ -130,6 +130,18 @@ class CrashingStepper extends FakeStepper {
   }
 }
 
+/** A stepper that retries a failed step body once, unless its config allows no retries. */
+class RetryingStepper extends FakeStepper {
+  override async do<T extends JsonValue>(
+    name: string,
+    config: unknown,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const once = (config as { retries?: { limit: number } } | undefined)?.retries?.limit === 0;
+    return super.do(name, config, once ? fn : () => fn().catch(() => fn()));
+  }
+}
+
 let seq = 0;
 async function makeTask(user = alice, conversationId = "ca", kind = "turn") {
   seq += 1;
@@ -333,6 +345,42 @@ describe("task workflow", () => {
     const [row] = await alice.approvals.batch(batchId);
     expect(row).toMatchObject({ status: "failed", reason: "outcome_unknown" });
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+  });
+
+  it("retries an approved read whose first attempt failed", async () => {
+    const { taskId, instanceId } = await makeTask();
+    // An untrusted result first, so the egress read after it asks (floor_tainted_egress).
+    const peek = tool("peek", "read", async () => ({ ok: true, content: "page" }));
+    const untrusted = { ...peek, execute: async () => ({ ok: true, content: "page" }) };
+    const fetch = tool("fetch", "read", async () => {
+      if (fetch.calls === 1) throw new Error("connection reset");
+      return { ok: true, content: "fetched" };
+    });
+    const egress = [{ id: "web", kind: "third_party" as const, dataEgress: true }];
+    const fetchTool = { ...fetch, manifest: { ...fetch.manifest, destinations: egress } };
+    fetchTool.execute = fetch.execute.bind(fetch);
+    let batchId = "";
+    const approve = async () => {
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    const stepper = new RetryingStepper([approve]);
+    const replies: Reply[] = [
+      { calls: [["peek", { q: "x" }]] },
+      { calls: [["fetch", { q: "y" }]] },
+      { text: "done" },
+    ];
+    const { promise } = await run(replies, instanceId, stepper, [untrusted, fetchTool]);
+    await promise;
+    expect(fetch.calls).toBe(2);
+    const state = JSON.stringify(JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}"));
+    expect(state).toContain("fetched");
+    expect(state).not.toContain("its outcome is unknown");
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
   it("bookkeeping that fails after the hold never repeats the model call", async () => {

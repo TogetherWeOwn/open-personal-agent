@@ -276,6 +276,14 @@ const approvalAudit = (
   detail: detail === null ? null : JSON.stringify(detail),
 });
 
+/** Whether a batch failed on an `approvalAudit` guard (nothing changed), not on D1 itself. */
+const guardRefused = (e: unknown): boolean => {
+  for (let at = e; at instanceof Error; at = at.cause) {
+    if (at.message.includes("NOT NULL constraint failed: audit_log.action")) return true;
+  }
+  return false;
+};
+
 /** A call's ledger values, priced from the table; the cost columns stay null without a price. */
 function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
   const price = findPrice(providerId, model);
@@ -942,7 +950,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * Claims an approved call just before it runs (crypto review W3): `approved` to
            * `executing`, while it is unexpired. The row as claimed, or `undefined` if another
            * run claimed it, it was never approved, or it expired: then nothing runs. With its
-           * audit row, so a call that never reaches `finish` still shows when it began.
+           * audit row, so a call that never reaches `finish` still shows when it began. Throws
+           * when D1 fails, leaving the row as it was.
            */
           claim: async (batchId: string, approvalId: string, now: number) => {
             const [claimed] = await db
@@ -974,16 +983,22 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                     ),
                   ),
               ])
-              .catch(() => [[]]);
+              .catch((e: unknown) => {
+                // Only a lost claim reads as "nothing to run"; a D1 failure reaches the caller,
+                // whose claim step retries or reports that the approval couldn't be checked.
+                if (guardRefused(e)) return [[]];
+                throw e;
+              });
             return claimed[0];
           },
           /**
            * Marks a claimed call as handed to its tool, `executing` to `dispatched`, as the first
            * thing its durable step does (crypto review W3). `false` when the row is past
            * `executing`: an engine crash reran the step after the call may already have acted,
-           * so it must not run again.
+           * so it must not run again. A read may: with `rerun`, a row already `dispatched` is
+           * handed to its tool again, so a read's step still retries a transient failure.
            */
-          dispatch: async (batchId: string, approvalId: string) => {
+          dispatch: async (batchId: string, approvalId: string, rerun = false) => {
             const rows = await db
               .update(approvals)
               .set({ status: "dispatched" })
@@ -992,7 +1007,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   eq(approvals.batchId, batchId),
                   eq(approvals.approvalId, approvalId),
                   eq(approvals.userId, userId),
-                  eq(approvals.status, "executing"),
+                  rerun
+                    ? inArray(approvals.status, ["executing", "dispatched"])
+                    : eq(approvals.status, "executing"),
                 ),
               )
               .returning({ approvalId: approvals.approvalId });

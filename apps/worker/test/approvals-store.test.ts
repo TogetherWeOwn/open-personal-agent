@@ -266,9 +266,32 @@ describe("the approvals store", () => {
     expect(await bob.approvals.dispatch("batch_5", "appr_d")).toBe(false);
     expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(true);
     expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(false);
+    expect(await alice.approvals.dispatch("batch_5", "appr_d", true)).toBe(true); // a read reruns
     const unknown = { status: "failed", reason: "outcome_unknown" } as const;
     expect(await alice.approvals.finish("batch_5", "appr_d", unknown)).toBe(true);
     expect(await status("appr_d", "batch_5")).toBe("failed");
+  });
+
+  it("lets a D1 failure during a claim reach the caller, leaving the row approved", async () => {
+    await alice.approvals.create([item("appr_a", 0)]);
+    const now = Date.now();
+    const approve = { decision: "approve", scope: "once", detail: {} } as const;
+    await alice.approvals.decide("batch_1", [{ approvalId: "appr_a", ...approve }], now);
+    const down = new Proxy(db, {
+      get: (target, key) =>
+        key === "batch"
+          ? async () => {
+              throw new Error("D1_ERROR: Network connection lost.");
+            }
+          : (Reflect.get(target, key, target) as (...a: unknown[]) => unknown).bind(target),
+    });
+    const flaky = createRepository({ ...env, DB: down }).forUser(
+      scopeFromSession({ userId: "alice" }),
+    );
+    await expect(flaky.approvals.claim("batch_1", "appr_a", now)).rejects.toThrow(/Network/);
+    expect(await status("appr_a")).toBe("approved");
+    // Once D1 is back the same call claims it.
+    expect((await alice.approvals.claim("batch_1", "appr_a", now))?.status).toBe("executing");
   });
 
   it("expires every approval not yet run on a compromise signal, and cancels tasks waiting (AC13)", async () => {
