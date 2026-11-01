@@ -141,6 +141,31 @@ async function connectTaskContext(
 
 taskContextContract("SQLite journal", connectTaskContext);
 
+describe("deleted-task steps persist nothing", () => {
+  it("a step whose task row is deleted mid-step returns its value but journals no row", async () => {
+    const h = await connectTaskContext();
+    const out = await h.ctx.step("s1", async () => {
+      // Account deletion takes the task row while the step is running.
+      await db().prepare("DELETE FROM tasks WHERE id = ?").bind(h.taskId).run();
+      return "finished";
+    });
+    expect(out).toBe("finished");
+    expect(await h.persistedText()).toBe("[]");
+  });
+
+  it("a deleted task's large step offloads no output file either", async () => {
+    const h = await connectTaskContext();
+    const big = "x".repeat(2 * 1024 * 1024);
+    const out = await h.ctx.step("s1", async () => {
+      await db().prepare("DELETE FROM tasks WHERE id = ?").bind(h.taskId).run();
+      return big;
+    });
+    expect(out).toBe(big);
+    expect(await h.persistedText()).toBe("[]");
+    expect(h.outputIds()).toEqual([]);
+  });
+});
+
 describe("Node composition", () => {
   it("applies the same migrations as wrangler, once", () => {
     const migrations = join(import.meta.dirname, "../../../migrations");
