@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-1 (every non-public route needs a session) and M2-3 (the public list is exact).
+import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { app } from "../src/app";
+import { app, createApp } from "../src/app";
 import { SESSION_COOKIE } from "../src/auth";
+import type { AppEnv } from "../src/env";
 import { PUBLIC_ROUTES } from "../src/session";
-import { Browser, claim, db, freshDatabase } from "./helpers/app";
+import { Browser, claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
 freshDatabase();
 
@@ -75,6 +77,14 @@ describe("the route table", () => {
     }
     // An unknown path is closed too: the guard runs before the 404.
     expect((await new Browser().req("/api/unknown")).status).toBe(401);
+  });
+
+  it("puts the routes createApp is given behind the same guards", async () => {
+    const extra = new Hono<AppEnv>().get("/probe", (c) => c.text("ok"));
+    const probe = () => createApp(extra).request(`${ORIGIN}/api/probe`, {}, env);
+    expect((await probe()).status).toBe(403); // the claim guard
+    await claim();
+    expect((await probe()).status).toBe(401); // the session guard
   });
 
   it("answers no public route with 401", async () => {

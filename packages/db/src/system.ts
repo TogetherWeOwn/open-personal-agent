@@ -16,6 +16,10 @@ export interface SqlDatabase {
   batch(statements: SqlStatement[]): Promise<{ meta: { changes: number } }[]>;
 }
 
+/** A session not used for this long is over, wherever it is checked. */
+export const SESSION_IDLE_MS = 30 * 86_400_000;
+const LIVE = "revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?";
+
 export type ChallengeKind = "claim" | "recovery" | "recovery_code" | "login";
 
 /** A session row to insert. The cookie value never reaches the store, only its hash. */
@@ -285,12 +289,18 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         const row = await db
           .prepare(
             `SELECT id, user_id, last_seen_at FROM sessions
-             WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?`,
+             WHERE token_hash = ? AND ${LIVE}`,
           )
           .bind(tokenHash, now, idleSince)
           .first<{ id: string; user_id: string; last_seen_at: number }>();
         return row && { ...row, scope: scopeFromSession({ userId: row.user_id }) };
       },
+      /** Whether the user's session `id` is still live by `find`'s rules: a socket rechecks it. */
+      isLive: async (id: string, userId: string, now: number) =>
+        (await db
+          .prepare(`SELECT 1 FROM sessions WHERE id = ? AND user_id = ? AND ${LIVE}`)
+          .bind(id, userId, now, now - SESSION_IDLE_MS)
+          .first()) !== null,
       touch: async (id: string, now: number) => {
         await db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, id).run();
       },
@@ -321,8 +331,7 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           await db
             .prepare(
               `SELECT id, created_at, last_seen_at, expires_at FROM sessions
-               WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?
-               ORDER BY created_at DESC`,
+               WHERE user_id = ? AND ${LIVE} ORDER BY created_at DESC`,
             )
             .bind(userId, now, idleSince)
             .all<{ id: string; created_at: number; last_seen_at: number; expires_at: number }>()

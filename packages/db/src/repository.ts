@@ -8,17 +8,32 @@ import { openD1, readSchemaVersion } from "./index";
 import { conversations, secrets, userSettings, users } from "./schema";
 
 declare const brand: unique symbol;
-/** A user's authority over their own rows. Only `scopeFromSession` creates one. */
+/** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
 export type UserScope = { readonly userId: string; readonly [brand]: true };
 
 const issued = new WeakSet<object>();
 
+function issue(userId: string): UserScope {
+  const scope = Object.freeze({ userId }) as UserScope;
+  issued.add(scope);
+  return scope;
+}
+
 /** For the session layer only (the lint enforces it), after it has validated the session. */
 export function scopeFromSession(session: { readonly userId: string }): UserScope {
   if (!session.userId) throw new Error("session has no user");
-  const scope = Object.freeze({ userId: session.userId }) as UserScope;
-  issued.add(scope);
-  return scope;
+  return issue(session.userId);
+}
+
+/**
+ * For the user's assistant only (the lint allows it in apps/worker/src/assistant.ts). Only
+ * `forUser(scope).assistant()` names one `u:<userId>`, so the Durable Object's own name carries
+ * the authority of the session that named it (ADR 0002).
+ */
+export function scopeForAssistant(name: string): UserScope {
+  const userId = /^u:(\S+)$/.exec(name)?.[1];
+  if (!userId) throw new Error("not a user's assistant");
+  return issue(userId);
 }
 
 /** The parts of R2 and Durable Object namespaces used here; the Node root supplies its own. */

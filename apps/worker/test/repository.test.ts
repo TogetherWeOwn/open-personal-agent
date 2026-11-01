@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { createRepository, scopeFromSession, type UserScope } from "@opa/db/repository";
+import {
+  createRepository,
+  scopeForAssistant,
+  scopeFromSession,
+  type UserScope,
+} from "@opa/db/repository";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { WorkerEnv } from "../src/compose";
 
@@ -27,6 +32,9 @@ describe("scoped repository", () => {
   it("refuses a scope the session layer didn't issue", () => {
     expect(() => repo.forUser({ userId: "alice" } as UserScope)).toThrow(/not issued/);
     expect(() => scopeFromSession({ userId: "" })).toThrow();
+    for (const name of ["u:", "health", "x:alice", "u:a b"])
+      expect(() => scopeForAssistant(name), name).toThrow();
+    expect(scopeForAssistant("u:alice").userId).toBe("alice");
   });
 
   it("keeps files under the user's prefix and names the assistant from the scope", async () => {
