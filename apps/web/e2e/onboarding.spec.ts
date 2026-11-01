@@ -35,6 +35,10 @@ test("onboarding saves a key, shows only its last 4, tests it and opens the chat
   await expect(cards).toContainText("metered");
   await expect(cards).toContainText("the Usage page tracks it");
   expect(await new AxeBuilder({ page }).analyze()).toHaveProperty("violations", []);
+  // A base URL typed under "Other" stays behind when the user switches back to OpenAI.
+  await page.getByText("Other OpenAI-compatible", { exact: true }).click();
+  await page.getByLabel("Base URL").fill("https://other.test/v1");
+  await page.getByText("OpenAI", { exact: true }).click();
   await expect(page.getByLabel("API key", { exact: true })).toHaveAttribute("type", "password");
   await page.getByLabel("API key", { exact: true }).fill(KEY);
   await page.getByRole("button", { name: "Save and continue" }).click();
@@ -61,4 +65,5 @@ test("onboarding saves a key, shows only its last 4, tests it and opens the chat
     apiKey: KEY,
   });
   expect(bodies).toContainEqual({ ...model, model: "gpt-4.1-mini" });
+  expect(JSON.stringify(bodies)).not.toContain("other.test");
 });

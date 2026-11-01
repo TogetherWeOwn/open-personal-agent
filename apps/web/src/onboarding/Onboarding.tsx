@@ -63,6 +63,7 @@ const ERRORS: Record<string, string> = {
   key_required: "Enter the API key again: it belongs to a different provider or address.",
   invalid_base_url: "The base URL must be a valid https:// address.",
   vault_unavailable: "Keys can't be saved until the server's master key is fixed.",
+  ai_unavailable: "Workers AI isn't connected to this deployment. Use an API key instead.",
 };
 const message = (e: unknown) =>
   ERRORS[(e as Error).message] ?? "That didn't work. Check the fields and try again.";
@@ -103,7 +104,8 @@ export function Onboarding() {
         : {
             kind: "openai-chat",
             providerId: preset,
-            baseUrl: form.baseUrl || p.baseUrl,
+            // A base URL typed under "Other" must not follow the key to a named provider.
+            baseUrl: preset === "custom" ? form.baseUrl : p.baseUrl,
             model: form.model || p.model,
             ...(form.apiKey ? { apiKey: form.apiKey } : {}),
           };
