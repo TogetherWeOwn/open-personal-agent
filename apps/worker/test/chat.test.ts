@@ -17,6 +17,8 @@ afterEach(() => vi.restoreAllMocks());
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
 const never = new Promise<void>(() => {});
+/** `vi.waitFor` gives up after 1 s; a turn's D1 round trips take longer on a loaded CI runner. */
+const WAIT = { timeout: 10_000 };
 
 /** A model that replies "Hello there" and records what it was asked. A gate holds it mid-reply. */
 function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = false): ModelProvider {
@@ -80,7 +82,7 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
     ws.addEventListener("close", (e) => resolve(e.code)),
   );
   const until = (type: HarnessEvent["type"]) =>
-    vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type));
+    vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type), WAIT);
   const send = (conversationId: string, text: string) =>
     ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
   return { res, ws, events, until, send, closed };
@@ -196,7 +198,7 @@ describe("chat transport", () => {
           { content: "Tell me a story", status: "complete" },
           { content: kept, status: "interrupted" },
         ]);
-      });
+      }, WAIT);
       expect(await count("usage", "conversation_id = 'conv-2'")).toBe(1); // the ledger keeps the call
 
       const seen: ModelMessage[][] = [];
@@ -258,21 +260,21 @@ describe("chat transport", () => {
     tab.send?.("mine", "first");
     const failed = (message: string) => ({ type: "turn.failed", seq: 0, payload: { message } });
     const noModel = failed("Pick a model in Settings first.");
-    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]));
+    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]), WAIT);
     expect(await count("conversations", "id = 'mine'")).toBe(0);
     await useModel(owner, scripted([], never));
     tab.send?.("theirs", "hi");
     tab.send?.("../x", "hi");
     const gone = failed("That conversation doesn't exist.");
     const bad = failed("That message can't be sent.");
-    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, gone, bad]));
+    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, gone, bad]), WAIT);
     expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
     expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
     tab.send?.("mine", "first");
     await tab.until?.("message.delta");
     tab.send?.("mine", "second");
     const busy = { message: "Another reply is still being written." };
-    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }));
+    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }), WAIT);
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
     // The list holds the user's own conversations only.
     const list = await (await browser.req("/api/conversations")).json<{ conversations: unknown }>();
