@@ -16,27 +16,29 @@ const reply = (status, result) => ({ status, ok: status < 300, json: async () =>
 function account({ failDelete } = {}) {
   const state = {
     "/workers/scripts": [{ id: P }, { id: "opa" }, { id: `${P}9` }],
-    "/workflows": [{ name: `${P}-task-workflow` }, { name: "opa-task-workflow" }],
+    // 100 others first, so ours is on page 2.
+    "/workflows": [
+      ...Array.from({ length: 100 }, (_, i) => ({ name: `w${i}` })),
+      { name: `${P}-task-workflow` },
+    ],
     "/d1/database": [
       { name: `${P}-db`, uuid: "ours" },
       { name: "opa-db", uuid: "prod" },
     ],
     "/r2/buckets": [{ name: `${P}-files` }, { name: "opa-files" }],
   };
-  const [objects, calls, out] = [["a.txt"], [], []];
+  const [objects, calls, out] = [[{ key: "a.txt" }], [], []];
   const fetch = async (url, init = {}) => {
     const p = new URL(url).pathname.replace("/client/v4/accounts/acc", "");
     calls.push(`${init.method ?? "GET"} ${p}`);
     const base = Object.keys(state).find((k) => p.startsWith(k));
-    if (p.includes("/objects")) {
-      if (init.method === "DELETE") objects.length = 0;
-      const listed = objects.map((key) => ({ key }));
-      return reply(200, listed);
-    }
+    if (p.includes("/objects")) return reply(200, init.method ? objects.splice(0) : objects);
     if (!base) return reply(403); // queues: the token has no access
     const list = state[base];
+    const page = Number(new URL(url).searchParams.get("page") ?? 1);
+    const paged = list.slice((page - 1) * 100, page * 100);
     if (init.method !== "DELETE")
-      return reply(200, base === "/r2/buckets" ? { buckets: list } : list);
+      return reply(200, base === "/r2/buckets" ? { buckets: list } : paged);
     if (base === failDelete || (base === "/r2/buckets" && objects.length)) return reply(500);
     const key = p.slice(base.length + 1);
     state[base] = list.filter((r) => ![r.id, r.name, r.uuid].includes(key));
@@ -88,7 +90,8 @@ describe("teardown:cloudflare", () => {
 });
 
 const d1 = (uuid) => ({ kind: "d1", name: "d", item: { uuid } });
-const ONE_EACH = async () => [d1("u1"), { kind: "r2", name: "b", item: {} }];
+const r2 = (name) => ({ kind: "r2", name, item: {} });
+const ONE_EACH = async () => [d1("u1"), r2("b")];
 
 /** verify:cloudflare with the deploy, teardown and inventory steps faked. */
 function verifySetup({ changes, inventory = ONE_EACH } = {}) {
@@ -144,9 +147,9 @@ describe("verify:cloudflare", () => {
     expect(t.report()).toContain("Result: **FAIL**");
   });
 
-  it("fails when a re-deploy provisions a second database", async () => {
+  it("fails when a re-deploy binds a different bucket", async () => {
     let n = 0;
-    const t = verifySetup({ inventory: async () => [d1(`u${n++}`)] });
+    const t = verifySetup({ inventory: async () => [d1("u1"), r2(`b${n++}`)] });
     await expect(t.run()).rejects.toThrow(/did not re-bind/);
     expect(t.calls.at(-1)).toMatch(/^teardown/);
   });

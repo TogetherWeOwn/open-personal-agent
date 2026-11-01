@@ -1,22 +1,21 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-// `pnpm teardown:cloudflare --name <prefix> [--confirm <prefix>]` (ADR 0001 #7). It runs on a
-// real account, so it accepts only verification prefixes, lists everything before deleting, and
-// fails if anything with the prefix is left afterwards. Without `--confirm` it only lists.
+// `pnpm teardown:cloudflare --name <prefix> [--confirm <prefix>]` (ADR 0001 #7): only verification
+// prefixes; lists first (and only lists without `--confirm`); fails if anything is left.
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { DeployError } from "./deploy-cloudflare.mjs";
 
 export const PREFIX_PATTERN = /^opa-v-[0-9]{8}-[a-z0-9]{6}$/;
 
-// [kind, list path, name field, delete path]: `{p}` is the prefix, `{field}` a field of the item.
-// Deleting the Worker first also removes its Durable Object namespaces, cron and assets.
+// [kind, list path, name field, delete path]: `{p}` is the prefix, `{field}` a field of the item;
+// `{page}` lists are followed to the end. Deleting the Worker removes its DOs, cron and assets.
 const KINDS = [
   ["worker", "/workers/scripts", "id", "/workers/scripts/{id}?force=true"],
-  ["workflow", "/workflows?per_page=100", "name", "/workflows/{name}"],
-  ["d1", "/d1/database?per_page=100&name={p}", "name", "/d1/database/{uuid}"],
+  ["workflow", "/workflows?per_page=100&page={page}", "name", "/workflows/{name}"],
+  ["d1", "/d1/database?per_page=100&page={page}&name={p}", "name", "/d1/database/{uuid}"],
   ["r2", "/r2/buckets?per_page=100&name_contains={p}", "name", "/r2/buckets/{name}"],
-  ["queue", "/queues?per_page=100", "queue_name", "/queues/{queue_id}"],
+  ["queue", "/queues", "queue_name", "/queues/{queue_id}"],
 ];
 
 /** A client for `/accounts/<CLOUDFLARE_ACCOUNT_ID>`. Teardown never guesses the account. */
@@ -37,14 +36,18 @@ export function accountApi(deps) {
 export async function listPrefixed(api, prefix) {
   const [found, skipped] = [[], []];
   for (const [kind, list, field, remove] of KINDS) {
-    const res = await api(list.replace("{p}", prefix));
-    if (kind === "queue" && (res.status === 401 || res.status === 403)) skipped.push(kind);
-    else if (!res.ok) throw new DeployError(`listing ${kind} failed (HTTP ${res.status})`);
-    const result = res.body.result ?? [];
-    for (const item of Array.isArray(result) ? result : (result.buckets ?? [])) {
-      const name = item[field];
-      if (name !== prefix && !name?.startsWith(`${prefix}-`)) continue;
-      found.push({ kind, name, item, remove: remove.replace(/\{(\w+)\}/, (_m, f) => item[f]) });
+    for (let page = 1, more = true; more; page++) {
+      const res = await api(list.replace("{p}", prefix).replace("{page}", page));
+      if (kind === "queue" && (res.status === 401 || res.status === 403)) skipped.push(kind);
+      else if (!res.ok) throw new DeployError(`listing ${kind} failed (HTTP ${res.status})`);
+      const result = res.body.result ?? [];
+      const items = Array.isArray(result) ? result : (result.buckets ?? []);
+      more = list.includes("{page}") && items.length === 100;
+      for (const item of items) {
+        const name = item[field];
+        if (name !== prefix && !name?.startsWith(`${prefix}-`)) continue;
+        found.push({ kind, name, item, remove: remove.replace(/\{(\w+)\}/, (_m, f) => item[f]) });
+      }
     }
   }
   return { found, skipped };
@@ -97,13 +100,9 @@ export async function teardownCloudflare(argv, deps) {
 
 // If objects remain anyway, the bucket delete fails and the post-check names the bucket.
 async function emptyBucket(api, bucket) {
-  for (let page = 0; page < 100; page++) {
-    const res = await api(`/r2/buckets/${bucket}/objects?per_page=1000`);
-    const keys = res.ok ? (res.body.result ?? []).map((o) => o.key) : [];
-    if (!keys.length) return;
-    for (const key of keys) {
-      await api(`/r2/buckets/${bucket}/objects/${encodeURIComponent(key)}`, { method: "DELETE" });
-    }
+  const res = await api(`/r2/buckets/${bucket}/objects?per_page=1000`);
+  for (const { key } of res.ok ? (res.body.result ?? []) : []) {
+    await api(`/r2/buckets/${bucket}/objects/${encodeURIComponent(key)}`, { method: "DELETE" });
   }
 }
 

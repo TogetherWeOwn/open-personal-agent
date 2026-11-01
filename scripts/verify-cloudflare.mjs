@@ -78,7 +78,8 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     migration = writeDummyMigration(deps.root);
     await deploy("Upgrade (dummy migration)", ["worker", "migrations"]);
     await snapshot("after the upgrade");
-    const same = (s) => s.d1.length === 1 && s.r2.length === 1 && s.d1[0] === snapshots[0].d1[0];
+    const one = (s) => s.d1.length === 1 && s.r2.length === 1 && `${s.d1} ${s.r2}`;
+    const same = (s) => one(s) && one(s) === one(snapshots[0]);
     if (!snapshots.every(same)) throw new DeployError("a re-deploy did not re-bind the same D1/R2");
     await phase("Health and smoke", () => smoke(deps.fetch, url));
   } catch (error) {
@@ -86,14 +87,11 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
   } finally {
     if (migration) fs.rmSync(migration.file, { force: true });
   }
-  let teardown = null;
-  try {
-    teardown = await phase("Teardown", () =>
-      steps.teardown(["--name", prefix, "--confirm", prefix], vdeps),
-    );
-  } catch (error) {
+  const args = ["--name", prefix, "--confirm", prefix];
+  const teardown = await phase("Teardown", () => steps.teardown(args, vdeps)).catch((error) => {
     failure ??= error;
-  }
+    return null;
+  });
 
   const report = renderReport(deps, { prefix, failure, phases, prompts, snapshots, teardown });
   const file = values.report ?? path.join(deps.root, ".wrangler", "opa-verify", `${prefix}.md`);
