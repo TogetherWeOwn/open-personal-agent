@@ -82,8 +82,10 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   }, [visible]);
 
   // A switch the server hasn't saved yet, for a chat it hasn't seen (nothing sent) or while the
-  // save is in flight. The chat's sends carry it, so its first reply already uses it.
+  // save is in flight. A send carries it, so a new chat's first reply already uses it; `sentPins`
+  // is what the last send carried, so a switch made after it is still saved once the chat exists.
   const pendingPins = useRef(new Map<string, RolePick | null>());
+  const sentPins = useRef(new Map<string, RolePick | null | undefined>());
   // Removing a provider in Settings clears the server's pins on it, so a pin naming one that is
   // gone follows the Chat role here too.
   const live = (pick: RolePick | null | undefined) =>
@@ -121,8 +123,16 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     return transport.connect((event) => {
       if (event.type === "turn.started") {
         if (!known.current.has(event.sessionId)) void list();
-        // The turn's send saved the chat's model with it.
-        pendingPins.current.delete(event.sessionId);
+        const id = event.sessionId;
+        const pick = pendingPins.current.get(id);
+        // The send saved its pick with the new chat; a later switch is saved now the chat exists.
+        if (pendingPins.current.has(id) && sentPins.current.get(id) !== pick) {
+          void setConversationModel(id, pick ?? null).then(
+            () => pendingPins.current.get(id) === pick && pendingPins.current.delete(id),
+            () => {},
+          );
+        } else pendingPins.current.delete(id);
+        sentPins.current.delete(id);
       }
       dispatch({ type: "event", event });
     }, connected);
@@ -150,7 +160,9 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   const send = (text: string): boolean => {
     if (state.pending || !text.trim()) return false;
     dispatch({ type: "send", id: newId(), text });
-    transport.send(active.id, text, live(pendingPins.current.get(active.id)) ?? undefined);
+    const pick = pendingPins.current.get(active.id);
+    sentPins.current.set(active.id, pick);
+    transport.send(active.id, text, live(pick) ?? undefined);
     return true;
   };
 

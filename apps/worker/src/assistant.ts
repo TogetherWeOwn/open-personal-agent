@@ -109,9 +109,14 @@ export class Assistant extends Agent<Bindings> {
   ) {
     if (!(await this.#sessionLive(connection))) return;
     const chat = this.#chat;
+    // The model context comes from D1, never from memory, so it survives an eviction. A new
+    // conversation has none yet.
+    const history = await chat.listMessages(conversationId);
     // Picked before `open`, so a send that can't run never creates an empty conversation. A send
-    // may name the chat's own model, for a chat picked before the server had it (M3-06 AC3).
-    const pick = own ?? { conversationId };
+    // may name the chat's own model, for a chat picked before the server had it (M3-06 AC3); an
+    // existing chat keeps the pin it has, so a newer switch is never overwritten by a send.
+    const fresh = history === null ? own : undefined;
+    const pick = fresh ?? { conversationId };
     const picked = await this.resolveModel(await this.#composed, this.#scope, "chat", pick);
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
@@ -128,9 +133,7 @@ export class Assistant extends Agent<Bindings> {
       usage: null,
       called: false,
     };
-    // The model context comes from D1, never from memory, so it survives an eviction. A new
-    // conversation has none yet.
-    const messages = ((await chat.listMessages(conversationId)) ?? [])
+    const messages = (history ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }))
       .concat({ role: "user", content: text });
@@ -148,11 +151,10 @@ export class Assistant extends Agent<Bindings> {
     const emit = this.#emitter(conversationId, turn.turnId);
     const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
     try {
-      if (!(await chat.open(conversationId, title))) {
+      if (!(await chat.open(conversationId, title, fresh))) {
         this.limits.release(turn.turnId);
         return reject(connection, conversationId, "That conversation doesn't exist.");
       }
-      if (own) await chat.setModel(conversationId, own);
       await picked.used?.();
       await chat.startTurn(conversationId, text, turn.replyId);
     } catch (err) {

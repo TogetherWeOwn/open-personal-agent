@@ -204,6 +204,12 @@ describe("chat transport", () => {
     await tab.until?.("turn.completed");
     expect(JSON.parse(fetch.mock.calls[2]?.[1]?.body as string).model).toBe("gpt-z");
     expect((await user.getConversation("conv-7"))?.model).toBe("gpt-z");
+    // An existing chat keeps its saved pin: a send's pick never overwrites a newer switch.
+    tab.events.length = 0;
+    tab.send?.("conv-6", "Still you?", own);
+    await tab.until?.("turn.completed");
+    expect(JSON.parse(fetch.mock.calls[3]?.[1]?.body as string).model).toBe("gpt-y");
+    expect((await user.getConversation("conv-6"))?.model).toBe("gpt-y");
     // A pick naming no saved provider of this user's is refused, and writes nothing.
     tab.events.length = 0;
     tab.send?.("conv-8", "Hi", { provider: "not-mine", model: "gpt-z" });
