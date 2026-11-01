@@ -1,0 +1,66 @@
+{
+  "$comment": "Cloudflare API token permissions for `pnpm deploy:cloudflare` (ADR 0001 #6). This file is the single source of truth: preflight checks each `required` entry, and any PR that adds a binding updates it. Group names follow https://developers.cloudflare.com/fundamentals/api/reference/permissions/ (checked 2026-10-31).",
+  "permissions": [
+    {
+      "id": "workers-scripts",
+      "scope": "account",
+      "group": "Workers Scripts Edit",
+      "required": true,
+      "bindings": ["ASSETS", "ASSISTANT", "TASK_WORKFLOW", "triggers"],
+      "neededFor": "uploading the Worker with its Durable Object, Workflow, cron and assets; setting secrets; the workers.dev URL",
+      "steps": ["preflight", "deploy", "secrets"],
+      "check": "/accounts/{account_id}/workers/scripts",
+      "status": "unverified: the reference lists no Workflows group, so Workflows is assumed to be covered here until the M2-05 run"
+    },
+    {
+      "id": "d1",
+      "scope": "account",
+      "group": "D1 Edit",
+      "required": true,
+      "bindings": ["DB"],
+      "neededFor": "creating the DB database and applying migrations",
+      "steps": ["deploy", "migrations"],
+      "check": "/accounts/{account_id}/d1/database?per_page=1"
+    },
+    {
+      "id": "r2",
+      "scope": "account",
+      "group": "Workers R2 Storage Edit",
+      "required": true,
+      "bindings": ["FILES"],
+      "neededFor": "creating the FILES bucket",
+      "steps": ["preflight", "deploy"],
+      "check": "/accounts/{account_id}/r2/buckets?per_page=1"
+    },
+    {
+      "id": "account-settings",
+      "scope": "account",
+      "group": "Account Settings Read",
+      "required": true,
+      "neededFor": "looking up the account",
+      "check": "/accounts/{account_id}"
+    },
+    {
+      "id": "workers-ai",
+      "scope": "account",
+      "group": "Workers AI Read",
+      "required": false,
+      "bindings": ["AI"],
+      "neededFor": "the AI binding",
+      "steps": ["deploy"],
+      "status": "unverified: left out of the token until a verification run shows the deploy needs it"
+    },
+    {
+      "id": "user-details",
+      "scope": "user",
+      "group": "User Details Read, Memberships Read",
+      "required": false,
+      "neededFor": "choosing an account when CLOUDFLARE_ACCOUNT_ID is not set and the token sees several",
+      "status": "unverified: expected to be unnecessary, because the script passes CLOUDFLARE_ACCOUNT_ID to wrangler"
+    }
+  ],
+  "notInM2": [
+    { "group": "Queues Edit", "when": "a queue binding is added" },
+    { "group": "Containers Edit", "when": "configuration B (M4)" }
+  ]
+}
