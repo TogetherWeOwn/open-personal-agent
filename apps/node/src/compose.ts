@@ -12,6 +12,7 @@ import { openSqlite, sqliteD1 } from "./d1";
 import { modelFetch } from "./egress";
 import "./workers-globals";
 import { migrate } from "./migrate";
+import { memoryRateLimit } from "./rate-limit";
 
 /** Paths the app answers before static assets: `assets.run_worker_first` in `wrangler.jsonc`. */
 export const APP_ROUTES = "/api /api/* /agents /agents/* /hooks /hooks/* /setup /setup/*".split(
@@ -72,6 +73,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,
     OPA_SETUP_TOKEN: vars.OPA_SETUP_TOKEN,
     OPA_CLIENT_IP_HEADER: vars.OPA_CLIENT_IP_HEADER,
+    PUBLIC_LIMIT: memoryRateLimit(30, 60_000), // the Worker's `ratelimits` in wrangler.jsonc
   } as unknown as WorkerEnv;
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
   const env = compose(raw);
