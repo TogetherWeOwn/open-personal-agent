@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // No runtime's types: the app reaches its bindings through the structural ports in env.ts.
+  "compilerOptions": { "lib": ["ES2023", "DOM", "DOM.Iterable"], "types": [] },
+  // test/softauthn.ts is checked by the apps that run it, under their runtime's types.
+  "include": ["src"]
+}

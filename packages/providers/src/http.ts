@@ -1,43 +1,91 @@
 // SPDX-License-Identifier: Apache-2.0
-// What every fetch adapter does the same way: checks the base URL before a key can go to it, and
-// maps a failed HTTP response to a normalized error.
-import type { ModelErrorCode, ModelEvent } from "@opa/core";
-import { error } from "./chat-chunks";
+// What the keyed HTTP adapters share: base URL checks, the key's headers, redaction and the
+// mapping of HTTP failures. Fetch only, no SDK (ADR 0006).
+import type { ModelErrorCode, ModelEvent, ModelInfo } from "@opa/core";
+import { aborted, error } from "./chat-chunks";
 import { canonicalOrigin } from "./credential-binding";
+
+export interface EndpointOptions {
+  /** For example `https://api.openai.com/v1`. The key is only ever sent to this origin. */
+  baseUrl: string;
+  /** Optional: local servers often need none. */
+  apiKey?: string;
+  fetch?: typeof fetch;
+  /**
+   * The caller's `fetch` sends plain HTTP to private addresses only (Node's guard with
+   * `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`), so a key may go to any `http:` base URL.
+   */
+  privateHttp?: boolean;
+}
+
+export interface Endpoint {
+  /** Origin and path, without a trailing slash. */
+  base: string;
+  headers: Record<string, string>;
+  fetch: typeof fetch;
+  redact: (text: string) => string;
+}
 
 const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/;
 
 /** Whether `hostname` (a `URL`'s, so IPv6 in brackets) names this machine. */
 export const isLoopbackHost = (hostname: string) => LOOPBACK.test(hostname);
 
-/**
- * The base URL without trailing slashes. Throws when it has a query or fragment, or when it would
- * send a key over plain HTTP to anything but loopback (or, with `privateHttp`, a private host
- * that the caller's `fetch` guards).
- */
-export function apiBase(baseUrl: string, apiKey: string | undefined, privateHttp = false): string {
-  canonicalOrigin(baseUrl);
-  const url = new URL(baseUrl);
+export function endpoint(options: EndpointOptions): Endpoint {
+  canonicalOrigin(options.baseUrl);
+  const url = new URL(options.baseUrl);
   if (url.search || url.hash) throw new Error("Base URL must not have a query or fragment");
   // Over plain HTTP a key is readable in transit, so only loopback servers may take one.
-  const plainOk = privateHttp || LOOPBACK.test(url.hostname);
-  if (apiKey && url.protocol === "http:" && !plainOk) {
+  const plainOk = options.privateHttp || LOOPBACK.test(url.hostname);
+  if (options.apiKey && url.protocol === "http:" && !plainOk) {
     throw new Error("A base URL that takes an API key must use https");
   }
   let path = url.pathname;
   while (path.endsWith("/")) path = path.slice(0, -1);
-  return url.origin + path;
+  const { apiKey } = options;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  return {
+    base: url.origin + path,
+    headers,
+    fetch: options.fetch ?? fetch,
+    redact: (text) => (apiKey ? text.split(apiKey).join("[redacted]") : text),
+  };
 }
 
-/** Replaces every copy of the key in text that came back from the provider. */
-export const redactor = (apiKey: string | undefined) => (text: string) =>
-  apiKey ? text.split(apiKey).join("[redacted]") : text;
+/** `GET /models`, which the OpenAI-shaped APIs share. */
+export async function listModels({ base, headers, fetch }: Endpoint): Promise<ModelInfo[]> {
+  const res = await fetch(`${base}/models`, { headers, redirect: "manual" });
+  if (!res.ok) throw new Error(`Listing models failed with HTTP ${res.status}`);
+  const body = (await res.json()) as { data?: { id: string }[] };
+  return (body.data ?? []).map((m) => ({ id: m.id, label: m.id }));
+}
 
-/** OpenAI and Anthropic both put the reason in `error.message`. */
-export async function httpError(
-  res: Response,
-  redact: (text: string) => string,
-): Promise<ModelEvent> {
+/** POSTs a streaming request: the response body, or the one error event that ends the call. */
+export async function openStream(
+  { base, headers, fetch, redact }: Endpoint,
+  path: string,
+  body: unknown,
+  signal: AbortSignal | undefined,
+): Promise<ReadableStream<Uint8Array> | ModelEvent> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      // A followed redirect would carry the key to another origin.
+      redirect: "manual",
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    return signal?.aborted ? aborted() : error("network", "Could not reach the provider");
+  }
+  if (!res.ok) return httpError(res, redact);
+  return res.body ?? error("bad_response", "The provider returned no stream");
+}
+
+async function httpError(res: Response, redact: (text: string) => string): Promise<ModelEvent> {
   if (res.status >= 300 && res.status < 400) {
     return error(
       "bad_request",

@@ -33,7 +33,11 @@ export const ALLOWLIST = [
 ];
 
 const CHECKS = [
-  ["master-key", /^(?:packages\/vault\/|apps\/worker\/src\/compose\.ts$)/, /OPA_MASTER_KEY/],
+  [
+    "master-key",
+    /^(?:packages\/vault\/|(?:apps\/worker|packages\/server)\/src\/compose\.ts$)/,
+    /OPA_MASTER_KEY/,
+  ],
   [
     "cloudflare-env",
     /^apps\/worker\/src\/compose\.ts$/,

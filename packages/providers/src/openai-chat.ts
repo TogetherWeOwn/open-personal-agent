@@ -2,44 +2,25 @@
 // `openai-chat`: the long-tail adapter for OpenAI-compatible chat-completions hosts (ADR 0006).
 // Fetch only, no SDK.
 import type { ModelEvent, ModelProvider, ModelRequest } from "@opa/core";
-import { aborted, error, replayChunks } from "./chat-chunks";
+import { error, replayChunks } from "./chat-chunks";
 import { chatMessages, chatTools } from "./chat-request";
 import { type OpenAIChatCompat, resolveCompat } from "./compat";
-import { apiBase, httpError, redactor } from "./http";
+import { type EndpointOptions, endpoint, listModels, openStream } from "./http";
 import { sseData } from "./sse";
 
-export interface OpenAIChatOptions {
+export interface OpenAIChatOptions extends EndpointOptions {
   providerId: string;
-  /** For example `https://api.openai.com/v1`. The key is only ever sent to this origin. */
-  baseUrl: string;
-  /** Optional: local servers often need none. */
-  apiKey?: string;
   compat?: Partial<OpenAIChatCompat>;
-  fetch?: typeof fetch;
-  /**
-   * The caller's `fetch` sends plain HTTP to private addresses only (Node's guard with
-   * `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`), so a key may go to any `http:` base URL.
-   */
-  privateHttp?: boolean;
 }
 
 export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvider {
-  const base = apiBase(options.baseUrl, options.apiKey, options.privateHttp);
-  const compat = resolveCompat(base, options.compat);
-  const doFetch = options.fetch ?? fetch;
-  const redact = redactor(options.apiKey);
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (options.apiKey) headers.authorization = `Bearer ${options.apiKey}`;
+  const http = endpoint(options);
+  const compat = resolveCompat(http.base, options.compat);
 
   return {
     id: options.providerId,
 
-    async listModels() {
-      const res = await doFetch(`${base}/models`, { headers, redirect: "manual" });
-      if (!res.ok) throw new Error(`Listing models failed with HTTP ${res.status}`);
-      const body = (await res.json()) as { data?: { id: string }[] };
-      return (body.data ?? []).map((m) => ({ id: m.id, label: m.id }));
-    },
+    listModels: () => listModels(http),
 
     capabilities() {
       return { tools: compat.supportsTools, usageInStream: compat.supportsUsageInStreaming };
@@ -62,33 +43,14 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
         body[compat.maxTokensField] = request.maxOutputTokens;
       }
       if (request.temperature !== undefined) body.temperature = request.temperature;
-      let res: Response;
-      try {
-        res = await doFetch(`${base}/chat/completions`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          // A followed redirect would carry the key to another origin.
-          redirect: "manual",
-          ...(request.signal ? { signal: request.signal } : {}),
-        });
-      } catch {
-        yield request.signal?.aborted
-          ? aborted()
-          : error("network", "Could not reach the provider");
+      const stream = await openStream(http, "/chat/completions", body, request.signal);
+      if ("type" in stream) {
+        yield stream;
         return;
       }
-      if (!res.ok) {
-        yield await httpError(res, redact);
-        return;
-      }
-      if (!res.body) {
-        yield error("bad_response", "The provider returned no stream");
-        return;
-      }
-      yield* replayChunks(sseData(res.body, request.signal), {
+      yield* replayChunks(sseData(stream, request.signal), {
         signal: request.signal,
-        redact,
+        redact: http.redact,
         expectUsage: compat.supportsUsageInStreaming,
       });
     },

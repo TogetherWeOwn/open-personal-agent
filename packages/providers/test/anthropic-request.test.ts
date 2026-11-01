@@ -26,7 +26,7 @@ const reasoning = (blocks: ReplayBlock[], over: Partial<ModelReasoning> = {}): M
   providerId: "anthropic",
   api: "anthropic-messages",
   model: MODEL,
-  data: { blocks },
+  items: blocks,
   ...over,
 });
 const call = (id: string, name = "get_time", args = "{}"): ModelToolCall => ({

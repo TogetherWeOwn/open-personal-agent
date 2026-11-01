@@ -5,8 +5,8 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SoftPasskey } from "@opa/server/test/softauthn";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { SoftPasskey } from "../../worker/test/helpers/softauthn";
 
 // Behind a TLS-terminating proxy, as in production: browsers use this, the test connects directly.
 const PUBLIC = "https://agent.example";
