@@ -71,7 +71,20 @@ export async function executeExport(
         await user.exports.finishExpired(id);
         return { status: "expired", bytes: 0 };
       }
-      await user.exports.finishReady(id, bytes, now());
+      // The update is conditional on the row still running and unexpired, so a
+      // `false` is either a racing finish that already ended the row (leave it alone)
+      // or an expiry that landed between the re-read and the update (expire the row
+      // and drop the just-written ZIP + staged files, as above).
+      if (!(await user.exports.finishReady(id, bytes, now()))) {
+        const current = await user.exports.get(id);
+        if (current && current.status === "running") {
+          await user.exports.removeZip(id).catch(() => {});
+          await user.exports.removeStaged(id).catch(() => {});
+          await user.exports.finishExpired(id);
+          return { status: "expired", bytes: 0 };
+        }
+        return { status: "skipped", bytes: 0 };
+      }
       return { status: "ready", bytes, entries };
     });
     await stepper.do(
