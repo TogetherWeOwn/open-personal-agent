@@ -94,25 +94,30 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
    * A possible-compromise signal (M3-07 AC13): recovery-code redemption, recovery with the setup
    * token, "sign out everywhere" and, with M3-19, passkey removal. Every approval of the user
    * that hasn't run yet, pending or approved but unclaimed, expires, interactive and background,
-   * with its ceremony burned, and every task waiting on one is cancelled as on expiry. Part of
-   * the signal's own batch, so the two can't diverge.
+   * with its ceremony burned, and every task waiting on one is cancelled as on expiry. An
+   * approved row keeps its `decided_at`: that is when the user answered, which its receipt
+   * shows. Part of the signal's own batch, so the two can't diverge.
    */
   const expireApprovals = (userId: string, now: number, signal: string) => [
     db
       .prepare(
-        `UPDATE approvals SET status = 'expired', reason = ?, decided_at = ?, nonce = NULL,
+        `UPDATE approvals SET status = 'expired', reason = ?,
+           decided_at = CASE WHEN status = 'approved' THEN decided_at ELSE ? END, nonce = NULL,
            step_up_digest = NULL, step_up_expires_at = NULL, step_up_session_id = NULL
          WHERE user_id = ? AND status IN ('pending', 'approved')`,
       )
       .bind(`signal:${signal}`, now, userId),
+    // Matched by the signal's reason, not by `decided_at`, which an approved row keeps. A task
+    // still waiting can only be waiting on a row this batch expired: an earlier signal's tasks
+    // were cancelled with it.
     db
       .prepare(
         `UPDATE tasks SET status = 'cancelled', finished_at = ?, updated_at = ?
          WHERE user_id = ? AND status = 'waiting_for_approval' AND id IN (
            SELECT task_id FROM approvals WHERE user_id = ? AND status = 'expired'
-             AND reason = ? AND decided_at = ? AND task_id IS NOT NULL)`,
+             AND reason = ? AND task_id IS NOT NULL)`,
       )
-      .bind(now, now, userId, userId, `signal:${signal}`, now),
+      .bind(now, now, userId, userId, `signal:${signal}`),
     audit(userId, "approval.expire_all", "approvals", "ok", signal),
   ];
 
