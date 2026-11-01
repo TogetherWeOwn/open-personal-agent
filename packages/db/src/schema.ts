@@ -610,6 +610,8 @@ export const userSettings = sqliteTable("user_settings", {
   memoryInboxDays: integer("memory_inbox_days").notNull().default(14),
   /** Settings › Memory › "Learn from our chats": the assistant may use `remember` (M3-15 AC5). */
   learnFromChats: integer("learn_from_chats", { mode: "boolean" }).notNull().default(true),
+  /** Settings › Assistant › "Show work": how much of a turn's timeline the thread shows (M3-09). */
+  showWork: text("show_work").notNull().default("collapsed"),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 

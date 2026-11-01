@@ -49,7 +49,7 @@ export const SETTINGS: {
   /** The screen already exists: serve it instead of the placeholder. */
   shipped?: boolean;
 }[] = [
-  { id: "assistant", label: "Assistant" },
+  { id: "assistant", label: "Assistant", shipped: true },
   { id: "models", label: "Models", shipped: true },
   { id: "agent-engine", label: "Agent engine", shipped: true },
   {
@@ -87,9 +87,9 @@ function SettingsList() {
 function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
-  // Models, Agent engine, Spending and Privacy & security already shipped with real
-  // screens; the table serves them instead of their placeholders, so the rebase keeps what
-  // `main` already gives those addresses.
+  // Assistant, Models, Agent engine, Memory, Spending and Privacy & security already
+  // shipped with real screens; the table serves them instead of their placeholders, so the
+  // rebase keeps what `main` already gives those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
   return (
     <Page title={page.label}>
