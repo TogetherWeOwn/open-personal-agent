@@ -632,7 +632,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * Settles a stopped turn where it is and opens a new reply at the end of the chat, for
            * a late approval (M3-07 AC14): the old reply keeps its text, its saved state goes,
            * and a thread line names the original request before the new, streaming reply.
-           * All of it or none.
+           * All of it or none, and only for a stopped turn of this conversation with that reply.
            */
           supersede: async (s: {
             old: { turnId: string; replyId: string; reply: string };
@@ -641,14 +641,40 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             line: { id: string; content: string };
           }) => {
             if (!(await getConversation(s.conversationId))) throw new Error("not found");
+            // A turn's conversation and reply never change, so this read can't go stale.
+            const [old] = await db
+              .select({ turnId: turnStates.turnId })
+              .from(turnStates)
+              .where(
+                and(
+                  eq(turnStates.turnId, s.old.turnId),
+                  eq(turnStates.userId, userId),
+                  eq(turnStates.conversationId, s.conversationId),
+                  eq(turnStates.replyId, s.old.replyId),
+                ),
+              )
+              .limit(1);
+            if (!old) throw new Error("not found");
             await db.batch([
               db
                 .update(messages)
                 .set({ status: "complete", content: s.old.reply })
-                .where(and(eq(messages.id, s.old.replyId), eq(messages.userId, userId))),
+                .where(
+                  and(
+                    eq(messages.id, s.old.replyId),
+                    eq(messages.userId, userId),
+                    eq(messages.conversationId, s.conversationId),
+                  ),
+                ),
               db
                 .delete(turnStates)
-                .where(and(eq(turnStates.turnId, s.old.turnId), eq(turnStates.userId, userId))),
+                .where(
+                  and(
+                    eq(turnStates.turnId, s.old.turnId),
+                    eq(turnStates.userId, userId),
+                    eq(turnStates.conversationId, s.conversationId),
+                  ),
+                ),
               message(s.conversationId, s.line.id, "system", s.line.content),
               message(s.conversationId, s.replyId, "assistant", ""),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(s.conversationId)),
@@ -676,14 +702,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           create: async (items: readonly NewApproval[]) => {
             const [first] = items;
             if (!first) return true;
+            // One batch, in one conversation: the ownership check below covers every item.
             if (items.some((i) => i.batchId !== first.batchId)) throw new Error("one batch only");
+            if (items.some((i) => i.conversationId !== first.conversationId)) {
+              throw new Error("one conversation only");
+            }
             if (!(await getConversation(first.conversationId))) return false;
             for (const { taskId } of items) {
               if (taskId === null || taskId === undefined) continue;
               const own = await db
                 .select({ id: tasks.id })
                 .from(tasks)
-                .where(and(eq(tasks.id, taskId), eq(tasks.userId, userId)))
+                .where(
+                  and(
+                    eq(tasks.id, taskId),
+                    eq(tasks.userId, userId),
+                    eq(tasks.conversationId, first.conversationId),
+                  ),
+                )
                 .limit(1);
               if (!own.length) return false;
             }
@@ -707,6 +743,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * and unexpired, so a batch that changed since the caller read it starts nothing.
            */
           beginStepUp: async (batchId: string, pending: number, c: StepUpCeremony, now: number) => {
+            if (pending < 1) return false; // nothing to sign for
             const live = and(
               eq(approvals.batchId, batchId),
               eq(approvals.userId, userId),
@@ -792,8 +829,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * Records the user's decisions on pending, unexpired items, all of them or none, each
-           * with its audit row. Throws when any item was decided, expired or cancelled since the
-           * caller read the batch; nothing is written then.
+           * with its audit row. An approval holds only a scope its row offered. Throws when any
+           * item was decided, expired or cancelled since the caller read the batch, or asks for
+           * a scope it wasn't offered; nothing is written then.
            */
           decide: async (
             batchId: string,
@@ -828,6 +866,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                       eq(approvals.userId, userId),
                       eq(approvals.status, "pending"),
                       gt(approvals.expiresAt, now),
+                      approve
+                        ? sql`EXISTS (SELECT 1 FROM json_each(${approvals.scopes}) WHERE value = ${d.scope})`
+                        : undefined,
                     ),
                   ),
                 db
@@ -861,24 +902,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /**
            * Claims an approved call just before it runs (crypto review W3): `approved` to
            * `executing`, while it is unexpired. The row as claimed, or `undefined` if another
-           * run claimed it, it was never approved, or it expired: then nothing runs.
+           * run claimed it, it was never approved, or it expired: then nothing runs. With its
+           * audit row, so a call that never reaches `finish` still shows when it began.
            */
-          claim: async (batchId: string, approvalId: string, now: number) =>
-            (
-              await db
-                .update(approvals)
-                .set({ status: "executing" })
-                .where(
-                  and(
-                    eq(approvals.batchId, batchId),
-                    eq(approvals.approvalId, approvalId),
-                    eq(approvals.userId, userId),
-                    eq(approvals.status, "approved"),
-                    gt(approvals.expiresAt, now),
+          claim: async (batchId: string, approvalId: string, now: number) => {
+            const [claimed] = await db
+              .batch([
+                db
+                  .update(approvals)
+                  .set({ status: "executing" })
+                  .where(
+                    and(
+                      eq(approvals.batchId, batchId),
+                      eq(approvals.approvalId, approvalId),
+                      eq(approvals.userId, userId),
+                      eq(approvals.status, "approved"),
+                      gt(approvals.expiresAt, now),
+                    ),
+                  )
+                  .returning(),
+                db
+                  .insert(auditLog)
+                  .values(
+                    approvalAudit(
+                      userId,
+                      "approval.claim",
+                      batchId,
+                      approvalId,
+                      "ok",
+                      null,
+                      sql`changes() = 1`,
+                    ),
                   ),
-                )
-                .returning()
-            )[0],
+              ])
+              .catch(() => [[]]);
+            return claimed[0];
+          },
           /**
            * Ends an approval's life: a claimed call `executed` or `failed`; an approved call the
            * re-check refused `denied` (AC12); an undecided one past its expiry `expired`. With

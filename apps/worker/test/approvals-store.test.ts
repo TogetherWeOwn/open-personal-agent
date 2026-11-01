@@ -81,6 +81,44 @@ describe("the approvals store", () => {
     expect(await count("approvals")).toBe(2);
   });
 
+  it("writes a batch in one conversation only, and a task only into its own", async () => {
+    await expect(
+      alice.approvals.create([item("appr_a", 0), item("appr_b", 1, { conversationId: "c2" })]),
+    ).rejects.toThrow(/one conversation/);
+    await db
+      .prepare(
+        "INSERT INTO tasks (id, user_id, conversation_id, kind, mode, status) VALUES ('t9', 'alice', 'c1', 'chat', 'background', 'running')",
+      )
+      .run();
+    await alice.createConversation("c3");
+    const elsewhere = item("appr_t", 0, { conversationId: "c3", turnId: null, taskId: "t9" });
+    expect(await alice.approvals.create([elsewhere])).toBe(false);
+    expect(await count("approvals")).toBe(0);
+  });
+
+  it("supersedes only a stopped turn of the same conversation (AC14)", async () => {
+    await alice.createConversation("c3");
+    await db
+      .prepare(
+        "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state, updated_at) VALUES ('turn-s', 'alice', 'c1', 'reply-s', 'test', 'm', 'awaiting_approval', '{}', 0)",
+      )
+      .run();
+    const late = {
+      old: { turnId: "turn-s", replyId: "reply-s", reply: "Waiting." },
+      replyId: "reply-new",
+      line: { id: "line-new", content: "Approved later." },
+    };
+    await expect(alice.turns.supersede({ ...late, conversationId: "c3" })).rejects.toThrow();
+    await expect(
+      alice.turns.supersede({ ...late, old: { ...late.old, replyId: "x" }, conversationId: "c1" }),
+    ).rejects.toThrow();
+    expect(await alice.turns.load("turn-s")).toBeDefined();
+    expect(await count("messages")).toBe(0);
+    await alice.turns.supersede({ ...late, conversationId: "c1" });
+    expect(await alice.turns.load("turn-s")).toBeUndefined();
+    expect(await count("messages")).toBe(2);
+  });
+
   it("needs exactly one context: a turn or a task", async () => {
     await expect(alice.approvals.create([item("appr_a", 0, { turnId: null })])).rejects.toThrow();
   });
@@ -114,6 +152,21 @@ describe("the approvals store", () => {
       alice.approvals.decide("batch_1", [decision as never], Date.now()),
     ).rejects.toThrow();
     expect(await status("appr_a")).toBe("pending");
+  });
+
+  it("approves only with a scope the row offered, and starts no ceremony for no items", async () => {
+    await alice.approvals.create([item("appr_a", 0)]); // offers "once" only
+    const wider = {
+      approvalId: "appr_a",
+      decision: "approve",
+      scope: "destination",
+      detail: {},
+    } as const;
+    await expect(alice.approvals.decide("batch_1", [wider], Date.now())).rejects.toThrow();
+    expect(await status("appr_a")).toBe("pending");
+    expect(await audits("approval.approve")).toBe(0);
+    expect(await alice.approvals.beginStepUp("batch_1", 0, ceremony, Date.now())).toBe(false);
+    expect(await alice.approvals.beginStepUp("batch_none", 0, ceremony, Date.now())).toBe(false);
   });
 
   it("runs a step-up ceremony once: begin, take burns it, a second take finds nothing (W3)", async () => {
@@ -154,6 +207,7 @@ describe("the approvals store", () => {
     expect(await bob.approvals.claim("batch_1", "appr_a", now)).toBeUndefined();
     expect((await alice.approvals.claim("batch_1", "appr_a", now))?.status).toBe("executing");
     expect(await alice.approvals.claim("batch_1", "appr_a", now)).toBeUndefined();
+    expect(await audits("approval.claim")).toBe(1); // the losing claims left none
     expect(await alice.approvals.finish("batch_1", "appr_a", { status: "executed" })).toBe(true);
     expect(await status("appr_a")).toBe("executed");
     // Denied at the re-check: from approved, with its reason, on the row and in the log.
