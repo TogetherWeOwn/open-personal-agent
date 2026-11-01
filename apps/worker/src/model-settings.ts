@@ -1,23 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Onboarding answers and model settings (M2-15). Keys arrive in a POST body, go straight into the
 // vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
-import type { ModelProvider } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
-import {
-  createOpenAIChatProvider,
-  createWorkersAIProvider,
-  credentialBinding,
-  isLoopbackHost,
-  type WorkersAIBinding,
-} from "@opa/providers";
-import { decrypt, encrypt, type UserScope as VaultScope } from "@opa/vault";
+import { credentialBinding, isLoopbackHost, STARTER_MODEL } from "@opa/providers";
+import { encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
+import { MODEL_KEY_PURPOSE as PURPOSE, privateHttp, resolveChatModel } from "./chat-model";
 import type { AppEnv } from "./env";
 
-/** The "Try without a key" starter: metered Workers AI through the `AI` binding. */
-export const STARTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const CALLER = "model-settings";
-const PURPOSE = "model_api_key" as const;
 const TEST_TIMEOUT_MS = 20_000;
 const TEST_PROMPT = [{ role: "user" as const, content: "Reply with one word: ready" }];
 
@@ -58,8 +49,6 @@ function leaks(text: string, key: string) {
 }
 
 type Ctx = Context<AppEnv>;
-// Only with the guarded fetch that enforces it; the flag alone never widens plain HTTP.
-const privateHttp = (c: Ctx) => c.env.MODEL_PRIVATE_HOSTS === true && !!c.env.MODEL_FETCH;
 const fail = (c: Ctx, status: 400 | 404 | 409 | 503, error: string) => c.json({ error }, status);
 
 export const settings = new Hono<AppEnv>();
@@ -110,7 +99,7 @@ settings.put("/model", async (c) => {
     const url = new URL(baseUrl);
     // Node's guarded fetch refuses loopback unless private hosts are allowed.
     const local = isLoopbackHost(url.hostname) && !c.env.MODEL_FETCH;
-    const plain = url.protocol === "http:" && (local || privateHttp(c));
+    const plain = url.protocol === "http:" && (local || privateHttp(c.env));
     if ((url.protocol !== "https:" && !plain) || url.search || url.hash) {
       throw new Error("invalid URL");
     }
@@ -146,40 +135,19 @@ settings.put("/model", async (c) => {
 
 /** Sends one short prompt with the saved settings; reports latency and tool support. */
 settings.post("/model/test", async (c) => {
-  const store = settingsOf(c);
-  const row = await store.get();
-  if (!row?.modelKind || !row.model) return fail(c, 409, "no_model");
-  let provider: ModelProvider;
-  let apiKey: string | null = null;
-  if (row.modelKind === "workers-ai") {
-    if (!c.env.AI) return fail(c, 503, "ai_unavailable");
-    provider = createWorkersAIProvider(c.env.AI as unknown as WorkersAIBinding);
-  } else {
-    if (!c.env.VAULT) return fail(c, 503, "vault_unavailable");
-    const { providerId, baseUrl, keySecretId: secretId } = row;
-    if (!providerId || !baseUrl || !secretId) return fail(c, 409, "no_model");
-    const binding = credentialBinding(providerId, baseUrl);
-    const ref = { secretId, purpose: PURPOSE, binding, caller: CALLER } as const;
-    // A lost master key makes saved keys unreadable; the user enters theirs again.
-    apiKey = await decrypt(c.env.VAULT, vaultScope(c), ref).catch(() => null);
-    if (apiKey === null) return fail(c, 409, "key_required");
-    // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
-    const fetch = c.env.MODEL_FETCH ? { fetch: c.env.MODEL_FETCH } : {};
-    const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(c), ...fetch };
-    try {
-      provider = createOpenAIChatProvider(options);
-    } catch {
-      // Saved as plain HTTP while private hosts were allowed, and they no longer are.
-      return fail(c, 409, "invalid_base_url");
-    }
-    await store.keyUsed(secretId);
+  const resolved = await resolveChatModel(c.env, c.var.session.scope, CALLER);
+  if ("error" in resolved) {
+    const { error } = resolved;
+    return fail(c, error === "ai_unavailable" || error === "vault_unavailable" ? 503 : 409, error);
   }
+  const { provider, model, apiKey } = resolved;
+  await resolved.used?.();
   const started = Date.now();
   let firstTokenMs: number | null = null;
   let reply = "";
   const signal = AbortSignal.timeout(TEST_TIMEOUT_MS);
   const consume = async () => {
-    const request = { model: row.model as string, messages: TEST_PROMPT, maxOutputTokens: 16 };
+    const request = { model, messages: TEST_PROMPT, maxOutputTokens: 16 };
     for await (const event of provider.stream({ ...request, signal })) {
       if (event.type === "text.delta") {
         firstTokenMs ??= Date.now() - started;
@@ -210,7 +178,7 @@ settings.post("/model/test", async (c) => {
     ok: true,
     latencyMs: firstTokenMs ?? Date.now() - started,
     totalMs: Date.now() - started,
-    tools: provider.capabilities(row.model).tools,
+    tools: provider.capabilities(model).tools,
     reply: reply.slice(0, 200),
   });
 });

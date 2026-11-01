@@ -12,6 +12,7 @@ export {
 } from "./openai-chat";
 export {
   createWorkersAIProvider,
+  STARTER_MODEL,
   WORKERS_AI_PROVIDER_ID,
   type WorkersAIBinding,
 } from "./workers-ai";

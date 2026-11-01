@@ -25,8 +25,8 @@ export interface NodeOptions {
   /** The built SPA (`apps/web/dist`). */
   assetsDir: string;
   /**
-   * Read for the secrets in `.dev.vars.example` and `OPA_ALLOW_PRIVATE_MODEL_HOSTS`, usually
-   * `process.env`.
+   * Read for the secrets in `.dev.vars.example`, `OPA_ALLOW_PRIVATE_MODEL_HOSTS` and
+   * `OPA_CLIENT_IP_HEADER`, usually `process.env`.
    */
   vars: Record<string, string | undefined>;
   /**
@@ -71,6 +71,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,
     OPA_SETUP_TOKEN: vars.OPA_SETUP_TOKEN,
+    OPA_CLIENT_IP_HEADER: vars.OPA_CLIENT_IP_HEADER,
   } as unknown as WorkerEnv;
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
   const env = compose(raw);

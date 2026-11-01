@@ -3,11 +3,11 @@
 // and tool support.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
+import { STARTER_MODEL } from "@opa/providers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
-import { STARTER_MODEL } from "../src/model-settings";
 import { ORIGIN, sessionHeaders } from "./helpers/app";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };

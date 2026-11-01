@@ -16,3 +16,8 @@ OPA_SESSION_SECRET=
 
 # One-time token that claims a fresh deployment at /setup: 32 random bytes, base64.
 OPA_SETUP_TOKEN=
+
+# Not a secret, and optional. Off Cloudflare, the header your reverse proxy sets to the client's
+# address, e.g. `X-Real-IP`. It keys the recovery-code rate limit. The default, `CF-Connecting-IP`,
+# can be sent by any client when no Cloudflare edge sits in front.
+# OPA_CLIENT_IP_HEADER=
