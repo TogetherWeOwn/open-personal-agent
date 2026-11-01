@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The `*/10` reconciler (M3-18 AC2): approval expiry in D1 without waking a Durable Object, and
 // one tick that runs every part, where one part failing doesn't stop the others.
+import { systemStore } from "@opa/db/system";
 import { expireApprovals, reconcile, reconcilerParts } from "@opa/server/reconciler";
 import { describe, expect, it } from "vitest";
 import { count, db, env, freshDatabase } from "./helpers/app";
@@ -119,9 +120,28 @@ describe("approval expiry", () => {
       },
     ]);
 
-    // The next tick finds nothing new and writes nothing.
-    await expireApprovals({ DB: env.DB }, NOW + 1);
+    // The next tick finds nothing new and writes nothing, even within the same millisecond.
+    await expireApprovals({ DB: env.DB }, NOW);
     expect(await count("audit_log", "action = 'approval.expire'")).toBe(3);
+  });
+
+  it("writes audit rows for exactly the approvals a capped tick expired", async () => {
+    await seed();
+    for (const id of ["a", "b", "c"]) await approval(id, "u1", NOW - 1);
+    const { approvals } = systemStore({ DB: env.DB });
+    expect(await approvals.expireDue(NOW, 2)).toBe(2);
+    expect(await count("audit_log", "action = 'approval.expire'")).toBe(2);
+    expect(await approvals.expireDue(NOW, 2)).toBe(1);
+    const targets = await db
+      .prepare(
+        "SELECT target_id FROM audit_log WHERE action = 'approval.expire' ORDER BY target_id",
+      )
+      .all<{ target_id: string }>();
+    expect(targets.results.map((r) => r.target_id)).toEqual([
+      "b-a/appr_a",
+      "b-b/appr_b",
+      "b-c/appr_c",
+    ]);
   });
 
   it("leaves a task that is no longer waiting as it is", async () => {
