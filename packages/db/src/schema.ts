@@ -363,7 +363,9 @@ export const tasks = sqliteTable(
  * in R2 under `u/{userId}/exports/{id}.zip` (the repository derives the key); item files stream
  * through `u/{userId}/exports/{id}/staged/` while the run builds it. `expires_at` is stamped at
  * creation (1 hour out): the reconciler deletes the object then, and the same bound frees a run
- * that never finishes. The row stays as the user's history.
+ * that never finishes. The row stays as the user's history. One export runs at a time per user:
+ * the partial unique index below rejects a second `running` row, so two racing POSTs cannot
+ * start two Workflow runs — the loser answers 409 `already_running` like the check did.
  */
 export const dataExports = sqliteTable(
   "exports",
@@ -383,6 +385,7 @@ export const dataExports = sqliteTable(
   (t) => [
     index("exports_user_idx").on(t.userId, t.createdAt),
     index("exports_sweep_idx").on(t.status, t.expiresAt),
+    uniqueIndex("exports_running_user_unique").on(t.userId).where(sql`${t.status} = 'running'`),
   ],
 );
 
