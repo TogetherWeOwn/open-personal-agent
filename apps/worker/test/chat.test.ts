@@ -384,6 +384,37 @@ describe("chat transport", () => {
     expect(spend).toEqual({ day, spentMicroUsd: 0, held: {} });
   });
 
+  it("writes a call's ledger row once when an eviction hid that it was written", async () => {
+    const { owner } = await claim();
+    const turn = { conversationId: "c6", turnId: "t6", replyId: "r6", providerId: "p", model: "m" };
+    const usage = { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0 };
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("c6", "Hi", undefined);
+    await user.chat.startTurn("c6", "Hi", "r6", []);
+    // The row landed; the process died before the checkpoint said so.
+    await user.usage.record({
+      id: "call-6",
+      providerId: "p",
+      model: "m",
+      usage,
+      conversationId: "c6",
+    });
+    const snapshot = {
+      ...turn,
+      reply: "Hel",
+      wrote: true,
+      holds: [],
+      callStarted: true,
+      callRecorded: false,
+      callUsage: usage,
+      callId: "call-6",
+    };
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({ name: "chat-turn", snapshot } as never),
+    );
+    expect(await count("usage", "1")).toBe(1);
+  });
+
   it("names the DO from the session, never from the request", async () => {
     const { browser, owner } = await claim();
     expect((await openTab(new Browser())).res.status).toBe(401);

@@ -130,6 +130,8 @@ interface TurnCheckpoint {
   /** This call's ledger row is written. */
   callRecorded: boolean;
   callUsage: CallUsage | null;
+  /** This call's ledger row ID, fixed when it starts, so a recovery's write can't add a second. */
+  callId?: string;
   /**
    * It runs again from a saved stop, so its `turn_states` row predates this run: the row alone
    * no longer shows that the turn stopped cleanly.
@@ -936,6 +938,7 @@ export class Assistant extends Agent<Bindings> {
 
     const recordCall = async () => {
       await repo.usage.record({
+        ...(cp.callId ? { id: cp.callId } : {}),
         providerId: cp.providerId,
         model: cp.model,
         usage: cp.callUsage,
@@ -1055,6 +1058,7 @@ export class Assistant extends Agent<Bindings> {
               cp.callStarted = true;
               cp.callRecorded = false;
               cp.callUsage = null;
+              cp.callId = crypto.randomUUID();
               stash(cp);
             }
             break;
@@ -1260,6 +1264,7 @@ export class Assistant extends Agent<Bindings> {
     for (const hold of cp.holds) this.limits.settle(hold, cp.providerId, cp.model, cp.callUsage);
     if (cp.callStarted && !cp.callRecorded) {
       await repo.usage.record({
+        ...(cp.callId ? { id: cp.callId } : {}),
         providerId: cp.providerId,
         model: cp.model,
         usage: cp.callUsage,

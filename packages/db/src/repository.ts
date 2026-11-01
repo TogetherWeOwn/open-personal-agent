@@ -1099,13 +1099,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
            * such as the settings Test button, names neither.
            */
-          record: async (call: LedgerCall & { conversationId?: string; messageId?: string }) => {
-            await db.insert(usage).values({
-              ...ledgerValues(call),
-              userId,
-              conversationId: call.conversationId ?? null,
-              messageId: call.messageId ?? null,
-            });
+          /**
+           * Writes a call's ledger row. With `id`, writing the same call again (a recovery that
+           * can't tell whether the first write landed) changes nothing.
+           */
+          record: async (
+            call: LedgerCall & { id?: string; conversationId?: string; messageId?: string },
+          ) => {
+            await db
+              .insert(usage)
+              .values({
+                ...ledgerValues(call),
+                ...(call.id ? { id: call.id } : {}),
+                userId,
+                conversationId: call.conversationId ?? null,
+                messageId: call.messageId ?? null,
+              })
+              .onConflictDoNothing({ target: usage.id });
           },
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
