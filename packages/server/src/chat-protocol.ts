@@ -48,6 +48,8 @@ export interface TaskProgress {
   seq: number;
   type: string;
   payload: unknown;
+  /** It continues a promoted turn of the conversation, whose event log it joins. */
+  inTurn?: boolean;
 }
 
 /** A turn's reply text in its saved state: one segment per model call that spoke. */
