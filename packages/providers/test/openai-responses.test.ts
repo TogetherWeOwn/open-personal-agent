@@ -3,7 +3,7 @@
 // A-M2 rule, and fixture replays of text, a tool call, reasoning, cached usage and errors.
 import type { ModelMessage, ModelReasoning } from "@opa/core";
 import { describe, expect, it } from "vitest";
-import { createOpenAIResponsesProvider } from "../src/openai-responses";
+import { createOpenAIResponsesProvider, usesOpenAIResponses } from "../src/openai-responses";
 import failed from "./fixtures/openai-responses-failed.sse?raw";
 import text from "./fixtures/openai-responses-text.sse?raw";
 import toolCall from "./fixtures/openai-responses-tool-call.sse?raw";
@@ -214,5 +214,18 @@ describe("openai-responses requests", () => {
     const events = await replay(p.stream({ model: MODEL, messages: ask }));
     expect(events[0]).toMatch(/^error bad_request: The provider redirected/);
     expect(calls.map((c) => c.url)).toEqual(["https://api.openai.com/v1/responses"]);
+  });
+});
+
+describe("the wire API is a property of the preset", () => {
+  it("uses Responses for the OpenAI preset only", () => {
+    expect(usesOpenAIResponses("openai", "https://api.openai.com/v1")).toBe(true);
+    expect(usesOpenAIResponses("openai", "https://API.openai.com/v1/")).toBe(true);
+    // Other hosts, and OpenAI's own host under another preset, stay on Chat Completions.
+    expect(usesOpenAIResponses("openai", "https://api.example.com/v1")).toBe(false);
+    expect(usesOpenAIResponses("custom", "https://api.openai.com/v1")).toBe(false);
+    expect(usesOpenAIResponses("openrouter", "https://openrouter.ai/api/v1")).toBe(false);
+    expect(usesOpenAIResponses("openai", null)).toBe(false);
+    expect(usesOpenAIResponses("openai", "not a url")).toBe(false);
   });
 });

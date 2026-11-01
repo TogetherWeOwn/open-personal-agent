@@ -3,7 +3,12 @@
 // vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
 import type { ModelUsage } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
-import { credentialBinding, isLoopbackHost, STARTER_MODEL } from "@opa/providers";
+import {
+  credentialBinding,
+  isLoopbackHost,
+  STARTER_MODEL,
+  usesOpenAIResponses,
+} from "@opa/providers";
 import { encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
 import { MODEL_KEY_PURPOSE as PURPOSE, privateHttp, resolveChatModel } from "./chat-model";
@@ -37,6 +42,12 @@ async function view(c: Ctx) {
     model: chat
       ? {
           kind: chat.kind,
+          // The wire API follows the preset: a saved OpenAI key moves to Responses as it is.
+          api: starter
+            ? "workers-ai"
+            : usesOpenAIResponses(chat.providerId, chat.baseUrl)
+              ? "openai-responses"
+              : "openai-chat",
           providerId: starter ? null : chat.providerId,
           baseUrl: starter ? null : chat.baseUrl,
           model: row.chatModel ?? chat.model,

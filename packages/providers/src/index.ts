@@ -11,6 +11,7 @@ export {
   createOpenAIResponsesProvider,
   OPENAI_RESPONSES_API,
   type OpenAIResponsesOptions,
+  usesOpenAIResponses,
 } from "./openai-responses";
 export {
   createWorkersAIProvider,
