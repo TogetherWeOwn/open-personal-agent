@@ -368,8 +368,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       /**
        * Every key under a prefix, in order, following cursors. `[]` where the store has no
        * listing (Node); the export Workflow runs on Workers, where R2 always lists.
+       * The prefix must stay inside the user's namespace, like `getObject`: a caller can
+       * only name its own objects, never another user's.
        */
       const listR2Prefix = async (prefix: string): Promise<{ key: string; size: number }[]> => {
+        if (!prefix.startsWith(`u/${userId}/`)) throw new Error("invalid prefix");
         if (!FILES.list) return [];
         const keys: { key: string; size: number }[] = [];
         let cursor: string | undefined;
