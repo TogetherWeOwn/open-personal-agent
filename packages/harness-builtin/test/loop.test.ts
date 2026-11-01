@@ -180,6 +180,19 @@ describe("stop-and-resume approvals (M3-03 AC4)", () => {
     expect(() => resolveApprovals(state, batchId, [ok], NOW)).toThrow("already decided");
   });
 
+  it("refuses a gated call too large to approve instead of asking", async () => {
+    const send = tool("send", "consequential");
+    const big = "x".repeat(70_000);
+    const { provider } = scripted([{ calls: [["send", { q: big }]] }, { text: "Too big." }]);
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, [send]), state);
+    expect(outcome).toBe("completed");
+    expect(state.pending).toBeNull();
+    expect(ofType(events, "approval.requested")).toEqual([]);
+    expect(send.inputs).toEqual([]);
+    expect(state.messages.find((m) => m.role === "tool")?.content).toMatch(/too large to ask/);
+  });
+
   it("waits for the whole batch, then runs the approved call and the model goes on", async () => {
     const { send, h, requests, state } = await stop();
     const batchId = state.pending?.batchId as string;

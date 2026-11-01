@@ -902,6 +902,78 @@ describe("approvals in the DO host (M3-07a)", () => {
     expect(await count("turn_states", "1")).toBe(0);
   });
 
+  it("resumes a batch queued behind a resume that found its own batch still waiting", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const replies = [{ calls: [["send", { q: "a" }]] }, { calls: [["send", { q: "b" }]] }];
+    await useModel(owner, replying([...(replies as Reply[]), { text: "Sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-qa", "Send a");
+    await tab.until?.("approval.requested");
+    const a = asked(tab.events);
+    tab.send?.("conv-qb", "Send b");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "approval.requested")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    const b = tab.events.filter(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    )[1]?.payload;
+    if (!b) throw new Error("no second batch");
+    await decideInD1(b.batchId, b.items[0]?.approvalId ?? "", "approved");
+    // A's resume holds the slot while it reads D1, so B queues; A is still undecided and
+    // starts nothing. B must still run once A lets go.
+    const results = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      Promise.all([i.resumeBatch(a.batchId), i.resumeBatch(b.batchId)]),
+    );
+    expect(results).toEqual(["waiting", "queued"]);
+    await vi.waitFor(() => expect(send.inputs).toEqual([{ q: "b" }]), SOCKET_WAIT);
+  });
+
+  it("keeps a queued batch whose resume failed, for the next try", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const replies = [{ calls: [["send", { q: "a" }]] }, { calls: [["send", { q: "b" }]] }];
+    await useModel(owner, replying([...(replies as Reply[]), { text: "Sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-fa", "Send a");
+    await tab.until?.("approval.requested");
+    const a = asked(tab.events);
+    tab.send?.("conv-fb", "Send b");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "approval.requested")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    const b = tab.events.filter(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    )[1]?.payload;
+    if (!b) throw new Error("no second batch");
+    await decideInD1(b.batchId, b.items[0]?.approvalId ?? "", "approved");
+    // B queues behind A's resume, and its own resume then fails on a vault hiccup.
+    const queued = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
+      const resolve = i.resolveModel;
+      i.resolveModel = async () => {
+        throw new Error("vault hiccup");
+      };
+      const results = await Promise.all([i.resumeBatch(a.batchId), i.resumeBatch(b.batchId)]);
+      await vi.waitFor(() => expect(state.storage.kv.get("approvals:queue")).toEqual([b.batchId]));
+      i.resolveModel = resolve;
+      return results;
+    });
+    expect(queued).toEqual(["waiting", "queued"]);
+    expect(send.inputs).toEqual([]);
+    // Still queued, so the next try runs it.
+    const again = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(b.batchId),
+    );
+    expect(again).toBe("resumed");
+    await vi.waitFor(() => expect(send.inputs).toEqual([{ q: "b" }]), SOCKET_WAIT);
+  });
+
   it("refuses an approved call whose tool changed since it was approved (AC12)", async () => {
     const { browser, owner } = await claim();
     const send = loopTool("send", "consequential");

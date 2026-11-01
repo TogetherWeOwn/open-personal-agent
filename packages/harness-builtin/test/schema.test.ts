@@ -91,6 +91,15 @@ describe("parseInput refuses what an approval couldn't bind exactly (M3-07 AC1, 
     expect(parseInput(any, '{"s":"\\ud83d\\ude00"}').ok).toBe(true);
     expect(parseInput(any, `{"a":${"[".repeat(40)}${"]".repeat(40)}}`).ok).toBe(false);
   });
+
+  it("leaves size to the schema: input past the approval limit still parses", () => {
+    const big = "x".repeat(200_000); // create_artifact takes up to 262,144 characters
+    expect(parseInput(any, JSON.stringify({ content: big }))).toEqual({
+      ok: true,
+      input: { content: big },
+    });
+    expect(canonical({ content: big })).toHaveLength(200_014);
+  });
 });
 
 describe("canonical", () => {
