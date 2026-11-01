@@ -478,6 +478,89 @@ export function memoryService(db: Db, userId: string) {
       const saved = await write({ id, trust, status: "active" }, targetIds);
       return saved ? { status: "saved", memory: saved } : { status: "not_found" };
     },
+    /**
+     * "Keep both" on a conflict (M3-15 AC2): the proposal becomes a note of its own beside the
+     * notes it would have replaced, which stay current. Its links go in the same batch, so it
+     * never reads as their later version and forgetting it never sweeps them up.
+     */
+    keepBoth: async (actor: MemoryActor, id: string): Promise<WriteOutcome> => {
+      if (actor.via !== "user") return { status: "forbidden" };
+      const now = Date.now();
+      const pending = and(mine(id), eq(memories.status, "proposed"), gt(memories.expiresAt, now));
+      const proposal = (await db.select().from(memories).where(pending).limit(1))[0];
+      if (!proposal || proposal.op === "delete") return { status: "not_found" };
+      const trust = proposal.kind === "instruction" ? "user" : proposal.trust;
+      const [, activated] = await db.batch([
+        db.delete(memoryLinks).where(
+          and(
+            eq(memoryLinks.userId, userId),
+            eq(memoryLinks.memoryId, id),
+            sql`EXISTS (SELECT 1 FROM memories p WHERE p.id = ${id} AND p.user_id = ${userId}
+                AND p.status = 'proposed' AND p.expires_at > ${now})`,
+          ),
+        ),
+        db
+          .update(memories)
+          .set({ status: "active", op: "create", trust, expiresAt: null, updatedAt: now })
+          .where(pending)
+          .returning(),
+      ]);
+      const saved = activated[0];
+      return saved ? { status: "saved", memory: saved } : { status: "not_found" };
+    },
+    /**
+     * Earlier versions of a current memory, newest first: every row it superseded, directly or
+     * through earlier edits. Empty when the memory is missing or someone else's.
+     */
+    versions: (id: string) =>
+      db.all<Memory>(sql`
+        WITH RECURSIVE chain(id) AS (
+          SELECT id FROM memories WHERE id = ${id} AND user_id = ${userId} AND status = 'active'
+          UNION
+          SELECT l.target_id FROM memory_links l JOIN chain c ON l.memory_id = c.id
+            WHERE l.user_id = ${userId}
+        )
+        SELECT n, id, user_id AS userId, kind, text, trust, status, op, source,
+          source_ref AS sourceRef, source_excerpt AS sourceExcerpt,
+          conversation_id AS conversationId, created_at AS createdAt, updated_at AS updatedAt,
+          last_used_at AS lastUsedAt, expires_at AS expiresAt
+        FROM memories
+        WHERE user_id = ${userId} AND status = 'superseded' AND id IN chain
+        ORDER BY created_at DESC, n DESC`),
+    /**
+     * Expires unconfirmed proposals to rejected (M3-15 AC2): a proposal past its date is deleted,
+     * as a rejected one is; it was never a memory. Returns how many expired.
+     */
+    expire: async () =>
+      (
+        await db
+          .delete(memories)
+          .where(
+            and(
+              eq(memories.userId, userId),
+              eq(memories.status, "proposed"),
+              sql`${memories.expiresAt} <= ${Date.now()}`,
+            ),
+          )
+          .returning({ id: memories.id })
+      ).length,
+    /**
+     * Everything remembered, for the `opa-memory-export/v1` download: current notes and their
+     * earlier versions (never proposals, which were never memories) with the supersede links.
+     */
+    dump: async () => {
+      const rows = await db
+        .select()
+        .from(memories)
+        .where(and(eq(memories.userId, userId), sql`${memories.status} <> 'proposed'`))
+        .orderBy(desc(memories.createdAt), desc(memories.n));
+      const links = await db
+        .select({ memoryId: memoryLinks.memoryId, targetId: memoryLinks.targetId })
+        .from(memoryLinks)
+        .innerJoin(memories, eq(memories.id, memoryLinks.memoryId))
+        .where(and(eq(memoryLinks.userId, userId), sql`${memories.status} <> 'proposed'`));
+      return { rows, links };
+    },
     /** The user rejects a proposal: it is deleted, it was never a memory. Only the user can. */
     reject: async (actor: MemoryActor, id: string) =>
       actor.via === "user" &&

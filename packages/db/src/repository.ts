@@ -553,6 +553,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   backgroundProvider: userSettings.backgroundProvider,
                   backgroundModel: userSettings.backgroundModel,
                   onboardedAt: userSettings.onboardedAt,
+                  learnFromChats: userSettings.learnFromChats,
                 })
                 .from(users)
                 .leftJoin(userSettings, eq(userSettings.userId, users.id))

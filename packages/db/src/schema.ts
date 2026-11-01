@@ -369,6 +369,8 @@ export const userSettings = sqliteTable("user_settings", {
   backgroundProvider: providerRef("background_provider"),
   backgroundModel: text("background_model"),
   onboardedAt: integer("onboarded_at"),
+  /** Settings › Memory › "Learn from our chats": the assistant may use `remember` (M3-15 AC5). */
+  learnFromChats: integer("learn_from_chats", { mode: "boolean" }).notNull().default(true),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 
