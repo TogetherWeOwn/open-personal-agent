@@ -16,4 +16,4 @@ CREATE TABLE `artifacts` (
 CREATE INDEX `artifacts_user_created_idx` ON `artifacts` (`user_id`,`created_at`);--> statement-breakpoint
 CREATE INDEX `artifacts_user_conversation_idx` ON `artifacts` (`user_id`,`conversation_id`,`created_at`);--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (10);
+INSERT INTO `schema_version` (`version`) VALUES (11);

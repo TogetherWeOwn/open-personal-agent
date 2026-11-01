@@ -357,6 +357,40 @@ export const tasks = sqliteTable(
 );
 
 /**
+ * The Node step journal (M3-23b): one row per completed step of a task run, keyed by the
+ * Workflow instance and the step name. A resumed run replays these rows instead of re-running
+ * their functions, the way the Workflow engine replays `step.do` on Cloudflare. Only the Node
+ * journal writes here; the tables ship in the shared migration so both roots stay on one schema.
+ */
+export const taskSteps = sqliteTable(
+  "task_steps",
+  {
+    instanceId: text("instance_id").notNull(),
+    name: text("name").notNull(),
+    output: text("output").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.instanceId, t.name] })],
+);
+
+/**
+ * Events the Node journal waits on (M3-23b): `waitForEvent` consumes the oldest matching row
+ * for its instance and type, so each event wakes exactly one wait. Producers (approval resume
+ * in M3-23a, tests) post with `postTaskEvent`.
+ */
+export const taskEvents = sqliteTable(
+  "task_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    instanceId: text("instance_id").notNull(),
+    type: text("type").notNull(),
+    payload: text("payload").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("task_events_instance_idx").on(t.instanceId, t.id)],
+);
+
+/**
  * A file a tool wrote (M3-11, F-3.13): the Outputs library. The bytes live in R2 under
  * `u/{userId}/files/{id}` (the repository derives the key, and writes the row in the same call
  * as the object, so no tool file is missing from Outputs). The source run is the conversation
