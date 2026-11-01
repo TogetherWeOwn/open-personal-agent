@@ -179,10 +179,12 @@ export function App({ transport }: AppProps) {
     }, connected);
   }, [transport]);
 
-  // A task's conversation link names its chat in the address bar; select it once the list
+  // A task's conversation link names its chat in the address bar; adopt it once the list
   // holding it loads. Each address is adopted once, so switching chats in place (which leaves
-  // the address behind) never yanks the open chat back. An unknown chat after the load can't
-  // open anything, so the address falls back to chat.
+  // the address behind) never yanks the open chat back. Adopting opens the thread the way a
+  // tap would: on phones the thread panel stays hidden until `threadOpen` is set, so selecting
+  // alone would leave the Chats list showing. An unknown chat after the load can't open
+  // anything, so the address falls back to chat.
   const handledChatAddress = useRef<string | null>(null);
   const chatConversationId =
     matched?.route.path === "/c/:conversationId" ? matched.params.conversationId : undefined;
@@ -200,7 +202,10 @@ export function App({ transport }: AppProps) {
     );
     if (resolution.action === "wait") return;
     handledChatAddress.current = chatConversationId;
-    if (resolution.action === "select") dispatch({ type: "select", id: resolution.id });
+    if (resolution.action === "select") {
+      dispatch({ type: "select", id: resolution.id });
+      setThreadOpen(true);
+    } else if (resolution.action === "none") setThreadOpen(true);
     else if (resolution.action === "redirect") navigate("/", true);
   }, [chatConversationId, state.conversations, state.activeId, listed]);
 
