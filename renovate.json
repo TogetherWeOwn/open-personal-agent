@@ -17,10 +17,6 @@
     {
       "groupName": "Cloudflare toolchain",
       "matchPackageNames": ["wrangler", "miniflare", "@cloudflare/**"]
-    },
-    {
-      "groupName": "GitHub Actions",
-      "matchManagers": ["github-actions"]
     }
   ]
 }

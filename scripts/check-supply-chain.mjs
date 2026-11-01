@@ -3,6 +3,7 @@
 // minimum release age in pnpm and Renovate, and workflows that pin every action by commit SHA,
 // default to read-only permissions and never use `pull_request_target`.
 import { readdirSync } from "node:fs";
+import { parse } from "yaml";
 import { isMain, readText, report, repoTextFiles } from "./lib/repo.mjs";
 
 /** Packages whose install scripts were reviewed. Extend only with a reviewed PR. */
@@ -10,22 +11,19 @@ export const REVIEWED_BUILDS = ["esbuild", "workerd"];
 export const MIN_RELEASE_AGE_MINUTES = 1440;
 
 export function checkPnpmPolicy(workspaceYaml) {
-  const problems = [];
-  const age = Number(/^minimumReleaseAge:\s*(\d+)\s*$/m.exec(workspaceYaml)?.[1]);
-  if (!(age >= MIN_RELEASE_AGE_MINUTES)) {
-    problems.push(`pnpm-workspace.yaml: minimumReleaseAge must be >= ${MIN_RELEASE_AGE_MINUTES}`);
-  }
-  if (!/^strictDepBuilds:\s*true\s*$/m.test(workspaceYaml)) {
-    problems.push("pnpm-workspace.yaml: strictDepBuilds must be true");
-  }
-  const block = /^onlyBuiltDependencies:\s*\n((?:\s+-\s*.+\n?)*)/m.exec(workspaceYaml);
-  if (!block) problems.push("pnpm-workspace.yaml: onlyBuiltDependencies allowlist is missing");
-  for (const [, name] of block?.[1].matchAll(/-\s*["']?([^"'\s]+)/g) ?? []) {
-    if (!REVIEWED_BUILDS.includes(name)) {
-      problems.push(`pnpm-workspace.yaml: "${name}" may run build scripts but is not reviewed`);
-    }
-  }
-  return problems;
+  const ws = parse(workspaceYaml) ?? {};
+  const builds = ws.onlyBuiltDependencies;
+  return [
+    !(ws.minimumReleaseAge >= MIN_RELEASE_AGE_MINUTES) &&
+      `minimumReleaseAge must be >= ${MIN_RELEASE_AGE_MINUTES}`,
+    ws.strictDepBuilds !== true && "strictDepBuilds must be true",
+    !Array.isArray(builds) && "the onlyBuiltDependencies allowlist is missing",
+    ...(builds ?? []).map(
+      (n) => !REVIEWED_BUILDS.includes(n) && `"${n}" may run build scripts unreviewed`,
+    ),
+  ]
+    .filter(Boolean)
+    .map((p) => `pnpm-workspace.yaml: ${p}`);
 }
 
 export function checkRenovatePolicy(renovateJson) {
@@ -34,35 +32,42 @@ export function checkRenovatePolicy(renovateJson) {
   return rules.some((r) => r.minimumReleaseAge) ? [] : ["renovate.json: no minimumReleaseAge"];
 }
 
-export function checkWorkflow(path, yaml) {
+const grantsWrite = (perms) =>
+  typeof perms === "string"
+    ? perms.includes("write")
+    : Object.values(perms ?? {}).includes("write");
+
+export function checkWorkflow(path, text) {
+  const wf = parse(text) ?? {};
   const problems = [];
-  if (/\bpull_request_target\b/.test(yaml)) problems.push(`${path}: uses pull_request_target`);
-  if (!/^permissions:[ \t]*\n[ \t]+contents:[ \t]*read[ \t]*\n(?![ \t])/m.test(yaml)) {
+  const on = wf.on ?? {};
+  const triggers = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on);
+  if (triggers.includes("pull_request_target")) problems.push(`${path}: uses pull_request_target`);
+  if (JSON.stringify(wf.permissions) !== '{"contents":"read"}') {
     problems.push(`${path}: top-level permissions must be exactly "contents: read"`);
   }
-  // Any permissions block, job-level included, may narrow access but never grant write.
-  for (const m of yaml.matchAll(/^([ \t]*)permissions:(.*)\n((?:\1[ \t]+.*(?:\n|$))*)/gm)) {
-    if (/write/.test(m[2] + m[3])) problems.push(`${path}: a permissions block grants write`);
+  for (const [name, job] of Object.entries(wf.jobs ?? {})) {
+    if (grantsWrite(job?.permissions)) problems.push(`${path}: job "${name}" grants write`);
   }
-  return [...problems, ...checkPins(path, yaml)];
+  return [...problems, ...checkPins(path, wf)];
 }
 
-/** Every `uses:` in a workflow or composite action is local or pinned to an immutable ref. */
-export function checkPins(path, yaml) {
-  const problems = [];
-  yaml.split("\n").forEach((line, i) => {
-    const value = /^\s*(?:-\s*)?uses:(.*)$/.exec(line)?.[1];
-    const ref = value
-      ?.replace(/\s#.*$/, "")
-      .trim()
-      .replace(/^["']|["']$/g, "");
-    if (ref === undefined || ref.startsWith("./")) return;
-    const pinned = ref.startsWith("docker://")
-      ? /@sha256:[0-9a-f]{64}$/.test(ref)
-      : /@[0-9a-f]{40}$/.test(ref);
-    if (!pinned) problems.push(`${path}:${i + 1}: "${ref}" is not pinned to a full SHA`);
-  });
-  return problems;
+/** Every `uses:` in a parsed workflow or composite action is local or pinned to an immutable ref. */
+export function checkPins(path, doc) {
+  const refs = (node, at) =>
+    node && typeof node === "object"
+      ? Object.entries(node).flatMap(([k, v]) =>
+          k === "uses" ? [[at, String(v)]] : refs(v, at ? `${at}.${k}` : k),
+        )
+      : [];
+  return refs(doc, "")
+    .filter(([, ref]) => !ref.startsWith("./"))
+    .filter(([, ref]) =>
+      ref.startsWith("docker://")
+        ? !/@sha256:[0-9a-f]{64}$/.test(ref)
+        : !/@[0-9a-f]{40}$/.test(ref),
+    )
+    .map(([at, ref]) => `${path}: ${at} uses "${ref}", which is not pinned to a full SHA`);
 }
 
 if (isMain(import.meta.url)) {
@@ -75,6 +80,6 @@ if (isMain(import.meta.url)) {
     ...checkPnpmPolicy(readText("pnpm-workspace.yaml") ?? ""),
     ...checkRenovatePolicy(readText("renovate.json")),
     ...workflows.flatMap((f) => checkWorkflow(`${dir}/${f}`, readText(`${dir}/${f}`) ?? "")),
-    ...actions.flatMap((f) => checkPins(f.path, f.text)),
+    ...actions.flatMap((f) => checkPins(f.path, parse(f.text))),
   ]);
 }

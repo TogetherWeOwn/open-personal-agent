@@ -64,22 +64,33 @@ describe("supply chain", () => {
   });
 
   it("requires SHA pins, read-only permissions and no privileged PR trigger", () => {
-    const wf = (step: string) => `on: push\npermissions:\n  contents: read\njobs:\n${step}`;
-    expect(checkWorkflow("ci.yml", wf(`      - uses: a/b@${"a".repeat(40)} # v1`))).toEqual([]);
-    expect(checkWorkflow("ci.yml", wf("      - uses: ./.github/actions/setup"))).toEqual([]);
-    expect(checkWorkflow("ci.yml", wf("      - uses: actions/checkout@v7"))).toEqual([
-      'ci.yml:5: "actions/checkout@v7" is not pinned to a full SHA',
+    const wf = (job: string) => `on: push\npermissions:\n  contents: read\njobs:\n  a:\n${job}`;
+    const step = (uses: string) => wf(`    steps:\n      - uses: ${uses}\n`);
+    expect(checkWorkflow("ci.yml", step(`a/b@${"a".repeat(40)} # v1`))).toEqual([]);
+    expect(checkWorkflow("ci.yml", step("./.github/actions/setup"))).toEqual([]);
+    expect(checkWorkflow("ci.yml", step("actions/checkout@v7"))).toEqual([
+      'ci.yml: jobs.a.steps.0 uses "actions/checkout@v7", which is not pinned to a full SHA',
     ]);
-    expect(checkWorkflow("ci.yml", wf("").replace("read\n", "read\n  actions: read\n"))).toEqual([
+    expect(checkWorkflow("ci.yml", step(">-\n          actions/checkout@v7"))).toHaveLength(1);
+    expect(
+      checkWorkflow("ci.yml", wf("    uses: o/r/.github/workflows/x.yml@main\n")),
+    ).toHaveLength(1);
+    const extra = wf("    steps: []\n").replace("read\n", "read\n  actions: read\n");
+    expect(checkWorkflow("ci.yml", extra)).toEqual([
       'ci.yml: top-level permissions must be exactly "contents: read"',
     ]);
-    expect(checkWorkflow("ci.yml", `on: ${join("pull_request", "_target")}\n`)).toHaveLength(2);
-    const jobWrite = wf("  a:\n    permissions:\n      contents: write\n    steps: []\n");
-    expect(checkWorkflow("ci.yml", jobWrite)).toEqual(["ci.yml: a permissions block grants write"]);
-    expect(checkWorkflow("ci.yml", wf("  a:\n    permissions: write-all\n"))).toHaveLength(1);
-    expect(checkWorkflow("ci.yml", wf("      - uses:\n          actions/checkout@v7"))).toEqual([
-      'ci.yml:5: "" is not pinned to a full SHA',
-    ]);
+    const jobWrite = wf(
+      "    permissions:\n      contents: read # never write\n\n      actions: write\n",
+    );
+    expect(checkWorkflow("ci.yml", jobWrite)).toEqual(['ci.yml: job "a" grants write']);
+    expect(checkWorkflow("ci.yml", wf("    permissions: write-all\n"))).toHaveLength(1);
+    expect(checkWorkflow("ci.yml", wf("    permissions: { contents: read } # no write\n"))).toEqual(
+      [],
+    );
+    const trigger = join("pull_request", "_target");
+    expect(
+      checkWorkflow("ci.yml", `on: [push, ${trigger}]\npermissions:\n  contents: read\n`),
+    ).toEqual(["ci.yml: uses pull_request_target"]);
   });
 });
 
