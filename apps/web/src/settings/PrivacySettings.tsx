@@ -3,7 +3,7 @@
 // a ZIP of your chats, memories, tasks, files, settings and usage history, made in the
 // background and downloadable for one hour. While one is being made the button waits on it
 // instead of starting another; the list below is the row history newest first.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Heading } from "react-aria-components";
 import { Button, buttonClass, Card, CardHeader } from "../ui";
 import { type DataExport, formatBytes, listExports, startExport } from "./export-api";
@@ -64,13 +64,12 @@ export function PrivacySettings() {
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
-  const [reloads, setReloads] = useState(0);
   const runningId = rows?.find((row) => row.status === "running")?.id ?? null;
   const running = runningId !== null;
 
-  useEffect(() => {
+  // A failed load says so and offers a retry: an empty list would read as "no exports".
+  const load = useCallback(() => {
     let cancelled = false;
-    // A failed load says so and offers a retry: an empty list would read as "no exports".
     setLoadFailed(false);
     listExports().then(
       (exports) => !cancelled && setRows(exports),
@@ -83,7 +82,9 @@ export function PrivacySettings() {
     return () => {
       cancelled = true;
     };
-  }, [reloads]);
+  }, []);
+
+  useEffect(() => load(), [load]);
 
   // While an export is being made, refresh the list until it lands somewhere.
   useEffect(() => {
@@ -122,7 +123,7 @@ export function PrivacySettings() {
             <p role="alert" className="text-danger">
               Couldn't load your exports.
             </p>
-            <Button variant="secondary" onPress={() => setReloads((n) => n + 1)}>
+            <Button variant="secondary" onPress={() => void load()}>
               Try again
             </Button>
           </div>
