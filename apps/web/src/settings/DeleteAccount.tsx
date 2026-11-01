@@ -84,8 +84,15 @@ export function DeleteAccount() {
           onlyOwner && (
             <p role="note" className="text-sm">
               You&apos;re the only account on this deployment. Deleting it returns the app to its
-              first-run screen, and claiming it again needs a fresh setup token — rotate
-              OPA_SETUP_TOKEN on the server before anyone signs up again.
+              first-run screen, and claiming it again needs a fresh setup token — rotate the
+              deployment&apos;s setup token secret before anyone signs up again (see{" "}
+              <a
+                href="https://github.com/TogetherWeOwn/open-personal-agent#deploy-to-cloudflare"
+                className="font-medium text-accent underline underline-offset-2"
+              >
+                the deploy docs
+              </a>
+              ).
             </p>
           )
         )}
