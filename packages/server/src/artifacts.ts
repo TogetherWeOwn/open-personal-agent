@@ -9,18 +9,24 @@ import { userContent } from "./security";
 
 export const artifactRoutes = new Hono<AppEnv>();
 
-/** Newest first, a page at a time: `?conversationId=` narrows to one chat, `?before=` pages on. */
+/**
+ * Newest first, a page at a time: `?conversationId=` narrows to one chat; `?before=` and
+ * `?beforeId=` (the last row's `createdAt` and `id`) page on.
+ */
 artifactRoutes.get("/", async (c) => {
-  const { conversationId, before } = c.req.query();
+  const { conversationId, before, beforeId } = c.req.query();
   if (conversationId !== undefined && !isId(conversationId))
     return c.json({ error: "bad_request" }, 400);
   const cursor = before === undefined ? undefined : Number(before);
   if (cursor !== undefined && !Number.isSafeInteger(cursor))
     return c.json({ error: "bad_request" }, 400);
+  if (beforeId !== undefined && (cursor === undefined || !isId(beforeId)))
+    return c.json({ error: "bad_request" }, 400);
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const artifacts = await user.artifacts.list({
     ...(conversationId !== undefined ? { conversationId } : {}),
     ...(cursor !== undefined ? { before: cursor } : {}),
+    ...(beforeId !== undefined ? { beforeId } : {}),
   });
   c.header("Cache-Control", "no-store");
   return c.json({ artifacts });

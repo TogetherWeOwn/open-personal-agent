@@ -42,8 +42,10 @@ async function serve(page: Page, files = FILES) {
       if (req.method() === "DELETE") return route.fulfill({ status: 204 });
       if (!id) {
         const chat = url.searchParams.get("conversationId");
-        const artifacts = files.filter((f) => !chat || f.conversationId === chat);
-        return route.fulfill({ json: { artifacts } });
+        const after = url.searchParams.get("beforeId");
+        const mine = files.filter((f) => !chat || f.conversationId === chat);
+        const from = after ? mine.findIndex((f) => f.id === after) + 1 : 0;
+        return route.fulfill({ json: { artifacts: mine.slice(from, from + 100) } });
       }
       const found = files.find((f) => f.id === id);
       if (!found) return route.fulfill({ status: 404, json: { error: "not_found" } });
@@ -110,6 +112,17 @@ test("filters to one chat, in the address too, and back to all files", async ({ 
   await page.getByRole("button", { name: "All files" }).click();
   await expect(page).toHaveURL(/\/activity\/outputs$/);
   await expect(files(page)).toHaveCount(3);
+});
+
+test("pages on the last file's time and ID, so files made together all show", async ({ page }) => {
+  // 101 files from one millisecond: the second page has to start inside the tie.
+  const many = Array.from({ length: 101 }, (_, i) => file({ id: `f${i}`, name: `f${i}.md` }));
+  const seen = await serve(page, many);
+  await page.goto("/activity/outputs");
+  await expect(files(page)).toHaveCount(100);
+  await page.getByRole("button", { name: "Show older files" }).click();
+  await expect(files(page)).toHaveCount(101);
+  expect(seen).toContain(`GET /api/artifacts?before=${many[99]?.createdAt}&beforeId=f99`);
 });
 
 test("shows the empty state when nothing has been made yet", async ({ page }) => {

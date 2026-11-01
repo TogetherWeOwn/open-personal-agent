@@ -75,6 +75,51 @@ describe("Outputs", () => {
     expect(await one.json()).toMatchObject({ id: "a1", conversationTitle: "Orkney trip" });
   });
 
+  it("pages on (createdAt, id), so files made in the same millisecond all appear", async () => {
+    const alice = await user("alice");
+    // 101 files share one timestamp: the first page ends inside the tie.
+    await db.batch(
+      Array.from({ length: 101 }, (_, i) =>
+        db
+          .prepare(
+            "INSERT INTO artifacts (id, user_id, name, media_type, size_bytes, created_at) VALUES (?, 'alice', ?, 'text/plain', 1, 1000)",
+          )
+          .bind(`f${String(i).padStart(3, "0")}`, `f${i}.txt`),
+      ),
+    );
+    const first = await list(alice);
+    expect(first).toHaveLength(100);
+    const last = first[99] as Listed & { createdAt: number };
+    const rest = await list(alice, `?before=${last.createdAt}&beforeId=${last.id}`);
+    expect(rest.map((a) => a.id)).toEqual(["f000"]);
+    expect((await get(alice, "/api/artifacts?beforeId=f001")).status).toBe(400);
+  });
+
+  it("refuses to save over an existing artifact and keeps its bytes", async () => {
+    await user("alice");
+    const files = as("alice").files({});
+    await files.putFile("a1", "first", "text/plain", "a.txt");
+    await expect(files.putFile("a1", "second", "text/plain", "b.txt")).rejects.toThrow();
+    expect(await (await env.FILES.get("u/alice/files/a1"))?.text()).toBe("first");
+  });
+
+  it("keeps the row when the object delete fails, so the delete can be retried", async () => {
+    const alice = await user("alice");
+    await as("alice").files({}).putFile("a1", "x", "text/plain", "x.txt");
+    const failing = createRepository({
+      ...env,
+      FILES: Object.assign(Object.create(env.FILES), {
+        delete: () => Promise.reject(new Error("R2 timeout")),
+      }),
+    });
+    await expect(
+      failing.forUser(scopeFromSession({ userId: "alice" })).artifacts.remove("a1"),
+    ).rejects.toThrow(/R2 timeout/);
+    expect((await list(alice)).map((a) => a.id)).toEqual(["a1"]);
+    expect((await get(alice, "/api/artifacts/a1", "DELETE")).status).toBe(204);
+    expect(await env.FILES.head("u/alice/files/a1")).toBeNull();
+  });
+
   it("keeps the file when its chat is deleted, with the source cleared", async () => {
     const alice = await user("alice");
     await as("alice").createConversation("gone", "Old chat");

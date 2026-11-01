@@ -22,10 +22,14 @@ export const PAGE = 100;
 export const contentUrl = (id: string, download = false) =>
   `/api/artifacts/${encodeURIComponent(id)}/content${download ? "?download=1" : ""}`;
 
-export async function listArtifacts(conversationId?: string, before?: number) {
+/** `after` is the last file already shown: the next page starts just past its time and ID. */
+export async function listArtifacts(conversationId?: string, after?: Artifact) {
   const query = new URLSearchParams();
   if (conversationId) query.set("conversationId", conversationId);
-  if (before !== undefined) query.set("before", String(before));
+  if (after) {
+    query.set("before", String(after.createdAt));
+    query.set("beforeId", after.id);
+  }
   const res = await fetch(`/api/artifacts${query.size ? `?${query}` : ""}`);
   if (!res.ok) throw new Error("load_failed");
   return ((await res.json()) as { artifacts: Artifact[] }).artifacts;

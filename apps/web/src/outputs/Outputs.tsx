@@ -142,7 +142,7 @@ export function Outputs() {
   const older = () => {
     const last = files?.at(-1);
     if (!last) return;
-    listArtifacts(chat || undefined, last.createdAt).then(
+    listArtifacts(chat || undefined, last).then(
       (rows) => {
         setFiles((have) => [...(have ?? []), ...rows]);
         setMore(rows.length === PAGE);
