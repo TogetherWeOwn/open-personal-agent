@@ -237,14 +237,53 @@ test("a request handled elsewhere says so and doesn't pretend it worked", async 
   await ask(page, s, [email()]);
   s.reply = { status: 409, json: { error: "stale" } };
   await card(page).getByRole("button", { name: "Allow", exact: true }).click();
-  await expect(card(page).getByRole("alert")).toHaveText(
-    "This request changed or was already handled. Review it again.",
-  );
+  await expect(card(page).getByRole("alert")).toHaveText("This request changed. Review it again.");
   s.reply = { status: 500, json: {} };
   await card(page).getByRole("button", { name: "Allow", exact: true }).click();
   await expect(card(page).getByRole("alert")).toHaveText(
     "That didn't reach your assistant. Try again.",
   );
+});
+
+test("an answer whose response was lost leaves a receipt that claims no answer", async ({
+  page,
+}) => {
+  const s = await stub(page);
+  await page.goto("/");
+  await ask(page, s, [email()]);
+  // The server records the decision, then the response never arrives.
+  await page.route(
+    "/api/approvals/batch_1",
+    (r) => {
+      s.batches = [];
+      return r.abort("connectionreset");
+    },
+    { times: 1 },
+  );
+  await card(page).getByRole("button", { name: "Allow", exact: true }).click();
+  // The batch left the list, but that alone doesn't say it was this answer that counted.
+  await expect(
+    page.getByText(/^No longer waiting: Send email · .*check the chat\.$/),
+  ).toBeVisible();
+  await expect(card(page)).toHaveCount(0);
+});
+
+test("already_decided on a retry is already answered, not an error", async ({ page }) => {
+  const s = await stub(page);
+  await page.goto("/");
+  await ask(page, s, [email()]);
+  // Another tab decided first: the batch has left the server's pending rows.
+  await page.route(
+    "/api/approvals/batch_1",
+    (r) => {
+      s.batches = [];
+      return r.fulfill({ status: 409, json: { error: "already_decided" } });
+    },
+    { times: 1 },
+  );
+  await card(page).getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(page.getByText(/^Already answered: Send email/)).toBeVisible();
+  await expect(card(page)).toHaveCount(0);
 });
 
 test.describe("the multi-action card (AC11)", () => {

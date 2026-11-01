@@ -86,7 +86,7 @@ function offered(items: readonly ApprovalItem[]): { scopes: Scope[]; because?: A
 
 const FAILURES = {
   not_confirmed: "Not confirmed. Nothing was done.",
-  changed: "This request changed or was already handled. Review it again.",
+  changed: "This request changed. Review it again.",
   expired: "This request expired, so I stopped it.",
   cancelled: "The task was cancelled, so nothing will run.",
   offline: "That didn't reach your assistant. Try again.",
@@ -139,7 +139,8 @@ export function ApprovalCard({
     setFailure(null);
     const result = await submitDecision(batch, decisions);
     setSending(false);
-    if (result.kind === "done") return;
+    // Answered, or no longer waiting after a lost answer: its receipt replaces the card.
+    if (result.kind === "done" || result.kind === "handled" || result.kind === "left") return;
     setFailure(FAILURES[result.kind]);
     if (result.kind !== "not_confirmed" && result.kind !== "offline") void refreshApprovals();
   };
