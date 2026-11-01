@@ -10,7 +10,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import type { PendingBatch } from "./api";
 import { plain } from "./copy";
 import { ApprovalReceipt } from "./ItemBody";
-import { refreshApprovals, useApprovals, wantFocus } from "./store";
+import { refreshApprovals, startOfToday, useApprovals, wantFocus } from "./store";
 
 const link = "font-medium text-accent underline underline-offset-2";
 const PAGE = 20;
@@ -34,8 +34,6 @@ function Origin({ batch }: { batch: PendingBatch }) {
     </p>
   );
 }
-
-const startOfToday = () => new Date().setHours(0, 0, 0, 0);
 
 export function Inbox() {
   const { status, batches, receipts, announcement } = useApprovals();

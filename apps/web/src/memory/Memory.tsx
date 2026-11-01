@@ -352,10 +352,10 @@ export function Memory() {
                     {!deleting.has(n.id) && (
                       <Button
                         variant="quiet"
-                        aria-label={`Undo: ${n.text}`}
+                        aria-label={`Forget: ${n.text}`}
                         onPress={() => hold([n.id], `Forgot ${quote(n.text)}. ${BACKUP_LINE}`)}
                       >
-                        Undo
+                        Forget
                       </Button>
                     )}
                   </li>

@@ -344,6 +344,46 @@ describe("task workflow", () => {
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
+  it("cancels the task when its approval expires undecided, with no further model call", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    let batchId = "";
+    const stepper = new FakeStepper([
+      // The wait times out past the approval's expiry with the row still pending. Past expiry
+      // is a row write, not a clock jump, so the task's own duration limit doesn't trip.
+      async () => {
+        const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+        batchId = state.turn.pending.batchId as string;
+        await env.DB.prepare("UPDATE approvals SET expires_at = ? WHERE batch_id = ?")
+          .bind(Date.now() - 1, batchId)
+          .run();
+        return null;
+      },
+    ]);
+    const { promise, streams } = await run(
+      [{ calls: [["send", { q: "x" }]] }, { text: "done" }],
+      instanceId,
+      stepper,
+      [send],
+    );
+    await promise;
+    expect(stepper.waits).toBe(1);
+    expect(send.calls).toBe(0);
+    expect(streams()).toBe(1); // the expiry ends the run before the next model call
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    // The undecided row expired with its audit row, as the reconciler's sweep writes them.
+    expect((await alice.approvals.batch(batchId))[0]).toMatchObject({
+      status: "expired",
+      reason: "expired",
+    });
+    const audit = await env.DB.prepare(
+      "SELECT result, detail FROM audit_log WHERE action = 'approval.expire' AND target_id = ?",
+    )
+      .bind(`${batchId}/appr_call_1`)
+      .first<{ result: string; detail: string }>();
+    expect(audit).toMatchObject({ result: "denied", detail: '{"reason":"expired"}' });
+  });
+
   it("never runs an approved call twice when a crash reruns its step (crypto review W3)", async () => {
     const { taskId, instanceId } = await makeTask();
     const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
@@ -440,6 +480,35 @@ describe("task workflow", () => {
     expect(stepper.waits).toBe(1);
     expect(fetch.calls).toBe(1);
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
+  });
+
+  it("stores a priced tool's cost estimate on the task's approval row (M3-07 AC6)", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    // A hook that reads its own tool, as a class-based tool's method would.
+    const priced = {
+      ...send,
+      price: 250_000,
+      estimateCost(this: { price: number }) {
+        return this.price;
+      },
+    };
+    let cost: number | null | undefined;
+    const deny = async () => {
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      const batchId = state.turn.pending.batchId as string;
+      const [row] = await alice.approvals.batch(batchId);
+      cost = row?.costMicroUsd;
+      const approvalId = row?.approvalId as string;
+      const decision = { approvalId, decision: "deny", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    const replies: Reply[] = [{ calls: [["send", { q: "y" }]] }, { text: "done" }];
+    const { promise } = await run(replies, instanceId, new FakeStepper([deny]), [priced]);
+    await promise;
+    expect(cost).toBe(250_000);
+    expect(send.calls).toBe(0);
   });
 
   it("bookkeeping that fails after the hold never repeats the model call", async () => {

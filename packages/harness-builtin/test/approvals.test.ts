@@ -65,6 +65,51 @@ describe("bindBatch", () => {
   });
 });
 
+describe("a call's cost estimate (M3-07 AC6)", () => {
+  async function asked(estimateCost: LoopTool["estimateCost"]) {
+    const send = { ...tool("send", "consequential"), ...(estimateCost ? { estimateCost } : {}) };
+    const { provider } = scripted([{ calls: [["send", { q: "a" }]] }]);
+    const h = host(provider, [send]);
+    const state = newTurn();
+    const { events } = await drain(h, state);
+    const pending = state.pending as NonNullable<TurnState["pending"]>;
+    const [row] = await bindBatch({ userId: "alice", tools: h.tools, pending, context });
+    const card = events.find((e) => e.type === "approval.requested");
+    const [item] = card?.type === "approval.requested" ? card.payload.items : [];
+    return { item, row };
+  }
+
+  it("puts the tool's estimate, rounded up, on the card and on the row", async () => {
+    const seen: unknown[] = [];
+    const { item, row } = await asked((input) => {
+      seen.push(input);
+      return 120_000.2;
+    });
+    expect(seen).toEqual([{ q: "a" }]);
+    expect(item?.costMicroUsd).toBe(120_001);
+    expect(row?.costMicroUsd).toBe(120_001);
+  });
+
+  it("leaves the cost off for a tool with no estimate, or one it can't use", async () => {
+    const bad = [
+      undefined,
+      () => undefined,
+      () => Number.NaN,
+      () => Number.POSITIVE_INFINITY,
+      () => -1,
+      () => "5" as unknown as number,
+      () => {
+        throw new Error("no price");
+      },
+    ];
+    for (const estimateCost of bad) {
+      const { item, row } = await asked(estimateCost);
+      expect(item && "costMicroUsd" in item).toBe(false);
+      expect(row?.costMicroUsd).toBeNull();
+    }
+  });
+});
+
 describe("applyStoredDecisions", () => {
   it("waits while an item is pending and unexpired", async () => {
     const { h, state, rows } = await stopped();

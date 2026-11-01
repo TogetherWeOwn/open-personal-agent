@@ -44,6 +44,20 @@ const CASES: Record<string, Case> = {
   "GET /api/exports/:id": { params: (v) => ({ id: v.export }), own: 200 },
   // The spare session: revoking the one the owner signs in with would 401 every later route.
   "DELETE /api/sessions/:id": { params: (v) => ({ id: v.spareSession }), own: 200 },
+  // Another user's passkey is a 404 that changes nothing of theirs (the denied rename is the
+  // attacker's own audit row).
+  "PATCH /api/passkeys/:id": {
+    params: (v) => ({ id: v.passkey }),
+    body: () => ({ name: "renamed by isolation" }),
+    own: 200,
+  },
+  // Removal needs the account step-up, which the harness never performs: owner and attacker
+  // alike get the step-up's answer, as with the approval decision above.
+  "DELETE /api/passkeys/:id": {
+    params: (v) => ({ id: v.passkey }),
+    status: 403,
+    own: 403,
+  },
   "PUT /api/settings/providers/:id": {
     params: (v) => ({ id: v.provider }),
     body: () => ({ providerId: "openai", baseUrl: BASE_URL, model: "gpt-4o-mini" }),

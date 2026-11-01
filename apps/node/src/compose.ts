@@ -7,7 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { createApp } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
-import { reconcile, reconcilerParts } from "@opa/server/reconciler";
+import { reconcile, reconcilerParts, recordDatabase } from "@opa/server/reconciler";
 import { Hono } from "hono";
 import { NodeAssistant, nodeRoutes } from "./assistant";
 import { localBlobStore } from "./blobs";
@@ -151,10 +151,12 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       return nodeApp.fetch(forwarded, Object.assign(bindings ?? {}, await env));
     },
     // The Worker's reconciler without the parts that need its bindings: the owner's assistant
-    // and the export Workflow.
+    // and the export Workflow. The D1 size reading, which the Worker takes before the warning,
+    // runs on its own.
     scheduled: async () => {
       const { rotation, retention, approvals } = reconcilerParts;
-      await Promise.all(reconcile(env, Date.now(), { rotation, retention, approvals }));
+      const parts = { rotation, database: recordDatabase, retention, approvals };
+      await Promise.all(reconcile(env, Date.now(), parts));
     },
     db,
     assistantFor,

@@ -186,7 +186,15 @@ describe("R2 keys, DO names and Workflow ids (AC2)", () => {
           const res = await as(b, method, url, { body: BODIES[route]?.(b) });
           const text = await res.text();
           // The tool route takes a name, not an ID: setting B's own override is fine (200).
-          const allowed = route === "PUT /api/settings/tools/:name" ? [200, 400, 404] : [400, 404];
+          // Removing a passkey needs the account step-up the harness never performs, so the
+          // guard answers 403 before any lookup: still nothing of A's, as the snapshot and
+          // recorder assertions below hold (M3-19 AC2).
+          const allowed =
+            route === "PUT /api/settings/tools/:name"
+              ? [200, 400, 404]
+              : route === "DELETE /api/passkeys/:id"
+                ? [400, 403, 404]
+                : [400, 404];
           expect([route, id, allowed.includes(res.status)]).toEqual([route, id, true]);
           expect([route, id, leaked(a, text)]).toEqual([route, id, []]);
         }

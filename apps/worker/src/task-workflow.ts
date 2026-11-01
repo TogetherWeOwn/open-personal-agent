@@ -303,7 +303,9 @@ async function driveLoop(
   for (const tool of taskTools) {
     registry.register({
       manifest: tool.manifest,
-      ...(tool.target ? { target: tool.target } : {}),
+      // Called through the tool, not copied off it: a class's hook keeps its `this`.
+      ...(tool.target ? { target: (input) => tool.target?.(input) } : {}),
+      ...(tool.estimateCost ? { estimateCost: (input) => tool.estimateCost?.(input) } : {}),
       // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
       ...(tool.author ? { author: tool.author } : {}),
       execute: async (input, _signal, call) => {
@@ -387,6 +389,25 @@ async function driveLoop(
         if (!rewaited) throw new TaskCancelledError(taskId);
         await waitForDecision(ctx, cycle, turn, now);
         continue;
+      }
+      // The wait ended with an item expired and still undecided (M3-07 AC1): the Workflow wakes
+      // at the expiry, so this lands here rather than in the reconciler. The undecided rows
+      // expire with their audit rows and the task cancels — the same end as the reconciler's
+      // sweep and the compromise-signal path — instead of carrying on without the call.
+      // Decided here from the recorded rows and read time, so a replay takes the same branch.
+      const undecided = turn.pending?.items.filter((item) => !item.decision) ?? [];
+      if (undecided.length > 0) {
+        await ctx.step(`task:expire:${cycle}`, async () => {
+          for (const item of undecided) {
+            await user.approvals.finish(batchId, `appr_${item.toolCallId}`, {
+              status: "expired",
+              reason: "expired",
+            });
+          }
+          await user.tasks.cancel(taskId);
+          return null;
+        });
+        throw new TaskCancelledError(taskId);
       }
       host.approvals = {
         // Each a step, so a replay returns what happened instead of claiming again.
@@ -477,7 +498,7 @@ async function driveLoop(
 /**
  * Waits for the approvals route's wake-up, then loops: the next load reads what was decided
  * from D1, never this event's payload (M3-12 AC3). A timeout just wakes the loop, which expires
- * the batch itself.
+ * the undecided batch itself and cancels the task (M3-07 AC1).
  */
 async function waitForDecision(
   ctx: TaskContext,

@@ -280,6 +280,7 @@ export const approvals = sqliteTable(
     stepUp: integer("step_up", { mode: "boolean" }).notNull(),
     scopes: text("scopes").notNull(), // JSON: the scopes the card may offer
     taint: text("taint"), // JSON: what tainted the context first, if anything did
+    costMicroUsd: integer("cost_micro_usd"), // what the call itself would spend, if it spends any
     canonical: text("canonical").notNull(),
     bindingHash: text("binding_hash").notNull(),
     status: text("status", {
@@ -349,12 +350,13 @@ export const attachments = sqliteTable(
 /**
  * The allowance meters the ledger keeps beyond model calls (M3-16 AC3), summed per UTC day:
  * `workflow_steps` counts each `step.do` a task runs, and `do_ms` adds each chat turn's
- * wall-clock, from which the Durable Object duration is estimated. Deployment-wide, no user.
+ * wall-clock, from which the Durable Object duration is estimated. `d1_bytes` is not a sum but
+ * the database's size at the reconciler's latest tick that day (M3-18 AC2). Deployment-wide.
  */
 export const meters = sqliteTable(
   "meters",
   {
-    meter: text("meter", { enum: ["workflow_steps", "do_ms"] }).notNull(),
+    meter: text("meter", { enum: ["workflow_steps", "do_ms", "d1_bytes"] }).notNull(),
     day: integer("day").notNull(),
     amount: integer("amount").notNull().default(0),
   },

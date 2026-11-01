@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "adb46ae8-6ad1-41d3-acc6-cdeeea759b2e",
+  "id": "a8cdb042-f1fd-457c-9054-86ef753b4c3f",
   "prevId": "81080ed9-570e-4717-bbaf-65560d373f3c",
   "tables": {
     "approvals": {
@@ -108,6 +108,13 @@
         "taint": {
           "name": "taint",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cost_micro_usd": {
+          "name": "cost_micro_usd",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -2533,14 +2540,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": true
-        },
-        "show_work": {
-          "name": "show_work",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'collapsed'"
         },
         "updated_at": {
           "name": "updated_at",

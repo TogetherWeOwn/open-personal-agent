@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-// The `*/10` reconciler (M3-18 AC2): approval expiry in D1 without waking a Durable Object, and
-// one tick that runs every part, where one part failing doesn't stop the others.
+// The `*/10` reconciler (M3-18 AC2): approval expiry in D1 without waking a Durable Object, the
+// D1 size reading the allowance meters show, and one tick that runs every part, where one part
+// failing doesn't stop the others.
+import { createRepository } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
-import { expireApprovals, reconcile, reconcilerParts } from "@opa/server/reconciler";
+import { allowanceMeters } from "@opa/server/allowances";
+import {
+  expireApprovals,
+  reconcile,
+  reconcilerParts,
+  recordDatabase,
+} from "@opa/server/reconciler";
 import { describe, expect, it } from "vitest";
-import { count, db, env, freshDatabase } from "./helpers/app";
+import { claim, count, db, env, freshDatabase } from "./helpers/app";
 
 freshDatabase();
 
@@ -154,6 +162,91 @@ describe("approval expiry", () => {
   });
 });
 
+describe("the D1 size reading", () => {
+  const DAY = 86_400_000;
+  const readings = () =>
+    db
+      .prepare("SELECT day, amount FROM meters WHERE meter = 'd1_bytes' ORDER BY day")
+      .all<{ day: number; amount: number }>()
+      .then((r) => r.results);
+  /** The test database, with the size probe's statement (`SELECT 1`) replaced. */
+  const probe = (replace: (statement: D1PreparedStatement) => object): D1Database =>
+    Object.assign(Object.create(env.DB), {
+      prepare: (sql: string) =>
+        sql === "SELECT 1" ? replace(env.DB.prepare(sql)) : env.DB.prepare(sql),
+      batch: env.DB.batch.bind(env.DB),
+    });
+  const d1Meters = async (now: number) =>
+    (await allowanceMeters(env, now))
+      .filter((m) => m.id.startsWith("d1_"))
+      .map((m) => [m.id, m.used]);
+
+  it("records the size each tick, one row a UTC day set to the latest, and the D1 meters show it", async () => {
+    const live = await createRepository(env).deployment.databaseBytes();
+    // Before the first tick the meters read the database live.
+    expect(await d1Meters(NOW)).toEqual([
+      ["d1_cap", live],
+      ["d1_storage", live],
+    ]);
+
+    await Promise.all(reconcile(env, NOW, { database: recordDatabase }));
+    const today = NOW - (NOW % DAY);
+    expect(await readings()).toEqual([{ day: today, amount: live }]);
+
+    // A later tick the same day replaces the reading rather than adding to it.
+    const { deployment } = createRepository(env);
+    await deployment.setMeter("d1_bytes", 1_234, NOW + 1);
+    await deployment.setMeter("d1_bytes", 5_678, NOW + 2);
+    await deployment.setMeter("d1_bytes", 42, NOW - DAY); // yesterday's stays yesterday's
+    expect(await readings()).toEqual([
+      { day: today - DAY, amount: 42 },
+      { day: today, amount: 5_678 },
+    ]);
+    // Usage and the warning read the latest recorded figure, not a live one.
+    expect(await d1Meters(NOW)).toEqual([
+      ["d1_cap", 5_678],
+      ["d1_storage", 5_678],
+    ]);
+  });
+
+  it("warns on the reading taken in the same tick, not the last one", async () => {
+    const { browser } = await claim();
+    // The last tick read past 70% of both D1 meters; this one reads the real, small database.
+    await createRepository(env).deployment.setMeter("d1_bytes", 7_500_000_000, NOW);
+    // A slow probe: were the warning not to wait for it, it would read the last tick's size.
+    const DB = probe((statement) => ({
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return statement.run();
+      },
+    }));
+    await Promise.all(reconcile({ ...env, DB }, NOW));
+    const live = await createRepository(env).deployment.databaseBytes();
+    expect(await readings()).toEqual([{ day: NOW - (NOW % DAY), amount: live }]);
+    const { allowanceWarnings } = await (await browser.req("/api/settings/spending")).json<{
+      allowanceWarnings: { id: string }[];
+    }>();
+    expect(allowanceWarnings.filter((w) => w.id.startsWith("d1_"))).toEqual([]);
+  });
+
+  it("still warns, on the last recorded size, when the reading fails", async () => {
+    const { browser } = await claim();
+    await createRepository(env).deployment.setMeter("d1_bytes", 7_500_000_000, NOW);
+    const DB = probe(() => {
+      throw new Error("probe down");
+    });
+    await Promise.all(reconcile({ ...env, DB }, NOW, { allowances: reconcilerParts.allowances }));
+    expect(await readings()).toEqual([{ day: NOW - (NOW % DAY), amount: 7_500_000_000 }]);
+    const { allowanceWarnings } = await (await browser.req("/api/settings/spending")).json<{
+      allowanceWarnings: { id: string }[];
+    }>();
+    expect(allowanceWarnings.filter((w) => w.id.startsWith("d1_"))).toEqual([
+      { id: "d1_cap", percent: 75 },
+      { id: "d1_storage", percent: 150 },
+    ]);
+  });
+});
+
 describe("one reconciler tick", () => {
   /** What each part leaves behind, so a test can tell which ran. */
   async function dueWork() {
@@ -170,9 +263,10 @@ describe("one reconciler tick", () => {
     approvals: (await statuses())["appr_turn-due"],
     exports: await db.prepare("SELECT status FROM exports WHERE id = 'e1'").first("status"),
     retention: await count("audit_log", "action = 'retention.sweep' AND user_id IS NULL"),
+    database: await count("meters", "meter = 'd1_bytes'"),
   });
 
-  it("runs rotation, the allowance warning, the export sweep, retention and approval expiry", async () => {
+  it("runs rotation, the D1 size reading and allowance warning, the export sweep, retention and approval expiry", async () => {
     expect(Object.keys(reconcilerParts).sort()).toEqual([
       "allowances",
       "approvals",
@@ -182,7 +276,12 @@ describe("one reconciler tick", () => {
     ]);
     await dueWork();
     await Promise.all(reconcile(env, NOW));
-    expect(await ran()).toEqual({ approvals: "expired", exports: "expired", retention: 1 });
+    expect(await ran()).toEqual({
+      approvals: "expired",
+      exports: "expired",
+      retention: 1,
+      database: 1,
+    });
   });
 
   it("runs the other parts when one throws or rejects", async () => {
@@ -193,12 +292,17 @@ describe("one reconciler tick", () => {
         rotation: async () => {
           throw new Error("vault down");
         },
-        allowances: () => Promise.reject(new TypeError("no owner")),
+        retention: () => Promise.reject(new TypeError("no bucket")),
       }),
     );
     // Each part logs its own failure: none rejects the tick's `waitUntil`.
     expect(settled.every((s) => s.status === "fulfilled")).toBe(true);
-    expect(await ran()).toEqual({ approvals: "expired", exports: "expired", retention: 1 });
+    expect(await ran()).toEqual({
+      approvals: "expired",
+      exports: "expired",
+      retention: 0,
+      database: 1,
+    });
   });
 
   it("logs every part's failure when the environment can't be composed", async () => {

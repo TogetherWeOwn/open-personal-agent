@@ -67,8 +67,8 @@ export function Recover() {
         notice={
           <p>
             You're back in with a new passkey.{" "}
-            <strong>Your other passkeys and your old recovery codes no longer work</strong>, and
-            every other session was signed out.
+            <strong>Your other passkeys and your old recovery codes no longer work</strong>, every
+            other session was signed out, and anything waiting on your approval was cancelled.
           </p>
         }
       />

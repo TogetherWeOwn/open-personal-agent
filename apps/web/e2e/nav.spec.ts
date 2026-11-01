@@ -42,11 +42,16 @@ const PAGES: [path: string, heading: string, url?: RegExp][] = [
   ["/memory/waiting", "Waiting for you"],
   ["/settings", "Settings"],
   // Models already shipped with a real screen, so the table serves it, not a placeholder.
+  // M3-19 ships the Computer and Apps & tools screens the same way.
   ["/settings/models", "Settings"],
   ["/settings/agent-engine", "Settings"],
-  ["/settings/computer", "Computer"],
+  ["/settings/computer", "Settings"],
+  ["/settings/apps", "Settings"],
+  ["/settings/memory", "Settings"],
+  // M3-19 composes the Privacy & security screen (passkeys, sessions) with M3-20's export card.
   // Spending shipped with M3-17; Usage keeps its own address and Spending links to it.
   ["/settings/spending", "Settings"],
+  ["/settings/privacy", "Settings"],
   ["/usage", "Usage"],
   ["/nope", "This page doesn't exist"],
   ["/settings/nope", "This page doesn't exist"],
