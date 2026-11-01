@@ -6,6 +6,7 @@ import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
 import { Memory } from "./memory/Memory";
 import { Waiting } from "./memory/Waiting";
+import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { EmptyState, Page } from "./ui";
@@ -144,24 +145,8 @@ export const routes: Route[] = [
       go("/activity/tasks", "See all tasks"),
     ),
   },
-  {
-    path: "/activity/outputs",
-    nav: "activity",
-    screen: placeholder(
-      "Outputs",
-      "Files I make for you show up here, like summaries and reports.",
-    ),
-  },
-  {
-    path: "/activity/outputs/:outputId",
-    nav: "activity",
-    screen: placeholder(
-      "Output",
-      "This file doesn't exist or was deleted.",
-      undefined,
-      go("/activity/outputs", "All files"),
-    ),
-  },
+  { path: "/activity/outputs", nav: "activity", screen: Outputs },
+  { path: "/activity/outputs/:outputId", nav: "activity", screen: Output },
   {
     path: "/activity/log",
     nav: "activity",

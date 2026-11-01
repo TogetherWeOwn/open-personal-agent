@@ -191,11 +191,12 @@ memoryRoutes.post("/delete", async (c) => {
   });
 });
 
-/** Earlier versions of a note, newest first. */
+/** Earlier versions of a note, newest first; 404 unless it is the user's current note. */
 memoryRoutes.get("/:id/versions", async (c) => {
   const id = c.req.param("id");
   if (!isId(id)) return c.json({ error: "not_found" }, 404);
   const user = userOf(c);
+  if (!(await user.memory.get(id))) return c.json({ error: "not_found" }, 404);
   const titles = await titlesOf(user);
   return c.json({ versions: (await user.memory.versions(id)).map((m) => view(m, titles)) });
 });
