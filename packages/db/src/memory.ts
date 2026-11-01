@@ -392,9 +392,12 @@ export function memoryService(db: Db, userId: string) {
       const empty: RecallResult = { memories: [], tainted: false, tokens: 0 };
       const query = ftsQuery(text);
       if (!query) return empty;
+      // An explicit zero limit asks for nothing: return before touching the index.
+      if (opts?.limit === 0) return empty;
       const budget = opts?.budget ?? DEFAULT_RECALL_BUDGET_TOKENS;
+      // Other limits keep the minimum-one clamp, matching `search`.
       const limit = Math.min(
-        Math.max(Math.trunc(opts?.limit ?? RECALL_MAX_MEMORIES) || 0, 0),
+        Math.max(Math.trunc(opts?.limit ?? RECALL_MAX_MEMORIES) || 1, 1),
         RECALL_MAX_MEMORIES,
       );
       const ids = await db.all<{ id: string }>(sql`
