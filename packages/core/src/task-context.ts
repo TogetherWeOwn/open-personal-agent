@@ -78,8 +78,11 @@ export interface TaskBudget {
   release(key: string): Promise<void>;
   /** Settles the task's budget at its end, returning what the task spent. */
   end(): Promise<number>;
-  /** Counts a tool call against the user's 60 a minute (COST-2); `false`: the tool must not run. */
-  allowToolCall(): Promise<boolean>;
+  /**
+   * Counts a tool call against the user's 60 a minute (COST-2); `false`: the tool must not run.
+   * `key` is the call's idempotency key, so a retried step isn't counted twice.
+   */
+  allowToolCall(key: string): Promise<boolean>;
 }
 
 /**

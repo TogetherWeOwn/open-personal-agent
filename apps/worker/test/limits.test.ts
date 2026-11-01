@@ -174,6 +174,17 @@ describe("tool call rate (COST-2)", () => {
   });
 });
 
+describe("tool call rate, retries", () => {
+  it("counts a call that names itself once, however often its step retries", () => {
+    const { limits: l } = limits();
+    for (let i = 0; i < 4; i++) expect(l.toolCall("inst:tool:1")).toBe(true);
+    for (let i = 1; i < TOOL_CALLS_PER_MINUTE; i++)
+      expect(l.toolCall(`inst:tool:${i + 1}`)).toBe(true);
+    expect(l.toolCall("inst:tool:61")).toBe(false);
+    expect(l.toolCall("inst:tool:1")).toBe(true); // a retry of a counted call still runs
+  });
+});
+
 describe("Spending settings (M3-17 AC5)", () => {
   it("defaults to $0.50 a task, $5 a day, $20 a month and no hard cap", () => {
     const { limits: l } = limits();
@@ -209,6 +220,8 @@ describe("Spending settings (M3-17 AC5)", () => {
       { dailyCapMicroUsd: null },
       { dailyCapMicroUsd: "5000000" },
       { other: 1 },
+      { toString: 50_000 },
+      { constructor: 50_000 },
       [],
       null,
     ]) {
@@ -248,6 +261,35 @@ describe("task budgets (COST-3, A-Co2)", () => {
     l.settle("again", PROVIDER, MODEL, USAGE);
     expect(l.endTask("task1")).toBe(spentBefore + 1000 * 2 + 500 * 8);
     expect(l.task("task1")).toBeNull();
+  });
+
+  it("refuses a task's call when the task has no budget (never started, or ended)", () => {
+    const { limits: l } = limits();
+    expect(l.reserveFor("k", PROVIDER, MODEL, 2000, 0, { taskId: "unknown" })).toMatchObject({
+      limit: "task_budget",
+    });
+    l.startTask("t");
+    l.endTask("t");
+    expect(l.reserveFor("k", PROVIDER, MODEL, 2000, 0, { taskId: "t" })).toMatchObject({
+      limit: "task_budget",
+    });
+    expect(l.reserve("chat", PROVIDER, MODEL, 2000)).not.toBeNull(); // chat has no task
+  });
+
+  it("ends with what the task spent, counting a call still held at its full reservation", () => {
+    const { limits: l } = limits();
+    l.startTask("t");
+    const r = l.reserveFor("k", PROVIDER, MODEL, 2000, 0, { taskId: "t" });
+    expect(l.endTask("t")).toBe("reservedMicroUsd" in r ? r.reservedMicroUsd : -1);
+  });
+
+  it("undoes a raise whose Continue couldn't wake the task, so Continue can try again", () => {
+    const { limits: l } = limits();
+    l.startTask("t", 100_000);
+    expect(l.raiseTask("t")).toBe(true);
+    l.unraiseTask("t");
+    expect(l.task("t")).toMatchObject({ budgetMicroUsd: 100_000, raised: false });
+    expect(l.raiseTask("t")).toBe(true);
   });
 
   it("uses the default budget, and a replayed start keeps what the task spent", () => {
