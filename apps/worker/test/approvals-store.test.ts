@@ -342,6 +342,35 @@ describe("the approvals store", () => {
     expect(nonces).toBe(0);
     expect(await audits("approval.expire_all")).toBe(1);
   });
+
+  it("keeps when the user approved on a signal, and still cancels the task waiting on it", async () => {
+    await db
+      .prepare(
+        "INSERT INTO tasks (id, user_id, conversation_id, kind, mode, status) VALUES ('t1', 'alice', 'c1', 'chat', 'background', 'waiting_for_approval')",
+      )
+      .run();
+    await alice.approvals.create([
+      item("appr_t", 0, { batchId: "batch_t", turnId: null, taskId: "t1" }),
+    ]);
+    const approvedAt = Date.now() - 60_000;
+    const approve = {
+      approvalId: "appr_t",
+      decision: "approve",
+      scope: "once",
+      detail: {},
+    } as const;
+    await alice.approvals.decide("batch_t", [approve], approvedAt);
+    await systemStore(env).sessions.revokeAll("alice", Date.now());
+    expect(await status("appr_t", "batch_t")).toBe("expired");
+    const [row] = await alice.approvals.decided(0);
+    expect([row?.row.approvalId, row?.row.scope, row?.row.decidedAt]).toEqual([
+      "appr_t",
+      "once",
+      approvedAt,
+    ]);
+    const task = await db.prepare("SELECT status FROM tasks WHERE id = 't1'").first("status");
+    expect(task).toBe("cancelled");
+  });
 });
 
 const count = (table: string) =>

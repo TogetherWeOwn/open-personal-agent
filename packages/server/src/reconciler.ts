@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // The `*/10` reconciler (ADR 0003 #4, M3-18 AC2): a pending key rotation (crypto review C-1), the
-// 70% allowance warnings (COST-5), the export expiry sweep (M3-20 AC1), retention (M3-18) and
-// approval expiry (M3-07 AC1). Every part runs on its own and logs its own failure, so one never
-// stops the others; the next tick tries again. None but the allowance warning wakes a Durable
-// Object, and that one only the owner's.
+// D1 size reading (M3-18 AC2) and the 70% allowance warnings (COST-5), the export expiry sweep
+// (M3-20 AC1), retention (M3-18) and approval expiry (M3-07 AC1). Every part runs on its own and
+// logs its own failure, so one never stops the others; the next tick tries again. None but the
+// allowance warning wakes a Durable Object, and that one only the owner's.
 import { sweepExports } from "@opa/db/export";
 import { systemStore } from "@opa/db/system";
 import { log } from "@opa/log";
-import { reconcileAllowances } from "./allowances";
+import { reconcileAllowances, recordDatabaseBytes } from "./allowances";
 import type { Env } from "./env";
 import { runRetention } from "./retention";
 import { runRotation } from "./vault-rotation";
@@ -20,9 +20,19 @@ export async function expireApprovals(env: Pick<Env, "DB">, now = Date.now()) {
   if (count) log.info("approvals.expire", { count });
 }
 
+/** D1's size as today's `d1_bytes` reading; Node, with no allowance warning, runs it alone. */
+export const recordDatabase: ReconcilerPart = (env, now) => recordDatabaseBytes(env, now);
+
 export const reconcilerParts = {
   rotation: (env) => runRotation(env),
-  allowances: (env, now) => reconcileAllowances(env, now),
+  // The reading first, so the warning reads this tick's size rather than the last one. A failed
+  // reading is logged and the warning still goes out, on the last recorded size.
+  allowances: async (env, now) => {
+    await recordDatabase(env, now).catch((error: unknown) =>
+      log.error("reconcile.database", { errorName: (error as Error)?.name ?? "error" }),
+    );
+    await reconcileAllowances(env, now);
+  },
   exports: (env, now) => sweepExports(env, () => now),
   retention: (env, now) => runRetention(env, now),
   approvals: (env, now) => expireApprovals(env, now),

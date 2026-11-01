@@ -3,14 +3,14 @@
 // the session guard and the exact-Origin check like every write, and never a WebSocket frame. The
 // route loads the batch from D1, checks it is the session user's and, for a task, that the task
 // isn't cancelled, before it records anything or wakes the run that waits on it. `GET` lists what
-// still waits for the user, for the Inbox and its badge (AC8).
+// still waits for the user, for the Inbox and its badge (AC8), and what they decided, for receipts.
 //
 // A batch with an irreversible item needs a passkey assertion over a challenge derived from the
 // exact decision set and a fresh server nonce (crypto review W1-W5): `POST .../options` issues
 // it and the decision POST consumes it. Nothing else counts: not the account step-up window,
 // not a fresh login, not an assertion for another batch or another ceremony kind (D1). And an
 // approval assertion never opens the account window either (D2).
-import type { ApprovalItem } from "@opa/core";
+import type { ApprovalDecision, ApprovalItem } from "@opa/core";
 import { type ApprovalRow, createRepository, isBatchId } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import {
@@ -202,7 +202,46 @@ function itemOf(row: ApprovalRow): ApprovalItem {
     ...(row.taint ? { taint: taintOf(row.taint) } : {}),
     scopes: scopesOf(row),
     expiresAt: row.expiresAt,
+    ...(row.costMicroUsd === null ? {} : { costMicroUsd: row.costMicroUsd }),
   };
+}
+
+/** A batch the user decided, as `GET /api/approvals?status=decided` lists it. */
+export type DecidedBatch = PendingBatch & { decidedAt: number; decisions: ApprovalDecision[] };
+
+/**
+ * Rows, a batch's together in their stored order, as the batches the list returns. A decided
+ * batch also carries what the user answered: the row's `scope` is set exactly when they approved.
+ */
+function batchesOf(rows: readonly { row: ApprovalRow; conversationTitle: string | null }[]) {
+  const batches = new Map<string, PendingBatch & Partial<DecidedBatch>>();
+  for (const { row, conversationTitle } of rows) {
+    let batch = batches.get(row.batchId);
+    if (!batch) {
+      batch = {
+        batchId: row.batchId,
+        conversationId: row.conversationId,
+        conversationTitle,
+        taskId: row.taskId,
+        createdAt: row.createdAt,
+        expiresAt: row.expiresAt,
+        items: [],
+      };
+      batches.set(row.batchId, batch);
+    }
+    batch.expiresAt = Math.min(batch.expiresAt, row.expiresAt);
+    batch.items.push(itemOf(row));
+    if (row.decidedAt !== null) {
+      batch.decidedAt = Math.max(batch.decidedAt ?? 0, row.decidedAt);
+      batch.decisions = batch.decisions ?? [];
+      batch.decisions.push(
+        row.scope
+          ? { approvalId: row.approvalId, decision: "approve", scope: row.scope }
+          : { approvalId: row.approvalId, decision: "deny", scope: "once" },
+      );
+    }
+  }
+  return [...batches.values()];
 }
 
 export function approvalRoutes(forward: ApprovalForward) {
@@ -215,31 +254,24 @@ export function approvalRoutes(forward: ApprovalForward) {
   /**
    * What the Inbox and its badge read (AC8): every batch still waiting for the user, across
    * conversations and tasks, each item as its card shows it. Read from D1, never from events.
+   * `status=decided&since=<ms>` lists what the user answered since then, with their decisions,
+   * so a receipt outlives a reload (the Inbox's "Done today").
    */
   routes.get("/", async (c) => {
-    if ((c.req.query("status") ?? "pending") !== "pending") {
+    const status = c.req.query("status") ?? "pending";
+    if (status !== "pending" && status !== "decided") {
       return c.json({ error: "invalid_status" }, 400);
     }
     const user = createRepository(c.env).forUser(c.var.session.scope);
-    const batches = new Map<string, PendingBatch>();
-    for (const { row, conversationTitle } of await user.approvals.pending(Date.now())) {
-      let batch = batches.get(row.batchId);
-      if (!batch) {
-        batch = {
-          batchId: row.batchId,
-          conversationId: row.conversationId,
-          conversationTitle,
-          taskId: row.taskId,
-          createdAt: row.createdAt,
-          expiresAt: row.expiresAt,
-          items: [],
-        };
-        batches.set(row.batchId, batch);
+    if (status === "decided") {
+      const raw = c.req.query("since") ?? "";
+      const since = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(since)) {
+        return c.json({ error: "invalid_since" }, 400);
       }
-      batch.expiresAt = Math.min(batch.expiresAt, row.expiresAt);
-      batch.items.push(itemOf(row));
+      return c.json({ batches: batchesOf(await user.approvals.decided(since)) });
     }
-    return c.json({ batches: [...batches.values()] });
+    return c.json({ batches: batchesOf(await user.approvals.pending(Date.now())) });
   });
 
   /**

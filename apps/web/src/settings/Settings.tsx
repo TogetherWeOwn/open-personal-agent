@@ -1,22 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings (m3-ux §3.9): one screen, a page per axis. M3-06b ships Models and the read-only
-// Agent engine page, M3-15 the Memory page, M3-17 Spending, TWO-674 Privacy & security; the
-// other axes arrive with their own cards. The tabs keep the order of the settings list in routes.tsx.
+// Agent engine page, M3-15 the Memory page, M3-17 Spending, M3-19 the Computer and Apps &
+// tools pages, TWO-674 Privacy & security; the other axes arrive with their own cards. The
+// tabs keep the order of the settings list in routes.tsx.
 import { useEffect, useRef } from "react";
 import { Heading, Link } from "react-aria-components";
 import { hasNavigated } from "../router";
 import { pageTitle } from "../ui";
 import { AgentEngine } from "./AgentEngine";
+import { AppsTools } from "./AppsTools";
+import { Computer } from "./Computer";
 import { MemorySettings } from "./MemorySettings";
 import { ModelsSettings } from "./ModelsSettings";
+import { PrivacySecurity } from "./PrivacySecurity";
 import { PrivacySettings } from "./PrivacySettings";
 import { SpendingSettings } from "./Spending";
 
-export type SettingsPage = "models" | "agent-engine" | "memory" | "privacy" | "spending";
+export type SettingsPage =
+  | "models"
+  | "agent-engine"
+  | "computer"
+  | "apps"
+  | "memory"
+  | "privacy"
+  | "spending";
 
 const PAGES: { id: SettingsPage; label: string; href: string }[] = [
   { id: "models", label: "Models", href: "/settings/models" },
   { id: "agent-engine", label: "Agent engine", href: "/settings/agent-engine" },
+  { id: "computer", label: "Computer", href: "/settings/computer" },
+  { id: "apps", label: "Apps & tools", href: "/settings/apps" },
   { id: "memory", label: "Memory", href: "/settings/memory" },
   { id: "spending", label: "Spending", href: "/settings/spending" },
   { id: "privacy", label: "Privacy & security", href: "/settings/privacy" },
@@ -61,14 +74,21 @@ export function Settings({ page }: { page: SettingsPage }) {
       </nav>
       {page === "models" ? (
         <ModelsSettings />
+      ) : page === "agent-engine" ? (
+        <AgentEngine />
+      ) : page === "computer" ? (
+        <Computer />
+      ) : page === "apps" ? (
+        <AppsTools />
       ) : page === "memory" ? (
         <MemorySettings />
       ) : page === "privacy" ? (
-        <PrivacySettings />
-      ) : page === "spending" ? (
-        <SpendingSettings />
+        <>
+          <PrivacySecurity />
+          <PrivacySettings />
+        </>
       ) : (
-        <AgentEngine />
+        <SpendingSettings />
       )}
     </main>
   );

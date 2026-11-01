@@ -11,7 +11,13 @@ import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helper
 freshDatabase();
 
 type Options = { options: { challenge: string; allowCredentials?: { id: string }[] } };
-type Tool = { name: string; riskClass: string; override: string | null; locked: boolean };
+type Tool = {
+  name: string;
+  riskClass: string;
+  override: string | null;
+  default: string;
+  locked: boolean;
+};
 
 const tool = (name: string, riskClass: ToolManifest["riskClass"]) => ({
   manifest: {
@@ -60,6 +66,7 @@ describe("tool overrides", () => {
           name: "probe_send",
           riskClass: "consequential",
           override: null,
+          default: "ask",
           locked: false,
         }),
         expect.objectContaining({ name: "probe_delete", override: null, locked: true }),

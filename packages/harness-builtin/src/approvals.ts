@@ -29,6 +29,7 @@ export type BoundApproval = {
   stepUp: boolean;
   scopes: string;
   taint: string | null;
+  costMicroUsd: number | null;
   canonical: string;
   bindingHash: string;
   expiresAt: number;
@@ -87,6 +88,7 @@ export async function bindBatch(input: {
         stepUp: item.stepUp,
         scopes: JSON.stringify(item.scopes),
         taint: item.taint ? JSON.stringify(item.taint) : null,
+        costMicroUsd: item.costMicroUsd ?? null,
         canonical,
         bindingHash,
         expiresAt: item.expiresAt,

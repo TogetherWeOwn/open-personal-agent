@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Memory screen's routes and Settings › Memory (M3-15): notes, edits, deletes, proposals, export.
+import { registerMemoryTools } from "@opa/db/memory-tools";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
+import type { LoopTool } from "@opa/harness-builtin";
+import { ToolRegistry } from "@opa/policy";
 import { describe, expect, it } from "vitest";
 import { workerApp } from "../src/worker-app";
 import {
@@ -222,6 +225,27 @@ describe("memory settings", () => {
       body: { learnFromChats: "no" },
     });
     expect(bad.status).toBe(400);
+  });
+
+  it("takes remember from the turn's tools while Learn from our chats is off", async () => {
+    const { browser, owner } = await claim();
+    // What a host registers for the user's turn, read afresh as each turn starts.
+    const turnTools = async () => {
+      const tools = new ToolRegistry<LoopTool>();
+      await registerMemoryTools(
+        tools,
+        createRepository(env).forUser(scopeFromSession({ userId: owner })),
+        () => ({ tainted: false, userAsserted: true, source: { source: "chat" } }),
+      );
+      return tools.manifests().map((m) => m.name);
+    };
+    const learn = (learnFromChats: boolean) =>
+      browser.req("/api/settings/memory", { method: "PUT", body: { learnFromChats } });
+    expect(await turnTools()).toEqual(["remember", "recall", "forget"]);
+    await learn(false);
+    expect(await turnTools()).toEqual(["recall", "forget"]);
+    await learn(true);
+    expect(await turnTools()).toEqual(["remember", "recall", "forget"]);
   });
 });
 

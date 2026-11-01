@@ -2,7 +2,8 @@
 // Cloudflare allowance meters and the reconciler's 70% warning (M3-17 AC4, COST-5). Each meter
 // comes from a source the app has, since it holds no Cloudflare API token (M3-16 AC3): D1's own
 // size, the sum of the stored files' sizes, and the ledger's Workers AI neurons, task steps and
-// chat-turn wall-clock. The Usage page reads the same list, so it and the banners agree.
+// chat-turn wall-clock. D1's size is the one the reconciler records each tick. The Usage page
+// reads the same list, so it and the banners agree.
 import { createRepository, type DataBindings } from "@opa/db/repository";
 import { log } from "@opa/log";
 import { cloudflareAllowances, workersAiAllowance } from "@opa/pricing";
@@ -48,7 +49,8 @@ export async function allowanceMeters(env: Bindings, now = Date.now()): Promise<
   const d = new Date(now);
   const month = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); // Cloudflare bills UTC months
   const [d1, files, neurons, steps, turnMs] = await Promise.all([
-    deployment.databaseBytes(),
+    // The reconciler's latest reading, so Usage and the warning agree; live before its first tick.
+    deployment.latestMeter("d1_bytes").then((bytes) => bytes ?? deployment.databaseBytes()),
     deployment.fileBytes(),
     deployment.workersAiNeurons(now - (now % DAY)), // UTC days, as Cloudflare counts them
     deployment.meterTotal("workflow_steps", month),
@@ -80,6 +82,12 @@ export async function allowanceMeters(env: Bindings, now = Date.now()): Promise<
       unit: "gb_seconds",
     },
   ];
+}
+
+/** The reconciler's step (M3-18 AC2): records D1's size as today's `d1_bytes` reading. */
+export async function recordDatabaseBytes(env: Bindings, now = Date.now()): Promise<void> {
+  const { deployment } = createRepository(env);
+  await deployment.setMeter("d1_bytes", await deployment.databaseBytes(), now);
 }
 
 export function warningsFor(meters: readonly AllowanceMeter[]): AllowanceWarning[] {

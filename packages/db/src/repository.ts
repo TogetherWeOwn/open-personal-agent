@@ -414,6 +414,7 @@ export type NewApproval = Pick<
   | "stepUp"
   | "scopes"
   | "taint"
+  | "costMicroUsd"
   | "canonical"
   | "bindingHash"
   | "expiresAt"
@@ -541,6 +542,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(meters)
             .where(and(eq(meters.meter, meter), gte(meters.day, since - (since % 86_400_000))))
         )[0]?.n ?? 0,
+      /** Sets a gauge meter's UTC day to the latest reading (M3-18 AC2): one upsert, no read. */
+      setMeter: async (meter: "d1_bytes", amount: number, at: number) => {
+        await db
+          .insert(meters)
+          .values({ meter, day: at - (at % 86_400_000), amount })
+          .onConflictDoUpdate({ target: [meters.meter, meters.day], set: { amount } });
+      },
+      /** A gauge meter's latest recorded reading, or null before the first. */
+      latestMeter: async (meter: "d1_bytes") =>
+        (
+          await db
+            .select({ amount: meters.amount })
+            .from(meters)
+            .where(eq(meters.meter, meter))
+            .orderBy(desc(meters.day))
+            .limit(1)
+        )[0]?.amount ?? null,
       /**
        * The database's size in bytes (M3-16 AC3): D1 reports it with every result as
        * `meta.size_after`; Node's SQLite doesn't, so there it is pages × page size.
@@ -1324,6 +1342,39 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 approvals.batchId,
                 approvals.position,
               );
+          },
+          /**
+           * Every item the user decided at or after `since` (for the receipts that outlive a
+           * reload), each with its conversation's title. At most `limit` batches, never part of
+           * one: the latest decided first, a batch's items together in their stored order. What
+           * happened after the decision (a run, a re-check's refusal) doesn't change what the
+           * user answered: the row's `scope` is set exactly when they approved. An expiry also
+           * stamps `decided_at`, so an expired row counts only if they had approved it first.
+           */
+          decided: (since: number, limit = 100) => {
+            const mine = and(
+              eq(approvals.userId, userId),
+              gte(approvals.decidedAt, since),
+              or(sql`${approvals.status} <> 'expired'`, isNotNull(approvals.scope)),
+            );
+            const batch = db
+              .select({
+                batchId: approvals.batchId,
+                at: sql<number>`max(${approvals.decidedAt})`.as("at"),
+              })
+              .from(approvals)
+              .where(mine)
+              .groupBy(approvals.batchId)
+              .orderBy(sql`at desc`, approvals.batchId)
+              .limit(limit)
+              .as("batch");
+            return db
+              .select({ row: approvals, conversationTitle: conversations.title })
+              .from(approvals)
+              .innerJoin(batch, eq(batch.batchId, approvals.batchId))
+              .innerJoin(conversations, eq(conversations.id, approvals.conversationId))
+              .where(mine)
+              .orderBy(sql`${batch.at} desc`, approvals.batchId, approvals.position);
           },
           /**
            * Starts a step-up ceremony over the batch's pending items (W3): the nonce, the digest
