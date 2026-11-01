@@ -242,7 +242,7 @@ async function driveLoop(
   /** The loop-yielded limit the run paused on, for the row's "Paused: limit" label (AC1). */
   limit?: { kind: TaskLimitKind; detail: string };
 }> {
-  const { taskId } = task;
+  const { taskId, conversationId } = task;
   const billingId = picked.billingId ?? picked.provider.id;
   let llmSeq = 0;
   let toolSeq = 0;
@@ -284,7 +284,7 @@ async function driveLoop(
             await ctx.budget.settle(key, billingId, req.model, usage).catch(() => {});
           }
           await user.usage
-            .record({ providerId: billingId, model: req.model, usage, taskId })
+            .record({ providerId: billingId, model: req.model, usage, conversationId, taskId })
             .catch(() => {});
           return { refused: null, events: events as unknown as JsonValue };
         });

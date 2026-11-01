@@ -1457,6 +1457,52 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .groupBy(usage.providerId, usage.model, usage.costSource)
               .orderBy(usage.providerId, usage.model),
           /**
+           * The month's calls by conversation, by task and by day (M3-16 AC2). Titles come from
+           * this user's own rows only; a deleted conversation or task, or a call outside one,
+           * groups under a null ID. `dayStart` is any local midnight: days are counted from it.
+           */
+          breakdowns: async (since: number, dayStart: number) => {
+            const mine = and(eq(usage.userId, userId), gte(usage.createdAt, since));
+            const cost = {
+              calls: count(),
+              costMicroUsd: sql<number>`coalesce(sum(${usage.costMicroUsd}), 0)`.mapWith(Number),
+              unpricedCalls:
+                sql<number>`sum(case when ${usage.costSource} is null then 1 else 0 end)`.mapWith(
+                  Number,
+                ),
+            };
+            // Integer division from 400 days back, so it floors without SQLite's math functions.
+            // The difference is cast: the default `created_at` and a bound number can be REAL.
+            const base = dayStart - 400 * 86_400_000;
+            const day = sql<number>`cast((${usage.createdAt} - ${base}) as integer) / 86400000 - 400`;
+            const [byConversation, byTask, byDay] = await Promise.all([
+              db
+                .select({ id: conversations.id, title: conversations.title, ...cost })
+                .from(usage)
+                .leftJoin(
+                  conversations,
+                  and(eq(conversations.id, usage.conversationId), eq(conversations.userId, userId)),
+                )
+                .where(mine)
+                .groupBy(conversations.id)
+                .orderBy(desc(cost.costMicroUsd)),
+              db
+                .select({ id: tasks.id, title: tasks.title, ...cost })
+                .from(usage)
+                .leftJoin(tasks, and(eq(tasks.id, usage.taskId), eq(tasks.userId, userId)))
+                .where(mine)
+                .groupBy(tasks.id)
+                .orderBy(desc(cost.costMicroUsd)),
+              db
+                .select({ day: day.mapWith(Number), ...cost })
+                .from(usage)
+                .where(mine)
+                .groupBy(day)
+                .orderBy(day),
+            ]);
+            return { byConversation, byTask, byDay };
+          },
+          /**
            * One model call's ledger row (one row per call, PRD §17), written when the call
            * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
            * such as the settings Test button, names neither. With `id`, writing the same call
