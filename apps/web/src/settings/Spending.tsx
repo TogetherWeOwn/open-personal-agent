@@ -9,6 +9,7 @@ import {
   dollars,
   getSpending,
   parseDollars,
+  SPENDING_CHANGED,
   type Spending,
   type SpendingLimits,
   saveSpending,
@@ -48,9 +49,9 @@ export function SpendingSettings() {
   const [spending, setSpending] = useState<Spending | null>(null);
   const [text, setText] = useState<Record<keyof SpendingLimits, string> | null>(null);
   const [hardOn, setHardOn] = useState(false);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "failed" | "load_failed">(
-    "idle",
-  );
+  const [status, setStatus] = useState<
+    "idle" | "saving" | "saved" | "saved_stale" | "failed" | "load_failed"
+  >("idle");
 
   const show = useCallback((s: Spending) => {
     setSpending(s);
@@ -88,11 +89,18 @@ export function SpendingSettings() {
         monthlyBudgetMicroUsd: parsed.monthlyBudgetMicroUsd as number,
         hardCapMicroUsd: hardOn ? parsed.hardCapMicroUsd : null,
       });
-      show(await getSpending());
-      setStatus("saved");
     } catch {
-      setStatus("failed");
+      return setStatus("failed");
     }
+    window.dispatchEvent(new Event(SPENDING_CHANGED));
+    // Saved either way; only the figures beside the form may be a moment old.
+    await getSpending().then(
+      (fresh) => {
+        show(fresh);
+        setStatus("saved");
+      },
+      () => setStatus("saved_stale"),
+    );
   };
 
   const { defaults, executionLimits: x } = spending;
@@ -143,8 +151,8 @@ export function SpendingSettings() {
             Hard limit
           </Switch>
           <p className={hint}>
-            Background tasks pause when this is reached. Chat and your data stay available. Off by
-            default.
+            Background tasks pause when this is reached. Chat and your data stay available. Default:
+            off.
           </p>
           {hardOn && (
             <TextField
@@ -166,7 +174,13 @@ export function SpendingSettings() {
             Save
           </Button>
           <span role="status" className={hint}>
-            {status === "saved" ? "Saved." : status === "failed" ? "Couldn't save. Try again." : ""}
+            {status === "saved"
+              ? "Saved."
+              : status === "saved_stale"
+                ? "Saved. Reload to see the updated figures."
+                : status === "failed"
+                  ? "Couldn't save. Try again."
+                  : ""}
           </span>
         </div>
       </Form>

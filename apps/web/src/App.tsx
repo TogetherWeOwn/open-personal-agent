@@ -410,81 +410,84 @@ export function App({ transport }: AppProps) {
   return (
     <>
       {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
-      <div hidden={!chat} className="flex h-dvh">
-        <header className="sr-only">
-          <h1 ref={heading} tabIndex={-1}>
-            {APP_NAME}
-          </h1>
-        </header>
-        <aside
-          aria-label="Conversations"
-          className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
-        >
-          <div className="flex items-center justify-between gap-2 p-3">
-            <Heading level={2} className="px-1 text-lg font-semibold">
-              Chats
-            </Heading>
-            <ThemeToggle className={buttonClass("quiet")} />
-          </div>
-          <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
-            New chat
-          </Button>
-          <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
-            Usage
-          </Link>
-          <Link
-            href="/settings/models"
-            className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
-          >
-            Settings
-          </Link>
-          <ConversationList
-            conversations={state.conversations}
-            activeId={active.id}
-            onOpen={(id) => open({ type: "select", id })}
-          />
-        </aside>
-        <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
-          <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
-            <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
-              <span aria-hidden="true">← </span>Chats
-            </Button>
-            <Heading level={2} className="truncate px-1 font-semibold">
-              {active.title}
-            </Heading>
+      <div hidden={!chat} className="flex h-dvh flex-col">
+        {/* Above both panes, so a phone's Chats list shows them as well as a thread. */}
+        {chat && <SpendingBanners />}
+        <div className="flex min-h-0 flex-1">
+          <header className="sr-only">
+            <h1 ref={heading} tabIndex={-1}>
+              {APP_NAME}
+            </h1>
           </header>
-          {!healthy && (
-            <Banner tone="danger" alert>
-              Your assistant's server isn't responding properly, so replies may fail.
-            </Banner>
-          )}
-          {chat && <SpendingBanners />}
-          <Thread key={active.id} conversation={active} />
-          {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
-          <Composer
-            text={drafts[active.id] ?? ""}
-            setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
-            busy={state.pending !== null}
-            onSend={send}
-            onStop={() => transport.cancel()}
-            onNoModel={noModel ? goModels : undefined}
-            chip={
-              modelSettings && (
-                <ModelChip
-                  settings={modelSettings}
-                  pinned={pinned}
-                  onSwitch={switchModel}
-                  starting={starting}
-                />
-              )
-            }
-            config={config}
-            files={pendingFiles[active.id] ?? []}
-            onPick={pick}
-            onRemove={removeFile}
-            onRetry={retryFile}
-          />
-        </main>
+          <aside
+            aria-label="Conversations"
+            className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
+          >
+            <div className="flex items-center justify-between gap-2 p-3">
+              <Heading level={2} className="px-1 text-lg font-semibold">
+                Chats
+              </Heading>
+              <ThemeToggle className={buttonClass("quiet")} />
+            </div>
+            <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
+              New chat
+            </Button>
+            <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
+              Usage
+            </Link>
+            <Link
+              href="/settings/models"
+              className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
+            >
+              Settings
+            </Link>
+            <ConversationList
+              conversations={state.conversations}
+              activeId={active.id}
+              onOpen={(id) => open({ type: "select", id })}
+            />
+          </aside>
+          <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
+            <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
+              <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
+                <span aria-hidden="true">← </span>Chats
+              </Button>
+              <Heading level={2} className="truncate px-1 font-semibold">
+                {active.title}
+              </Heading>
+            </header>
+            {!healthy && (
+              <Banner tone="danger" alert>
+                Your assistant's server isn't responding properly, so replies may fail.
+              </Banner>
+            )}
+            <Thread key={active.id} conversation={active} />
+            {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
+            <Composer
+              text={drafts[active.id] ?? ""}
+              setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
+              busy={state.pending !== null}
+              onSend={send}
+              onStop={() => transport.cancel()}
+              onNoModel={noModel ? goModels : undefined}
+              chip={
+                modelSettings && (
+                  <ModelChip
+                    settings={modelSettings}
+                    pinned={pinned}
+                    onSwitch={switchModel}
+                    starting={starting}
+                  />
+                )
+              }
+              config={config}
+              files={pendingFiles[active.id] ?? []}
+              onPick={pick}
+              onRemove={removeFile}
+              onRetry={retryFile}
+            />
+          </main>
+        </div>
       </div>
       {!chat && (
         <>
