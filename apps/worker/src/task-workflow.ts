@@ -302,6 +302,7 @@ async function driveLoop(
     registry.register({
       manifest: tool.manifest,
       ...(tool.target ? { target: tool.target } : {}),
+      ...(tool.estimateCost ? { estimateCost: tool.estimateCost } : {}),
       // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
       ...(tool.author ? { author: tool.author } : {}),
       execute: async (input, _signal, call) => {

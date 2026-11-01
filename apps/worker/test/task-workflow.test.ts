@@ -442,6 +442,28 @@ describe("task workflow", () => {
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
+  it("stores a priced tool's cost estimate on the task's approval row (M3-07 AC6)", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    const priced: LoopTool = { ...send, estimateCost: () => 250_000 };
+    let cost: number | null | undefined;
+    const deny = async () => {
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      const batchId = state.turn.pending.batchId as string;
+      const [row] = await alice.approvals.batch(batchId);
+      cost = row?.costMicroUsd;
+      const approvalId = row?.approvalId as string;
+      const decision = { approvalId, decision: "deny", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    const replies: Reply[] = [{ calls: [["send", { q: "y" }]] }, { text: "done" }];
+    const { promise } = await run(replies, instanceId, new FakeStepper([deny]), [priced]);
+    await promise;
+    expect(cost).toBe(250_000);
+    expect(send.calls).toBe(0);
+  });
+
   it("bookkeeping that fails after the hold never repeats the model call", async () => {
     const { taskId, instanceId } = await makeTask();
     const { promise, streams } = await run([{ text: "hi" }], instanceId, new FakeStepper(), [], {
