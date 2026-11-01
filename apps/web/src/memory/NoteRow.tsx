@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // One note on the Memory screen (m3-ux §3.7): its text, trust chip, source and dates, Edit in
-// place (saved as a new version) and its earlier versions.
-import { Lock } from "lucide-react";
+// place (saved as a new version), Delete, and its earlier versions. In selection mode a checkbox
+// replaces the actions.
+import { Check, Lock } from "lucide-react";
 import { useRef, useState } from "react";
-import { Label, Link, TextArea, TextField } from "react-aria-components";
+import { Checkbox, Label, Link, TextArea, TextField } from "react-aria-components";
 import { Button, Disclosure, TrustChip } from "../ui";
 import { ago, editNote, memoryError, type Note, noteVersions, sourceLabel } from "./api";
 
@@ -70,11 +71,22 @@ function EarlierVersions({ id }: { id: string }) {
 
 export function NoteRow({
   note,
+  deleting,
+  selecting,
+  selected,
+  onSelect,
   onSaved,
+  onDelete,
 }: {
   note: Note;
+  /** Held in the Undo window: shown muted, with no actions. */
+  deleting: boolean;
+  selecting: boolean;
+  selected: boolean;
+  onSelect: (selected: boolean) => void;
   /** The edit was saved as `next`, which replaces `note`. */
   onSaved: (next: Note) => void;
+  onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note.text);
@@ -101,7 +113,21 @@ export function NoteRow({
   const instruction = note.kind === "instruction";
   const textId = `note-${note.id}`;
   return (
-    <li className="flex gap-2 rounded-xl border border-border bg-surface-raised p-4">
+    <li
+      className={`flex gap-2 rounded-xl border border-border bg-surface-raised p-4 ${deleting ? "opacity-60" : ""}`}
+    >
+      {selecting && !deleting && (
+        <Checkbox
+          isSelected={selected}
+          onChange={onSelect}
+          aria-labelledby={textId}
+          className="group flex min-h-11 min-w-11 items-start justify-center pt-1"
+        >
+          <span className="flex size-5 items-center justify-center rounded border border-border-strong group-data-selected:bg-accent group-data-selected:text-accent-contrast group-data-focus-visible:outline-2 group-data-focus-visible:outline-focus-ring">
+            {selected && <Check aria-hidden="true" size={14} />}
+          </span>
+        </Checkbox>
+      )}
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         {editing ? (
           <TextField
@@ -129,7 +155,11 @@ export function NoteRow({
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <TrustChip trust={note.trust} />
-          <NoteMeta note={note} />
+          {deleting ? (
+            <span className="text-sm text-text-muted">Deleting…</span>
+          ) : (
+            <NoteMeta note={note} />
+          )}
         </div>
         {editing ? (
           <div className="flex flex-wrap gap-2">
@@ -143,17 +173,23 @@ export function NoteRow({
             <Button onPress={stopEditing}>Cancel</Button>
           </div>
         ) : (
-          note.trust !== "system" && (
+          !selecting &&
+          !deleting && (
             <div ref={actions} className="-mb-2 -ml-3 flex flex-wrap gap-1">
-              <Button
-                variant="quiet"
-                aria-label={`Edit: ${note.text}`}
-                onPress={() => {
-                  setDraft(note.text);
-                  setEditing(true);
-                }}
-              >
-                Edit
+              {note.trust !== "system" && (
+                <Button
+                  variant="quiet"
+                  aria-label={`Edit: ${note.text}`}
+                  onPress={() => {
+                    setDraft(note.text);
+                    setEditing(true);
+                  }}
+                >
+                  Edit
+                </Button>
+              )}
+              <Button variant="quiet" aria-label={`Delete: ${note.text}`} onPress={onDelete}>
+                Delete
               </Button>
             </div>
           )

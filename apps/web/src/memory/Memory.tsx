@@ -1,19 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
-// Memory (m3-ux §3.7, M3-15): what the assistant remembers, in sections — About you (standing
-// instructions) and Notes — with search, Edit (saved as a new version) and Add.
+// Memory (m3-ux §3.7, M3-15): what the assistant remembers, in sections — Recently learned, About
+// you (standing instructions) and Notes — with search, Edit, Delete and bulk delete.
+//
+// Every delete says a backup is kept for 30 days (AC3). A delete is held while its Undo toast is
+// open and sent when the toast closes, the screen goes away or the page unloads, so the server's
+// forget stays a true hard delete and Undo never needs a restore.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Heading, Input, Label, SearchField, TextArea, TextField } from "react-aria-components";
-import { Banner, Button, EmptyState, Page, Skeleton } from "../ui";
-import { addNote, listNotes, memoryError, type Note } from "./api";
-import { NoteRow } from "./NoteRow";
+import { Banner, Button, ConfirmDialog, EmptyState, Page, Skeleton, Toast } from "../ui";
+import { addNote, BACKUP_LINE, listNotes, memoryError, type Note } from "./api";
+import { NoteMeta, NoteRow } from "./NoteRow";
+
+const WEEK = 7 * 86_400_000;
+const RECENT = 5;
+
+const quote = (text: string) => `'${text.length > 60 ? `${text.slice(0, 57)}…` : text}'`;
+
+interface Held {
+  ids: string[];
+  message: string;
+}
+
+/** Sends a held delete even while the page unloads. */
+const send = (ids: string[]) =>
+  fetch("/api/memory/delete", {
+    method: "POST",
+    keepalive: true,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
 
 export function Memory() {
   const [notes, setNotes] = useState<Note[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [query, setQuery] = useState("");
   const [shown, setShown] = useState("");
+  const [held, setHeld] = useState<Held | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+  const [allRecent, setAllRecent] = useState(false);
   const [draft, setDraft] = useState("");
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
   const keys = useRef(new Map<string, string>());
@@ -32,6 +60,52 @@ export function Memory() {
     return () => clearTimeout(timer);
   }, [query, load]);
 
+  // The held delete goes out when the toast closes, and also if the screen or page goes away.
+  const heldRef = useRef<Held | null>(null);
+  heldRef.current = held;
+  useEffect(() => {
+    const flush = () => {
+      if (heldRef.current) send(heldRef.current.ids);
+      heldRef.current = null;
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
+
+  const commit = async (h: Held) => {
+    setHeld(null);
+    heldRef.current = null;
+    try {
+      const res = await send(h.ids);
+      if (!res.ok) throw new Error(String(res.status));
+      const { failed: missed } = (await res.json()) as { failed: string[] };
+      setNotes((all) => all?.filter((n) => !h.ids.includes(n.id) || missed.includes(n.id)) ?? null);
+      if (missed.length > 0) {
+        const names = (notes ?? []).filter((n) => missed.includes(n.id)).map((n) => quote(n.text));
+        setProblem(
+          `Deleted ${h.ids.length - missed.length} of ${h.ids.length}. I couldn't delete ${names.join(", ")}.`,
+        );
+        setSelected(new Set(missed));
+        setSelecting(true);
+      }
+    } catch {
+      setProblem("I couldn't delete that. Check your connection and try again.");
+    }
+  };
+
+  /** Holds the delete behind an Undo toast; a delete already held goes out first. */
+  const hold = (ids: string[], message: string) => {
+    if (heldRef.current) commit(heldRef.current);
+    setProblem(null);
+    setHeld({ ids, message });
+    setAnnouncement(message);
+    setSelecting(false);
+    setSelected(new Set());
+  };
+
   const saved = (old: Note, next: Note) => {
     keys.current.set(next.id, keys.current.get(old.id) ?? old.id);
     setNotes((all) => all?.map((n) => (n.id === old.id ? next : n)) ?? null);
@@ -49,17 +123,35 @@ export function Memory() {
     }
   };
 
+  const deleting = new Set(held?.ids ?? []);
   const row = (note: Note) => (
     <NoteRow
       key={keys.current.get(note.id) ?? note.id}
       note={note}
+      deleting={deleting.has(note.id)}
+      selecting={selecting}
+      selected={selected.has(note.id)}
+      onSelect={(on) => {
+        const next = new Set(selected);
+        if (on) next.add(note.id);
+        else next.delete(note.id);
+        setSelected(next);
+        setAnnouncement(`${next.size} selected`);
+      }}
       onSaved={(next) => saved(note, next)}
+      onDelete={() => hold([note.id], `Deleted ${quote(note.text)}. ${BACKUP_LINE}`)}
     />
   );
 
   const all = notes ?? [];
   const instructions = all.filter((n) => n.kind === "instruction");
   const facts = all.filter((n) => n.kind === "fact");
+  const recent = shown
+    ? []
+    : all.filter((n) => Date.now() - n.createdAt < WEEK && n.trust !== "system");
+  const picked = all.filter((n) => selected.has(n.id));
+  const pickedInstructions = picked.filter((n) => n.kind === "instruction").length;
+
   return (
     <Page title="Memory">
       <p role="status" className="sr-only">
@@ -92,6 +184,40 @@ export function Memory() {
         </EmptyState>
       ) : (
         <>
+          {recent.length > 0 && (
+            <section aria-labelledby="recent" className="flex flex-col gap-3">
+              <Heading id="recent" level={2} className="text-lg font-semibold">
+                Recently learned
+              </Heading>
+              <ul className="flex flex-col gap-2">
+                {recent.slice(0, allRecent ? undefined : RECENT).map((n) => (
+                  <li
+                    key={n.id}
+                    className={`flex flex-wrap items-start justify-between gap-2 rounded-xl border border-border p-3 ${deleting.has(n.id) ? "opacity-60" : ""}`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="break-words">{n.text}</p>
+                      <NoteMeta note={n} learned />
+                    </div>
+                    {!deleting.has(n.id) && (
+                      <Button
+                        variant="quiet"
+                        aria-label={`Undo: ${n.text}`}
+                        onPress={() => hold([n.id], `Forgot ${quote(n.text)}. ${BACKUP_LINE}`)}
+                      >
+                        Undo
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {recent.length > RECENT && !allRecent && (
+                <Button variant="quiet" className="self-start" onPress={() => setAllRecent(true)}>
+                  Show all {recent.length}
+                </Button>
+              )}
+            </section>
+          )}
           {instructions.length > 0 && (
             <section aria-labelledby="about" className="flex flex-col gap-3">
               <Heading id="about" level={2} className="text-lg font-semibold">
@@ -108,6 +234,11 @@ export function Memory() {
               <Heading id="notes" level={2} className="text-lg font-semibold">
                 Notes
               </Heading>
+              {!selecting && (
+                <Button variant="quiet" onPress={() => setSelecting(true)}>
+                  Select
+                </Button>
+              )}
             </div>
             {facts.length > 0 ? (
               <ul className="flex flex-col gap-2">{facts.map(row)}</ul>
@@ -117,7 +248,7 @@ export function Memory() {
           </section>
         </>
       )}
-      {!shown && notes !== null && (
+      {!shown && notes !== null && !selecting && (
         <TextField
           value={draft}
           onChange={setDraft}
@@ -130,6 +261,69 @@ export function Memory() {
             Add
           </Button>
         </TextField>
+      )}
+      {selecting && (
+        <section
+          aria-label="Selection"
+          onKeyDown={(e) => e.key === "Escape" && setSelecting(false)}
+          className="sticky bottom-20 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-border-strong bg-surface-raised p-3 shadow-lg sm:bottom-4"
+        >
+          <p className="flex-1">{selected.size} selected</p>
+          <Button onPress={() => setSelected(new Set(all.map((n) => n.id)))}>
+            Select all {all.length}
+          </Button>
+          <Button
+            variant="danger"
+            isDisabled={selected.size === 0}
+            onPress={() => setConfirming(true)}
+          >
+            Delete…
+          </Button>
+          <Button
+            variant="quiet"
+            onPress={() => {
+              setSelecting(false);
+              setSelected(new Set());
+            }}
+          >
+            Cancel
+          </Button>
+        </section>
+      )}
+      <ConfirmDialog
+        isOpen={confirming}
+        onOpenChange={setConfirming}
+        title={`Delete ${picked.length} ${picked.length === 1 ? "note" : "notes"}?`}
+        confirm="Delete"
+        danger
+        onConfirm={() =>
+          hold(
+            picked.map((n) => n.id),
+            `Deleted ${picked.length} ${picked.length === 1 ? "note" : "notes"}. ${BACKUP_LINE}`,
+          )
+        }
+      >
+        <p>{BACKUP_LINE}</p>
+        {pickedInstructions > 0 && (
+          <p>
+            This includes {pickedInstructions} standing{" "}
+            {pickedInstructions === 1 ? "instruction" : "instructions"}.
+          </p>
+        )}
+      </ConfirmDialog>
+      {held && (
+        <Toast
+          key={held.ids.join()}
+          action="Undo"
+          onAction={() => {
+            setHeld(null);
+            heldRef.current = null;
+            setAnnouncement("Undone. Nothing was deleted.");
+          }}
+          onClose={() => commit(held)}
+        >
+          {held.message}
+        </Toast>
       )}
     </Page>
   );

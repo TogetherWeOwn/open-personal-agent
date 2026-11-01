@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Memory screen (M3-15 AC1; m3-ux §3.7): notes with trust and source, search, edit as a new
-// version and add.
+// The Memory screen (M3-15 AC1, AC3; m3-ux §3.7): notes with trust and source, search, edit as a
+// new version, delete with the backup line and Undo, bulk delete and Recently learned.
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
@@ -27,6 +27,7 @@ const note = (over: Record<string, unknown>) => ({
 
 interface Stub {
   notes: Record<string, unknown>[];
+  deletes: string[][];
 }
 
 async function stubMemory(page: Page): Promise<Stub> {
@@ -55,6 +56,7 @@ async function stubMemory(page: Page): Promise<Stub> {
         sourceRef: "https://example.com/tea",
       }),
     ],
+    deletes: [],
   };
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
@@ -62,6 +64,15 @@ async function stubMemory(page: Page): Promise<Stub> {
     const url = new URL(route.request().url());
     const method = route.request().method();
     const path = url.pathname;
+    if (path === "/api/memory/delete") {
+      const { ids } = route.request().postDataJSON() as { ids: string[] };
+      stub.deletes.push(ids);
+      const failed = ids.filter((id) => id === "n1" && ids.length > 1);
+      stub.notes = stub.notes.filter(
+        (n) => !ids.includes(n.id as string) || failed.includes(n.id as string),
+      );
+      return route.fulfill({ json: { deleted: ids.filter((id) => !failed.includes(id)), failed } });
+    }
     if (path.endsWith("/versions")) {
       return route.fulfill({ json: { versions: [note({ id: "old", text: "Likes tea" })] } });
     }
@@ -108,6 +119,9 @@ test("lists notes in sections with trust, source and dates", async ({ page }) =>
   await stubMemory(page);
   await page.goto("/memory");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Memory");
+  const recent = page.getByRole("region", { name: "Recently learned" });
+  await expect(recent).toContainText("Prefers trains to planes");
+  await expect(recent).toContainText("Learned 2 h ago");
   const about = page.getByRole("region", { name: "About you" });
   await expect(about).toContainText("Always answer in British English");
   await expect(about.getByLabel("Standing instruction")).toBeVisible();
@@ -154,6 +168,53 @@ test("edits in place: Esc cancels, a failed save keeps the text, a save makes a 
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText("Sam lives in Paris")).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit: Sam lives in Paris" })).toBeFocused();
+});
+
+test("holds a delete behind Undo with the backup line, then sends it", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.clock.install();
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Delete: Sam lives in Leeds" }).click();
+  const toast = page.getByRole("region", { name: "Notifications" });
+  await expect(toast).toContainText(
+    "Deleted 'Sam lives in Leeds'. A backup copy is kept for 30 days, then it's gone.",
+  );
+  await expect(page.getByText("Deleting…")).toBeVisible();
+  await toast.getByRole("button", { name: "Undo" }).click();
+  await expect(toast).toBeHidden();
+  expect(stub.deletes).toEqual([]);
+  await page.getByRole("button", { name: "Delete: Sam lives in Leeds" }).click();
+  // The new toast lands where Undo was; with the pointer over it, its clock would stop.
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(9_000);
+  expect(stub.deletes).toEqual([]);
+  await page.clock.runFor(1_500);
+  await expect(page.getByText("Sam lives in Leeds", { exact: true })).toBeHidden();
+  expect(stub.deletes).toEqual([["n1"]]);
+});
+
+test("bulk deletes after a confirmation that names the backup and the instructions", async ({
+  page,
+}) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 4" }).click();
+  await expect(page.getByRole("region", { name: "Selection" })).toContainText("4 selected");
+  await page.getByRole("button", { name: "Delete…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete 4 notes?" });
+  await expect(dialog).toContainText("A backup copy is kept for 30 days, then it's gone.");
+  await expect(dialog).toContainText("This includes 1 standing instruction.");
+  await axe(page);
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Deleted 3 of 4. I couldn't delete 'Sam lives in Leeds'.",
+  );
+  await expect(page.getByRole("region", { name: "Selection" })).toContainText("1 selected");
 });
 
 test("adds a note typed on the screen", async ({ page }) => {
