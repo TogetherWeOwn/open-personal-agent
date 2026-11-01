@@ -2,8 +2,9 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, type Route, test } from "@playwright/test";
 
-// Low entropy: the canary allowlist in .gitleaks.toml covers only `*.test.*` files.
-const TOKEN = "setup-token-for-e2e";
+// Low entropy: the canary allowlist in .gitleaks.toml covers only `*.test.*` files. Base64
+// characters, as the deploy script's tokens have, so a `+` must survive the fragment.
+const TOKEN = "setup+token/for+e2e==";
 const CODES = Array.from({ length: 10 }, (_, i) => `abcde-fghij-klmno-pqrst-uvwx${i}`);
 const b64 = (s: string) => btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 const creation = {
@@ -188,7 +189,15 @@ test("a signed-in user who hasn't onboarded lands on onboarding", async ({ page 
 
 test("Sign in with your passkey signs in and opens the app", async ({ page }) => {
   await authenticator(page);
-  await signedOut(page);
+  let signedIn = false;
+  await page.route("/api/me", (route) =>
+    signedIn
+      ? route.fulfill({ json: { id: "u", role: "owner" } })
+      : route.fulfill({ status: 401, json: { error: "unauthenticated" } }),
+  );
+  await page.route("/api/settings", (route) =>
+    route.fulfill({ json: { displayName: "", about: "", onboarded: false, model: null } }),
+  );
   const posts: string[] = [];
   await page.route("/api/auth/**", (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -197,6 +206,7 @@ test("Sign in with your passkey signs in and opens the app", async ({ page }) =>
       const options = { challenge: b64("login-challenge"), rpId: "localhost" };
       return route.fulfill({ json: { options: { ...options, userVerification: "required" } } });
     }
+    signedIn = true;
     return route.fulfill({ json: { ok: true } });
   });
   await page.goto("/");
@@ -213,4 +223,7 @@ test("Sign in with your passkey signs in and opens the app", async ({ page }) =>
   }, creation);
   await page.getByRole("button", { name: "Sign in with your passkey" }).click();
   await expect.poll(() => posts).toEqual(["/api/auth/login/options", "/api/auth/login"]);
+  // Signed in, the app routes on: here to onboarding, as nothing is set up yet.
+  await page.waitForURL("/onboarding");
+  await expect(page.getByRole("heading", { name: "Set up your assistant" })).toBeVisible();
 });
