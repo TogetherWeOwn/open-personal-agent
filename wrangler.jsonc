@@ -28,12 +28,14 @@
     "bindings": [{ "name": "ASSISTANT", "class_name": "Assistant" }]
   },
   "workflows": [
-    { "name": "opa-task-workflow", "binding": "TASK_WORKFLOW", "class_name": "TaskWorkflow" }
+    { "name": "opa-task-workflow", "binding": "TASK_WORKFLOW", "class_name": "TaskWorkflow" },
+    { "name": "opa-export-workflow", "binding": "EXPORT_WORKFLOW", "class_name": "ExportWorkflow" }
   ],
   // Declarative lifecycle for the classes this Worker exports (replaces `migrations`).
   "exports": {
     "Assistant": { "type": "durable-object", "storage": "sqlite" },
-    "TaskWorkflow": { "type": "workflow", "name": "opa-task-workflow" }
+    "TaskWorkflow": { "type": "workflow", "name": "opa-task-workflow" },
+    "ExportWorkflow": { "type": "workflow", "name": "opa-export-workflow" }
   },
   // Per client address on /api/health, /setup* and the login and recovery-code steps (rate-limit.ts).
   // The namespace is per account: another Worker using 1001 would share the counters.

@@ -100,9 +100,10 @@ describe("export rows", () => {
     expect(alice.exports.stagedKey("e1", "conversations.json")).toBe(
       "u/alice/exports/e1/staged/conversations.json",
     );
-    // Staged names are fixed filenames, never paths: separators become underscores.
+    // Each path segment is flattened, so dot segments parse badly nowhere, and the key
+    // stays a tree under the export's own directory.
     expect(alice.exports.stagedKey("e1", "../e2/staged/x")).toBe(
-      "u/alice/exports/e1/staged/.._e2_staged_x",
+      "u/alice/exports/e1/staged/_/e2/staged/x",
     );
     expect(() => alice.exports.key("../bob/exports/e1")).toThrow(/invalid id/);
   });

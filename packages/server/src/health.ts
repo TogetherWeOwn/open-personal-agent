@@ -105,7 +105,10 @@ export async function checkHealth(env: Env): Promise<Health> {
     }),
   ]);
   // Presence only: creating a Workflow instance or running a model would cost money.
-  const workflow = typeof env.TASK_WORKFLOW?.create === "function";
+  // Both runs report through the one check: either binding missing degrades it the same way.
+  const workflow =
+    typeof env.TASK_WORKFLOW?.create === "function" &&
+    typeof env.EXPORT_WORKFLOW?.create === "function";
   const ai = typeof env.AI?.run === "function";
 
   const secrets = secretsSet(env);
