@@ -28,6 +28,59 @@ async function stub(page: Page): Promise<Stub> {
   await page.route("/api/approvals?status=pending", (r) =>
     r.fulfill({ json: { batches: s.batches } }),
   );
+  // Tasks and the Activity log answered with loaded rows, so `fits` measures populated screens
+  // there, not the empty state. Outputs, Memory and Usage keep that check in their own specs.
+  const now = Date.now();
+  await page.route(
+    (url) => url.pathname === "/api/tasks",
+    (r) =>
+      r.fulfill({
+        json: {
+          tasks: [
+            {
+              id: "t1",
+              title: "Research every supplier for the winter collection and summarise the options",
+              conversationId: "c1",
+              conversationTitle: "Planning the winter collection launch with Sam and Priya",
+              kind: "chat",
+              mode: "agent",
+              status: "running",
+              limitKind: null,
+              error: null,
+              costMicroUsd: 123_400,
+              unpricedCalls: 0,
+              calls: 3,
+              createdAt: now - 600_000,
+              updatedAt: now - 300_000,
+              startedAt: now - 300_000,
+              finishedAt: null,
+            },
+          ],
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/activity/log",
+    (r) =>
+      r.fulfill({
+        json: {
+          entries: [
+            {
+              id: 9,
+              at: now - 60_000,
+              kind: "tools",
+              title: "Changed a tool's setting after reviewing what it can send and where",
+              action: "policy.override",
+              result: "ok",
+              target: "send_email_to_external_recipients",
+              detail: { from: "ask", to: "auto" },
+            },
+          ],
+          next: null,
+          retentionDays: 365,
+        },
+      }),
+  );
   return s;
 }
 
@@ -65,12 +118,21 @@ const SCREENS = [
   "/settings/deployment",
 ];
 
+// The screens above whose stub serves loaded rows: wait for a row, so `fits` proves the
+// populated layout fits, not just the heading and the empty state.
+const LOADED: Record<string, string> = {
+  "/activity/tasks": "Research every supplier for the winter collection and summarise the options",
+  "/activity/log": "send_email_to_external_recipients: Asks you first → Does it without asking",
+};
+
 for (const path of SCREENS) {
   test(`${path} fits 375 px with no axe violations`, async ({ page }) => {
     await stub(page);
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(tabs(page)).toBeVisible();
+    const loaded = LOADED[path];
+    if (loaded) await expect(page.getByText(loaded)).toBeVisible();
     await fits(page);
   });
 }
