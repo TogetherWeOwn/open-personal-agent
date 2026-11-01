@@ -35,7 +35,8 @@ export interface Bindings {
   UNAVAILABLE?: readonly ("workflow" | "ai")[];
   /**
    * The header that carries the client's address, set by a proxy you trust. Defaults to
-   * `CF-Connecting-IP`, which only Cloudflare sets; elsewhere a client can send it themselves.
+   * `CF-Connecting-IP`, which only Cloudflare sets; elsewhere a client can send it themselves, so
+   * the Node root defaults to a header it fills from the socket.
    */
   OPA_CLIENT_IP_HEADER?: string;
   /**
