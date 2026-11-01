@@ -3,7 +3,7 @@
 // still has a future. Stop writes the row first and asks the runtime to terminate best-effort,
 // so where the runtime is unreachable the row still moves; a 409 means the run already ended,
 // and the screen reloads to show that ending instead of arguing.
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DialogTrigger, Link } from "react-aria-components";
 import { Button, ConfirmDialog, EmptyState, Page, Skeleton, StatusChip } from "../ui";
 import {
@@ -34,11 +34,18 @@ export function TaskDetails({ params }: { params: Record<string, string> }) {
   const [failed, setFailed] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopFailed, setStopFailed] = useState(false);
+  // Every load is owned by the effect below: Stop asks for a reload by bumping this instead
+  // of fetching itself, so navigating away cancels the reload instead of letting it land on
+  // the newly opened task.
+  const [reloadKey, setReloadKey] = useState(0);
+  const idRef = useRef(id);
+  idRef.current = id;
 
-  const load = useCallback(() => {
-    // The effect's cleanup flips this, so a load for one id can't overwrite another: without
-    // it a slow response for task A lands after the move to task B and the screen shows A
-    // while Stop would POST B's id.
+  // Every load is owned by this effect, so navigating away (or asking for a reload after
+  // Stop) cancels the in-flight fetch: without the cleanup a slow response for task A lands
+  // after the move to task B and the screen shows A while Stop would POST B's id.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `reloadKey` re-runs the read after Stop
+  useEffect(() => {
     let live = true;
     setTask(null);
     setMissing(false);
@@ -63,11 +70,10 @@ export function TaskDetails({ params }: { params: Record<string, string> }) {
     return () => {
       live = false;
     };
-  }, [id]);
-
-  useEffect(() => load(), [load]);
+  }, [id, reloadKey]);
 
   const stop = () => {
+    const stoppedId = id;
     setStopping(true);
     setStopFailed(false);
     fetch(`/api/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST" })
@@ -75,7 +81,10 @@ export function TaskDetails({ params }: { params: Record<string, string> }) {
         // 409 is agreement, not failure: the run already ended, so show that ending.
         if (res.ok || res.status === 409) {
           setStopping(false);
-          load();
+          // Only reload when still on the stopped task. The reload runs through the effect
+          // (reloadKey), so leaving for another task cancels it instead of letting a late
+          // response overwrite that task's screen.
+          if (idRef.current === stoppedId) setReloadKey((k) => k + 1);
           return;
         }
         return Promise.reject(new Error(String(res.status)));
