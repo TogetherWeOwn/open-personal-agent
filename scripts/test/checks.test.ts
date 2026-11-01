@@ -150,6 +150,17 @@ describe("docs-cost-lint", () => {
       'DB: no cost row in the README "What this costs" table',
       'FILES: no entry lists it in deploy/permissions.json "bindings"',
     ]);
+    const short = repo();
+    short.readme = short.readme.replace(/^\| `DB` .*$/m, "| `DB` | D1 |");
+    expect(checkDocsCost(short)).toEqual(['DB: no cost row in the README "What this costs" table']);
+    const env = repo();
+    env.config.env = {
+      staging: { vars: { binding: "NOT_A_BINDING" }, queues: { producers: [{ binding: "JOBS" }] } },
+    };
+    expect(checkDocsCost(env)).toEqual([
+      'JOBS: no cost row in the README "What this costs" table',
+      'JOBS: no entry lists it in deploy/permissions.json "bindings"',
+    ]);
   });
 
   it("requires the section, the baseline, the unlimited caveat and a price date", () => {

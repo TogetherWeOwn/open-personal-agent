@@ -8,7 +8,10 @@ import { isMain, parseJsonc, report } from "./lib/repo.mjs";
 // Config sections that are not bindings, even where their entries carry a `binding` key.
 const NOT_BINDINGS = new Set(["$schema", "exports", "migrations", "vars", "env"]);
 
-/** Binding names in a parsed wrangler config. Cron triggers count as one binding, `triggers`. */
+/**
+ * Binding names in a parsed wrangler config, including those declared only in an `env` section.
+ * Cron triggers count as one binding, `triggers`.
+ */
 export function bindingNames(config) {
   const names = new Set();
   const walk = (value) => {
@@ -17,12 +20,14 @@ export function bindingNames(config) {
     if (typeof value.binding === "string") names.add(value.binding);
     for (const child of Object.values(value)) walk(child);
   };
-  for (const [key, value] of Object.entries(config)) {
-    if (!NOT_BINDINGS.has(key)) walk(value);
+  for (const section of [config, ...Object.values(config.env ?? {})]) {
+    for (const [key, value] of Object.entries(section)) {
+      if (!NOT_BINDINGS.has(key)) walk(value);
+    }
+    // Durable Object bindings are keyed by `name`, not `binding`.
+    for (const { name } of section.durable_objects?.bindings ?? []) names.add(name);
+    if (section.triggers?.crons?.length) names.add("triggers");
   }
-  // Durable Object bindings are keyed by `name`, not `binding`.
-  for (const { name } of config.durable_objects?.bindings ?? []) names.add(name);
-  if (config.triggers?.crons?.length) names.add("triggers");
   return [...names].sort();
 }
 
@@ -48,10 +53,12 @@ export function checkDocsCost({ readme, config, permissions }) {
       'README.md: "What this costs" does not say the $5 does not include unlimited usage',
     );
   }
-  // A cost row is a table row whose first cell is a backticked binding and whose cells are filled.
+  // A cost row is a table row whose first cell is a backticked binding, followed by a filled-in
+  // service, included allowance and overage rate.
   const costRows = new Set();
   for (const [, first, rest] of section.matchAll(/^\| `([^`]+)` +\|(.*)\|$/gm)) {
-    if (rest.split("|").every((cell) => cell.trim())) costRows.add(first);
+    const cells = rest.split("|");
+    if (cells.length === 3 && cells.every((cell) => cell.trim())) costRows.add(first);
   }
   const permitted = new Set(permissions.permissions.flatMap((p) => p.bindings ?? []));
   for (const name of bindingNames(config)) {
