@@ -20,6 +20,7 @@ import { Limits, type Reservation } from "./limits";
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
 const MAX_TEXT = 32_000;
+const TAB_RECHECK_MS = 30_000; // how often task progress rechecks the tabs' sessions
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
 
 type Emit = <T extends HarnessEvent["type"]>(
@@ -96,9 +97,18 @@ export class Assistant extends Agent<Bindings> {
    * A Workflow task's progress, broadcast to the user's tabs in the v1 envelope. `seq` is the
    * driver's per-task counter; persisting these into the per-conversation event log is M3-03c's
    * (AC10), which will dedupe replays by it. Until then a Workflow replay can repeat a live
-   * progress event, never invent one.
+   * progress event, never invent one. Like a chat turn, it first closes tabs whose session has
+   * ended; a task streams for longer than a turn, so the check repeats every 30 seconds.
    */
-  taskProgress(progress: TaskProgress): void {
+  async taskProgress(progress: TaskProgress): Promise<void> {
+    if (Date.now() - this.#tabsCheckedAt >= TAB_RECHECK_MS) {
+      this.#tabsCheckedAt = Date.now();
+      await Promise.all(
+        [...this.getConnections()].map((tab) =>
+          this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
+        ),
+      );
+    }
     this.broadcast(
       JSON.stringify({
         v: 1,
@@ -111,6 +121,9 @@ export class Assistant extends Agent<Bindings> {
       }),
     );
   }
+
+  /** When task progress last rechecked the tabs' sessions. */
+  #tabsCheckedAt = 0;
 
   /** The user's scope, from this DO's own name, which only the server sets. */
   get #scope() {

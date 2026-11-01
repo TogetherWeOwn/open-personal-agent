@@ -68,17 +68,15 @@ export interface WorkflowTaskContextDeps {
   limits?: { steps?: number; durationMs?: number };
 }
 
-/** Persisted in place of an output over the inline bound; resolved back from R2 for the caller. */
-const OUTPUT_REF = "__opaStepOutputRef";
-type OutputRef = { [OUTPUT_REF]: string; bytes: number };
-const isOutputRef = (v: unknown): v is OutputRef =>
-  typeof v === "object" && v !== null && typeof (v as OutputRef)[OUTPUT_REF] === "string";
-
-/** Persisted in place of a step's output when its guard stopped it before `fn` ran. */
-const STOPPED = "__opaStepStopped";
-type Stopped = { [STOPPED]: "cancelled" | "duration" };
-const isStopped = (v: unknown): v is Stopped =>
-  typeof v === "object" && v !== null && typeof (v as Stopped)[STOPPED] === "string";
+/**
+ * What a step persists: always this envelope, never `fn`'s value bare, so no value a step returns
+ * can pass for the adapter's own markers. `ref` stands in for an output over the inline bound,
+ * resolved back from R2 for the caller; `stopped` means the guard stopped the step before `fn`.
+ */
+type Persisted =
+  | { value: JsonValue }
+  | { ref: string; bytes: number }
+  | { stopped: "cancelled" | "duration" };
 
 const TERMINAL: readonly TaskStatus[] = ["succeeded", "failed", "cancelled", "interrupted"];
 const DEFAULT_STEP = {
@@ -115,11 +113,26 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
    * hand back a serialized error, while a returned marker persists, replays the same, and is
    * turned into the real error outside the step.
    */
-  async function guard(): Promise<Stopped | null> {
+  async function guard(): Promise<"cancelled" | "duration" | null> {
     const status = await deps.readStatus();
-    if (status === undefined || TERMINAL.includes(status)) return { [STOPPED]: "cancelled" };
-    if (now() - deps.startedAt > durationMs) return { [STOPPED]: "duration" };
+    if (status === undefined || TERMINAL.includes(status)) return "cancelled";
+    if (now() - deps.startedAt > durationMs) return "duration";
     return null;
+  }
+
+  function stop(why: "cancelled" | "duration"): never {
+    if (why === "cancelled") throw new TaskCancelledError(deps.taskId);
+    throw new TaskLimitError("duration", `${durationMs} ms`);
+  }
+
+  /**
+   * The same guard before a sleep or wait, outside any step: a task that has ended or run out
+   * of time does not park for hours first. On a replay it can only stop a task that has since
+   * ended, which is the right answer for that task anyway.
+   */
+  async function beforeWait(): Promise<void> {
+    const why = await guard();
+    if (why) stop(why);
   }
 
   const budget: TaskBudget = {
@@ -142,40 +155,39 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
       options?: Parameters<TaskContext["step"]>[2],
     ): Promise<T> {
       claim(name);
-      const persisted = await deps.stepper.do<JsonValue>(
+      const persisted = (await deps.stepper.do<JsonValue>(
         name,
         { ...DEFAULT_STEP, ...options },
-        async (): Promise<JsonValue> => {
+        async (): Promise<Persisted> => {
           const stopped = await guard();
-          if (stopped) return stopped;
+          if (stopped) return { stopped };
           const value = redactSecrets(await fn(idempotencyKey(name)), secrets);
           const json = JSON.stringify(value);
           const bytes = new TextEncoder().encode(json).length;
-          if (bytes <= STEP_OUTPUT_INLINE_MAX_BYTES) return value;
+          if (bytes <= STEP_OUTPUT_INLINE_MAX_BYTES) return { value };
           const id = await outputId(idempotencyKey(name));
           await deps.outputs.put(id, json);
-          return { [OUTPUT_REF]: id, bytes };
+          return { ref: id, bytes };
         },
-      );
-      if (isStopped(persisted)) {
-        if (persisted[STOPPED] === "cancelled") throw new TaskCancelledError(deps.taskId);
-        throw new TaskLimitError("duration", `${durationMs} ms`);
-      }
-      if (!isOutputRef(persisted)) return persisted as T;
+      )) as Persisted;
+      if ("stopped" in persisted) stop(persisted.stopped);
+      if ("value" in persisted) return persisted.value as T;
       // The object is immutable under its key, so reading it back outside a step replays to
       // the same value; a step here would just persist the large output it exists to avoid.
-      const stored = await deps.outputs.get(persisted[OUTPUT_REF]);
-      if (!stored) throw new Error(`step output ${persisted[OUTPUT_REF]} is missing`);
+      const stored = await deps.outputs.get(persisted.ref);
+      if (!stored) throw new Error(`step output ${persisted.ref} is missing`);
       return JSON.parse(await stored.text()) as T;
     },
 
     async sleep(name, durationMs) {
       claim(name);
+      await beforeWait();
       await deps.stepper.sleep(name, durationMs);
     },
 
     async waitForEvent(name, options) {
       claim(name);
+      await beforeWait();
       return deps.stepper.waitForEvent(name, options);
     },
 
@@ -197,7 +209,8 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
 }
 
 /**
- * Replaces every exact occurrence of a guarded secret in a step output's strings. Step outputs
+ * Replaces every exact occurrence of a guarded secret in a step output's strings, object keys
+ * included. Step outputs
  * are persisted (and replayed from storage), so a provider or tool that echoes a key back —
  * the failure M3-06a had to guard in the Test reply — must not fix it in durable state.
  */
@@ -211,7 +224,7 @@ export function redactSecrets<T>(value: T, secrets: readonly string[]): T {
   if (Array.isArray(value)) return value.map((v) => redactSecrets(v, secrets)) as T;
   if (typeof value === "object" && value !== null) {
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, redactSecrets(v, secrets)]),
+      Object.entries(value).map(([k, v]) => [redactSecrets(k, secrets), redactSecrets(v, secrets)]),
     ) as T;
   }
   return value;
