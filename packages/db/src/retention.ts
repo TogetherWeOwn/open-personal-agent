@@ -14,6 +14,7 @@ import {
   conversations,
   messages,
   tasks,
+  turnStates,
   userSettings,
   users,
 } from "./schema";
@@ -111,7 +112,12 @@ export function retentionStore({ DB, FILES }: Bindings) {
   const db = openD1(DB);
   const attachmentKey = (userId: string, id: string) => `u/${userId}/attachments/${id}`;
 
-  /** Deletes the user's chats idle since `cutoff`, never one with a live task or reply. */
+  /**
+   * Deletes the user's chats idle since `cutoff`, never one with a live task or reply. A reply
+   * still `streaming` is live unless its turn stopped (approval, limit) and has waited since
+   * before `cutoff`: an unanswered stop doesn't keep a chat past the setting, and its saved state
+   * goes with the chat, by cascade.
+   */
   const sweepConversations = async (userId: string, cutoff: number) => {
     let total = 0;
     for (let round = 0; round < SWEEP_ROUNDS; round++) {
@@ -140,7 +146,24 @@ export function retentionStore({ DB, FILES }: Bindings) {
                 .where(
                   and(
                     eq(messages.conversationId, conversations.id),
-                    or(sql`${messages.createdAt} >= ${cutoff}`, eq(messages.status, "streaming")),
+                    or(
+                      sql`${messages.createdAt} >= ${cutoff}`,
+                      and(
+                        eq(messages.status, "streaming"),
+                        notExists(
+                          db
+                            .select({ x: sql`1` })
+                            .from(turnStates)
+                            .where(
+                              and(
+                                eq(turnStates.replyId, messages.id),
+                                eq(turnStates.userId, userId),
+                                lt(turnStates.updatedAt, cutoff),
+                              ),
+                            ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
             ),

@@ -396,6 +396,20 @@ describe("chatReducer", () => {
     expect(reply(state)?.text).toBe("One\n\nTwo");
   });
 
+  it("completes an adopted reply with its whole segment, not a copy after the tail", () => {
+    // Reloaded mid-reply: D1 has the earlier segment, the tab adopts the turn at its next delta.
+    const reloaded = run(load("c1", msg("u1", "Hi"), msg("r-t1", "One", "streaming")));
+    const state = run(
+      load("c1", msg("u1", "Hi"), msg("r-t1", "One", "streaming")),
+      delta("lo"),
+      ev("message.completed", { text: "Hello" }),
+      delta("Next"),
+      ev("message.completed", { text: "Next" }),
+    );
+    expect(reply(reloaded)?.text).toBe("One");
+    expect(reply(state)?.text).toBe("One\n\nHello\n\nNext");
+  });
+
   it("applies a resumed turn's replayed events only once (M3-03 AC11)", () => {
     const at = (seq: number, type: HarnessEvent["type"], payload = {}): ChatAction =>
       ({
