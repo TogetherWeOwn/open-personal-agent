@@ -2,9 +2,11 @@
 // The `FILES` binding on Node: the subset of R2's API the app uses, over a local directory. Each
 // object is one file named by the SHA-256 of its key, so no key can escape the directory. Bodies
 // stream to and from disk, so an upload is never held whole in memory here either (M3-10 AC1).
+// Listing (M3-20b) reads the sidecar each `put` leaves beside its object: the hash names no
+// prefix, so the `.key` file beside it remembers the key the object was stored under.
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, mkdirSync } from "node:fs";
-import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -14,6 +16,7 @@ type Body = ConstructorParameters<typeof Response>[0];
 export function localBlobStore(dir: string): R2Bucket {
   mkdirSync(dir, { recursive: true });
   const pathOf = (key: string) => join(dir, createHash("sha256").update(key).digest("hex"));
+  const sidecarOf = (key: string) => `${pathOf(key)}.key`;
 
   async function etagOf(path: string) {
     const hash = createHash("md5");
@@ -59,10 +62,58 @@ export function localBlobStore(dir: string): R2Bucket {
         await rm(temp, { force: true });
         throw err;
       }
+      // The sidecar is what `list` reads: an object without one would survive a prefix purge,
+      // so a sidecar the store cannot write removes the object instead of stranding it.
+      try {
+        await writeFile(sidecarOf(key), key, "utf8");
+      } catch (err) {
+        await rm(pathOf(key), { force: true });
+        throw err;
+      }
       return head(key);
     },
     async delete(keys: string | string[]) {
-      for (const key of Array.isArray(keys) ? keys : [keys]) await rm(pathOf(key), { force: true });
+      for (const key of Array.isArray(keys) ? keys : [keys]) {
+        await rm(pathOf(key), { force: true });
+        await rm(sidecarOf(key), { force: true });
+      }
+    },
+    /**
+     * One page of the keys a prefix names, in sidecar order: R2's listing over the sidecars.
+     * Objects whose sidecar is missing (written before sidecars existed, or crashed between
+     * the rename and the sidecar write) are not listed — `put` refuses the second case, and
+     * the first predates every prefix walk, so an upgraded deployment's pre-sidecar objects
+     * need an operator directory wipe once no account owns them. `cursor` is the sidecar name
+     * to resume after; resuming at the first name at or past it, so a cursor object deleted
+     * concurrently ends the page early instead of dropping every later key. A directory read
+     * failure throws — an empty page must never masquerade as a proven-empty prefix.
+     */
+    async list(options?: { prefix?: string; cursor?: string; limit?: number }) {
+      const prefix = options?.prefix ?? "";
+      const limit = options?.limit ?? 1000;
+      const names = (await readdir(dir)).sort();
+      const objects: { key: string; size: number; uploaded: Date }[] = [];
+      let resume = options?.cursor === undefined;
+      let cursor: string | undefined;
+      for (const name of names) {
+        if (!name.endsWith(".key")) continue;
+        if (!resume) {
+          if (options?.cursor !== undefined && name >= options.cursor) resume = true;
+          else continue;
+        }
+        const key = await readFile(join(dir, name), "utf8").catch(() => null);
+        if (key === null || !key.startsWith(prefix)) continue;
+        const info = await stat(pathOf(key)).catch(() => null);
+        if (!info) continue;
+        if (objects.length >= limit) {
+          cursor = name;
+          break;
+        }
+        objects.push({ key, size: info.size, uploaded: info.mtime });
+      }
+      return cursor === undefined
+        ? { objects, truncated: false as const }
+        : { objects, truncated: true as const, cursor };
     },
   };
   return bucket as unknown as R2Bucket;

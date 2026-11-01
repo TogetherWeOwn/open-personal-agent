@@ -104,7 +104,7 @@ export interface DataBindings<Stub, Id> {
     /**
      * R2's listing, a page at a time: the allowance meter (COST-5) sums the whole bucket's sizes
      * with it, and the retention sweep (M3-18) lists a prefix by upload time. Absent where the
-     * store has none (Node); both then leave those objects alone.
+     * store has none; both then leave those objects alone.
      */
     list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
       objects: { key: string; size: number; uploaded: Date }[];
@@ -125,7 +125,7 @@ export interface DataBindings<Stub, Id> {
     }>;
     /**
      * The keys under a prefix, for enumerating the file and task-output stores an export
-     * walks (M3-20 AC1). Absent where the store has no listing (Node); the walk then treats
+     * walks (M3-20 AC1). Absent where the store has no listing; the walk then treats
      * the store as empty. The export Workflow runs on Workers, where R2 always lists.
      */
     list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
