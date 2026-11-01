@@ -5,7 +5,7 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/compose";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
@@ -118,6 +118,27 @@ describe("task rows", () => {
     const done = await alice.tasks.get("t10");
     expect(done?.limitKind).toBeNull();
     expect(done?.finishedAt).not.toBeNull();
+  });
+
+  it("a repeated pause finish keeps the pause timestamp stable", async () => {
+    await alice.tasks.create(makeTask("t14", "ca"));
+    await alice.tasks.markRunning("t14", 1_000);
+    expect(await alice.tasks.finish("t14", "budget_limited", undefined, "calls")).toBe(true);
+    const pausedAt = (await alice.tasks.get("t14"))?.updatedAt ?? 0;
+    expect((await alice.tasks.get("t14"))?.status).toBe("budget_limited");
+    // The 7-day pause wait times out with no Continue; the run's end writes the same pause
+    // again. The timestamp must not move, or the Tasks view's elapsed clock (frozen at the
+    // pause) would count the idle wait as run time.
+    const later = vi.spyOn(Date, "now").mockReturnValue(pausedAt + 7 * 86_400_000);
+    try {
+      expect(await alice.tasks.finish("t14", "budget_limited", undefined, "calls")).toBe(true);
+    } finally {
+      later.mockRestore();
+    }
+    expect((await alice.tasks.get("t14"))?.updatedAt).toBe(pausedAt);
+    // A pause under a different kind still moves the row.
+    expect(await alice.tasks.finish("t14", "budget_limited", undefined, "duration")).toBe(true);
+    expect((await alice.tasks.get("t14"))?.limitKind).toBe("duration");
   });
 
   it("clears the limit kind when a paused task resumes or is cancelled", async () => {

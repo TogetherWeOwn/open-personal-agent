@@ -1401,6 +1401,20 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             limitKind?: TaskLimitKind | null,
           ) => {
             const now = Date.now();
+            const nextKind = status === "budget_limited" ? (limitKind ?? null) : null;
+            // A pause writes `budget_limited` when it starts waiting, and the run's end writes
+            // the same pause again when the 7-day wait times out with no Continue. Re-stamping
+            // `updatedAt` there would move the pause timestamp, and the Tasks view freezes its
+            // elapsed clock at `updatedAt` — so the wait would read as run time. A repeat of
+            // the row's own end state is a no-op (still `true`: the row is in that state).
+            const current = (
+              await db
+                .select({ status: tasks.status, limitKind: tasks.limitKind })
+                .from(tasks)
+                .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+                .limit(1)
+            )[0];
+            if (current?.status === status && (current.limitKind ?? null) === nextKind) return true;
             return (
               (
                 await db
@@ -1408,7 +1422,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .set({
                     status,
                     error: error ?? null,
-                    limitKind: status === "budget_limited" ? (limitKind ?? null) : null,
+                    limitKind: nextKind,
                     // A budget-limited task is paused, not finished: it may be continued.
                     ...(status === "budget_limited" ? {} : { finishedAt: now }),
                     updatedAt: now,
