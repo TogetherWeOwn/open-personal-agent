@@ -865,6 +865,30 @@ describe("turn and spend limits (M2-22)", () => {
     expect(await count("conversations")).toBe(0);
   });
 
+  it("gives back the first call's hold when Stop lands before the model is called", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      const pick = instance.resolveModel;
+      instance.resolveModel = async (...args) => {
+        await gate; // the Stop lands while the turn is still starting
+        return pick(...args);
+      };
+    });
+    const tab = await openTab(browser);
+    tab.send?.("conv-stop", "Hi!");
+    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await new Promise((r) => setTimeout(r, 200));
+    release();
+    await tab.until?.("turn.cancelled");
+    expect(maxTokens).toEqual([]);
+    const spend = await storage(owner, (kv) => kv.get<{ held: object }>("spend"));
+    expect(spend?.held).toEqual({});
+  });
+
   it("caps max_tokens from the budget left and charges the call's cost", async () => {
     const { browser, owner } = await claim();
     const maxTokens: (number | undefined)[] = [];

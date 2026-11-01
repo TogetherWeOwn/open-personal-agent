@@ -974,105 +974,119 @@ export class Assistant extends Agent<Bindings> {
     const gen = runTurn(host, run.history, state, signal);
     let thinking = "";
     let stashedAt = 0;
-    for (;;) {
-      const next = await gen.next();
-      if (next.done) {
-        // A resume still waiting on undecided approvals names no stop event; save it anyway,
-        // with the decisions recorded so far.
-        if (!persisted && (next.value === "awaiting_approval" || next.value === "limit_reached")) {
-          await persistStop(next.value).catch(failSave);
-        }
-        return;
-      }
-      const event = next.value;
-      if (
-        event.type === "turn.completed" ||
-        event.type === "turn.cancelled" ||
-        event.type === "turn.failed"
-      ) {
-        const status =
-          event.type === "turn.completed"
-            ? "complete"
-            : event.type === "turn.cancelled"
-              ? "interrupted" // D1 has no "cancelled": a stopped reply is an interrupted one
-              : "error";
-        try {
-          if (cp.callStarted && !cp.callRecorded) await recordCall();
-          await chat.settle({ replyId, reply: cp.reply }, status);
-          await repo.turns.remove(turnId);
-        } catch {
-          await failSave();
-          await gen.return("failed");
+    try {
+      for (;;) {
+        const next = await gen.next();
+        if (next.done) {
+          // A resume still waiting on undecided approvals names no stop event; save it anyway,
+          // with the decisions recorded so far.
+          if (
+            !persisted &&
+            (next.value === "awaiting_approval" || next.value === "limit_reached")
+          ) {
+            await persistStop(next.value).catch(failSave);
+          }
           return;
         }
-        emit(event);
-        // The turn is in D1 now, so its events leave the log; a later tab reloads from D1.
-        this.#events.trim(conversationId, turnId);
-        continue;
-      }
-      if (event.type === "approval.requested" || event.type === "limit.reached") {
-        // The state is complete at these events; save it before any tab can act on them. An
-        // approval's rows go first: the route reads its decisions from them (M3-07 AC9).
-        try {
-          if (event.type === "approval.requested" && state.pending) {
-            const rows = await bindBatch({
-              userId: this.#scope.userId,
-              tools,
-              pending: state.pending,
-              context: { kind: "turn", id: turnId, conversationId },
-            });
-            if (!(await repo.approvals.create(rows))) throw new Error("the conversation is gone");
+        const event = next.value;
+        if (
+          event.type === "turn.completed" ||
+          event.type === "turn.cancelled" ||
+          event.type === "turn.failed"
+        ) {
+          const status =
+            event.type === "turn.completed"
+              ? "complete"
+              : event.type === "turn.cancelled"
+                ? "interrupted" // D1 has no "cancelled": a stopped reply is an interrupted one
+                : "error";
+          try {
+            if (cp.callStarted && !cp.callRecorded) await recordCall();
+            await chat.settle({ replyId, reply: cp.reply }, status);
+            await repo.turns.remove(turnId);
+          } catch {
+            await failSave();
+            await gen.return("failed");
+            return;
           }
-          await persistStop(
-            event.type === "approval.requested" ? "awaiting_approval" : "limit_reached",
-          );
-        } catch {
-          await failSave();
-          await gen.return("failed");
-          return;
+          emit(event);
+          // The turn is in D1 now, so its events leave the log; a later tab reloads from D1.
+          this.#events.trim(conversationId, turnId);
+          continue;
+        }
+        if (event.type === "approval.requested" || event.type === "limit.reached") {
+          // The state is complete at these events; save it before any tab can act on them. An
+          // approval's rows go first: the route reads its decisions from them (M3-07 AC9).
+          try {
+            if (event.type === "approval.requested" && state.pending) {
+              const rows = await bindBatch({
+                userId: this.#scope.userId,
+                tools,
+                pending: state.pending,
+                context: { kind: "turn", id: turnId, conversationId },
+              });
+              if (!(await repo.approvals.create(rows))) throw new Error("the conversation is gone");
+            }
+            await persistStop(
+              event.type === "approval.requested" ? "awaiting_approval" : "limit_reached",
+            );
+          } catch {
+            await failSave();
+            await gen.return("failed");
+            return;
+          }
+          emit(event);
+          continue;
+        }
+        switch (event.type) {
+          case "step.started":
+            if (!event.payload.toolCallId) {
+              thinking = event.payload.stepId;
+              cp.callStarted = true;
+              cp.callRecorded = false;
+              cp.callUsage = null;
+              stash(cp);
+            }
+            break;
+          case "message.delta":
+            current += event.payload.text;
+            syncReply();
+            if (Date.now() - stashedAt > STASH_MS) {
+              stash(cp);
+              stashedAt = Date.now();
+            }
+            break;
+          case "message.completed":
+            if (event.payload.text) segments.push(event.payload.text);
+            current = "";
+            syncReply();
+            stash(cp);
+            break;
+          case "usage.updated":
+            cp.callUsage = pickUsage(event.payload.usage);
+            await tryRecord();
+            stash(cp);
+            break;
+          case "step.completed":
+            if (event.payload.stepId === thinking) {
+              await tryRecord(); // a call that reported no usage still gets its row
+              stash(cp);
+            }
+            break;
+          default:
+            break;
         }
         emit(event);
-        continue;
       }
-      switch (event.type) {
-        case "step.started":
-          if (!event.payload.toolCallId) {
-            thinking = event.payload.stepId;
-            cp.callStarted = true;
-            cp.callRecorded = false;
-            cp.callUsage = null;
-            stash(cp);
-          }
-          break;
-        case "message.delta":
-          current += event.payload.text;
-          syncReply();
-          if (Date.now() - stashedAt > STASH_MS) {
-            stash(cp);
-            stashedAt = Date.now();
-          }
-          break;
-        case "message.completed":
-          if (event.payload.text) segments.push(event.payload.text);
-          current = "";
-          syncReply();
-          stash(cp);
-          break;
-        case "usage.updated":
-          cp.callUsage = pickUsage(event.payload.usage);
-          await tryRecord();
-          stash(cp);
-          break;
-        case "step.completed":
-          if (event.payload.stepId === thinking) {
-            await tryRecord(); // a call that reported no usage still gets its row
-            stash(cp);
-          }
-          break;
-        default:
-          break;
+    } finally {
+      // The first call's hold was taken before the loop ran; if the loop never spent it (a Stop
+      // before its first call, a resume that stopped again first), it goes back uncharged.
+      if (first && pendingHold) {
+        this.limits.release(pendingHold);
+        pendingHold = null;
+        cp.holds = [];
+        stash(cp);
       }
-      emit(event);
     }
   }
 
