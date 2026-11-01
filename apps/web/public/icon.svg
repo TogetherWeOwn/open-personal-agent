@@ -1,0 +1,9 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Open Personal Agent</title>
+  <rect width="512" height="512" rx="112" fill="#9c4221"/>
+  <path d="M256 136c-77 0-140 50-140 112 0 33 18 63 47 84l-11 50 54-28c16 4 32 6 50 6 77 0 140-50 140-112S333 136 256 136z" fill="#faf8f5"/>
+  <circle cx="200" cy="248" r="16" fill="#9c4221"/>
+  <circle cx="256" cy="248" r="16" fill="#9c4221"/>
+  <circle cx="312" cy="248" r="16" fill="#9c4221"/>
+</svg>

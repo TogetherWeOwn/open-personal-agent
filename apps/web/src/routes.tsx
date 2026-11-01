@@ -10,6 +10,7 @@ import { Memory } from "./memory/Memory";
 import { Waiting } from "./memory/Waiting";
 import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
+import { InstallHint } from "./settings/InstallHint";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { TaskDetails } from "./tasks/TaskDetails";
 import { Tasks } from "./tasks/Tasks";
@@ -81,6 +82,7 @@ function SettingsPage({ params }: { params: Record<string, string> }) {
   return (
     <Page title={page.label}>
       {go("/settings", "All settings")}
+      {page.id === "deployment" && <InstallHint />}
       <EmptyState title={page.empty ?? "Nothing to change here yet."}>{page.body}</EmptyState>
     </Page>
   );
