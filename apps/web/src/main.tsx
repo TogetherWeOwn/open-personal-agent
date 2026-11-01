@@ -81,7 +81,6 @@ function Root() {
     );
   return null;
 }
-}
 
 createRoot(root).render(
   <StrictMode>

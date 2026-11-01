@@ -5,6 +5,7 @@
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
 import { Redirect } from "./router";
+import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { EmptyState, Page } from "./ui";
 import { Usage } from "./usage/Usage";
 
@@ -34,10 +35,17 @@ const go = (href: string, label: string) => (
   </Link>
 );
 
-export const SETTINGS: { id: string; label: string; empty?: string; body?: string }[] = [
+export const SETTINGS: {
+  id: string;
+  label: string;
+  empty?: string;
+  body?: string;
+  /** The screen already exists: serve it instead of the placeholder. */
+  shipped?: boolean;
+}[] = [
   { id: "assistant", label: "Assistant" },
-  { id: "models", label: "Models" },
-  { id: "engine", label: "Agent engine" },
+  { id: "models", label: "Models", shipped: true },
+  { id: "agent-engine", label: "Agent engine", shipped: true },
   {
     id: "computer",
     label: "Computer",
@@ -74,6 +82,9 @@ function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
   if (page.id === "spending") return <Redirect to="/usage" />;
+  // Models and Agent engine already shipped with real screens; the table serves them instead of
+  // their placeholders, so the rebase keeps what `main` already gives those addresses.
+  if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
   return (
     <Page title={page.label}>
       {go("/settings", "All settings")}

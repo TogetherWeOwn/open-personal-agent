@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings (m3-ux §3.9): one screen, a page per axis. M3-06b ships Models and the read-only
 // Agent engine page; the other axes arrive with their own cards.
+import { useEffect } from "react";
 import { Heading, Link } from "react-aria-components";
+import { pageTitle } from "../ui";
 import { AgentEngine } from "./AgentEngine";
 import { ModelsSettings } from "./ModelsSettings";
 
@@ -17,6 +19,10 @@ const navLink =
   "flex min-h-11 items-center rounded-lg px-3 font-medium hover:bg-surface-raised aria-[current=page]:bg-surface-raised aria-[current=page]:ring-1 aria-[current=page]:ring-border-strong";
 
 export function Settings({ page }: { page: SettingsPage }) {
+  // A routed screen names the page, like every other screen in the route table.
+  useEffect(() => {
+    document.title = pageTitle("Settings");
+  }, []);
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-8">
       <Link href="/" className={`${link} self-start`}>

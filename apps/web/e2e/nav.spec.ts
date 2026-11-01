@@ -6,7 +6,16 @@ import { expect, type Page, test } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
-  await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
+  // The table serves the real Settings screens, so the stub carries the shape they read.
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: {
+        onboarded: true,
+        providers: [],
+        roles: { chat: null, background: null, embedding: null },
+      },
+    }),
+  );
 });
 
 const h1 = (page: Page) => page.getByRole("heading", { level: 1 });
@@ -29,7 +38,9 @@ const PAGES: [path: string, heading: string, url?: RegExp][] = [
   ["/memory", "Memory"],
   ["/memory/waiting", "Waiting for you"],
   ["/settings", "Settings"],
-  ["/settings/models", "Models"],
+  // Models already shipped with a real screen, so the table serves it, not a placeholder.
+  ["/settings/models", "Settings"],
+  ["/settings/agent-engine", "Settings"],
   ["/settings/computer", "Computer"],
   ["/settings/spending", "Usage", /\/usage$/],
   ["/usage", "Usage"],
