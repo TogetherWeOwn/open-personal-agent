@@ -10,7 +10,16 @@
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/agents", "/agents/*", "/hooks", "/hooks/*", "/setup"]
+    "run_worker_first": [
+      "/api",
+      "/api/*",
+      "/agents",
+      "/agents/*",
+      "/hooks",
+      "/hooks/*",
+      "/setup",
+      "/setup/*"
+    ]
   },
   "d1_databases": [{ "binding": "DB", "migrations_dir": "migrations" }],
   "r2_buckets": [{ "binding": "FILES" }],
@@ -26,5 +35,8 @@
     "Assistant": { "type": "durable-object", "storage": "sqlite" },
     "TaskWorkflow": { "type": "workflow", "name": "opa-task-workflow" }
   },
-  "triggers": { "crons": ["*/10 * * * *"] }
+  "triggers": { "crons": ["*/10 * * * *"] },
+  // Invocation logs record each request's URL and are off (ADR 0010 D11). The app's own
+  // allowlist logger (packages/log) writes the request log instead.
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
 }

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Headers for static assets, which Cloudflare serves without running the Worker. They must match
+# APP_CSP and COMMON_HEADERS in apps/worker/src/security.ts; apps/worker/test/security.test.ts checks.
+/*
+  Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()

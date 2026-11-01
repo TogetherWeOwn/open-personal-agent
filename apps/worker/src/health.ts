@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-import { openD1, readSchemaVersion, SCHEMA_VERSION } from "@opa/db";
+import { SCHEMA_VERSION } from "@opa/db";
+import { createRepository } from "@opa/db/repository";
+import { masterKeySet, type SecretName } from "./compose";
 import type { Env } from "./env";
 
-/** Worker secrets the deploy generates (ADR 0001 #5). Health reports presence only, never values. */
-export const REQUIRED_SECRETS = [
-  "OPA_MASTER_KEY",
-  "OPA_SESSION_SECRET",
-  "OPA_SETUP_TOKEN",
-] as const;
-export type SecretName = (typeof REQUIRED_SECRETS)[number];
-
 export interface Health {
-  /** `setup_required`: unmigrated or a secret is missing. `degraded`: a binding check failed. */
+  /**
+   * `setup_required`: unmigrated or a secret is missing. `degraded`: a check failed, other than
+   * for a capability the runtime declares `UNAVAILABLE`.
+   */
   status: "ok" | "setup_required" | "degraded";
   schema: { expected: number; applied: number | null; current: boolean };
   checks: {
@@ -20,6 +17,8 @@ export interface Health {
     durableObject: boolean;
     workflow: boolean;
     ai: boolean;
+    /** The vault started: the master keys are valid (ADR 0010 D4.1 #7). */
+    vault: boolean;
   };
   secrets: Record<SecretName, boolean>;
 }
@@ -41,18 +40,42 @@ async function probe(fn: () => Promise<unknown>): Promise<boolean> {
   }
 }
 
+function secretsSet(env: Env): Record<SecretName, boolean> {
+  const isSet = (value: string | undefined) => typeof value === "string" && value !== "";
+  return {
+    ...masterKeySet(env),
+    OPA_SESSION_SECRET: isSet(env.OPA_SESSION_SECRET),
+    OPA_SETUP_TOKEN: isSet(env.OPA_SETUP_TOKEN),
+  };
+}
+
+// A newer schema is fine: migrations stay compatible with the previous Worker (ADR 0004).
+const isCurrent = (applied: number | null) => applied !== null && applied >= SCHEMA_VERSION;
+
+/**
+ * `checkHealth(env).status === "setup_required"`, from the schema version and the secrets only:
+ * one query, no storage or Durable Object probe. For the setup routes.
+ */
+export async function setupRequired(env: Env): Promise<boolean> {
+  if (Object.values(secretsSet(env)).includes(false)) return true;
+  let applied = null as number | null;
+  const database = await probe(async () => {
+    applied = await createRepository(env).deployment.schemaVersion();
+  });
+  return database && !isCurrent(applied);
+}
+
 export async function checkHealth(env: Env): Promise<Health> {
   // Assigned inside the database probe; the cast stops TypeScript narrowing it to `null`.
   let applied = null as number | null;
+  const { deployment } = createRepository(env);
   const [database, storage, durableObject] = await Promise.all([
     probe(async () => {
-      applied = await readSchemaVersion(openD1(env.DB));
+      applied = await deployment.schemaVersion();
     }),
-    // A HEAD on a key that never exists: proves the bucket is bound and reachable.
-    probe(() => env.FILES.head("health/probe")),
-    // A fixed name outside the `u:<userId>` space, so it never touches a user's object.
+    probe(() => deployment.probeStorage()),
     probe(async () => {
-      const pong = await env.ASSISTANT.get(env.ASSISTANT.idFromName("health")).ping();
+      const pong = await deployment.healthObject().ping();
       if (pong !== "pong") throw new Error("unexpected ping reply");
     }),
   ]);
@@ -60,15 +83,15 @@ export async function checkHealth(env: Env): Promise<Health> {
   const workflow = typeof env.TASK_WORKFLOW?.create === "function";
   const ai = typeof env.AI?.run === "function";
 
-  const secrets = Object.fromEntries(
-    REQUIRED_SECRETS.map((name) => [name, typeof env[name] === "string" && env[name] !== ""]),
-  ) as Record<SecretName, boolean>;
-  // A newer schema is fine: migrations stay compatible with the previous Worker (ADR 0004).
-  const current = applied !== null && applied >= SCHEMA_VERSION;
-  const checks = { database, storage, durableObject, workflow, ai };
+  const secrets = secretsSet(env);
+  const current = isCurrent(applied);
+  const checks = { database, storage, durableObject, workflow, ai, vault: env.VAULT !== null };
+  const unavailable = new Set<string>(env.UNAVAILABLE ?? []);
 
   let status: Health["status"] = "ok";
-  if (Object.values(checks).includes(false)) status = "degraded";
+  if (Object.entries(checks).some(([name, ok]) => !ok && !unavailable.has(name))) {
+    status = "degraded";
+  }
   if ((database && !current) || Object.values(secrets).includes(false)) status = "setup_required";
 
   return { status, schema: { expected: SCHEMA_VERSION, applied, current }, checks, secrets };

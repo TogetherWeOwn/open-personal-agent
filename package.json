@@ -15,20 +15,26 @@
   },
   "scripts": {
     "build": "pnpm --filter @opa/web build",
-    "dev": "pnpm build && wrangler dev --local",
+    "dev": "pnpm build && node scripts/dev.mjs",
     "dev:web": "pnpm --filter @opa/web dev",
+    "start:node": "pnpm --filter @opa/node start",
     "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
+    "teardown:cloudflare": "node scripts/teardown-cloudflare.mjs",
+    "verify:cloudflare": "node scripts/verify-cloudflare.mjs",
+    "docs:verify": "node scripts/generate-verify-guide.mjs",
     "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker",
-    "lint": "biome check .",
+    "lint": "biome check . && node scripts/check-scoped-access.mjs",
     "format": "biome format --write .",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run --project unit --project worker",
     "test:unit": "vitest run --project unit",
     "test:worker": "vitest run --project worker",
     "test:harness": "vitest run --project harness",
-    "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs",
-    "notices": "node scripts/generate-notices.mjs"
+    "test:node": "vitest run --project node",
+    "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs && node scripts/generate-verify-guide.mjs --check",
+    "notices": "node scripts/generate-notices.mjs",
+    "dev:mock-model": "node scripts/mock-openai.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
@@ -39,5 +45,24 @@
     "vitest": "5.0.5",
     "wrangler": "4.156.0",
     "yaml": "2.9.1"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "The app's D1 database. Keep the suggested name, or use `<worker name>-db`."
+      },
+      "FILES": {
+        "description": "The R2 bucket for uploaded files. Keep the suggested name, or use `<worker name>-files`."
+      },
+      "OPA_MASTER_KEY": {
+        "description": "Key-encryption key: 32 random bytes, base64. Generate one with `openssl rand -base64 32` and **back it up**: losing it makes stored keys unrecoverable."
+      },
+      "OPA_SESSION_SECRET": {
+        "description": "Signs session state: 32 random bytes, base64. Generate one with `openssl rand -base64 32`."
+      },
+      "OPA_SETUP_TOKEN": {
+        "description": "One-time token that claims the new deployment at `/setup`: 32 random bytes, base64. Generate one with `openssl rand -base64 32` and keep it for the first visit."
+      }
+    }
   }
 }

@@ -135,6 +135,21 @@ describe("openai-chat requests", () => {
     expect(seen).toEqual(["text.delta", "error"]);
   });
 
+  it("ends a stalled stream once cancelled", async () => {
+    const controller = new AbortController();
+    const chunk = JSON.stringify({ choices: [{ delta: { content: "Hi" } }] });
+    const stalled = new ReadableStream<Uint8Array>({
+      start: (c) => c.enqueue(new TextEncoder().encode(`data: ${chunk}\n\n`)),
+    });
+    const { p } = provider("https://x.test/v1", () => new Response(stalled));
+    const seen: string[] = [];
+    for await (const event of p.stream({ ...hello, signal: controller.signal })) {
+      seen.push(event.type);
+      setTimeout(() => controller.abort(), 10);
+    }
+    expect(seen[0]).toBe("text.delta");
+  });
+
   it("refuses redirects and empty bodies", async () => {
     const moved = () =>
       new Response(null, { status: 307, headers: { location: "https://y.test" } });

@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Canary secrets (ADR 0010 D11, R7 M2-5+): runs the Worker suite and the build with a fresh canary
+# in every secret, then scans the console output and the built bundles for it. Also runs the
+# scoped-access lint and the D4.1 #3 bundle check.
+name: Canary scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  WRANGLER_SEND_METRICS: "false"
+
+jobs:
+  canary-scan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash # -eo pipefail, so a failing suite fails the `tee` step
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/check-scoped-access.mjs # raw bindings, scope minting, master key
+      - name: Generate a canary
+        run: echo "OPA_CANARY=opa-canary-$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+      - name: Worker suite with canary secrets
+        run: pnpm vitest run --project worker --silent=false 2>&1 | tee "$RUNNER_TEMP/worker.log"
+      - name: Build with canary secrets in the environment
+        env:
+          OPA_MASTER_KEY: ${{ env.OPA_CANARY }}-master
+          OPA_SESSION_SECRET: ${{ env.OPA_CANARY }}-session
+          OPA_SETUP_TOKEN: ${{ env.OPA_CANARY }}-setup
+        run: pnpm deploy:dry-run
+      - run: node scripts/check-worker-bundle.mjs # ADR 0010 D4.1 #3
+      - run: node scripts/canary-scan.mjs --log "$RUNNER_TEMP/worker.log" dist/worker apps/web/dist

@@ -10,7 +10,7 @@
       "neededFor": "uploading the Worker with its Durable Object, Workflow, cron and assets; setting secrets; the workers.dev URL",
       "steps": ["preflight", "deploy", "secrets"],
       "check": "/accounts/{account_id}/workers/scripts",
-      "status": "unverified: the reference lists no Workflows group, so Workflows is assumed to be covered here until the M2-05 run"
+      "status": "verified 2026-11-01 (M2-05 deploy-verify run 41260337408): Workers Scripts Edit covers Workflows; the reference lists no separate Workflows group"
     },
     {
       "id": "d1",
@@ -48,7 +48,7 @@
       "bindings": ["AI"],
       "neededFor": "the AI binding",
       "steps": ["deploy"],
-      "status": "unverified: left out of the token until a verification run shows the deploy needs it"
+      "status": "verified 2026-11-01 (M2-05 run): not needed; the deploy passed without it"
     },
     {
       "id": "user-details",
@@ -56,7 +56,7 @@
       "group": "User Details Read, Memberships Read",
       "required": false,
       "neededFor": "choosing an account when CLOUDFLARE_ACCOUNT_ID is not set and the token sees several",
-      "status": "unverified: expected to be unnecessary, because the script passes CLOUDFLARE_ACCOUNT_ID to wrangler"
+      "status": "verified 2026-11-01 (M2-05 run): not needed, because the script passes CLOUDFLARE_ACCOUNT_ID to wrangler"
     }
   ],
   "notInM2": [

@@ -315,7 +315,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
   );
   if (url) log(`URL: ${url}`);
   log(COST_LINE);
-  return { name, tag, changed, dryRun };
+  return { name, tag, changed, dryRun, url };
 }
 
 // The newest version tag, if the active version is that one or was reached from it only through
