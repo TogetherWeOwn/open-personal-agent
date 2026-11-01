@@ -308,8 +308,9 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return { ...seen, pending: null, announcement: "The assistant stopped at a limit." };
     case "usage.updated":
       return seen;
-    // The remaining M3 events (steps, tools, taint) get their timeline with the cards that
-    // render them; until then they leave the thread as it is.
+    // The remaining M3 events (steps, tools, taint, and the queue's own announcements) get
+    // their timeline with the cards that render them (M3-09b for the queue); until then they
+    // leave the thread as it is.
     case "step.started":
     case "step.completed":
     case "tool.called":
@@ -319,6 +320,9 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     case "task.promoted":
     case "artifact.created":
     case "memory.proposed":
+    case "turn.queued":
+    case "turn.steered":
+    case "turn.dequeued":
       return seen;
   }
 }
