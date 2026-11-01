@@ -49,12 +49,13 @@ export function ruleText(item: ApprovalItem): string {
 export function taintText(item: ApprovalItem): string | null {
   const { taint } = item;
   if (!taint) return null;
+  const label = plain(taint.label);
   const from =
     taint.kind === "web"
-      ? `a web page (${taint.label})`
+      ? `a web page (${label})`
       : taint.kind === "memory"
-        ? `a memory I wasn't sure about (${taint.label})`
-        : taint.label;
+        ? `a memory I wasn't sure about (${label})`
+        : label;
   return `This includes text from ${from}, which could be trying to steer me.`;
 }
 
@@ -107,6 +108,13 @@ export function emptyText(value: unknown): string | null {
 export const INVISIBLE =
   // biome-ignore lint/suspicious/noMisleadingCharacterClass: each character is matched on its own, as a chip
   /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
+
+/**
+ * A label from outside (a page's title, a chat's name) with its invisible characters dropped, so a
+ * bidi override in it can't reorder the sentence around it. Labels only: what would be sent
+ * shows its characters instead.
+ */
+export const plain = (text: string) => text.replace(INVISIBLE, "");
 
 /** A host that renders as something else: punycode, or letters from more than one script. */
 export function looksLikeAnother(host: string): boolean {

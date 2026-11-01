@@ -2,7 +2,7 @@
 import type { ApprovalItem } from "@opa/core";
 import { describe, expect, it } from "vitest";
 import type { PendingBatch } from "../src/approvals/api";
-import { emptyText, INVISIBLE } from "../src/approvals/copy";
+import { emptyText, INVISIBLE, plain, taintText } from "../src/approvals/copy";
 import { receiptText } from "../src/approvals/store";
 
 const item = (approvalId: string, tool: string): ApprovalItem => ({
@@ -42,6 +42,17 @@ describe("INVISIBLE", () => {
 
   it("leaves ordinary text alone", () => {
     expect("friend@example.com, Ünïcødé 漢字".match(INVISIBLE)).toBeNull();
+  });
+});
+
+describe("plain and taintText", () => {
+  it("drops a label's invisible characters, so an override can't reorder the line", () => {
+    expect(plain("evil\u202ecom.example\u200b")).toBe("evilcom.example");
+    expect(plain("Trip to Ünïcødé 漢字")).toBe("Trip to Ünïcødé 漢字");
+    const tainted = { ...item("a1", "send"), taint: { kind: "web", label: "gpj.\u202eexe" } };
+    expect(taintText(tainted as ApprovalItem)).toBe(
+      "This includes text from a web page (gpj.exe), which could be trying to steer me.",
+    );
   });
 });
 

@@ -113,26 +113,31 @@ function Payload({ args }: { args: string }) {
   );
 }
 
+/** **To:** with the host's hidden characters shown, and a warning when it imitates another. */
+export function TargetLine({ target }: { target: string }) {
+  return (
+    <p>
+      <span className="font-medium">To: </span>
+      <span className="break-all">
+        <Visible text={target} />
+      </span>
+      {looksLikeAnother(target) && (
+        <span className="mt-1 flex items-center gap-1 text-sm text-status-warning">
+          <TriangleAlert aria-hidden="true" size={14} />
+          Looks like another address. Check it carefully.
+        </span>
+      )}
+    </p>
+  );
+}
+
 /** One action's anatomy (M3-07 AC6): target, full payload, rule, taint reason, cost, Details. */
 export function ItemBody({ item }: { item: ApprovalItem }) {
   const taint = taintText(item);
   const cost = costText(item);
   return (
     <>
-      {item.target && (
-        <p>
-          <span className="font-medium">To: </span>
-          <span className="break-all">
-            <Visible text={item.target} />
-          </span>
-          {looksLikeAnother(item.target) && (
-            <span className="mt-1 flex items-center gap-1 text-sm text-status-warning">
-              <TriangleAlert aria-hidden="true" size={14} />
-              Looks like another address. Check it carefully.
-            </span>
-          )}
-        </p>
-      )}
+      {item.target && <TargetLine target={item.target} />}
       <Payload args={item.args} />
       <p>
         <span className="font-medium">Rule: </span>
