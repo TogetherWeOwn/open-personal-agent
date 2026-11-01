@@ -180,25 +180,25 @@ export class Assistant extends Agent<Bindings> {
   /**
    * Saves a Spending change if every field is valid (`checkSpending`); `null` if not. Returns
    * the settings before and after together, so an audit of the change can't pair this write
-   * with another request's "before".
+   * with another request's "before", and the write's number for `revertSpending`.
    */
-  setSpending(body: unknown): { before: SpendingSettings; after: SpendingSettings } | null {
+  setSpending(
+    body: unknown,
+  ): { before: SpendingSettings; after: SpendingSettings; write: number } | null {
     const changes = checkSpending(body);
     if (!changes) return null;
     const before = this.limits.settings();
-    return { before, after: this.limits.setSettings(changes) };
+    const { settings: after, write } = this.limits.saveSettings(changes);
+    return { before, after, write };
   }
 
   /**
-   * Undoes a `setSpending` whose audit row couldn't be written: each field goes back to its
-   * `before` value only while it still holds this change's `after` value, so a later change
-   * that saved meanwhile is never overwritten.
+   * Undoes a `setSpending` whose audit row couldn't be written. A field goes back only while
+   * this write is still the last to have changed it, so a later change that saved meanwhile is
+   * never overwritten, even one that set the same value.
    */
-  revertSpending(before: SpendingSettings, after: SpendingSettings): void {
-    const now = this.limits.settings();
-    const keys = Object.keys(after) as (keyof SpendingSettings)[];
-    const undo = keys.filter((k) => before[k] !== after[k] && now[k] === after[k]);
-    if (undo.length) this.limits.setSettings(Object.fromEntries(undo.map((k) => [k, before[k]])));
+  revertSpending(write: number, before: SpendingSettings): void {
+    this.limits.revertSettings(write, before);
   }
 
   /**
