@@ -443,6 +443,8 @@ export const tasks = sqliteTable(
     updatedAt: integer("updated_at").notNull().default(now),
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
+    /** When the retention sweep removed the tool outputs from `state` (M3-18 AC1). */
+    outputsRemovedAt: integer("outputs_removed_at"),
   },
   (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
 );
@@ -555,6 +557,15 @@ export const userSettings = sqliteTable("user_settings", {
   backgroundProvider: providerRef("background_provider"),
   backgroundModel: text("background_model"),
   onboardedAt: integer("onboarded_at"),
+  /**
+   * Retention (COST-10, M3-18 AC1), applied by the daily sweep. A chat with no new message for
+   * this many days is deleted; 0 keeps chats forever.
+   */
+  messageRetentionDays: integer("message_retention_days").notNull().default(0),
+  /** Tool outputs in finished tasks are removed after this many days; 0 keeps them. */
+  toolOutputRetentionDays: integer("tool_output_retention_days").notNull().default(30),
+  /** Unconfirmed memory suggestions expire to rejected after this many days (M3-15 AC2). */
+  memoryInboxDays: integer("memory_inbox_days").notNull().default(14),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 
