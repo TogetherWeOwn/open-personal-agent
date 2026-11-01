@@ -9,6 +9,7 @@
     "./memory": "./src/memory.ts",
     "./memory-tools": "./src/memory-tools.ts",
     "./repository": "./src/repository.ts",
+    "./task-tools": "./src/task-tools.ts",
     "./system": "./src/system.ts",
     "./vault-store": "./src/vault-store.ts"
   },
