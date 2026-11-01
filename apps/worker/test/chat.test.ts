@@ -175,22 +175,20 @@ describe("chat transport", () => {
     await db.exec(`INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member');
       INSERT INTO conversations (id, user_id) VALUES ('theirs', 'other');`);
     const tab = await openTab(browser);
+    // Before onboarding picks a model, the real resolver finds none, and nothing is written.
+    tab.send?.("mine", "first");
+    const failed = (message: string) => ({ type: "turn.failed", seq: 0, payload: { message } });
+    const noModel = failed("Pick a model in Settings first.");
+    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]));
+    expect(await count("conversations", "id = 'mine'")).toBe(0);
+    await useModel(owner, scripted([], never));
     tab.send?.("theirs", "hi");
     tab.send?.("../x", "hi");
-    await vi.waitFor(() =>
-      expect(tab.events.map((e) => [e.type, e.seq])).toEqual([
-        ["turn.failed", 0],
-        ["turn.failed", 0],
-      ]),
-    );
+    const gone = failed("That conversation doesn't exist.");
+    const bad = failed("That message can't be sent.");
+    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, gone, bad]));
     expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
     expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
-
-    // Before onboarding picks a model, the real resolver finds none.
-    tab.send?.("mine", "first");
-    const noModel = { message: "Pick a model in Settings first." };
-    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ seq: 0, payload: noModel }));
-    await useModel(owner, scripted([], never));
     tab.send?.("mine", "first");
     await tab.until?.("message.delta");
     tab.send?.("mine", "second");

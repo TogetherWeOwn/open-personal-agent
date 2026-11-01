@@ -101,14 +101,15 @@ export class Assistant extends Agent<Bindings> {
   ) {
     if (!(await this.#sessionLive(connection))) return;
     const chat = this.#chat;
-    const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
-    if (!(await chat.open(conversationId, title))) {
-      return reject(connection, conversationId, "That conversation doesn't exist.");
-    }
+    // Picked before `open`, so a send that can't run never creates an empty conversation.
     const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
       return reject(connection, conversationId, message);
+    }
+    const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
+    if (!(await chat.open(conversationId, title))) {
+      return reject(connection, conversationId, "That conversation doesn't exist.");
     }
     const { provider, model } = picked;
     const turn: TurnRecord = {
