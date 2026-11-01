@@ -4,7 +4,12 @@
 import type { ModelUsage } from "@opa/core";
 import { createRepository, type ProviderValues } from "@opa/db/repository";
 import { findPrice, isStale } from "@opa/pricing";
-import { credentialBinding, isLoopbackHost, STARTER_MODEL } from "@opa/providers";
+import {
+  credentialBinding,
+  isLoopbackHost,
+  STARTER_MODEL,
+  usesOpenAIResponses,
+} from "@opa/providers";
 import { encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
 import {
@@ -40,6 +45,14 @@ function priceHint(billingId: string, model: string | null) {
   return { inputUsdPerMTok, outputUsdPerMTok, verifiedAt, stale: isStale(verifiedAt) };
 }
 
+/** The wire API a provider's calls use: it follows the preset, so a saved OpenAI key moves as it is. */
+const apiOf = (row: Provider) =>
+  row.kind === "workers-ai"
+    ? "workers-ai"
+    : row.providerId && row.baseUrl && usesOpenAIResponses(row.providerId, row.baseUrl)
+      ? "openai-responses"
+      : "openai-chat";
+
 /** A saved provider as the browser sees it: the key's last 4 and dates, never the key (SEC-7). */
 function providerView(row: Provider) {
   // `last4` is null for keys shorter than 8 characters; the join still finds the row.
@@ -47,6 +60,7 @@ function providerView(row: Provider) {
   return {
     id: row.id,
     kind: row.kind,
+    api: apiOf(row),
     providerId: row.providerId,
     baseUrl: row.baseUrl,
     model: row.model,
@@ -83,6 +97,7 @@ async function view(c: Ctx) {
     model: chat
       ? {
           kind: chat.kind,
+          api: apiOf(chat),
           providerId: starter ? null : chat.providerId,
           baseUrl: starter ? null : chat.baseUrl,
           model: row.chatModel ?? chat.model,

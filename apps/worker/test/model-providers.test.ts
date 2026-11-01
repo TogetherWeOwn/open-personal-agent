@@ -3,17 +3,23 @@
 // Every response any route sends is kept, and the last test checks none carries a key (A-M3).
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
+import { app } from "@opa/server/app";
+import { settings } from "@opa/server/model-settings";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
-import { settings } from "../src/model-settings";
 import { ORIGIN, sessionHeaders } from "./helpers/app";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const MASTER = btoa("k".repeat(32));
 const KEYS = ["sk-first-0123456789abcdefWXYZ", "sk-second-9876543210fedcbaQRST"];
-const OPENAI = { kind: "openai-chat", providerId: "openai", baseUrl: "https://api.openai.com/v1" };
+// OpenAI's host under its own name, not the OpenAI preset: priced as OpenAI, and on Chat
+// Completions, so the mocks below speak one wire format (M3-04 moves the preset to Responses).
+const OPENAI = {
+  kind: "openai-chat",
+  providerId: "my-openai",
+  baseUrl: "https://api.openai.com/v1",
+};
 const ROUTER = {
   kind: "openai-chat",
   providerId: "openrouter",
@@ -79,7 +85,8 @@ describe("several providers", () => {
     first = a.body.id;
     second = b.body.id;
     expect(a.body).toMatchObject({
-      providerId: "openai",
+      providerId: "my-openai",
+      api: "openai-chat",
       model: "gpt-4o-mini",
       key: { last4: "WXYZ", lastUsedAt: null },
       price: { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6, stale: expect.any(Boolean) },

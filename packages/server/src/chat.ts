@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Reads of the user's conversations and their messages from D1, on both runtimes. The chat socket itself needs the
-// Assistant Durable Object, so only the Worker serves it (worker-app.ts).
+// Reads of the user's conversations and their messages from D1, on both runtimes. The chat socket
+// itself needs the Assistant Durable Object, so only the Worker serves it
+// (apps/worker/src/worker-app.ts).
 import { createRepository, isId } from "@opa/db/repository";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";

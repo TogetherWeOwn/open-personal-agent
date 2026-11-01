@@ -44,9 +44,9 @@ importers:
       '@hono/node-server':
         specifier: 2.1.5
         version: 2.1.5(hono@4.13.14)
-      '@opa/worker':
+      '@opa/server':
         specifier: workspace:*
-        version: link:../worker
+        version: link:../../packages/server
       hono:
         specifier: 4.13.14
         version: 4.13.14
@@ -121,6 +121,9 @@ importers:
       '@opa/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@opa/server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@opa/vault':
         specifier: workspace:*
         version: link:../../packages/vault
@@ -161,6 +164,33 @@ importers:
       '@opa/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/server:
+    dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opa/db':
+        specifier: workspace:*
+        version: link:../db
+      '@opa/log':
+        specifier: workspace:*
+        version: link:../log
+      '@opa/pricing':
+        specifier: workspace:*
+        version: link:../pricing
+      '@opa/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@opa/vault':
+        specifier: workspace:*
+        version: link:../vault
+      '@simplewebauthn/server':
+        specifier: 14.0.3
+        version: 14.0.3
+      hono:
+        specifier: 4.13.14
+        version: 4.13.14
 
   packages/vault: {}
 

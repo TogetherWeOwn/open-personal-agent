@@ -6,10 +6,11 @@ import { createRepository, type UserScope } from "@opa/db/repository";
 import { billingProviderId, estimate, findPrice } from "@opa/pricing";
 import {
   createOpenAIChatProvider,
+  createOpenAIResponsesProvider,
   createWorkersAIProvider,
   credentialBinding,
+  usesOpenAIResponses,
   WORKERS_AI_PROVIDER_ID,
-  type WorkersAIBinding,
 } from "@opa/providers";
 import { decrypt, type UserScope as VaultScope } from "@opa/vault";
 import type { Env } from "./env";
@@ -106,7 +107,7 @@ export async function resolveChatModel(
   const { row, model } = picked;
   if (row.kind === "workers-ai") {
     if (!env.AI) return { error: "ai_unavailable" };
-    const provider = createWorkersAIProvider(env.AI as unknown as WorkersAIBinding);
+    const provider = createWorkersAIProvider(env.AI);
     return { provider, model, apiKey: null };
   }
   if (!env.VAULT) return { error: "vault_unavailable" };
@@ -123,7 +124,10 @@ export async function resolveChatModel(
   let provider: ModelProvider;
   try {
     const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(env), ...fetch };
-    provider = createOpenAIChatProvider(options);
+    // The OpenAI preset talks Responses with the same key and binding (M3-04 AC3).
+    provider = usesOpenAIResponses(providerId, baseUrl)
+      ? createOpenAIResponsesProvider(options)
+      : createOpenAIChatProvider(options);
   } catch {
     // Saved as plain HTTP while private hosts were allowed, and they no longer are.
     return { error: "invalid_base_url" };
