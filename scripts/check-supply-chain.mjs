@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Supply-chain policy (ADR 0010 D12; R7 M2-9, M2-10): a reviewed build-script allowlist, a
-// minimum release age in pnpm and Renovate, and workflows that pin every action by commit SHA,
-// default to read-only permissions and never use `pull_request_target`. Also ADR 0010 D4.1 #8:
+// minimum release age in pnpm and Renovate, and workflows that pin every action by commit SHA and
+// every image by digest, default to read-only permissions and never use a privileged trigger
+// (`pull_request_target`, `workflow_run`, comment and review events). Also ADR 0010 D4.1 #8:
 // every third-party package in the Worker bundle is on a reviewed list.
 
 import { readdirSync } from "node:fs";
@@ -122,11 +123,42 @@ export function checkPnpmPolicy(workspaceYaml) {
     .map((p) => `pnpm-workspace.yaml: ${p}`);
 }
 
+const MINUTES = { minute: 1, hour: 60, day: 1440, week: 10080 };
+/** A Renovate duration such as "3 days" in minutes, or NaN if it isn't one. */
+const minutes = (age) => {
+  const m = /^(\d+)\s*(minute|hour|day|week)s?$/.exec(typeof age === "string" ? age.trim() : "");
+  return m ? Number(m[1]) * MINUTES[m[2]] : Number.NaN;
+};
+
+/** The top level sets the age for every package, and no package rule lowers it. */
 export function checkRenovatePolicy(renovateJson) {
   const config = JSON.parse(renovateJson ?? "{}");
-  const rules = [config, ...(config.packageRules ?? [])];
-  return rules.some((r) => r.minimumReleaseAge) ? [] : ["renovate.json: no minimumReleaseAge"];
+  const short = (age) => !(minutes(age) >= MIN_RELEASE_AGE_MINUTES);
+  return [
+    short(config.minimumReleaseAge) &&
+      `minimumReleaseAge must be at least ${MIN_RELEASE_AGE_MINUTES / 1440} day at the top level`,
+    ...(config.packageRules ?? []).map(
+      (r, i) =>
+        "minimumReleaseAge" in r &&
+        short(r.minimumReleaseAge) &&
+        `packageRules.${i} lowers minimumReleaseAge to "${r.minimumReleaseAge}"`,
+    ),
+  ]
+    .filter(Boolean)
+    .map((p) => `renovate.json: ${p}`);
 }
+
+/**
+ * Triggers that run the default branch's workflow with its secrets and a write-capable token on
+ * events anyone can cause, so their inputs are untrusted (a fork's PR, a comment, a review).
+ */
+const PRIVILEGED_TRIGGERS = [
+  "pull_request_target",
+  "workflow_run",
+  "issue_comment",
+  "pull_request_review",
+  "pull_request_review_comment",
+];
 
 const grantsWrite = (perms) =>
   typeof perms === "string"
@@ -138,14 +170,31 @@ export function checkWorkflow(path, text) {
   const problems = [];
   const on = wf.on ?? {};
   const triggers = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on);
-  if (triggers.includes("pull_request_target")) problems.push(`${path}: uses pull_request_target`);
+  for (const trigger of PRIVILEGED_TRIGGERS.filter((t) => triggers.includes(t))) {
+    problems.push(`${path}: uses ${trigger}`);
+  }
   if (JSON.stringify(wf.permissions) !== '{"contents":"read"}') {
     problems.push(`${path}: top-level permissions must be exactly "contents: read"`);
   }
   for (const [name, job] of Object.entries(wf.jobs ?? {})) {
     if (grantsWrite(job?.permissions)) problems.push(`${path}: job "${name}" grants write`);
   }
-  return [...problems, ...checkPins(path, wf)];
+  return [...problems, ...checkPins(path, wf), ...checkImages(path, wf)];
+}
+
+/**
+ * Every job container and service image is a literal name pinned to a sha256 digest. A `${{ }}`
+ * expression resolves at run time, so a digest after one pins nothing.
+ */
+export function checkImages(path, wf) {
+  const images = Object.entries(wf.jobs ?? {}).flatMap(([name, job]) => [
+    [`jobs.${name}.container`, job?.container],
+    ...Object.entries(job?.services ?? {}).map(([s, v]) => [`jobs.${name}.services.${s}`, v]),
+  ]);
+  return images
+    .map(([at, v]) => [at, typeof v === "string" ? v : v?.image])
+    .filter(([, image]) => image != null && !/^[^\s$]+@sha256:[0-9a-f]{64}$/.test(String(image)))
+    .map(([at, image]) => `${path}: ${at} uses "${image}", which is not pinned to a sha256 digest`);
 }
 
 /** Every `uses:` in a parsed workflow or composite action is local or pinned to an immutable ref. */
