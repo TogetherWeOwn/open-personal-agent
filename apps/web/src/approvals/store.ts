@@ -4,7 +4,7 @@
 // that was closed, asleep or offline catches up on its next load, focus or reconnect.
 import type { ApprovalDecision, HarnessEvent } from "@opa/core";
 import { useSyncExternalStore } from "react";
-import { type DecideResult, listPending, type PendingBatch } from "./api";
+import { type DecideResult, decide, listPending, type PendingBatch } from "./api";
 import { actionOf, scopeLabel } from "./copy";
 
 /** A batch this tab saw decided, here or elsewhere: one line, with the card behind Details. */
@@ -27,8 +27,28 @@ let state: ApprovalsState = { status: "loading", batches: [], receipts: [], anno
 const listeners = new Set<() => void>();
 const set = (next: Partial<ApprovalsState>) => {
   state = { ...state, ...next };
+  if (next.batches) watchExpiry();
   for (const listener of listeners) listener();
 };
+
+let expiry: ReturnType<typeof setTimeout> | undefined;
+/**
+ * One timer for the whole list: when the soonest batch expires it leaves, and the list is read
+ * again, so neither the badge nor "1 approval waiting" outlives what the server still accepts.
+ */
+function watchExpiry() {
+  clearTimeout(expiry);
+  const soonest = Math.min(...state.batches.map((b) => b.expiresAt));
+  if (!Number.isFinite(soonest)) return;
+  expiry = setTimeout(
+    () => {
+      const now = Date.now();
+      set({ batches: state.batches.filter((b) => b.expiresAt > now) });
+      void refreshApprovals();
+    },
+    Math.min(Math.max(soonest - Date.now(), 0), 2 ** 31 - 1),
+  );
+}
 
 export function useApprovals(): ApprovalsState {
   return useSyncExternalStore(
@@ -54,7 +74,10 @@ export function receiptText(
   const name = (d: ApprovalDecision) => actionOf(items.get(d.approvalId)?.tool ?? "");
   const approved = decisions.filter((d) => d.decision === "approve");
   const denied = decisions.filter((d) => d.decision === "deny");
-  const scope = approved[0] ? scopeLabel(approved[0].scope).toLowerCase() : "";
+  // The card offers one scope for the whole batch; another client could send several.
+  const scopes = new Set(approved.map((d) => d.scope));
+  const [only] = scopes;
+  const scope = scopes.size === 1 && only ? scopeLabel(only).toLowerCase() : "";
   const when = time(at);
   let text: string;
   if (decisions.length <= 1) {
@@ -67,7 +90,10 @@ export function receiptText(
   } else if (!approved.length) {
     text = `You declined all ${decisions.length} · ${when}. I won't do any of them.`;
   } else {
-    text = `You approved ${approved.length} of ${decisions.length} (${scope}) · ${when}.`;
+    const each = approved.map((d) => `${name(d)} (${scopeLabel(d.scope).toLowerCase()})`);
+    text = scope
+      ? `You approved ${approved.length} of ${decisions.length} (${scope}) · ${when}.`
+      : `You approved ${approved.length} of ${decisions.length} · ${when}: ${each.join(", ")}.`;
     if (denied.length) text += ` Declined: ${denied.map(name).join(", ")}.`;
   }
   if (result?.kind === "done" && approved.length) {
@@ -118,6 +144,21 @@ export function decided(
     receipts: [receipt, ...state.receipts.filter((r) => r.batch.batchId !== batch.batchId)],
   });
   void refreshApprovals();
+}
+
+/**
+ * Sends this tab's answer. The batch counts as decided here before the request goes out: the run
+ * it wakes can send `approval.resolved` before the response arrives, and that isn't "elsewhere".
+ */
+export async function submitDecision(
+  batch: PendingBatch,
+  decisions: ApprovalDecision[],
+): Promise<DecideResult> {
+  decidedHere.add(batch.batchId);
+  const result = await decide(batch.batchId, batch.items, decisions);
+  if (result.kind === "done") decided(batch, decisions, result);
+  else decidedHere.delete(batch.batchId);
+  return result;
 }
 
 /** The events that change the list. Another tab's decision leaves a receipt here too, no error. */

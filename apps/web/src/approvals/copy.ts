@@ -93,8 +93,13 @@ export function costText(item: ApprovalItem): string | null {
   return `This will cost about $${(micro / 1_000_000).toFixed(2)} (estimate).`;
 }
 
-/** Zero-width and direction characters a body could hide; the card shows them as chips. */
-export const INVISIBLE = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+/**
+ * Characters that render as nothing (zero-width, direction marks and overrides, fillers, variation
+ * selectors and tags) that a body or a host could hide; the card shows them as chips.
+ */
+export const INVISIBLE =
+  // biome-ignore lint/suspicious/noMisleadingCharacterClass: each character is matched on its own, as a chip
+  /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
 
 /** A host that renders as something else: punycode, or letters from more than one script. */
 export function looksLikeAnother(host: string): boolean {

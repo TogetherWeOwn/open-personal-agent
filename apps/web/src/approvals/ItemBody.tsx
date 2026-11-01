@@ -10,7 +10,7 @@ import { actionOf, costText, INVISIBLE, looksLikeAnother, ruleText, taintText } 
 import type { Receipt } from "./store";
 
 /** Text exactly as it would be sent, with invisible characters made visible. */
-function Visible({ text }: { text: string }) {
+export function Visible({ text }: { text: string }) {
   const parts: ReactNode[] = [];
   let last = 0;
   for (const m of text.matchAll(INVISIBLE)) {
@@ -42,13 +42,39 @@ function Value({ value }: { value: unknown }) {
       </ul>
     );
   }
-  return <Visible text={JSON.stringify(value, null, 2)} />;
+  if (value && typeof value === "object")
+    return <Fields fields={value as Record<string, unknown>} />;
+  return <Visible text={JSON.stringify(value)} />;
 }
 
 const keyLabel = (key: string) => {
   const words = key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
   return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
 };
+
+/** An object's fields, each under its own label, so a nested recipient reads like a top one. */
+function Fields({
+  fields,
+  className = "",
+}: {
+  fields: Record<string, unknown>;
+  className?: string;
+}) {
+  return (
+    <dl className={`grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 ${className}`}>
+      {Object.entries(fields).map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="font-medium text-text-muted">
+            <Visible text={keyLabel(k)} />
+          </dt>
+          <dd className="min-w-0">
+            <Value value={v} />
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
 
 /** Every argument in full. A long one starts at 6 lines with Show all: never cut silently. */
 function Payload({ args }: { args: string }) {
@@ -64,18 +90,10 @@ function Payload({ args }: { args: string }) {
   const long = args.length > 400 || args.split("\\n").length > 6;
   return (
     <div className="flex flex-col gap-1">
-      <dl
-        className={`grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-lg border border-border bg-surface p-3 text-sm ${long && !all ? "max-h-36 overflow-hidden" : ""}`}
-      >
-        {entries.map(([k, v]) => (
-          <div key={k} className="contents">
-            <dt className="font-medium text-text-muted">{keyLabel(k)}</dt>
-            <dd className="min-w-0">
-              <Value value={v} />
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <Fields
+        fields={parsed}
+        className={`rounded-lg border border-border bg-surface p-3 text-sm ${long && !all ? "max-h-36 overflow-hidden" : ""}`}
+      />
       {long && (
         <Button variant="quiet" className="self-start" onPress={() => setAll(!all)}>
           {all ? "Show less" : "Show all"}
@@ -94,7 +112,9 @@ export function ItemBody({ item }: { item: ApprovalItem }) {
       {item.target && (
         <p>
           <span className="font-medium">To: </span>
-          <span className="break-all">{item.target}</span>
+          <span className="break-all">
+            <Visible text={item.target} />
+          </span>
           {looksLikeAnother(item.target) && (
             <span className="mt-1 flex items-center gap-1 text-sm text-status-warning">
               <TriangleAlert aria-hidden="true" size={14} />
