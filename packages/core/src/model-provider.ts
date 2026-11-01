@@ -50,12 +50,17 @@ export interface ModelRequest {
   signal?: AbortSignal;
 }
 
-/** Token counts for one call. `inputTokens` includes `cachedInputTokens`. */
+/**
+ * Token counts for one call. `inputTokens` includes `cachedInputTokens` (read from the prompt
+ * cache) and `cacheWriteInputTokens` (written to it, which some providers bill above input).
+ */
 export interface ModelUsage {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
   reasoningTokens: number;
+  /** Absent when the provider doesn't report cache writes apart from input. */
+  cacheWriteInputTokens?: number;
 }
 
 export type FinishReason = "stop" | "length" | "tool_calls" | "content_filter" | "other";

@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { HarnessEvent } from "@opa/core";
 
-/** A row of `GET /api/conversations`, newest first. */
-export type ConversationSummary = { id: string; title: string | null; updatedAt: number };
+/** A row of `GET /api/conversations`, newest first. `model` is the chat's own pick, if it has one. */
+export type ConversationSummary = {
+  id: string;
+  title: string | null;
+  updatedAt: number;
+  model?: { provider: string; model: string } | null;
+};
 
 /** A row of `GET /api/conversations/:id/messages`, oldest first. */
 export type StoredMessage = {
@@ -22,8 +27,11 @@ export interface ChatTransport {
    * reconnect, after which the caller reloads what it shows. Returns a function that disconnects.
    */
   connect(onEvent: (event: HarnessEvent) => void, onOpen: () => void): () => void;
-  /** Starts a turn. A send that can't be made is answered with a `turn.failed` at `seq` 0. */
-  send(conversationId: string, text: string): void;
+  /**
+   * Starts a turn. A send that can't be made is answered with a `turn.failed` at `seq` 0. `model`
+   * pins the chat to its own model first, for a chat picked before the server had it.
+   */
+  send(conversationId: string, text: string, model?: { provider: string; model: string }): void;
   /** Stops the running turn, which then ends with `turn.interrupted`. */
   cancel(): void;
   conversations(): Promise<ConversationSummary[]>;

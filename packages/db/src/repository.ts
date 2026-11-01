@@ -4,6 +4,7 @@
 import { estimate, findPrice } from "@opa/pricing";
 import { and, count, desc, eq, gte, inArray, type SQL, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
@@ -164,8 +165,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             and(eq(secrets.id, modelProviders.keySecretId), eq(secrets.userId, userId)),
           )
           .where(and(eq(modelProviders.userId, userId), where));
-      const createConversation = async (id: string, title: string | null = null) => {
-        await db.insert(conversations).values({ id: checkId(id), userId, title });
+      const createConversation = async (
+        id: string,
+        title: string | null = null,
+        pin?: { provider: string; model: string },
+      ) => {
+        const model = { modelProvider: pin?.provider ?? null, model: pin?.model ?? null };
+        await db.insert(conversations).values({ id: checkId(id), userId, title, ...model });
       };
       return {
         /** The user's own `users` row; `undefined` if it was deleted. */
@@ -210,10 +216,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .orderBy(messages.seq)
               : null,
           /** Creates the conversation on its first message; `false` if the ID is someone else's. */
-          open: async (id: string, title: string) => {
+          /** Opens a conversation, creating it, with its own model if one is given, when it's new. */
+          open: async (id: string, title: string, pin?: { provider: string; model: string }) => {
             if (await getConversation(id)) return true;
             // A conflict is either another user's row or this user's from a concurrent open.
-            await createConversation(id, title).catch(() => {});
+            await createConversation(id, title, pin).catch(() => {});
             return (await getConversation(id)) !== undefined;
           },
           /** Pins the conversation to a model, or back to the Chat role with `null`. */
@@ -350,11 +357,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             await db.insert(modelProviders).values({ ...values, id, userId });
             return id;
           },
+          /**
+           * A new model also moves the roles and conversations that were on the old one, so a
+           * listing never shows one model while calls go to another. Other picks stay.
+           */
           update: async (id: string, values: Partial<ProviderValues>) => {
-            await db
-              .update(modelProviders)
-              .set({ ...values, updatedAt: Date.now() })
-              .where(ownProvider(id));
+            const old = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
+            if (!old) return;
+            const { model } = values;
+            const moved = model && old.model && model !== old.model ? old.model : null;
+            const on = (provider: SQLiteColumn, column: SQLiteColumn, owner: SQLiteColumn) =>
+              and(eq(owner, userId), eq(provider, id), eq(column, moved as string));
+            const { chatProvider, chatModel, backgroundProvider, backgroundModel } = userSettings;
+            await db.batch([
+              db
+                .update(modelProviders)
+                .set({ ...values, updatedAt: Date.now() })
+                .where(ownProvider(id)),
+              ...(moved && model
+                ? [
+                    db
+                      .update(userSettings)
+                      .set({ chatModel: model })
+                      .where(on(chatProvider, chatModel, userSettings.userId)),
+                    db
+                      .update(userSettings)
+                      .set({ backgroundModel: model })
+                      .where(on(backgroundProvider, backgroundModel, userSettings.userId)),
+                    db
+                      .update(conversations)
+                      .set({ model })
+                      .where(
+                        on(conversations.modelProvider, conversations.model, conversations.userId),
+                      ),
+                  ]
+                : []),
+            ]);
           },
           /** Removes the row and its key; roles and conversations naming it fall back. */
           remove: async (id: string) => {

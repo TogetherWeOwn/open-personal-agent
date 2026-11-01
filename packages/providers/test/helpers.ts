@@ -14,11 +14,12 @@ export function byteStream(text: string, chunkSize = 7): ReadableStream<Uint8Arr
   });
 }
 
-/** One line per event; usage reads `input/output/cached/reasoning`. */
+/** One line per event; usage reads `input/output/cached/reasoning`, plus `/written` if reported. */
 export function brief(e: ModelEvent): string {
   if (e.type === "usage") {
     const u = e.usage;
-    return `usage ${u.inputTokens}/${u.outputTokens}/${u.cachedInputTokens}/${u.reasoningTokens}`;
+    const written = u.cacheWriteInputTokens === undefined ? "" : `/${u.cacheWriteInputTokens}`;
+    return `usage ${u.inputTokens}/${u.outputTokens}/${u.cachedInputTokens}/${u.reasoningTokens}${written}`;
   }
   if (e.type === "done") return `done ${e.finishReason}`;
   if (e.type === "error") return `error ${e.code}: ${e.message}`;
