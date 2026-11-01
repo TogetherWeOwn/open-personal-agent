@@ -156,8 +156,11 @@ describe("export rows", () => {
       { key: `${prefix}a.json`, size: 1 },
       { key: `${prefix}b.json`, size: 1 },
     ]);
-    // Another user's directory is empty to her; Node has no listing, so the walk sees none.
-    expect(await alice.exports.listPrefix(bob.exports.stagedPrefix("e7"))).toEqual([]);
+    // Another user's directory is rejected, like getObject's foreign keys; Node has no
+    // listing, so the walk sees none even for an own prefix.
+    await expect(alice.exports.listPrefix(bob.exports.stagedPrefix("e7"))).rejects.toThrow(
+      /invalid prefix/,
+    );
     const noList = createRepository({ ...env, FILES: {} as never }).forUser(
       scopeFromSession({ userId: "alice" }),
     );
