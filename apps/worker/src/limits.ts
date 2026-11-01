@@ -131,16 +131,25 @@ export class Limits {
     return this.#rate("turns", TURNS_PER_MINUTE);
   }
 
-  /** Counts a tool call, or returns `false` past 60 in the last minute: the tool must not run. */
-  toolCall(): boolean {
-    return this.#rate("tools", TOOL_CALLS_PER_MINUTE);
+  /**
+   * Counts a tool call, or returns `false` past 60 in the last minute: the tool must not run.
+   * `callKey` names the call, so a retried step asking again for the same call isn't counted
+   * twice while it is still in the window.
+   */
+  toolCall(callKey?: string): boolean {
+    return this.#rate("tools", TOOL_CALLS_PER_MINUTE, callKey);
   }
 
-  #rate(key: string, perMinute: number): boolean {
+  #rate(key: string, perMinute: number, callKey?: string): boolean {
     const now = this.now();
-    const recent = (this.kv.get<number[]>(key) ?? []).filter((t) => now - t < MINUTE);
+    // Entries are times, or `[time, callKey]` for a call that names itself.
+    const recent = (this.kv.get<(number | [number, string])[]>(key) ?? []).filter(
+      (e) => now - (typeof e === "number" ? e : e[0]) < MINUTE,
+    );
+    if (callKey !== undefined && recent.some((e) => typeof e !== "number" && e[1] === callKey))
+      return true;
     if (recent.length >= perMinute) return false;
-    this.kv.put(key, [...recent, now]);
+    this.kv.put(key, [...recent, callKey === undefined ? now : [now, callKey]]);
     return true;
   }
 
@@ -220,6 +229,15 @@ export class Limits {
     return true;
   }
 
+  /** Undoes `raiseTask` when the Continue it was for couldn't wake the task. */
+  unraiseTask(taskId: string): void {
+    const tasks = this.#tasks();
+    const task = tasks[taskId];
+    if (!task?.raised) return;
+    const budgetMicroUsd = task.budgetMicroUsd / 2;
+    this.kv.put("tasks", { ...tasks, [taskId]: { ...task, budgetMicroUsd, raised: false } });
+  }
+
   /** A task's budget and what it has spent so far; `null` when it never started or has ended. */
   task(taskId: string): Omit<TaskEnvelope, "at"> | null {
     const task = this.#tasks()[taskId];
@@ -232,11 +250,18 @@ export class Limits {
       : null;
   }
 
-  /** Settles a task's budget at its end: what it spent; calls still held settle on their own. */
+  /**
+   * Settles a task's budget at its end and returns what it spent. A call still held (its step
+   * was lost mid-call) settles on its own later, so its whole reservation is counted here: the
+   * figure is never below what the task really cost.
+   */
   endTask(taskId: string): number {
     const { [taskId]: task, ...rest } = this.#tasks();
     this.kv.put("tasks", rest);
-    return task?.spentMicroUsd ?? 0;
+    const held = Object.values(this.#spend().held)
+      .filter((hold) => hold.task === taskId)
+      .reduce((n, hold) => n + hold.microUsd, 0);
+    return (task?.spentMicroUsd ?? 0) + held;
   }
 
   /**
@@ -275,6 +300,10 @@ export class Limits {
     // What each applicable limit has left before this call; the smallest binds.
     const room: [SpendLimit, number, string][] = [];
     const task = scope.taskId === undefined ? undefined : this.#tasks()[scope.taskId];
+    // A task's call draws on its budget; with none (never started, or ended), nothing is left.
+    if (scope.taskId !== undefined && !task) {
+      return { limit: "task_budget", detail: "the task has no budget left to draw on" };
+    }
     if (task) {
       const taskHeld = sum(holds.filter((hold) => hold.task === scope.taskId));
       room.push([
@@ -378,7 +407,7 @@ export function checkSpending(body: unknown): Partial<SpendingSettings> | null {
   const out: Partial<SpendingSettings> = {};
   for (const [key, value] of Object.entries(body)) {
     if (key === "hardCapMicroUsd" && value === null) out.hardCapMicroUsd = null;
-    else if (key in SPENDING_DEFAULTS && valid(value))
+    else if (Object.hasOwn(SPENDING_DEFAULTS, key) && valid(value))
       out[key as keyof SpendingSettings] = value as number;
     else return null;
   }
