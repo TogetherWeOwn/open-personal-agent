@@ -8,6 +8,7 @@ export { canonicalOrigin, credentialBinding } from "./credential-binding";
 export { createOpenAIChatProvider, type OpenAIChatOptions } from "./openai-chat";
 export {
   createWorkersAIProvider,
+  STARTER_MODEL,
   WORKERS_AI_PROVIDER_ID,
   type WorkersAIBinding,
 } from "./workers-ai";

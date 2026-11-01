@@ -44,6 +44,8 @@ describe("scoped-access lint", () => {
     const cases: [string, string, number][] = [
       ["apps/worker/src/chat.ts", "scopeFromSession(s)", 1],
       ["apps/worker/src/auth/session.ts", "scopeFromSession(s)", 0],
+      ["apps/worker/src/assistant.ts", "scopeForAssistant(this.name)", 0],
+      ["apps/worker/src/chat.ts", "scopeForAssistant(name)", 1],
       ["apps/worker/src/health.ts", `env.${KEY}`, 1],
       ["packages/core/src/a.ts", `"${KEY}_PREV"`, 1],
       ["apps/worker/src/compose.ts", `env.${KEY}`, 0],

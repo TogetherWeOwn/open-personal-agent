@@ -2,7 +2,7 @@
 // Passkey login, sessions and the route-auth guard (ADR 0010 D2). The guard denies by default:
 // a route is reachable without a session only if it is on `PUBLIC_ROUTES`, so a new route that
 // forgets to declare itself stays closed. test/routes.test.ts enumerates the route table.
-import { systemStore } from "@opa/db/system";
+import { SESSION_IDLE_MS as IDLE_MS, systemStore } from "@opa/db/system";
 import {
   type AuthenticationResponseJSON,
   type AuthenticatorTransport,
@@ -13,6 +13,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { AppEnv } from "./env";
+import { sameOrigin } from "./security";
 
 /** The only routes that answer without a session, as `METHOD /path`. Keep this list exact. */
 export const PUBLIC_ROUTES: ReadonlySet<string> = new Set([
@@ -25,7 +26,6 @@ export const PUBLIC_ROUTES: ReadonlySet<string> = new Set([
 ]);
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-export const IDLE_MS = 30 * 86_400_000;
 /** `last_seen_at` is written at most this often, so reads don't each cost a D1 write. */
 const TOUCH_MS = 60 * 60_000;
 
@@ -34,7 +34,7 @@ const TOUCH_MS = 60 * 60_000;
  * same-site is never enough. Then every route not on the public list needs a live session.
  */
 export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (!SAFE_METHODS.has(c.req.method) && c.req.header("Origin") !== new URL(c.req.url).origin) {
+  if (!SAFE_METHODS.has(c.req.method) && !sameOrigin(c)) {
     return c.json({ error: "bad_origin" }, 403);
   }
   // Hono answers HEAD with the GET handler, so the list's GET entries cover HEAD too.

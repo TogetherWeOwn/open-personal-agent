@@ -2,10 +2,9 @@
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
 // tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
-import type { HarnessEvent, ModelProvider } from "@opa/core";
-import { chatStore, isConversationId, type TurnRecord } from "@opa/db/chat";
-import { scopeFromAssistantName } from "@opa/db/repository";
-import { createWorkersAIProvider } from "@opa/providers";
+import type { HarnessEvent } from "@opa/core";
+import { createRepository, isId, scopeForAssistant, type TurnRecord } from "@opa/db/repository";
+import { systemStore } from "@opa/db/system";
 import {
   Agent,
   type Connection,
@@ -13,13 +12,12 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
-import { SESSION_HEADER } from "./chat";
-import { withoutMasterKeys } from "./compose";
-import type { Bindings } from "./env";
-import { IDLE_MS } from "./session";
+import { resolveChatModel } from "./chat-model";
+import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
+import type { Bindings, Env } from "./env";
 
-/** Workers AI needs no key, so a fresh deployment can chat (ADR 0006). Onboarding picks later. */
-export const DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+/** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
+export const SESSION_HEADER = "x-opa-session-id";
 const MAX_TEXT = 32_000;
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
 
@@ -31,15 +29,15 @@ type Emit = <T extends HarnessEvent["type"]>(
 export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
   static override options = { sendIdentityOnConnect: false };
-  /** The model for chat turns. Tests replace it with a scripted provider. */
-  chatModel: { provider: ModelProvider; model: string } = {
-    provider: createWorkersAIProvider(this.env.AI),
-    model: DEFAULT_MODEL,
-  };
+  /** Picks each turn's model. Tests replace it with a scripted provider. */
+  resolveModel = resolveChatModel;
   #running: AbortController | null = null;
+  /** The env with the vault: `compose` stays the only reader of the master keys. */
+  readonly #composed: Promise<Env>;
 
-  constructor(ctx: DurableObjectState, env: Bindings) {
+  constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, withoutMasterKeys(env));
+    this.#composed = compose(env);
   }
 
   /** Liveness check for `/api/health`. */
@@ -47,9 +45,13 @@ export class Assistant extends Agent<Bindings> {
     return "pong";
   }
 
-  /** The user's chat rows, scoped by this DO's own name, which only the server sets. */
-  get #store() {
-    return chatStore(this.env, scopeFromAssistantName(this.name));
+  /** The user's scope, from this DO's own name, which only the server sets. */
+  get #scope() {
+    return scopeForAssistant(this.name);
+  }
+
+  get #chat() {
+    return createRepository(this.env).forUser(this.#scope).chat;
   }
 
   override shouldSendProtocolMessages(): boolean {
@@ -74,7 +76,7 @@ export class Assistant extends Agent<Bindings> {
     const text = msg.text.trim();
     if (this.#running) {
       reject(connection, msg.conversationId, "Another reply is still being written.");
-    } else if (!isConversationId(msg.conversationId) || !text || text.length > MAX_TEXT) {
+    } else if (!isId(msg.conversationId) || !text || text.length > MAX_TEXT) {
       reject(connection, "", "That message can't be sent.");
     } else {
       const running = new AbortController();
@@ -98,12 +100,12 @@ export class Assistant extends Agent<Bindings> {
     stash: (data: TurnRecord) => void,
   ) {
     if (!(await this.#sessionLive(connection))) return;
-    const store = this.#store;
+    const chat = this.#chat;
     const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
-    if (!(await store.openConversation(conversationId, title))) {
+    if (!(await chat.open(conversationId, title))) {
       return reject(connection, conversationId, "That conversation doesn't exist.");
     }
-    const { provider, model } = this.chatModel;
+    const { provider, model } = await this.resolveModel(await this.#composed, this.#scope);
     const turn: TurnRecord = {
       conversationId,
       turnId: crypto.randomUUID(),
@@ -117,9 +119,9 @@ export class Assistant extends Agent<Bindings> {
     // Checkpoint before the first write, so a recovery can always name the turn.
     stash(turn);
     const emit = this.#emitter(conversationId, turn.turnId);
-    await store.startTurn(conversationId, text, turn.replyId);
+    await chat.startTurn(conversationId, text, turn.replyId);
     // The model context comes from D1, never from memory, so it survives an eviction.
-    const messages = ((await store.listMessages(conversationId)) ?? [])
+    const messages = ((await chat.listMessages(conversationId)) ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }));
     emit("turn.started", { messageId: turn.replyId });
@@ -149,7 +151,7 @@ export class Assistant extends Agent<Bindings> {
       failure = "The model call failed.";
     }
     try {
-      await store.settle(turn, signal.aborted ? "interrupted" : failure ? "error" : "complete");
+      await chat.settle(turn, signal.aborted ? "interrupted" : failure ? "error" : "complete");
     } catch {
       return emit("turn.failed", { message: "The reply couldn't be saved." });
     }
@@ -166,8 +168,9 @@ export class Assistant extends Agent<Bindings> {
   /** A socket outlives logout and revocation, so each action rechecks the session it opened with. */
   async #sessionLive(connection: Connection): Promise<boolean> {
     const { sessionId } = (connection.state ?? {}) as { sessionId?: string | null };
-    const now = Date.now();
-    if (sessionId && (await this.#store.sessionLive(sessionId, now, now - IDLE_MS))) return true;
+    const sessions = systemStore(this.env).sessions;
+    if (sessionId && (await sessions.isLive(sessionId, this.#scope.userId, Date.now())))
+      return true;
     connection.close(4401, "unauthenticated");
     return false;
   }
@@ -180,14 +183,14 @@ export class Assistant extends Agent<Bindings> {
     if (ctx.name !== "chat-turn") return;
     const turn = ctx.snapshot as TurnRecord | null;
     if (!turn) return;
-    await this.#store.settle(turn, "interrupted"); // the ledger keeps any usage already reported
+    await this.#chat.settle(turn, "interrupted"); // the ledger keeps any usage already reported
     this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
   }
 
   #emitter(sessionId: string, turnId: string): Emit {
     let seq = 0;
     return (type, payload) =>
-      this.broadcast(JSON.stringify({ seq: ++seq, sessionId, turnId, type, payload }));
+      this.broadcast(JSON.stringify({ v: 1, seq: ++seq, sessionId, turnId, type, payload }));
   }
 }
 
@@ -205,8 +208,18 @@ function parse(message: WSMessage) {
   return null;
 }
 
-/** Fails a send for the tab that made it only. No turn started, so it has no turn ID. */
+/**
+ * Fails a send for the tab that made it only. No turn started, so it has no turn ID, and `seq` 0
+ * keeps it outside the sequence of a turn the tab may be receiving.
+ */
 function reject(connection: Connection, sessionId: string, message: string) {
-  const payload = { message };
-  connection.send(JSON.stringify({ seq: 1, sessionId, turnId: "", type: "turn.failed", payload }));
+  const event: HarnessEvent = {
+    v: 1,
+    seq: 0,
+    sessionId,
+    turnId: "",
+    type: "turn.failed",
+    payload: { message },
+  };
+  connection.send(JSON.stringify(event));
 }

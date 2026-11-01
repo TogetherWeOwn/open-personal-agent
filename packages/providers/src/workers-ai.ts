@@ -12,6 +12,8 @@ export interface WorkersAIBinding {
 }
 
 export const WORKERS_AI_PROVIDER_ID = "workers-ai";
+/** What a fresh deployment chats with until onboarding picks a model: it needs no key. */
+export const STARTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
   return {

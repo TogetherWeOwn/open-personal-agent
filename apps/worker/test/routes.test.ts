@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-1 (every non-public route needs a session) and M2-3 (the public list is exact).
 import { describe, expect, it } from "vitest";
-import { app } from "../src/app";
 import { SESSION_COOKIE } from "../src/auth";
 import { PUBLIC_ROUTES } from "../src/session";
+import { workerApp as app } from "../src/worker-app";
 import { Browser, claim, db, freshDatabase } from "./helpers/app";
 
 freshDatabase();

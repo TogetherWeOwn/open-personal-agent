@@ -29,6 +29,12 @@ export const RULES = [
     "a UserScope comes from the session layer only (ADR 0010 D3)",
   ],
   [
+    "scope-minting",
+    /^(?:packages\/db\/|apps\/worker\/src\/assistant\.ts$)/,
+    /\bscopeForAssistant\b/g,
+    "only the assistant scopes itself, by the name the session gave it (ADR 0010 D3)",
+  ],
+  [
     "master-key",
     /^(?:packages\/vault\/|apps\/(?:worker|node)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,

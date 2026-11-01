@@ -4,8 +4,8 @@
 import { runInDurableObject } from "cloudflare:test";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
 import { describe, expect, it, vi } from "vitest";
-import { app } from "../src/app";
 import type { Assistant } from "../src/assistant";
+import { workerApp } from "../src/worker-app";
 import { Browser, claim, count, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
 freshDatabase();
@@ -36,14 +36,14 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
 const assistantOf = (userId: string) => env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${userId}`));
 function useModel(userId: string, provider: ModelProvider) {
   return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
-    instance.chatModel = { provider, model: "test-model" };
+    instance.resolveModel = async () => ({ provider, model: "test-model" });
   });
 }
 
 /** Opens a tab's WebSocket and collects the events it receives. */
 async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
   const cookie = [...br.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
-  const res = await app.request(
+  const res = await workerApp.request(
     `${ORIGIN}${path}`,
     { headers: { upgrade: "websocket", origin, cookie } },
     br.bindings,
@@ -78,7 +78,7 @@ describe("chat transport", () => {
     types.push("message.completed", "turn.completed");
     expect(a.events.map((e) => e.type)).toEqual(types);
     expect(b.events).toEqual(a.events);
-    expect(a.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(a.events.map((e) => [e.v, e.seq])).toEqual([1, 2, 3, 4, 5, 6].map((n) => [1, n]));
     expect(seen).toEqual([[{ role: "user", content: "Hi!" }]]);
 
     const res = await browser.req("/api/conversations/conv-1/messages");
@@ -179,7 +179,10 @@ describe("chat transport", () => {
     tab.send?.("theirs", "hi");
     tab.send?.("../x", "hi");
     await vi.waitFor(() =>
-      expect(tab.events.map((e) => e.type)).toEqual(["turn.failed", "turn.failed"]),
+      expect(tab.events.map((e) => [e.type, e.seq])).toEqual([
+        ["turn.failed", 0],
+        ["turn.failed", 0],
+      ]),
     );
     expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
     expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
