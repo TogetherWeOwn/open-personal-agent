@@ -59,6 +59,19 @@ export interface Day {
   costMicroUsd: number;
   unpricedCalls: number;
 }
+/** One Cloudflare allowance, as the reconciler's banners read it (M3-16 AC3). */
+export interface AllowanceMeter {
+  id:
+    | "d1_cap"
+    | "d1_storage"
+    | "r2_storage"
+    | "workers_ai_neurons"
+    | "workflows_steps"
+    | "do_duration";
+  used: number;
+  limit: number;
+  unit: "bytes" | "neurons" | "steps" | "gb_seconds";
+}
 export interface UsageData {
   currency: string;
   today: Period;
@@ -74,6 +87,8 @@ export interface UsageData {
     billedNeurons: number;
     resetsAt: number;
   } | null;
+  /** Only the owner gets them: the allowances are the Cloudflare account's. */
+  meters: AllowanceMeter[] | null;
 }
 
 export const num = new Intl.NumberFormat();

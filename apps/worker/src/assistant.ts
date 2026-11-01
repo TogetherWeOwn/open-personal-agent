@@ -180,6 +180,19 @@ const REFUSED: Record<string, string> = {
   already_claimed: "This approval was already used, so the call didn't run again.",
 };
 
+/** What `#drive` runs a turn with: a new turn's or a resumed one's. */
+interface DriveRun {
+  checkpoint: TurnCheckpoint;
+  stash: (data: TurnCheckpoint) => void;
+  provider: ModelProvider;
+  model: string;
+  firstHold: { id: string; maxOutputTokens: number };
+  history: ModelMessage[];
+  state: TurnState;
+  signal: AbortSignal;
+  approvals?: ApprovalRun;
+}
+
 export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
   static override options = { sendIdentityOnConnect: false };
@@ -1440,17 +1453,20 @@ export class Assistant extends Agent<Bindings> {
    * settled to D1 before its terminal event is sent, or, at an approval or limit, saved to D1
    * to resume later (its event log stays, so a reconnect still replays the whole turn).
    */
-  async #drive(run: {
-    checkpoint: TurnCheckpoint;
-    stash: (data: TurnCheckpoint) => void;
-    provider: ModelProvider;
-    model: string;
-    firstHold: { id: string; maxOutputTokens: number };
-    history: ModelMessage[];
-    state: TurnState;
-    signal: AbortSignal;
-    approvals?: ApprovalRun;
-  }): Promise<void> {
+  async #drive(run: DriveRun): Promise<void> {
+    const began = Date.now();
+    try {
+      await this.#driveTurn(run);
+    } finally {
+      // The turn's wall-clock, for the Durable Object duration estimate (M3-16 AC3). A meter
+      // that can't be written never holds up or fails the reply.
+      void createRepository(this.env)
+        .deployment.addToMeter("do_ms", Date.now() - began, Date.now())
+        .catch(() => {});
+    }
+  }
+
+  async #driveTurn(run: DriveRun): Promise<void> {
     const { checkpoint: cp, stash, state, signal } = run;
     const { conversationId, turnId, replyId } = cp;
     const repo = this.#repo;

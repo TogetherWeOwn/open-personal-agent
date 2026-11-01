@@ -5,6 +5,7 @@
 import { createRepository } from "@opa/db/repository";
 import { findPrice, isStale, providerInfo, workersAiAllowance, workersPaid } from "@opa/pricing";
 import { Hono } from "hono";
+import { allowanceMeters } from "./allowances";
 import type { AppEnv } from "./env";
 
 type Usage = ReturnType<ReturnType<typeof createRepository>["forUser"]>["usage"];
@@ -195,6 +196,9 @@ usageRoutes.get("/", async (c) => {
           resetsAt: utcDay + DAY,
         }
       : null;
+  // Every Cloudflare allowance the app can estimate (M3-16 AC3), from the list the reconciler's
+  // banners read. The owner's only, like the neurons: they are the account's, not one user's.
+  const meters = profile?.role === "owner" ? await allowanceMeters(c.env, now) : null;
   // Past the free allowance, neurons are billed (A-Co3). Other apps on the account may have
   // used some of it, so this is at least what is billed, never more.
   const allowanceView = allowance && {
@@ -214,5 +218,6 @@ usageRoutes.get("/", async (c) => {
     ),
     breakdowns: breakdowns(breakdownRows, first, last, dateOf),
     allowance: allowanceView,
+    meters,
   });
 });

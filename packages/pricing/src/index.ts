@@ -54,6 +54,10 @@ export const cloudflareAllowances: {
   d1IncludedBytes: number;
   d1MaxBytes: number;
   r2IncludedBytes: number;
+  workflowStepsPerMonth: number;
+  doGbSecondsPerMonth: number;
+  /** Duration bills each active Durable Object as this much memory, whatever it uses. */
+  doMemoryGb: number;
   verifiedAt: string;
 } = table.cloudflare;
 

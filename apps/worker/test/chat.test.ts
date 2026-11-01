@@ -205,6 +205,11 @@ describe("chat transport", () => {
       { user_id: owner, conversation_id: "conv-1", provider_id: "scripted", model: "test-model" },
     ]);
     expect(ledger.results[0]).toMatchObject({ input_tokens: 12, output_tokens: 3 });
+    // The turn's wall-clock feeds the Durable Object duration estimate (M3-16 AC3).
+    await vi.waitFor(async () => {
+      const meters = await db.prepare("SELECT meter FROM meters").all();
+      expect(meters.results).toEqual([{ meter: "do_ms" }]);
+    });
   });
 
   it("calls the saved model, and a settings change applies to the next turn", async () => {

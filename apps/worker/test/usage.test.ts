@@ -44,6 +44,7 @@ type UsageBody = {
     day: { date: string; calls: number; costMicroUsd: number }[];
   };
   allowance: { resetsAt: number; freeNeuronsUsed: number; billedNeurons: number } | null;
+  meters: { id: string; used: number; limit: number; unit: string }[] | null;
 };
 const DAY = 86_400_000;
 
@@ -140,7 +141,16 @@ describe("usage ledger", () => {
     // The allowance total includes everyone's calls, so a member doesn't get it.
     const member = { headers: await sessionHeaders("other") };
     const theirs = await workerApp.request(`${ORIGIN}/api/usage`, member, env);
-    expect((await theirs.json<UsageBody>()).allowance).toBeNull();
+    expect(await theirs.json<UsageBody>()).toMatchObject({ allowance: null, meters: null });
+    // The owner gets every allowance meter, from the list the reconciler's banners read.
+    expect(body.meters?.map((m) => m.id)).toEqual([
+      "d1_cap",
+      "d1_storage",
+      "r2_storage",
+      "workers_ai_neurons",
+      "workflows_steps",
+      "do_duration",
+    ]);
     expect(body.today.groups[0]?.lines).toMatchObject([
       { name: "GPT-4.1", priceVerifiedAt: "2020-01-01", stale: true },
     ]);

@@ -22,7 +22,9 @@ export interface ExportParams {
 export class ExportWorkflow extends WorkflowEntrypoint<Bindings, ExportParams> {
   override async run(event: WorkflowEvent<ExportParams>, step: WorkflowStep): Promise<void> {
     // `event.payload` is never read: the export is whatever row names this instance.
-    await executeExport(this.env, event.instanceId, stepperFor(step));
+    const counted = () =>
+      createRepository(this.env).deployment.addToMeter("workflow_steps", 1, Date.now());
+    await executeExport(this.env, event.instanceId, stepperFor(step, counted));
   }
 }
 

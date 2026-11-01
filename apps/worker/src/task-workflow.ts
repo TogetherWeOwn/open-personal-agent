@@ -40,7 +40,7 @@ import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
-import { type AssistantTaskRpc, createWorkflowTaskContext } from "./task-context";
+import { type AssistantTaskRpc, createWorkflowTaskContext, stepperFor } from "./task-context";
 
 /** Advisory only: identity comes from the instance's task row, never from these params (AC9). */
 export interface TaskParams {
@@ -93,7 +93,9 @@ export class TaskWorkflow extends WorkflowEntrypoint<Bindings, TaskParams> {
       await this.#composed,
       { resolveModel: this.resolveModel, taskTools: this.taskTools },
       event.instanceId,
-      stepperFor(step),
+      stepperFor(step, () =>
+        createRepository(this.env).deployment.addToMeter("workflow_steps", 1, Date.now()),
+      ),
     );
   }
 }
@@ -565,44 +567,6 @@ const nextUtcMonth = (t: number) => {
   const d = new Date(t);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
 };
-
-/** The platform stepper's surface used here, without its serializable-type machinery. */
-type PlatformStepper = {
-  do(name: string, config: Record<string, unknown>, fn: () => Promise<unknown>): Promise<unknown>;
-  sleep(name: string, duration: number): Promise<void>;
-  waitForEvent(
-    name: string,
-    options: { type: string; timeout: number },
-  ): Promise<{ payload: unknown }>;
-};
-
-/** Maps the platform stepper to the port's: ms durations in, step outputs hidden from logs. */
-function stepperFor(step: WorkflowStep): TaskStepper {
-  const platform = step as unknown as PlatformStepper;
-  return {
-    do: (name, config, fn) =>
-      platform.do(
-        name,
-        {
-          ...(config.retries
-            ? {
-                retries: {
-                  limit: config.retries.limit,
-                  delay: config.retries.delayMs,
-                  ...(config.retries.backoff ? { backoff: config.retries.backoff } : {}),
-                },
-              }
-            : {}),
-          ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
-          sensitive: "output", // step outputs are the user's content, not telemetry
-        },
-        () => fn(),
-      ) as never,
-    sleep: (name, durationMs) => platform.sleep(name, durationMs),
-    waitForEvent: (name, options) =>
-      platform.waitForEvent(name, { type: options.type, timeout: options.timeoutMs }) as never,
-  };
-}
 
 function parseState(json: string | null): TaskTurnState | null {
   if (!json) return null;
