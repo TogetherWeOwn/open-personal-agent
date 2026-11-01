@@ -55,13 +55,20 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         emit("message.delta", { text });
         timer = setTimeout(tick, delayMs);
       };
+      let started = false;
+      const begin = () => {
+        started = true;
+        emit("turn.started", { messageId: `${turnId}-reply` });
+      };
       stop = () => {
         clearTimeout(timer);
         stop = null;
+        // A turn stopped before its start still starts, so the tab can match the interruption.
+        if (!started) begin();
         emit("turn.interrupted", { message: "Stopped." });
       };
       const start = () => {
-        emit("turn.started", { messageId: `${turnId}-reply` });
+        begin();
         timer = setTimeout(tick, delayMs);
       };
       if (text === MOCK_SLOW_START) timer = setTimeout(start, 1000);
