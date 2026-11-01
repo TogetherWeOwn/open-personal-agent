@@ -34,8 +34,10 @@ import {
   setConversationModel,
   settingsApi,
 } from "./models/settings-api";
+import { hasNavigated, match, navigate, usePath } from "./router";
+import { NotFound, routes } from "./routes";
 import { ThemeToggle } from "./ThemeToggle";
-import { Banner, Button, buttonClass } from "./ui";
+import { APP_NAME, Banner, Button, buttonClass, pageTitle } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -61,16 +63,22 @@ function useLoad(
 
 interface AppProps {
   transport: ChatTransport;
-  /** Client-side navigation, from the shell; a full load when the app stands alone. */
-  onNavigate?: (href: string) => void;
-  /** False while another screen covers the chat; becoming visible reloads the model settings. */
-  visible?: boolean;
 }
 
-export function App({ transport, onNavigate, visible = true }: AppProps) {
+export function App({ transport }: AppProps) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
+  const path = usePath();
+  const matched = match(routes, path);
+  const Screen = matched ? matched.route.screen : NotFound;
+  const chat = !Screen;
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!chat) return;
+    document.title = pageTitle("Chat");
+    if (hasNavigated()) heading.current?.focus();
+  }, [chat]);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
@@ -79,8 +87,10 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
   const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  // The chat stays mounted while another screen shows; becoming visible again reloads the
+  // model settings, so a model picked in Settings › Models is live on return (#88).
   useEffect(() => {
-    if (!visible) return;
+    if (!chat) return;
     let current = true;
     settingsApi<ModelSettings>("").then(
       (loaded) => {
@@ -91,7 +101,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     return () => {
       current = false;
     };
-  }, [visible]);
+  }, [chat]);
 
   // The chats the server has: listed, or one whose turn has started. A switch in any other chat
   // waits in `pendingPins`, and the chat's first send carries it, so its first reply already uses
@@ -344,8 +354,8 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     setThreadOpen(true);
   };
 
-  const goModels = () =>
-    onNavigate ? onNavigate("/settings/models") : window.location.assign("/settings/models");
+  // The route table serves /settings/models in-app, so stay client-side.
+  const goModels = () => navigate("/settings/models");
 
   // A new chat's first message is on its way, so the chat isn't on the server yet.
   const starting =
@@ -397,82 +407,88 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
 
   return (
-    <div className="flex h-dvh">
-      <header className="sr-only">
-        <h1>Open Personal Agent</h1>
-      </header>
-      <aside
-        aria-label="Conversations"
-        className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
-      >
-        <div className="flex items-center justify-between gap-2 p-3">
-          <Heading level={2} className="px-1 text-lg font-semibold">
-            Chats
-          </Heading>
-          <ThemeToggle className={buttonClass("quiet")} />
-        </div>
-        <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
-          New chat
-        </Button>
-        <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
-          Usage
-        </Link>
-        <Link
-          href="/settings/models"
-          className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
-        >
-          Settings
-        </Link>
-        <ConversationList
-          conversations={state.conversations}
-          activeId={active.id}
-          onOpen={(id) => open({ type: "select", id })}
-        />
-      </aside>
-      <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
-        <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
-          <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
-            <span aria-hidden="true">← </span>Chats
-          </Button>
-          <Heading level={2} className="truncate px-1 font-semibold">
-            {active.title}
-          </Heading>
+    <>
+      {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
+      <div hidden={!chat} className="flex h-dvh">
+        <header className="sr-only">
+          <h1 ref={heading} tabIndex={-1}>
+            {APP_NAME}
+          </h1>
         </header>
-        {!healthy && (
-          <Banner tone="danger" alert>
-            Your assistant's server isn't responding properly, so replies may fail.
-          </Banner>
-        )}
-        <Thread key={active.id} conversation={active} />
-        {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
-        <Composer
-          text={drafts[active.id] ?? ""}
-          setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
-          busy={state.pending !== null}
-          onSend={send}
-          onStop={() => transport.cancel()}
-          onNoModel={noModel ? goModels : undefined}
-          chip={
-            modelSettings && (
-              <ModelChip
-                settings={modelSettings}
-                pinned={pinned}
-                onSwitch={switchModel}
-                starting={starting}
-              />
-            )
-          }
-          config={config}
-          files={pendingFiles[active.id] ?? []}
-          onPick={pick}
-          onRemove={removeFile}
-          onRetry={retryFile}
-        />
-      </main>
-      <div role="status" className="sr-only">
+        <aside
+          aria-label="Conversations"
+          className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
+        >
+          <div className="flex items-center justify-between gap-2 p-3">
+            <Heading level={2} className="px-1 text-lg font-semibold">
+              Chats
+            </Heading>
+            <ThemeToggle className={buttonClass("quiet")} />
+          </div>
+          <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
+            New chat
+          </Button>
+          <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
+            Usage
+          </Link>
+          <Link
+            href="/settings/models"
+            className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
+          >
+            Settings
+          </Link>
+          <ConversationList
+            conversations={state.conversations}
+            activeId={active.id}
+            onOpen={(id) => open({ type: "select", id })}
+          />
+        </aside>
+        <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
+          <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
+            <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
+              <span aria-hidden="true">← </span>Chats
+            </Button>
+            <Heading level={2} className="truncate px-1 font-semibold">
+              {active.title}
+            </Heading>
+          </header>
+          {!healthy && (
+            <Banner tone="danger" alert>
+              Your assistant's server isn't responding properly, so replies may fail.
+            </Banner>
+          )}
+          <Thread key={active.id} conversation={active} />
+          {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
+          <Composer
+            text={drafts[active.id] ?? ""}
+            setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
+            busy={state.pending !== null}
+            onSend={send}
+            onStop={() => transport.cancel()}
+            onNoModel={noModel ? goModels : undefined}
+            chip={
+              modelSettings && (
+                <ModelChip
+                  settings={modelSettings}
+                  pinned={pinned}
+                  onSwitch={switchModel}
+                  starting={starting}
+                />
+              )
+            }
+            config={config}
+            files={pendingFiles[active.id] ?? []}
+            onPick={pick}
+            onRemove={removeFile}
+            onRetry={retryFile}
+          />
+        </main>
+      </div>
+      {!chat && <Screen params={matched?.params ?? {}} />}
+      <div role="status" className="sr-only" hidden={!chat}>
         {state.announcement}
       </div>
-    </div>
+    </>
   );
 }
 
