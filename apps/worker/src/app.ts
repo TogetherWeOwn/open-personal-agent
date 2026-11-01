@@ -3,7 +3,7 @@ import { createRepository } from "@opa/db/repository";
 import { log } from "@opa/log";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
-import { checkHealth } from "./health";
+import { checkHealth, setupRequired } from "./health";
 import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupOpen } from "./setup";
@@ -40,11 +40,10 @@ app.use("/api/secrets/*", async (c, next) => {
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 app.get("/setup", async (c) => {
-  const health = await checkHealth(c.env);
   c.header("Cache-Control", "no-store");
-  if (health.status === "setup_required") {
+  if (await setupRequired(c.env)) {
     c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
-    return c.html(finishSetupPage(health), 503);
+    return c.html(finishSetupPage(await checkHealth(c.env)), 503);
   }
   if (!(await setupOpen(c.env))) return c.json({ error: "already_claimed" }, 403);
   return c.env.ASSETS.fetch(c.req.raw);

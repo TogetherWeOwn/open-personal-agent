@@ -33,8 +33,8 @@ applied on start. Run `pnpm build`, then `pnpm start:node` with the three secret
 `.dev.vars.example` in the environment. Data goes to `.opa-data/` (set `OPA_DATA_DIR` to move it).
 It listens on `127.0.0.1:8787` (`OPA_HOST`, `PORT`); put a TLS-terminating proxy in front to
 expose it, and set `OPA_PUBLIC_ORIGIN` to the address browsers use (`https://agent.example`) or
-setup and login fail with `bad_origin`. Workers AI and background tasks are Cloudflare-only for now, so `/api/health` reports
-`degraded` on Node.
+setup and login fail with `bad_origin`. Workers AI and background tasks are Cloudflare-only for
+now: `/api/health` on Node reports them as `false`, and its status stays `ok`.
 
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
