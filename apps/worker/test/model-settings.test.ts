@@ -215,7 +215,7 @@ describe("model settings", () => {
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
     const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
+    expect(tested).toMatchObject({ ok: true, tools: true, reply: "ready" });
     // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
     const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([

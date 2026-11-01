@@ -1,0 +1,8 @@
+data: {"response":"","tool_calls":[],"p":"abcdef"}
+
+data: {"response":"","tool_calls":[{"name":"get_weather","arguments":{"city":"Lisbon"}}],"p":"abc"}
+
+data: {"response":"","usage":{"prompt_tokens":312,"completion_tokens":18,"total_tokens":330}}
+
+data: [DONE]
+

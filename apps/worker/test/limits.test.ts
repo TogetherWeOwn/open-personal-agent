@@ -23,6 +23,7 @@ function limits(start = 10 * DAY) {
 }
 const spent = (store: Map<string, unknown>) =>
   (store.get("spend") as { spentMicroUsd: number }).spentMicroUsd;
+const held = (store: Map<string, unknown>) => (store.get("spend") as { held: object }).held;
 const USAGE = { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0 };
 
 describe("turn rate", () => {
@@ -119,14 +120,40 @@ describe("daily spend", () => {
     const { limits: l, store, clock } = limits();
     l.reserve("t1", PROVIDER, MODEL, 2000);
     l.settle("t1", PROVIDER, MODEL, USAGE);
+    clock.now += DAY - 1000;
     l.reserve("late", PROVIDER, MODEL, 2000);
-    clock.now += DAY;
-    // A call that started yesterday counts there, not against today's budget.
-    l.settle("late", PROVIDER, MODEL, USAGE);
+    clock.now += 2000;
+    // A call still running at midnight keeps its hold, which the new day's calls reserve around,
+    // and is charged to the new day when it settles.
     l.reserve("t2", PROVIDER, MODEL, 2000);
+    expect(Object.keys(held(store))).toEqual(["late", "t2"]);
+    l.settle("late", PROVIDER, MODEL, USAGE);
+    expect(spent(store)).toBe(1000 * 2 + 500 * 8);
     l.settle("t2", PROVIDER, MODEL, { ...USAGE, outputTokens: 0 });
-    expect(spent(store)).toBe(1000 * 2);
+    expect(spent(store)).toBe(1000 * 2 + 500 * 8 + 1000 * 2);
     const free = { maxOutputTokens: MAX_OUTPUT_TOKENS, reservedMicroUsd: 0 };
     expect(l.reserve("t3", "local", "llama", 2000)).toEqual(free);
+  });
+
+  it("reads a hold stored as a plain amount, on the same day and across midnight", () => {
+    const { limits: l, store, clock } = limits();
+    store.set("spend", { day: 10 * DAY, spentMicroUsd: 0, held: { old: 1000, gone: 500 } });
+    l.reserve("t1", PROVIDER, MODEL, 2000);
+    l.settle("old", PROVIDER, MODEL, null);
+    expect(spent(store)).toBe(1000);
+    clock.now += DAY - 1;
+    l.settle("t1", PROVIDER, MODEL, USAGE);
+    clock.now += 1;
+    // `gone` never settled; after midnight it is a day old and dropped.
+    l.reserve("t2", PROVIDER, MODEL, 2000);
+    expect(Object.keys(held(store))).toEqual(["t2"]);
+  });
+
+  it("drops a hold a day old: its turn was lost, so it can't shrink later days' budgets", () => {
+    const { limits: l, store, clock } = limits();
+    l.reserve("lost", PROVIDER, MODEL, 2000);
+    clock.now += DAY;
+    l.reserve("t1", PROVIDER, MODEL, 2000);
+    expect(Object.keys(held(store))).toEqual(["t1"]);
   });
 });
