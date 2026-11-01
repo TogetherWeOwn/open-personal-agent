@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings › Privacy & security (M3-19 AC2): passkey add/rename/remove and recovery-code
-// regeneration. Removal needs the account step-up, refuses the last passkey, and expires every
-// pending approval in its own batch (M3-07 AC13).
+// regeneration. Adding and removal need the account step-up, removal refuses the last passkey
+// (even across concurrent requests) and expires every pending approval in its own batch
+// (M3-07 AC13).
+import { systemStore } from "@opa/db/system";
 import { describe, expect, it } from "vitest";
-import { Browser, claim, db, freshDatabase, passkey } from "./helpers/app";
+import { Browser, claim, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();
 
@@ -20,7 +22,8 @@ async function stepUp(br: Browser, key: ReturnType<typeof passkey>) {
   });
 }
 
-async function addPasskey(br: Browser, name?: string) {
+async function addPasskey(br: Browser, key: ReturnType<typeof passkey>, name?: string) {
+  expect(await stepUp(br, key)).toMatchObject({ status: 200 });
   const res = await br.req("/api/passkeys/options", { body: {} });
   const { options } = await res.json<{ options: { challenge: string } }>();
   return br.req("/api/passkeys", {
@@ -37,9 +40,9 @@ const audit = (action: string) =>
 
 describe("passkeys", () => {
   it("lists the claim passkey, then an added one with its name", async () => {
-    const { browser } = await claim();
+    const { browser, key } = await claim();
     expect((await list(browser)).passkeys).toHaveLength(1);
-    const res = await addPasskey(browser, "My key");
+    const res = await addPasskey(browser, key, "My key");
     expect(res.status).toBe(201);
     const { passkeys } = await list(browser);
     expect(passkeys).toHaveLength(2);
@@ -50,12 +53,62 @@ describe("passkeys", () => {
     expect(await audit("auth.passkey_add")).toHaveLength(1);
   });
 
+  it("needs the account step-up to add a passkey", async () => {
+    const { browser, key } = await claim();
+    // A stolen session cookie alone buys nothing.
+    expect(await browser.req("/api/passkeys/options", { body: {} })).toMatchObject({
+      status: 403,
+    });
+    expect(await browser.req("/api/passkeys", { body: { credential: {} } })).toMatchObject({
+      status: 403,
+    });
+    expect((await list(browser)).passkeys).toHaveLength(1);
+    // After the step-up both steps work.
+    expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
+    const res = await browser.req("/api/passkeys/options", { body: {} });
+    expect(res.status).toBe(200);
+    const { options } = await res.json<{ options: { challenge: string } }>();
+    const created = await browser.req("/api/passkeys", {
+      body: { credential: await passkey().create(options) },
+    });
+    expect(created.status).toBe(201);
+    expect((await list(browser)).passkeys).toHaveLength(2);
+  });
+
+  it("excludes the user's existing credentials from the registration options", async () => {
+    const { browser, key } = await claim();
+    expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
+    const { passkeys } = await list(browser);
+    const res = await browser.req("/api/passkeys/options", { body: {} });
+    expect(res.status).toBe(200);
+    const { options } = await res.json<{
+      options: { excludeCredentials?: { id: string; type: string }[] };
+    }>();
+    expect(options.excludeCredentials?.map((c) => c.id)).toEqual(
+      expect.arrayContaining(passkeys.map((p) => p.id)),
+    );
+  });
+
+  it("rejects an invalid name instead of silently renaming", async () => {
+    const { browser, key } = await claim();
+    expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
+    const res = await browser.req("/api/passkeys/options", { body: {} });
+    const { options } = await res.json<{ options: { challenge: string } }>();
+    const created = await browser.req("/api/passkeys", {
+      body: { credential: await passkey().create(options), name: "   " },
+    });
+    expect(created.status).toBe(400);
+    expect(await created.json()).toMatchObject({ error: "invalid_name" });
+    expect((await list(browser)).passkeys).toHaveLength(1);
+  });
+
   it("refuses a registration answer without a challenge, or with another user's", async () => {
-    const { browser } = await claim();
+    const { browser, key } = await claim();
     const other = new Browser();
     const res = await other.req("/api/passkeys/options", { body: {} });
     expect(res.status).toBe(401);
-    // No ceremony at all: the cookie is missing.
+    // Stepped up, but no ceremony was opened: the cookie is missing.
+    expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
     const fake = await browser.req("/api/passkeys", { body: { credential: {} } });
     expect(fake.status).toBe(400);
     expect(await fake.json()).toMatchObject({ error: "no_challenge" });
@@ -83,10 +136,12 @@ describe("passkeys", () => {
 
   it("removes with a step-up, expiring pending approvals in the same batch", async () => {
     const { browser, key } = await claim();
-    await addPasskey(browser, "Spare");
+    await addPasskey(browser, key, "Spare");
     const { passkeys } = await list(browser);
-    // Without the step-up: refused, nothing removed.
-    const denied = await browser.req(`/api/passkeys/${passkeys[0]?.id}`, { method: "DELETE" });
+    // Without the step-up: refused, nothing removed (a second session has none).
+    const plain = new Browser();
+    expect(await plain.login(key)).toMatchObject({ status: 200 });
+    const denied = await plain.req(`/api/passkeys/${passkeys[0]?.id}`, { method: "DELETE" });
     expect(denied.status).toBe(403);
     expect((await list(browser)).passkeys).toHaveLength(2);
     // A pending approval for the expiry to find.
@@ -116,13 +171,65 @@ describe("passkeys", () => {
   });
 
   it("refuses to remove the last passkey", async () => {
-    const { browser, key } = await claim();
+    const { browser, key, owner } = await claim();
     const { passkeys } = await list(browser);
     expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
     const res = await browser.req(`/api/passkeys/${passkeys[0]?.id}`, { method: "DELETE" });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: "last_passkey" });
     expect((await list(browser)).passkeys).toHaveLength(1);
+    // The store refuses it even past the route's pre-check, and 404s a missing row.
+    const store = systemStore(env);
+    expect(
+      await store.passkeys.remove({ id: passkeys[0]?.id ?? "", userId: owner, now: Date.now() }),
+    ).toBe("last_passkey");
+    expect(await store.passkeys.remove({ id: "no-such-key", userId: owner, now: Date.now() })).toBe(
+      "not_found",
+    );
+    expect((await list(browser)).passkeys).toHaveLength(1);
+  });
+
+  it("keeps one passkey when two removals race", async () => {
+    const { browser, key } = await claim();
+    await addPasskey(browser, key, "Spare");
+    const { passkeys } = await list(browser);
+    expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
+    const [first, second] = await Promise.all(
+      passkeys.map((p) => browser.req(`/api/passkeys/${p.id}`, { method: "DELETE" })),
+    );
+    // One wins; the other is refused as the last passkey, whichever order they ran in.
+    expect([first.status, second.status].sort()).toEqual([200, 400]);
+    expect((await list(browser)).passkeys).toHaveLength(1);
+  });
+
+  it("404s a passkey that is already gone", async () => {
+    const { browser, key } = await claim();
+    await addPasskey(browser, key, "Spare one");
+    await addPasskey(browser, key, "Spare two");
+    const { passkeys } = await list(browser);
+    expect(await stepUp(browser, key)).toMatchObject({ status: 200 });
+    const gone = passkeys.find((p) => p.name !== "Spare one" && p.name !== "Spare two")?.id ?? "";
+    expect(await browser.req(`/api/passkeys/${gone}`, { method: "DELETE" })).toMatchObject({
+      status: 200,
+    });
+    // Two remain, so the route reaches the store, which finds nothing to delete.
+    expect(await browser.req(`/api/passkeys/${gone}`, { method: "DELETE" })).toMatchObject({
+      status: 404,
+    });
+    expect((await list(browser)).passkeys).toHaveLength(2);
+  });
+});
+
+describe("cache headers", () => {
+  it("scopes no-store to the privacy routes", async () => {
+    const { browser } = await claim();
+    // Credential state is never cached.
+    expect((await browser.req("/api/passkeys")).headers.get("cache-control")).toBe("no-store");
+    // But a route mounted after the privacy router keeps its own headers: this 404 sets
+    // none, so the leak that stamped no-store on chat, usage and the SPA is gone.
+    const missing = await browser.req("/api/conversations/no-such-conversation/messages");
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("cache-control")).toBeNull();
   });
 });
 

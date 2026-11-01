@@ -4,6 +4,7 @@
 // value is ≥128 bits of randomness, so a plain SHA-256 is the right hash; nothing stores plaintext.
 import type { ChallengeKind, NewPasskey, NewSession, SystemStore } from "@opa/db/system";
 import {
+  type AuthenticatorTransport,
   generateRegistrationOptions,
   type RegistrationResponseJSON,
   verifyRegistrationResponse,
@@ -126,8 +127,16 @@ export function hashRecoveryCode(code: string): Promise<string> {
   return sha256(code.toLowerCase().replace(/[\s-]/g, ""));
 }
 
-/** Registration options for a new passkey of `userId`, the owner's account on this deployment. */
-export function registrationOptions(url: string, userId: string) {
+/**
+ * Registration options for a new passkey of `userId`, the owner's account on this deployment.
+ * `exclude` lists the user's existing credentials (from `passkeys.ofUser`), so re-adding on
+ * the same device refuses instead of silently replacing — and orphaning — the old row.
+ */
+export function registrationOptions(
+  url: string,
+  userId: string,
+  exclude: readonly { id: string; transports: string | null }[] = [],
+) {
   return generateRegistrationOptions({
     rpName: "Open Personal Agent",
     rpID: new URL(url).hostname,
@@ -135,6 +144,13 @@ export function registrationOptions(url: string, userId: string) {
     userID: encoder.encode(userId) as Uint8Array<ArrayBuffer>,
     attestationType: "none",
     authenticatorSelection: { residentKey: "required", userVerification: "required" },
+    excludeCredentials: exclude.map((p) => {
+      const transports = (p.transports?.split(",").filter(Boolean) ??
+        []) as AuthenticatorTransport[];
+      return transports.length > 0
+        ? { id: p.id, type: "public-key" as const, transports }
+        : { id: p.id, type: "public-key" as const };
+    }),
   });
 }
 

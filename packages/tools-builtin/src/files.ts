@@ -5,6 +5,7 @@
 // missing file and someone else's file answer identically. The display name is just a name:
 // the artifact id, minted by the host, is the handle for reading back.
 import type { LoopTool, ToolOutput } from "@opa/harness-builtin";
+import type { ToolManifest } from "@opa/policy";
 
 export type FilePorts = {
   /**
@@ -45,41 +46,44 @@ const hasControl = (text: string): boolean =>
     return code < 0x20 || code === 0x7f;
   });
 
+/** The `create_artifact` manifest, exported so Settings can list the tool without its ports. */
+export const CREATE_ARTIFACT_MANIFEST: ToolManifest = {
+  name: "create_artifact",
+  description:
+    "Save a text file for the user (notes, a draft, a table, code) so it appears in their " +
+    "Outputs. Returns an artifact id you can read back with read_file. Use it for anything " +
+    "the user would want to keep, instead of pasting a long document into the chat.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        minLength: 1,
+        maxLength: 120,
+        description: 'The file name the user sees, e.g. "trip-plan.md".',
+      },
+      content: {
+        type: "string",
+        maxLength: 262_144,
+        description: "The whole file content.",
+      },
+      type: {
+        type: "string",
+        enum: [...TYPES],
+        description: "The content type; guessed from the name when omitted.",
+      },
+    },
+    required: ["name", "content"],
+    additionalProperties: false,
+  },
+  riskClass: "write_reversible",
+  destinations: [{ id: "files", kind: "control_plane", dataEgress: false }],
+  scopes: ["files:write"],
+};
+
 export function createArtifactTool(ports: FilePorts): LoopTool {
   return {
-    manifest: {
-      name: "create_artifact",
-      description:
-        "Save a text file for the user (notes, a draft, a table, code) so it appears in their " +
-        "Outputs. Returns an artifact id you can read back with read_file. Use it for anything " +
-        "the user would want to keep, instead of pasting a long document into the chat.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          name: {
-            type: "string",
-            minLength: 1,
-            maxLength: 120,
-            description: 'The file name the user sees, e.g. "trip-plan.md".',
-          },
-          content: {
-            type: "string",
-            maxLength: 262_144,
-            description: "The whole file content.",
-          },
-          type: {
-            type: "string",
-            enum: [...TYPES],
-            description: "The content type; guessed from the name when omitted.",
-          },
-        },
-        required: ["name", "content"],
-        additionalProperties: false,
-      },
-      riskClass: "write_reversible",
-      destinations: [{ id: "files", kind: "control_plane", dataEgress: false }],
-      scopes: ["files:write"],
-    },
+    manifest: CREATE_ARTIFACT_MANIFEST,
     target(input) {
       return typeof input.name === "string" ? input.name : undefined;
     },
@@ -121,30 +125,33 @@ export function createArtifactTool(ports: FilePorts): LoopTool {
   };
 }
 
+/** The `read_file` manifest, exported so Settings can list the tool without its ports. */
+export const READ_FILE_MANIFEST: ToolManifest = {
+  name: "read_file",
+  description:
+    "Read back a file from the user's files by its artifact id (the id create_artifact " +
+    "returned, or one the user gives you). Only this user's files can be read.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      artifactId: {
+        type: "string",
+        minLength: 1,
+        maxLength: 64,
+        description: "The artifact id of the file.",
+      },
+    },
+    required: ["artifactId"],
+    additionalProperties: false,
+  },
+  riskClass: "read",
+  destinations: [{ id: "files", kind: "control_plane", dataEgress: false }],
+  scopes: ["files:read"],
+};
+
 export function readFileTool(ports: FilePorts): LoopTool {
   return {
-    manifest: {
-      name: "read_file",
-      description:
-        "Read back a file from the user's files by its artifact id (the id create_artifact " +
-        "returned, or one the user gives you). Only this user's files can be read.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          artifactId: {
-            type: "string",
-            minLength: 1,
-            maxLength: 64,
-            description: "The artifact id of the file.",
-          },
-        },
-        required: ["artifactId"],
-        additionalProperties: false,
-      },
-      riskClass: "read",
-      destinations: [{ id: "files", kind: "control_plane", dataEgress: false }],
-      scopes: ["files:read"],
-    },
+    manifest: READ_FILE_MANIFEST,
     async execute(input, signal) {
       const artifactId = String(input.artifactId ?? "");
       let text: string;

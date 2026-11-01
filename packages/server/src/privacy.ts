@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings › Privacy & security (M3-19 AC2): the user's passkeys and recovery codes. Passkeys
-// list with their names and dates, register on this signed-in session, rename freely, and
-// remove only with the 5-minute account step-up: removal expires every pending approval in the
+// list with their names and dates, add and remove only with the 5-minute account step-up, and
+// rename freely: removal expires every pending approval in the
 // same batch (M3-07 AC13), because a removed passkey is a possible-compromise signal. Recovery
 // codes regenerate with the same step-up; rotation is routine, so approvals are untouched. Every
 // change writes an audit row for the activity log (M3-19 AC3).
 import { systemStore } from "@opa/db/system";
-import { type Context, Hono } from "hono";
+import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { AppEnv } from "./env";
@@ -25,10 +25,19 @@ const cleanName = (value: unknown): string | null => {
 
 export const privacyRoutes = new Hono<AppEnv>();
 
-privacyRoutes.use(async (c, next) => {
+/** Credential state must never sit in a cache. Scoped to these routes: the app mounts this */
+/* router at `/`, so a pathless `use` would add the header to every route registered after it. */
+const noStore: MiddlewareHandler<AppEnv> = async (c, next) => {
   c.header("Cache-Control", "no-store");
   return next();
-});
+};
+for (const path of [
+  "/api/passkeys",
+  "/api/passkeys/*",
+  "/api/recovery-codes",
+  "/api/recovery-codes/*",
+] as const)
+  privacyRoutes.use(path, noStore);
 
 /** The user's passkeys, newest first. Public keys never leave the store: no secrets here. */
 privacyRoutes.get("/api/passkeys", async (c) => {
@@ -44,11 +53,22 @@ privacyRoutes.get("/api/passkeys", async (c) => {
   });
 });
 
-/** Step 1 of adding a passkey: registration options for one of this session's user's devices. */
+/**
+ * Step 1 of adding a passkey: registration options for one of this session's user's devices.
+ * Needs the 5-minute account step-up, like removal: a stolen session cookie must not buy a
+ * lasting passkey. The user's existing credentials are excluded, so re-adding on the same
+ * device refuses instead of orphaning the old row.
+ */
 privacyRoutes.post("/api/passkeys/options", async (c) => {
   const { userId } = c.var.session;
-  const options = await auth.registrationOptions(c.req.url, userId);
-  const cookie = await auth.putChallenge(storeOf(c), "passkey_add", options.challenge, userId);
+  if (!hasAccountStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
+  const store = storeOf(c);
+  const options = await auth.registrationOptions(
+    c.req.url,
+    userId,
+    await store.passkeys.ofUser(userId),
+  );
+  const cookie = await auth.putChallenge(store, "passkey_add", options.challenge, userId);
   const maxAge = auth.CHALLENGE_TTL_MS / 1000;
   setCookie(c, auth.CHALLENGE_COOKIE, cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   return c.json({ options });
@@ -56,10 +76,13 @@ privacyRoutes.post("/api/passkeys/options", async (c) => {
 
 /**
  * Step 2: verify the new passkey and store it. Body `{ credential, name? }`; the name defaults
- * to `Passkey N`. A challenge issued to another user, or answered twice, is `no_challenge`.
+ * to `Passkey N` when omitted or null, and is `invalid_name` when supplied but unusable.
+ * Needs the same account step-up as step 1. A challenge issued to another user, or answered
+ * twice, is `no_challenge`.
  */
 privacyRoutes.post("/api/passkeys", async (c) => {
   const { userId } = c.var.session;
+  if (!hasAccountStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
   const store = storeOf(c);
   const challenge = await auth.takeChallenge(
     store,
@@ -69,6 +92,8 @@ privacyRoutes.post("/api/passkeys", async (c) => {
   deleteCookie(c, auth.CHALLENGE_COOKIE, auth.COOKIE_OPTIONS);
   if (!challenge || challenge.user_id !== userId) return c.json({ error: "no_challenge" }, 400);
   const body = await c.req.json().catch(() => null);
+  if (body?.name !== undefined && body?.name !== null && cleanName(body.name) === null)
+    return c.json({ error: "invalid_name" }, 400);
   const passkey = await auth.verifyPasskey(
     c.req.url,
     body?.credential,
@@ -107,8 +132,11 @@ privacyRoutes.delete("/api/passkeys/:id", async (c) => {
   const store = storeOf(c);
   if ((await store.passkeys.list(userId)).length <= 1)
     return c.json({ error: "last_passkey" }, 400);
-  if (!(await store.passkeys.remove({ id: c.req.param("id"), userId, now: Date.now() })))
-    return c.json({ error: "not_found" }, 404);
+  const outcome = await store.passkeys.remove({ id: c.req.param("id"), userId, now: Date.now() });
+  // `not_found` is a missing row; `last_passkey` is a concurrent removal racing this one, so
+  // the account still has exactly one. Anything else threw and Hono answers 500.
+  if (outcome === "not_found") return c.json({ error: "not_found" }, 404);
+  if (outcome === "last_passkey") return c.json({ error: "last_passkey" }, 400);
   return c.json({ ok: true });
 });
 

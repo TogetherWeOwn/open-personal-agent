@@ -417,9 +417,17 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       /**
        * Removes one of the user's own passkeys (M3-19 AC2, M3-07 AC13): the row goes, every
        * pending approval expires with the `passkey_removal` signal, and the audit row lands in
-       * the same batch, so the two can't diverge. `false` when it is missing or another's.
+       * the same batch, so the two can't diverge. The batch also refuses to empty the account:
+       * a `requireChange`-style statement fails when no passkey is left afterwards, so two
+       * concurrent removals can't both commit. Returns `ok`, `not_found` (missing or already
+       * gone), or `last_passkey` (the row is still there but it is the last one left); anything
+       * else — a batch failure with the row still present among others — throws.
        */
-      remove: async (r: { id: string; userId: string; now: number }) => {
+      remove: async (r: {
+        id: string;
+        userId: string;
+        now: number;
+      }): Promise<"ok" | "not_found" | "last_passkey"> => {
         try {
           await db.batch([
             db.prepare("DELETE FROM passkeys WHERE id = ? AND user_id = ?").bind(r.id, r.userId),
@@ -428,10 +436,26 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             requireChange(),
             ...expireApprovals(r.userId, r.now, "passkey_removal"),
             audit(r.userId, "auth.passkey_remove", "auth", "ok", r.id),
+            // This batch emptied the account: break the single-row CHECK so the whole batch
+            // rolls back and the account keeps its last passkey.
+            db
+              .prepare(
+                "INSERT INTO setup_state (id) SELECT 0 WHERE " +
+                  "(SELECT count(*) FROM passkeys WHERE user_id = ?) = 0",
+              )
+              .bind(r.userId),
           ]);
-          return true;
-        } catch {
-          return false;
+          return "ok";
+        } catch (e) {
+          const remaining = (
+            await db
+              .prepare("SELECT id FROM passkeys WHERE user_id = ?")
+              .bind(r.userId)
+              .all<{ id: string }>()
+          ).results;
+          if (!remaining.some((p) => p.id === r.id)) return "not_found";
+          if (remaining.length <= 1) return "last_passkey";
+          throw e;
         }
       },
     },

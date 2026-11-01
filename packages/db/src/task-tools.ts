@@ -9,14 +9,16 @@
 // `LoopTool` surface is stubbed here structurally. The shapes mirror the M3-08/M3-03 interface
 // (`manifest` with `riskClass`/`destinations`/`scopes`, output with `ok`/`content`/`context`),
 // so registering for real is a type-only swap.
+import type { ToolManifest } from "@opa/policy";
+
 /** The `LoopTool` manifest fields the registry reads (M3-02 AC1). */
 export interface TaskToolManifest {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   riskClass: "read" | "write_reversible" | "consequential" | "irreversible";
-  destinations: { id: string; kind: string; dataEgress: boolean }[];
-  scopes: string[];
+  destinations: readonly { id: string; kind: string; dataEgress: boolean }[];
+  scopes: readonly string[];
 }
 
 /** What a result adds to the context. A queued row joins as system text. */
@@ -59,7 +61,7 @@ export interface TaskToolContext {
 
 export const TASK_TOOL_NAMES = ["task"] as const;
 
-const STAY_HOME = [{ id: "tasks", kind: "control_plane", dataEgress: false }];
+const STAY_HOME = [{ id: "tasks", kind: "control_plane", dataEgress: false }] as const;
 
 const failed = (content: string): TaskToolOutput => ({
   ok: false,
@@ -67,33 +69,36 @@ const failed = (content: string): TaskToolOutput => ({
   context: { kind: "system" },
 });
 
+/** The `task` manifest, exported so Settings can list the tool without its service. */
+export const TASK_MANIFEST: ToolManifest = {
+  name: "task",
+  description:
+    "Hand work to a background task that outlives this turn. Use it when the user asks you " +
+    "to keep working on something in the background, or when a job will take longer than " +
+    "this turn allows. The task queues immediately; tell the user they " +
+    "can follow it in the Tasks view.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: {
+        type: "string",
+        minLength: 1,
+        maxLength: 140,
+        description: "A short title for the task, shown in the Tasks list.",
+      },
+    },
+    required: ["title"],
+    additionalProperties: false,
+  },
+  // Filing the row is reversible (cancel); the run itself is stopped the same way.
+  riskClass: "write_reversible",
+  destinations: STAY_HOME,
+  scopes: ["tasks:write"],
+};
+
 function taskTool(service: TaskToolService, context: () => TaskToolContext): TaskTool {
   return {
-    manifest: {
-      name: "task",
-      description:
-        "Hand work to a background task that outlives this turn. Use it when the user asks you " +
-        "to keep working on something in the background, or when a job will take longer than " +
-        "this turn allows. The task queues immediately; tell the user they " +
-        "can follow it in the Tasks view.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          title: {
-            type: "string",
-            minLength: 1,
-            maxLength: 140,
-            description: "A short title for the task, shown in the Tasks list.",
-          },
-        },
-        required: ["title"],
-        additionalProperties: false,
-      },
-      // Filing the row is reversible (cancel); the run itself is stopped the same way.
-      riskClass: "write_reversible",
-      destinations: STAY_HOME,
-      scopes: ["tasks:write"],
-    },
+    manifest: TASK_MANIFEST,
     async execute(input) {
       const title = typeof input.title === "string" ? input.title.trim() : "";
       if (title === "") return failed("Tell me what to call the task.");
