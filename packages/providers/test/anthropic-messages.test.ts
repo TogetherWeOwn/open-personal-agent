@@ -202,9 +202,9 @@ describe("anthropic-messages", () => {
     ).toThrow("must use https");
   });
 
-  it("binds the key to the Anthropic origin", () => {
+  it("binds the key to the Anthropic origin and path", () => {
     expect(credentialBinding("anthropic", "https://api.anthropic.com/v1")).toBe(
-      "model:anthropic|https://api.anthropic.com",
+      "model:anthropic|https://api.anthropic.com/v1",
     );
     expect(credentialBinding("anthropic", "https://api.anthropic.com.attacker.test/v1")).not.toBe(
       credentialBinding("anthropic", "https://api.anthropic.com/v1"),

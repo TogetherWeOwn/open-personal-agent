@@ -321,6 +321,7 @@ describe("model settings", () => {
     expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
       `Bearer ${CANARY}`,
     );
+    const sent = fetch.mock.calls.length;
     // Pointing the saved URL at another path on the host, in D1, fails rather than sending the key.
     const move =
       "UPDATE model_providers SET base_url = ? WHERE id = (SELECT chat_provider FROM user_settings)";
@@ -329,7 +330,7 @@ describe("model settings", () => {
       status: 409,
       text: '{"error":"key_required"}',
     });
-    expect(fetch.mock.calls).toHaveLength(1);
+    expect(fetch.mock.calls).toHaveLength(sent);
     await env.DB.prepare(move).bind(OPENAI.baseUrl).run();
   });
 });
