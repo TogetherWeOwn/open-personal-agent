@@ -3,6 +3,7 @@ import { createRepository } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import { log } from "@opa/log";
 import { Hono } from "hono";
+import { artifactRoutes } from "./artifacts";
 import { attachmentRoutes } from "./attachments";
 import { chatRoutes } from "./chat";
 import type { AppEnv, AppPorts } from "./env";
@@ -70,6 +71,7 @@ shared.route("/api/auth", authRoutes);
 shared.route("/api/sessions", sessionRoutes);
 shared.route("/api", chatRoutes);
 shared.route("/api/attachments", attachmentRoutes);
+shared.route("/api/artifacts", artifactRoutes);
 shared.route("/api/usage", usageRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */

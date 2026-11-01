@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: Apache-2.0
+// Outputs (M3-11, F-3.13): the files tools wrote, listed globally or for one conversation, each
+// with its source run. The bytes are served to their owner only, sandboxed with no
+// `allow-same-origin` (ADR 0010 D5) — inline where the type previews, else as a download.
+import { createRepository, isId } from "@opa/db/repository";
+import { Hono } from "hono";
+import type { AppEnv } from "./env";
+import { userContent } from "./security";
+
+export const artifactRoutes = new Hono<AppEnv>();
+
+/** Newest first, a page at a time: `?conversationId=` narrows to one chat, `?before=` pages on. */
+artifactRoutes.get("/", async (c) => {
+  const { conversationId, before } = c.req.query();
+  if (conversationId !== undefined && !isId(conversationId))
+    return c.json({ error: "bad_request" }, 400);
+  const cursor = before === undefined ? undefined : Number(before);
+  if (cursor !== undefined && !Number.isSafeInteger(cursor))
+    return c.json({ error: "bad_request" }, 400);
+  const user = createRepository(c.env).forUser(c.var.session.scope);
+  const artifacts = await user.artifacts.list({
+    ...(conversationId !== undefined ? { conversationId } : {}),
+    ...(cursor !== undefined ? { before: cursor } : {}),
+  });
+  c.header("Cache-Control", "no-store");
+  return c.json({ artifacts });
+});
+
+artifactRoutes.get("/:id", async (c) => {
+  const row = await createRepository(c.env)
+    .forUser(c.var.session.scope)
+    .artifacts.get(c.req.param("id"));
+  if (!row) return c.json({ error: "not_found" }, 404);
+  c.header("Cache-Control", "no-store");
+  return c.json(row);
+});
+
+/**
+ * The file itself. `?download=1` always saves it; otherwise a previewable type shows inline and
+ * may be framed by the app's own Outputs page — still under CSP `sandbox`, so its scripts and
+ * links get an opaque origin and can't reach the account.
+ */
+artifactRoutes.get("/:id/content", async (c) => {
+  const user = createRepository(c.env).forUser(c.var.session.scope);
+  const row = await user.artifacts.get(c.req.param("id"));
+  if (!row) return c.json({ error: "not_found" }, 404);
+  const object = await user.artifacts.getObject(row.id);
+  if (!object?.body) return c.json({ error: "not_found" }, 404);
+  const download = c.req.query("download") === "1";
+  return userContent(object.body, row.mediaType, row.name, { download, frame: !download });
+});
+
+artifactRoutes.delete("/:id", async (c) => {
+  const user = createRepository(c.env).forUser(c.var.session.scope);
+  if (!(await user.artifacts.remove(c.req.param("id")))) return c.json({ error: "not_found" }, 404);
+  return c.body(null, 204);
+});
