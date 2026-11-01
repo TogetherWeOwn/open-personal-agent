@@ -228,3 +228,21 @@ export const usage = sqliteTable(
   },
   (t) => [index("usage_user_idx").on(t.userId, t.createdAt)],
 );
+
+/**
+ * One row per user: onboarding answers and the chat model. The key itself lives envelope-encrypted
+ * in `secrets` (ADR 0010 D4), bound to `provider_id` and the origin of `base_url` (ADR 0006 #5).
+ */
+export const userSettings = sqliteTable("user_settings", {
+  userId: userId().primaryKey(),
+  about: text("about"),
+  modelKind: text("model_kind", { enum: ["openai-chat", "workers-ai"] }),
+  providerId: text("provider_id"),
+  baseUrl: text("base_url"),
+  model: text("model"),
+  modelKeySecretId: text("model_key_secret_id").references(() => secrets.id, {
+    onDelete: "set null",
+  }),
+  onboardedAt: integer("onboarded_at"),
+  updatedAt: integer("updated_at").notNull().default(now),
+});

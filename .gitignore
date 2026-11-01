@@ -5,6 +5,7 @@ dist/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
+!.dev.vars.test
 *.log
 coverage/
 .DS_Store

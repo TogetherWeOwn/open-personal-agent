@@ -12,6 +12,9 @@ export async function* sseData(
   const decoder = new TextDecoder();
   let buffer = "";
   let data: string[] = [];
+  // A stalled stream never settles `read()`; cancelling the reader on abort ends it.
+  const cancel = () => void reader.cancel().catch(() => {});
+  signal?.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
       if (signal?.aborted) return;
@@ -36,6 +39,7 @@ export async function* sseData(
       if (done) return;
     }
   } finally {
+    signal?.removeEventListener("abort", cancel);
     await reader.cancel().catch(() => {});
   }
 }
