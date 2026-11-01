@@ -5,6 +5,24 @@ import { expect, test } from "@playwright/test";
 // Low entropy: the canary allowlist in .gitleaks.toml covers only `*.test.*` files.
 const KEY = "test-key-WXYZ";
 const model = { kind: "openai-chat", providerId: "openai", baseUrl: "https://api.openai.com/v1" };
+const LIMITS = {
+  taskBudgetMicroUsd: 500_000,
+  dailyCapMicroUsd: 5_000_000,
+  monthlyBudgetMicroUsd: 20_000_000,
+  hardCapMicroUsd: null,
+};
+// Settings › Spending's body, as checked; only the budgets show here.
+const spending = {
+  settings: LIMITS,
+  defaults: LIMITS,
+  executionLimits: { callsPerMessage: 8, toolCallsPerMessage: 20, stepsPerTask: 200 },
+  todayMicroUsd: 0,
+  monthMicroUsd: 0,
+  warning: null,
+  hardCapReached: false,
+  month: Date.UTC(2026, 10, 1),
+  userId: "u",
+};
 
 test("onboarding saves a key, tests it in the same step, and opens the chat with a prompt", async ({
   page,
@@ -23,7 +41,7 @@ test("onboarding saves a key, tests it in the same step, and opens the chat with
     const saved = { ...model, model: "gpt-4.1-mini", key: { last4: "WXYZ" } };
     const settings = { displayName: "Owner", about: "", onboarded, model: null };
     if (path.endsWith("/model")) return route.fulfill({ json: { ...settings, model: saved } });
-    if (path.endsWith("/spending")) return route.fulfill({ json: { settings: {} } });
+    if (path.endsWith("/spending")) return route.fulfill({ json: spending });
     return route.fulfill(path.endsWith("/settings") ? { json: settings } : { status: 204 });
   });
 
@@ -56,9 +74,14 @@ test("onboarding saves a key, tests it in the same step, and opens the chat with
   await expect(page.getByText("Saved key ending in WXYZ.")).toBeVisible();
   await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
   await page.getByRole("button", { name: "Save and test" }).click();
+  // A change after a passing test isn't what passed: Continue waits for another test.
+  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
+  await page.getByLabel("API key", { exact: true }).fill(KEY);
+  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await page.getByRole("button", { name: "Save and test" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
 
-  // Costs and limits: the defaults, each with Change.
+  // Costs and limits: the saved budgets, each with Change.
   await expect(page.getByText("Task budget: $0.50 per task")).toBeVisible();
   await expect(page.getByText("Monthly budget: $20")).toBeVisible();
   await page.getByRole("button", { name: "Change task budget" }).click();
@@ -89,6 +112,7 @@ test("onboarding saves a key, tests it in the same step, and opens the chat with
 
 test("every step but the model can be skipped; a skip is marked, not failed", async ({ page }) => {
   const bodies: unknown[] = [];
+  await page.clock.install();
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings**", async (route) => {
@@ -113,8 +137,11 @@ test("every step but the model can be skipped; a skip is marked, not failed", as
   await expect(page.getByRole("listitem").nth(2)).toHaveText("✓ Choose a model");
   await page.getByRole("button", { name: "Skip for now" }).click();
 
-  // Safety: the four lines and the sample card, whose buttons act on nothing.
+  // Safety: the four lines and the sample card, whose buttons act on nothing. However long the
+  // step stays open, the sample never expires.
   const sample = page.getByRole("region", { name: "Send email · Needs your OK" });
+  await expect(sample).toBeVisible();
+  await page.clock.fastForward("25:00:00");
   await expect(sample).toContainText("Sample");
   await expect(sample).toContainText("sam@example.com");
   await expect(sample).toContainText("This includes text from a web page (a recipe blog)");
@@ -128,6 +155,37 @@ test("every step but the model can be skipped; a skip is marked, not failed", as
 
   for (const skip of ["about", "costs", "safety", "chat"]) expect(bodies).toContainEqual({ skip });
   expect(bodies).not.toContainEqual(expect.objectContaining({ decision: expect.anything() }));
+});
+
+test("budgets that don't load offer Try again, never a guess to change", async ({ page }) => {
+  let failing = true;
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/spending")) {
+      return failing ? route.fulfill({ status: 500 }) : route.fulfill({ json: spending });
+    }
+    if (path.endsWith("/model/test")) {
+      return route.fulfill({ json: { ok: true, latencyMs: 300, tools: false, reply: "ready" } });
+    }
+    const settings = { displayName: "Sam", about: "", onboarded: false, model: null };
+    const starter = { kind: "workers-ai", model: "@cf/meta/llama", key: null };
+    if (path.endsWith("/model")) return route.fulfill({ json: { ...settings, model: starter } });
+    return route.fulfill(path.endsWith("/settings") ? { json: settings } : { status: 204 });
+  });
+
+  await page.goto("/onboarding");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByText("Try without a key", { exact: true }).click();
+  await page.getByRole("button", { name: "Save and test" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByText("I couldn't load your budgets.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Change/ })).toHaveCount(0);
+  failing = false;
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByText("Task budget: $0.50 per task")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Change task budget" })).toBeVisible();
 });
 
 test("a resumed setup keeps the saved provider, so Save reuses the saved key", async ({ page }) => {

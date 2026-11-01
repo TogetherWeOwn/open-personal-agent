@@ -4,7 +4,7 @@
 // edit a file. A saved key never comes back from the server, only its last 4 characters. Every
 // step but Claim and the model can be skipped, and a skipped one waits on the setup checklist.
 import type { SetupStep } from "@opa/core";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   Form,
   Heading,
@@ -31,6 +31,7 @@ import {
   type TestResult,
 } from "../models/settings-api";
 import { TestResultView } from "../models/TestResult";
+import { SETTINGS } from "../routes";
 import { dollars, getSpending, parseDollars, saveSpending } from "../settings/spending-api";
 import { VaultReset } from "../settings/VaultReset";
 import { Button } from "../ui";
@@ -47,6 +48,9 @@ const STEPS: { name: string; skip?: SetupStep }[] = [
   { name: "First chat", skip: "chat" },
 ];
 
+// "Change what needs my OK" opens Apps & tools, so it waits until that page has its controls.
+const APPS_SHIPPED = !!SETTINGS.find((s) => s.id === "apps")?.shipped;
+
 const field = "flex flex-col gap-1";
 const input =
   "min-h-11 rounded-lg border border-border-strong bg-surface-raised px-3 py-2 placeholder:text-text-muted";
@@ -54,9 +58,9 @@ const card =
   "flex cursor-pointer flex-col gap-2 rounded-xl border border-border-strong bg-surface-raised p-4 data-selected:border-accent data-selected:ring-2 data-selected:ring-accent";
 
 type Budget = "taskBudgetMicroUsd" | "monthlyBudgetMicroUsd";
-const BUDGETS: { key: Budget; label: string; fallback: number }[] = [
-  { key: "taskBudgetMicroUsd", label: "Task budget", fallback: 500_000 },
-  { key: "monthlyBudgetMicroUsd", label: "Monthly budget", fallback: 20_000_000 },
+const BUDGETS: { key: Budget; label: string }[] = [
+  { key: "taskBudgetMicroUsd", label: "Task budget" },
+  { key: "monthlyBudgetMicroUsd", label: "Monthly budget" },
 ];
 
 export function Onboarding() {
@@ -76,9 +80,22 @@ export function Onboarding() {
   // The save came back `vault_reset_required`: the saved keys don't open, so offer the reset.
   const [locked, setLocked] = useState(false);
   const [notice, setNotice] = useState("");
-  // The budgets as saved (their defaults until changed), and the ones the user is changing.
-  const [budgets, setBudgets] = useState<Record<Budget, number> | null>(null);
+  // The budgets as saved (their defaults until changed), and the ones the user is changing. Until
+  // they load nothing is offered for change, so a guess is never saved over a real limit.
+  const [budgets, setBudgets] = useState<Record<Budget, number> | "failed" | null>(null);
   const [editing, setEditing] = useState<Partial<Record<Budget, string>>>({});
+
+  const loadBudgets = useCallback(() => {
+    setBudgets(null);
+    getSpending().then(
+      ({ settings: s }) =>
+        setBudgets({
+          taskBudgetMicroUsd: s.taskBudgetMicroUsd,
+          monthlyBudgetMicroUsd: s.monthlyBudgetMicroUsd,
+        }),
+      () => setBudgets("failed"),
+    );
+  }, []);
 
   useEffect(() => {
     api<ModelSettings>("").then(
@@ -98,15 +115,8 @@ export function Onboarding() {
       },
       () => setError("Sign in to continue setting up."),
     );
-    getSpending().then(
-      ({ settings: s }) =>
-        setBudgets({
-          taskBudgetMicroUsd: s.taskBudgetMicroUsd,
-          monthlyBudgetMicroUsd: s.monthlyBudgetMicroUsd,
-        }),
-      () => {},
-    );
-  }, []);
+    loadBudgets();
+  }, [loadBudgets]);
 
   const run = (fn: () => Promise<void>) => async () => {
     setBusy(true);
@@ -265,7 +275,11 @@ export function Onboarding() {
       {choice === "api-key" && (
         <ProviderForm
           value={form}
-          onChange={setForm}
+          onChange={(value) => {
+            // A changed form isn't the model that passed, so it has to be tested again.
+            setForm(value);
+            setTest(null);
+          }}
           savedLast4={saved?.key ? saved.key.last4 : undefined}
         />
       )}
@@ -300,40 +314,53 @@ export function Onboarding() {
         <li>Providers also set their own rate limits; a busy model may ask you to wait.</li>
       </ul>
       <p>I also start with these budgets:</p>
-      <ul className="flex flex-col gap-2">
-        {BUDGETS.map(({ key, label, fallback }) => {
-          const value = budgets?.[key] ?? fallback;
-          const typed = editing[key];
-          return (
-            <li key={key} className="flex flex-wrap items-end gap-2">
-              {typed === undefined ? (
-                <>
-                  <span>
-                    {label}: <strong>{dollars(value)}</strong>
-                    {key === "monthlyBudgetMicroUsd" ? " (I warn you; I don't stop)" : " per task"}
-                  </span>
-                  <Button
-                    variant="quiet"
-                    aria-label={`Change ${label.toLowerCase()}`}
-                    onPress={() => setEditing((e) => ({ ...e, [key]: (value / 1e6).toFixed(2) }))}
+      {budgets === null ? (
+        <p role="status">Loading your budgets…</p>
+      ) : budgets === "failed" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p>I couldn't load your budgets.</p>
+          <Button variant="quiet" onPress={loadBudgets}>
+            Try again
+          </Button>
+        </div>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {BUDGETS.map(({ key, label }) => {
+            const value = budgets[key];
+            const typed = editing[key];
+            return (
+              <li key={key} className="flex flex-wrap items-end gap-2">
+                {typed === undefined ? (
+                  <>
+                    <span>
+                      {label}: <strong>{dollars(value)}</strong>
+                      {key === "monthlyBudgetMicroUsd"
+                        ? " (I warn you; I don't stop)"
+                        : " per task"}
+                    </span>
+                    <Button
+                      variant="quiet"
+                      aria-label={`Change ${label.toLowerCase()}`}
+                      onPress={() => setEditing((e) => ({ ...e, [key]: (value / 1e6).toFixed(2) }))}
+                    >
+                      Change
+                    </Button>
+                  </>
+                ) : (
+                  <TextField
+                    value={typed}
+                    onChange={(v) => setEditing((e) => ({ ...e, [key]: v }))}
+                    className={field}
                   >
-                    Change
-                  </Button>
-                </>
-              ) : (
-                <TextField
-                  value={typed}
-                  onChange={(v) => setEditing((e) => ({ ...e, [key]: v }))}
-                  className={field}
-                >
-                  <Label>{label} ($)</Label>
-                  <Input className={`${input} w-40 tabular-nums`} inputMode="decimal" />
-                </TextField>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                    <Label>{label} ($)</Label>
+                    <Input className={`${input} w-40 tabular-nums`} inputMode="decimal" />
+                  </TextField>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
       <p className="text-sm text-text-muted">
         You can change these any time in Settings › Spending.
       </p>
@@ -349,17 +376,19 @@ export function Onboarding() {
         <Button key="go" onPress={next} variant="primary">
           Continue
         </Button>,
-        <Button
-          key="change"
-          isDisabled={busy}
-          onPress={run(async () => {
-            // Leaving here skips the first chat, so it waits on the checklist.
-            await api("/setup", "POST", { skip: "chat" });
-            await finish(undefined, "/settings/apps");
-          })}
-        >
-          Change what needs my OK
-        </Button>,
+        APPS_SHIPPED && (
+          <Button
+            key="change"
+            isDisabled={busy}
+            onPress={run(async () => {
+              // Leaving here skips the first chat, so it waits on the checklist.
+              await api("/setup", "POST", { skip: "chat" });
+              await finish(undefined, "/settings/apps");
+            })}
+          >
+            Change what needs my OK
+          </Button>
+        ),
       )}
     </div>,
     <div key="chat" className="flex flex-col gap-4">

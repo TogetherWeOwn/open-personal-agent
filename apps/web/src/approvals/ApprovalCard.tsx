@@ -16,17 +16,18 @@ type Scope = ApprovalItem["scopes"][number];
 
 /**
  * The current time, re-read when the expiry line would change: each hour, then each minute, and
- * each second only in the last minute (m3-ux §3.3), and once more as it expires.
+ * each second only in the last minute (m3-ux §3.3), and once more as it expires. A `frozen`
+ * clock never moves, so onboarding's sample never expires however long its step stays open.
  */
-function useExpiryClock(expiresAt: number) {
+function useExpiryClock(expiresAt: number, frozen = false) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const left = expiresAt - now;
-    if (left <= 0) return;
+    if (frozen || left <= 0) return;
     const unit = left > 3_600_000 ? 3_600_000 : left > 60_000 ? 60_000 : 1000;
     const timer = setTimeout(() => setNow(Date.now()), left % unit || unit);
     return () => clearTimeout(timer);
-  }, [expiresAt, now]);
+  }, [expiresAt, now, frozen]);
   return now;
 }
 
@@ -113,7 +114,7 @@ export function ApprovalCard({
   sample?: boolean;
 }) {
   const headingId = `${idPrefix}-${batch.batchId}`;
-  const now = useExpiryClock(batch.expiresAt);
+  const now = useExpiryClock(batch.expiresAt, sample);
   const narrow = useNarrow();
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
   const [shown, setShown] = useState<ReadonlySet<string>>(new Set());
