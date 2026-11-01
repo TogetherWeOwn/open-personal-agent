@@ -88,7 +88,11 @@ describe("before the claim", () => {
   it("stays closed while the setup token is shorter than 128 bits", async () => {
     const weak = { ...env, OPA_SETUP_TOKEN: "short" };
     expect((await new Browser(weak).options("short")).status).toBe(503);
-    expect((await new Browser(weak).req("/setup")).status).toBe(403);
+    const page = await new Browser(weak).req("/setup");
+    expect(page.status).toBe(403);
+    const html = await page.text();
+    expect(html).toContain("<h1>Replace the setup token</h1>");
+    expect(html).toContain("--name &lt;your-worker-name&gt;");
   });
 
   it("stays closed while the setup token has too few distinct characters", async () => {
@@ -163,7 +167,10 @@ describe("the claim", () => {
   it("works once: afterwards /setup is 403 and other routes open", async () => {
     const br = new Browser();
     expect((await br.setup(TOKEN)).status).toBe(200);
-    expect((await br.req("/setup")).status).toBe(403);
+    const page = await br.req("/setup");
+    expect(page.status).toBe(403);
+    expect(page.headers.get("content-security-policy")).toMatch(/^default-src 'none'/);
+    expect(await page.text()).toContain("<h1>Already set up</h1>");
     const again = await br.options(TOKEN);
     expect(again.status).toBe(403);
     expect(await again.json()).toEqual({ error: "already_claimed" });

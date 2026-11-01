@@ -43,6 +43,28 @@ describe("boundaries", () => {
     expect(ports("packages/db/src/a.ts", 'import { z } from "zod";')).toBe(0);
   });
 
+  it("applies to the Worker modules @opa/worker exports to apps/node", () => {
+    const worker = (app: string) => [
+      { path: "apps/worker/package.json", text: '{ "exports": { "./app": "./src/app.ts" } }' },
+      { path: "apps/worker/src/app.ts", text: app },
+      {
+        path: "apps/worker/src/chat/index.tsx",
+        text: 'import { DurableObject } from "cloudflare:workers";',
+      },
+      { path: "apps/worker/src/index.ts", text: 'import { env } from "cloudflare:workers";' },
+    ];
+    expect(findPortViolations(worker('import { chat } from "./chat";'))).toEqual([
+      'apps/worker/src/chat/index.tsx:1: imports "cloudflare:workers" (ports rule, ADR 0011 #4)',
+    ]);
+    expect(findPortViolations(worker('import type { Chat } from "./chat";'))).toEqual([]);
+    // Types from a runtime module are erased too; a runtime import after them keeps its line.
+    const typed =
+      'import type {\n  DurableObjectState,\n} from "cloudflare:workers";\nimport "node:fs";';
+    expect(findPortViolations(worker(typed))).toEqual([
+      'apps/worker/src/app.ts:4: imports "node:fs" (ports rule, ADR 0011 #4)',
+    ]);
+  });
+
   it("rejects tooling in dependencies but allows it in devDependencies", () => {
     const text = JSON.stringify({
       dependencies: { hono: "1", vitest: "1", "@types/node": "1", "drizzle-kit": "1" },
