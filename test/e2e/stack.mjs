@@ -30,7 +30,7 @@ async function ready(server, url, ms = 60_000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (server.exitCode !== null) throw new Error(`wrangler dev exited (${server.exitCode})`);
-    const res = await fetch(url).catch(() => null);
+    const res = await fetch(url, { signal: AbortSignal.timeout(2_000) }).catch(() => null);
     if (res?.ok) return;
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -39,20 +39,10 @@ async function ready(server, url, ms = 60_000) {
 
 /**
  * Starts the stack on `port`. The secrets are made once and kept across restarts, so the vault
- * still opens the keys saved before one.
+ * still opens the keys saved before one. A start that fails cleans up what it started.
  */
 export async function startStack({ port = 8787, stdio = "ignore" } = {}) {
   const state = mkdtempSync(join(tmpdir(), "opa-e2e-"));
-  const migrate = spawnSync(
-    process.execPath,
-    [wrangler, "d1", "migrations", "apply", "DB", "--local", "--persist-to", state],
-    {
-      stdio: ["ignore", "ignore", "inherit"],
-      env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
-    },
-  );
-  if (migrate.status !== 0) throw new Error("wrangler d1 migrations apply failed");
-
   const setupToken = secret();
   const vars = {
     OPA_MASTER_KEY: secret(),
@@ -63,19 +53,40 @@ export async function startStack({ port = 8787, stdio = "ignore" } = {}) {
   for (const [name, value] of Object.entries(vars)) args.push("--var", `${name}:${value}`);
 
   const url = `http://localhost:${port}`;
-  const model = await startMockOpenAI({ port: 0 });
-  let server;
+  let model = null;
+  let server = null;
   const start = async () => {
     server = run(args, stdio);
     await ready(server, url);
   };
   const stop = () =>
     new Promise((resolve) => {
-      if (server.exitCode !== null) return resolve();
+      if (!server || server.exitCode !== null) return resolve();
       server.once("exit", resolve);
       process.kill(-server.pid, "SIGTERM");
     });
-  await start();
+  const close = async () => {
+    await stop();
+    await model?.close();
+    rmSync(state, { recursive: true, force: true });
+  };
+
+  try {
+    const migrate = spawnSync(
+      process.execPath,
+      [wrangler, "d1", "migrations", "apply", "DB", "--local", "--persist-to", state],
+      {
+        stdio: ["ignore", "ignore", "inherit"],
+        env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+      },
+    );
+    if (migrate.status !== 0) throw new Error("wrangler d1 migrations apply failed");
+    model = await startMockOpenAI({ port: 0 });
+    await start();
+  } catch (e) {
+    await close();
+    throw e;
+  }
   return {
     url,
     setupToken,
@@ -84,11 +95,7 @@ export async function startStack({ port = 8787, stdio = "ignore" } = {}) {
       await stop();
       await start();
     },
-    async close() {
-      await stop();
-      await model.close();
-      rmSync(state, { recursive: true, force: true });
-    },
+    close,
   };
 }
 
