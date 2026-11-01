@@ -128,6 +128,27 @@ snapshots:
     expect(checkRuntimeDependencies(lock)).toHaveLength(2);
     expect(checkRuntimeDependencies(lock)[0]).toContain('"string-width"');
   });
+
+  it("follows importer optional dependencies and aliases", () => {
+    const lock = `
+importers:
+  apps/worker:
+    dependencies:
+      hono: { specifier: npm:evil@1.0.0, version: evil@1.0.0 }
+    optionalDependencies:
+      extra: { specifier: 1.0.0, version: 1.0.0 }
+snapshots:
+  evil@1.0.0: {}
+  extra@1.0.0: { dependencies: { deep: 2.0.0 } }
+`;
+    expect(runtimeClosure(lock)).toEqual(["deep", "evil", "extra"]);
+  });
+
+  it("fails when the lockfile is missing", () => {
+    expect(checkRuntimeDependencies(null)).toEqual([
+      "pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked",
+    ]);
+  });
 });
 
 describe("bundles", () => {

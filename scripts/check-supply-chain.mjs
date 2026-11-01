@@ -26,6 +26,9 @@ export function runtimeClosure(lockYaml, importer = WORKER_IMPORTER) {
   const lock = parse(lockYaml) ?? {};
   const seen = new Set();
   const names = new Set();
+  // An alias (`npm:other@1`) is recorded as the full `other@1` key.
+  const keyOf = (name, version) =>
+    version.split("(")[0].includes("@") ? version : `${name}@${version}`;
   const visitPackage = (key) => {
     if (seen.has(key)) return;
     seen.add(key);
@@ -35,17 +38,20 @@ export function runtimeClosure(lockYaml, importer = WORKER_IMPORTER) {
       ...snap.dependencies,
       ...snap.optionalDependencies,
     })) {
-      // An alias (`npm:other@1`) is recorded as the full `other@1` key.
-      visitPackage(version.split("(")[0].includes("@") ? version : `${name}@${version}`);
+      visitPackage(keyOf(name, version));
     }
   };
   const visitImporter = (dir) => {
     if (seen.has(`link:${dir}`)) return;
     seen.add(`link:${dir}`);
-    // Workspace packages are bundled too, so their dependencies count.
-    for (const [name, { version }] of Object.entries(lock.importers?.[dir]?.dependencies ?? {})) {
+    // Workspace packages are bundled too, so their dependencies count. Optional ones are installed.
+    const importerDeps = lock.importers?.[dir] ?? {};
+    for (const [name, { version }] of Object.entries({
+      ...importerDeps.dependencies,
+      ...importerDeps.optionalDependencies,
+    })) {
       if (version.startsWith("link:")) visitImporter(posix.join(dir, version.slice(5)));
-      else visitPackage(`${name}@${version}`);
+      else visitPackage(keyOf(name, version));
     }
   };
   visitImporter(importer);
@@ -53,6 +59,9 @@ export function runtimeClosure(lockYaml, importer = WORKER_IMPORTER) {
 }
 
 export function checkRuntimeDependencies(lockYaml) {
+  if (lockYaml == null) {
+    return ["pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked"];
+  }
   return runtimeClosure(lockYaml)
     .filter((name) => !REVIEWED_RUNTIME.includes(name))
     .map(
@@ -131,7 +140,7 @@ if (isMain(import.meta.url)) {
   report("supply-chain", [
     ...checkPnpmPolicy(readText("pnpm-workspace.yaml") ?? ""),
     ...checkRenovatePolicy(readText("renovate.json")),
-    ...checkRuntimeDependencies(readText("pnpm-lock.yaml") ?? ""),
+    ...checkRuntimeDependencies(readText("pnpm-lock.yaml")),
     ...workflows.flatMap((f) => checkWorkflow(`${dir}/${f}`, readText(`${dir}/${f}`) ?? "")),
     ...actions.flatMap((f) => checkPins(f.path, parse(f.text))),
   ]);
