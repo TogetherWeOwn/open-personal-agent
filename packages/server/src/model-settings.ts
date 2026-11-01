@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Onboarding answers and model settings (M2-15, M3-06). Keys arrive in a request body, go straight
 // into the vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
-import type { ModelUsage } from "@opa/core";
+import type { ModelProvider, ModelUsage } from "@opa/core";
 import { createRepository, type ProviderValues } from "@opa/db/repository";
 import { findPrice, isStale } from "@opa/pricing";
 import {
@@ -25,6 +25,18 @@ import type { AppEnv } from "./env";
 const CALLER = "model-settings";
 const TEST_TIMEOUT_MS = 20_000;
 const TEST_PROMPT = [{ role: "user" as const, content: "Reply with one word: ready" }];
+const PROBE_TOOL = {
+  name: "report_ready",
+  description: "Reports that the assistant is ready. Takes no input.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+};
+const TOOL_PROBE = {
+  messages: [{ role: "user" as const, content: "Call the report_ready tool now." }],
+  tools: [PROBE_TOOL],
+  // Reasoning models spend output tokens before they call, and a reply cut at the cap drops its
+  // calls. This leaves room for that and still bounds the probe at about a cent.
+  maxOutputTokens: 1024,
+};
 
 type Ctx = Context<AppEnv>;
 type User = ReturnType<typeof userOf>;
@@ -323,7 +335,58 @@ settings.put("/roles", async (c) => {
   return c.json(await view(c));
 });
 
-/** Sends one short prompt with the picked model; reports latency, tools and the price hint. */
+type Call = Parameters<ModelProvider["stream"]>[0];
+
+/**
+ * What a probe without the call says about tools. Only a refused request (400) or a text answer
+ * is evidence against them; a rate limit, outage or timeout means the probe didn't get to ask.
+ */
+function probeOutcome(failure: string | undefined) {
+  if (!failure) return "ignored"; // answered in text
+  if (failure === "bad_request") return "rejected";
+  return failure === "timeout" ? "timeout" : "failed";
+}
+
+/**
+ * One model call under the Test deadline: the time to its first output, the text, any tool
+ * calls, usage, and the failure if it had one. Some providers never settle once they stall, so
+ * the deadline doesn't wait for the stream.
+ */
+async function timedCall(provider: ModelProvider, request: Omit<Call, "signal">) {
+  const started = Date.now();
+  const result = {
+    firstOutputMs: null as number | null,
+    reply: "",
+    toolCalls: [] as string[],
+    usage: null as ModelUsage | null,
+  };
+  const signal = AbortSignal.timeout(TEST_TIMEOUT_MS);
+  const consume = async () => {
+    for await (const event of provider.stream({ ...request, signal })) {
+      if (event.type === "text.delta" || event.type === "tool_call") {
+        result.firstOutputMs ??= Date.now() - started;
+      }
+      if (event.type === "text.delta") result.reply += event.text;
+      else if (event.type === "tool_call") result.toolCalls.push(event.toolCall.name);
+      else if (event.type === "usage") result.usage = event.usage;
+      else if (event.type === "error") return { code: event.code, message: event.message };
+    }
+    return null;
+  };
+  const timedOut = new Promise<{ code: string; message: string }>((resolve) =>
+    signal.addEventListener("abort", () =>
+      resolve({ code: "timeout", message: "The model didn't answer in 20 seconds." }),
+    ),
+  );
+  const failure = await Promise.race([consume(), timedOut]);
+  return { ...result, failure, totalMs: Date.now() - started };
+}
+
+/**
+ * Sends one short prompt with the picked model, then a tool-call probe (M3-06 AC4); reports
+ * latency, whether the model called the tool, and the price hint. A model's declared support
+ * isn't trusted on its own: some hosts accept `tools` and ignore them.
+ */
 async function test(c: Ctx, pick: ModelPick) {
   const resolved = await resolveChatModel(c.env, c.var.session.scope, CALLER, pick);
   if ("error" in resolved) {
@@ -332,53 +395,43 @@ async function test(c: Ctx, pick: ModelPick) {
   }
   const { provider, model, apiKey } = resolved;
   await resolved.used?.();
-  const started = Date.now();
-  let firstTokenMs: number | null = null;
-  let reply = "";
-  let usage: ModelUsage | null = null;
-  const signal = AbortSignal.timeout(TEST_TIMEOUT_MS);
-  const consume = async () => {
-    const request = { model, messages: TEST_PROMPT, maxOutputTokens: 16 };
-    for await (const event of provider.stream({ ...request, signal })) {
-      if (event.type === "text.delta") {
-        firstTokenMs ??= Date.now() - started;
-        reply += event.text;
-      } else if (event.type === "usage") {
-        usage = event.usage;
-      } else if (event.type === "error") {
-        return { code: event.code, message: event.message };
-      }
-    }
-    return null;
-  };
-  // Some providers never settle once they stall, so the deadline doesn't wait for the stream.
-  const timedOut = new Promise<{ code: string; message: string }>((resolve) =>
-    signal.addEventListener("abort", () =>
-      resolve({ code: "timeout", message: "The model didn't answer in 20 seconds." }),
-    ),
-  );
-  const failure = await Promise.race([consume(), timedOut]);
-  // A test that ran is a real, billed call, so it goes in the ledger like a chat turn, unpriced
-  // when the provider reported no usage. One rejected before any output (a bad key) ran no model.
   const billingId = resolved.billingId ?? provider.id;
-  const call = { providerId: billingId, model, usage };
-  if (usage || !failure || firstTokenMs !== null) await userOf(c).usage.record(call);
-  if (failure) {
-    // The provider writes this text. If it echoes any 8 characters of the key, drop it: a saved
-    // key never returns to the browser, even in part beyond its last 4 (ADR 0010 D4).
-    const echoed = apiKey !== null && leaks(failure.message, apiKey);
-    const message = echoed
+  // A call that ran is a real, billed call, so it goes in the ledger like a chat turn, unpriced
+  // when the provider reported no usage. One rejected before any output (a bad key) ran no model.
+  const record = async ({
+    usage,
+    failure,
+    firstOutputMs,
+  }: Awaited<ReturnType<typeof timedCall>>) => {
+    if (usage || !failure || firstOutputMs !== null) {
+      await userOf(c).usage.record({ providerId: billingId, model, usage });
+    }
+  };
+  const first = await timedCall(provider, { model, messages: TEST_PROMPT, maxOutputTokens: 16 });
+  await record(first);
+  // The provider writes this text. If it echoes any 8 characters of the key, drop it: a saved
+  // key never returns to the browser, even in part beyond its last 4 (ADR 0010 D4).
+  const safe = (message: string) =>
+    apiKey !== null && leaks(message, apiKey)
       ? "The provider rejected the request. Check the key and model."
-      : failure.message;
-    return c.json({ ok: false, error: { code: failure.code, message } });
+      : message;
+  if (first.failure) {
+    return c.json({
+      ok: false,
+      error: { code: first.failure.code, message: safe(first.failure.message) },
+    });
   }
+  const probe = await timedCall(provider, { model, ...TOOL_PROBE });
+  await record(probe);
+  const called = probe.toolCalls.includes(PROBE_TOOL.name);
   return c.json({
     ok: true,
-    latencyMs: firstTokenMs ?? Date.now() - started,
-    totalMs: Date.now() - started,
-    tools: provider.capabilities(model).tools,
+    latencyMs: first.firstOutputMs ?? first.totalMs,
+    totalMs: first.totalMs + probe.totalMs,
+    tools: called,
+    toolProbe: called ? "called" : probeOutcome(probe.failure?.code),
     price: priceHint(billingId, model),
-    reply: reply.slice(0, 200),
+    reply: first.reply.slice(0, 200),
   });
 }
 
