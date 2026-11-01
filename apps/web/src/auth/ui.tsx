@@ -4,10 +4,6 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link } from "react-aria-components";
 
-const button =
-  "min-h-11 rounded-lg px-4 font-medium data-disabled:opacity-50 data-pressed:opacity-90";
-export const primary = `${button} bg-accent text-accent-contrast`;
-export const secondary = `${button} border border-border-strong`;
 export const input =
   "min-h-11 rounded-lg border border-border-strong bg-surface-raised px-3 py-2 font-mono";
 const link = "text-accent underline underline-offset-2";

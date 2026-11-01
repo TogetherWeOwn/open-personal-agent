@@ -58,8 +58,18 @@ export async function currentSession(c: Context<AppEnv>): Promise<Session | null
   const row = await store.sessions.find(await auth.sha256(cookie), now, now - IDLE_MS);
   if (!row) return null;
   if (now - row.last_seen_at > TOUCH_MS) await store.sessions.touch(row.id, now);
-  return { id: row.id, userId: row.user_id, scope: row.scope };
+  return { id: row.id, userId: row.user_id, scope: row.scope, stepUpAt: row.step_up_at };
 }
+
+/**
+ * Whether the session confirmed a passkey within the account step-up window. A future stamp
+ * fails closed: without the lower bound it would stay valid until stamp + the window.
+ */
+export const hasStepUp = (session: Session, now = Date.now()) => {
+  if (session.stepUpAt === null) return false;
+  const age = now - session.stepUpAt;
+  return age >= 0 && age < auth.STEP_UP_MS;
+};
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -109,6 +119,59 @@ authRoutes.post("/login", async (c) => {
   setCookie(c, auth.SESSION_COOKIE, session.cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
   return c.json({ ok: true });
+});
+
+/**
+ * Step-up, step 1: a challenge for one of the signed-in user's own passkeys. The account actions
+ * (loosening a tool, and in M3-19 and M3-20 credential changes, export and deletion) need one.
+ * Lives under `/step-up/session` so the vault's action-bound `/step-up` keeps its path.
+ */
+authRoutes.post("/step-up/session/options", async (c) => {
+  const { userId } = c.var.session;
+  const store = systemStore(c.env);
+  const options = await generateAuthenticationOptions({
+    rpID: new URL(c.req.url).hostname,
+    userVerification: "required",
+    allowCredentials: (await store.passkeys.ofUser(userId)).map((p) => ({
+      id: p.id,
+      transports: (p.transports?.split(",").filter(Boolean) ?? []) as AuthenticatorTransport[],
+    })),
+  });
+  const cookie = await auth.putChallenge(store, "step_up", options.challenge, userId);
+  const maxAge = auth.CHALLENGE_TTL_MS / 1000;
+  setCookie(c, auth.CHALLENGE_COOKIE, cookie, { ...auth.COOKIE_OPTIONS, maxAge });
+  c.header("Cache-Control", "no-store");
+  return c.json({ options });
+});
+
+/**
+ * Step-up, step 2: the assertion must come from a passkey of the session's user, for a challenge
+ * issued to that user. It stamps this session only: another session of the same user, or a new
+ * login, has to step up for itself. Lives under `/step-up/session`, apart from the vault's
+ * action-bound `/step-up`.
+ */
+authRoutes.post("/step-up/session", async (c) => {
+  const { id, userId } = c.var.session;
+  const store = systemStore(c.env);
+  const challenge = await auth.takeChallenge(store, getCookie(c, auth.CHALLENGE_COOKIE), "step_up");
+  deleteCookie(c, auth.CHALLENGE_COOKIE, auth.COOKIE_OPTIONS);
+  c.header("Cache-Control", "no-store");
+  if (!challenge || challenge.user_id !== userId) {
+    await store.audit(userId, "auth.step_up", "auth", "denied");
+    return c.json({ error: "no_challenge" }, 400);
+  }
+  const body = await c.req.json().catch(() => null);
+  const response = body?.credential as AuthenticationResponseJSON | undefined;
+  const found = await store.passkeys.get(typeof response?.id === "string" ? response.id : "");
+  const passkey = found?.user_id === userId ? found : null;
+  const counter = passkey && (await verifyAssertion(c, passkey, response, challenge.challenge));
+  if (!passkey || counter === null) {
+    await store.audit(userId, "auth.step_up", "auth", "denied");
+    return c.json({ error: "not_verified" }, 401);
+  }
+  const now = Date.now();
+  await store.sessions.stepUp({ id, userId, passkeyId: passkey.id, counter, now });
+  return c.json({ ok: true, expiresAt: now + auth.STEP_UP_MS });
 });
 
 type StoredPasskey = NonNullable<Awaited<ReturnType<SystemStore["passkeys"]["get"]>>>;

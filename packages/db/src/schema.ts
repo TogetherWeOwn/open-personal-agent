@@ -69,6 +69,8 @@ export const sessions = sqliteTable(
     lastSeenAt: integer("last_seen_at").notNull().default(now),
     expiresAt: integer("expires_at").notNull(),
     revokedAt: integer("revoked_at"),
+    /** The last passkey step-up in this session; account actions need one in the last 5 minutes. */
+    stepUpAt: integer("step_up_at"),
   },
   (t) => [index("sessions_user_idx").on(t.userId, t.expiresAt)],
 );
@@ -102,7 +104,9 @@ export const webauthnChallenges = sqliteTable(
   "webauthn_challenges",
   {
     idHash: text("id_hash").primaryKey(),
-    kind: text("kind", { enum: ["claim", "recovery", "login"] }).notNull(),
+    kind: text("kind", {
+      enum: ["claim", "recovery", "recovery_code", "login", "step_up", "step_up_vault_reset"],
+    }).notNull(),
     challenge: text("challenge").notNull(),
     userId: text("user_id"),
     tokenHash: text("token_hash"),
@@ -219,6 +223,38 @@ export const messages = sqliteTable(
 );
 
 /**
+ * A file the user attached (M3-10). The bytes live in R2 under `u/{userId}/attachments/{id}`
+ * (the repository derives the key); this row holds what the server sniffed from its first bytes,
+ * never the type or size the client claimed. `message_id` is set when the message carrying it is
+ * sent; until then the file belongs to the composer that uploaded it.
+ */
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    mediaType: text("media_type").notNull(),
+    kind: text("kind", { enum: ["image", "pdf", "text"] }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    /**
+     * Whether the turn's model received the file, set when the message is sent (M3-10 AC2);
+     * null until then. The thread shows the plain wording for a file the model didn't read.
+     */
+    sentToModel: integer("sent_to_model", { mode: "boolean" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("attachments_user_message_idx").on(t.userId, t.messageId),
+    index("attachments_user_created_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+/**
  * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
  * table had no price for the model; `cost_source` says whether it was estimated or reported.
  * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls.
@@ -289,6 +325,50 @@ export const userSettings = sqliteTable("user_settings", {
   onboardedAt: integer("onboarded_at"),
   updatedAt: integer("updated_at").notNull().default(now),
 });
+
+/**
+ * The user's per-tool decision override (M3-02 AC2, EL fix 9). No row means the SEC-4 default for
+ * the tool's risk class. The policy engine enforces its floors whatever the row says.
+ */
+export const toolOverrides = sqliteTable(
+  "tool_overrides",
+  {
+    userId: userId(),
+    tool: text("tool").notNull(),
+    decision: text("decision", { enum: ["auto", "ask", "never"] }).notNull(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.tool] }),
+    check("tool_overrides_decision", sql`${t.decision} IN ('auto', 'ask', 'never')`),
+  ],
+);
+
+/**
+ * Standing approvals (M3-02 AC2, M3-07 AC3): this task, an hour, or always for one destination.
+ * Created only from an untainted context. A revoked row stays until the user is deleted.
+ */
+export const grants = sqliteTable(
+  "grants",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    tool: text("tool").notNull(),
+    scope: text("scope", { enum: ["task", "hour", "destination"] }).notNull(),
+    taskId: text("task_id"),
+    destination: text("destination"),
+    expiresAt: integer("expires_at"),
+    createdAt: createdAt(),
+    revokedAt: integer("revoked_at"),
+  },
+  (t) => [
+    index("grants_user_tool_idx").on(t.userId, t.tool),
+    check(
+      "grants_scope_target",
+      sql`(${t.scope} = 'task' AND ${t.taskId} IS NOT NULL) OR (${t.scope} = 'hour' AND ${t.expiresAt} IS NOT NULL) OR (${t.scope} = 'destination' AND ${t.destination} IS NOT NULL)`,
+    ),
+  ],
+);
 
 /**
  * Memory (ADR 0008). Only `MemoryService` (`./memory.ts`) reads or writes these tables; the

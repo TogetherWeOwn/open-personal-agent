@@ -17,7 +17,15 @@
   --color-accent-contrast: light-dark(#ffffff, #1a1815);
   --color-user-bubble: light-dark(#efe6dc, #2f2a24);
   --color-danger: light-dark(#a1261b, #f08a7e);
-  --color-status-warning: light-dark(#8a5a00, #e5b567);
+  /* M3 (m3-ux §5.1). Status colours reach 4.5:1 on every surface, borders and the ring 3:1. */
+  --color-approval-surface: light-dark(#fbf0e1, #2c2219);
+  --color-approval-border: light-dark(#a3570f, #d9904a);
+  --color-tool-surface: light-dark(#f4f1ec, #201e1a);
+  --color-status-success: light-dark(#2d6a2f, #8ccf8c);
+  --color-status-warning: light-dark(#835400, #e9bf5c);
+  --color-status-info: light-dark(#24608f, #8bb9e6);
+  /* Blue, so a focused accent button still shows its ring; the 2 px offset puts it on the surface. */
+  --color-focus-ring: light-dark(#1d5bd6, #7fb2ff);
 }
 
 :root {
@@ -30,7 +38,7 @@ body {
 
 /* One focus style, keyed off React Aria's keyboard-only flag. */
 [data-focus-visible] {
-  @apply outline-2 outline-offset-2 outline-accent;
+  @apply outline-2 outline-offset-2 outline-focus-ring;
 }
 
 /* The streaming caret: silent for screen readers, and steady so reduced motion needs no case. */

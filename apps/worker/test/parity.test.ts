@@ -5,6 +5,7 @@ import {
   blobStoreContract,
   databaseContract,
   memoryContract,
+  memoryGateContract,
   usageLedgerContract,
 } from "../../../test/contract/storage";
 import type { Env } from "../src/env";
@@ -18,6 +19,10 @@ usageLedgerContract("D1", async () => {
   return env.DB;
 });
 memoryContract("D1", async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  return env.DB;
+});
+memoryGateContract("D1", async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   return env.DB;
 });

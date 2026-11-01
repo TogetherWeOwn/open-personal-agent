@@ -217,7 +217,13 @@ describe("several providers", () => {
   it("pins a conversation to a model, and back to the Chat role", async () => {
     const pin = (id: string, body: unknown, user = "u1") =>
       call(user, "PUT", `/conversations/${id}/model`, body);
-    expect((await pin("c1", { provider: first, model: "gpt-4.1" })).status).toBe(204);
+    const switched = await pin("c1", { provider: first, model: "gpt-4.1" });
+    // The thread records the switch, in names a person reads, with the pin (TWO-614).
+    const line = { role: "system", status: "complete", content: "Switched to GPT-4.1 via OpenAI" };
+    expect(switched).toEqual({
+      status: 200,
+      body: { message: { id: expect.any(String), ...line } },
+    });
     const saved = "SELECT model_provider, model FROM conversations WHERE id = 'c1'";
     expect(await env.DB.prepare(saved).first()).toEqual({
       model_provider: first,
@@ -229,10 +235,20 @@ describe("several providers", () => {
       provider: first,
       model: "gpt-4.1",
     });
-    expect((await pin("c1", null)).status).toBe(204);
+    // Back to the Chat role: the line names the model the chat follows now.
+    const back = await pin("c1", null);
+    expect(back).toMatchObject({ status: 200, body: { message: { role: "system" } } });
     expect(await env.DB.prepare(saved).first()).toEqual({ model_provider: null, model: null });
+    // The messages endpoint returns both lines, in order; refused switches write none.
     expect((await pin("c1", { provider: "missing" })).status).toBe(400);
     expect((await pin("nope", { provider: first })).status).toBe(404);
+    const thread = (await call("u1", "GET", "/conversations/c1/messages")).body.messages;
+    expect(thread.map((m: { id: string }) => m.id)).toEqual([
+      switched.body.message.id,
+      back.body.message.id,
+    ]);
+    expect(thread[0]).toMatchObject(line);
+    await env.DB.prepare("DELETE FROM messages WHERE conversation_id = 'c1'").run();
   });
 
   it("moves the picks on a provider's model when it changes, and keeps the others", async () => {
@@ -295,8 +311,23 @@ describe("isolation", () => {
       400,
     );
     expect((await call("u2", "PUT", "/conversations/c2/model", { provider: id })).status).toBe(400);
-    // And u1 can't pin u2's conversation, even to u1's own model.
+    // And u1 can't pin u2's conversation, even to u1's own model, nor write a line into it.
     expect((await call("u1", "PUT", "/conversations/c2/model", { provider: id })).status).toBe(404);
+    const lines = "SELECT count(*) AS n FROM messages WHERE conversation_id = 'c2'";
+    expect(await env.DB.prepare(lines).first("n")).toBe(0);
+    // u2's switch lines are u2's alone: u1 can't read u2's thread, and u2 can't read u1's.
+    const own = await call("u2", "PUT", "/conversations/c2/model", null);
+    expect(own.status).toBe(200);
+    expect(await call("u1", "GET", "/conversations/c2/messages")).toEqual({
+      status: 404,
+      body: notFound,
+    });
+    await call("u1", "PUT", "/conversations/c1/model", { provider: second });
+    expect(await call("u2", "GET", "/conversations/c1/messages")).toEqual({
+      status: 404,
+      body: notFound,
+    });
+    expect((await call("u2", "GET", "/conversations/c2/messages")).body.messages).toEqual([]);
     expect((await call("u2", "GET", "/settings")).body.providers).toEqual([]);
   });
 });

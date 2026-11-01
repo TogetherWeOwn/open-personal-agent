@@ -47,3 +47,34 @@ describe("scoped repository", () => {
     expect(bob?.assistant().id.toString()).not.toBe(id);
   });
 });
+
+describe("attachment upload with no declared length", () => {
+  it("cuts R2 multipart parts at exactly 5 MiB, carrying a split chunk into the next", async () => {
+    const sizes: number[] = [];
+    const FILES = {
+      ...env.FILES,
+      createMultipartUpload: async () => ({
+        uploadPart: async (partNumber: number, value: Uint8Array) => {
+          sizes.push(value.byteLength);
+          return { partNumber, etag: `e${partNumber}` };
+        },
+        complete: async () => ({}),
+        abort: async () => ({}),
+      }),
+    };
+    const files = createRepository({ ...env, FILES } as never).forUser(
+      scopeFromSession({ userId: "alice" }),
+    ).attachments;
+    const chunk = new Uint8Array(3_000_000);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < 7; i++) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    await files.putObject("multi", body, "text/plain");
+    const part = 5 * 1024 * 1024;
+    // R2 refuses a multipart upload whose non-last parts differ in size.
+    expect(sizes).toEqual([part, part, part, part, 7 * 3_000_000 - 4 * part]);
+  });
+});

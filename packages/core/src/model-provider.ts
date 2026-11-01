@@ -29,8 +29,23 @@ export interface ModelReasoning {
   items: unknown[];
 }
 
+/**
+ * A file the user attached, ready for a model call (M3-10 AC2). Images and PDFs carry base64 in
+ * `data`; text files carry their decoded `text`. The caller only fills one in where the model's
+ * capability flags allow that kind (text always, as it rides in the message text).
+ */
+export interface ModelAttachment {
+  kind: "image" | "pdf" | "text";
+  /** The type sniffed server-side from the file's first bytes, never the client's claim. */
+  mediaType: string;
+  name: string;
+  data?: string;
+  text?: string;
+}
+
 export type ModelMessage =
-  | { role: "system" | "user"; content: string }
+  | { role: "system"; content: string }
+  | { role: "user"; content: string; attachments?: ModelAttachment[] }
   | {
       role: "assistant";
       content: string;
@@ -99,6 +114,12 @@ export interface ModelCapabilities {
   tools: boolean;
   /** The upstream reports token usage on streamed calls. */
   usageInStream: boolean;
+  /**
+   * The model can read attached images / PDFs (M3-10 AC2). Absent means no: an adapter claims a
+   * flag only where it knows the wire shape the model accepts, so a file is never sent on a guess.
+   */
+  imageInput?: boolean;
+  pdfInput?: boolean;
 }
 
 export interface ModelProvider {

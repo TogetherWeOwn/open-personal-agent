@@ -2,6 +2,11 @@
 // The model settings the server sends (M3-06): saved providers with their keys' last 4 and
 // dates, the Chat and Background roles, and Test results. A saved key never comes back from
 // the server, so nothing here can hold one beyond the form field it was typed into.
+import {
+  type PublicKeyCredentialRequestOptionsJSON,
+  startAuthentication,
+} from "@simplewebauthn/browser";
+import type { StoredMessage } from "../chat/transport";
 
 export interface PriceHint {
   inputUsdPerMTok: number;
@@ -85,13 +90,16 @@ export async function settingsApi<T>(path: string, method = "GET", body?: unknow
 export async function setConversationModel(
   conversationId: string,
   pick: RolePick | null,
-): Promise<void> {
+): Promise<StoredMessage | null> {
   const res = await fetch(`/api/conversations/${conversationId}/model`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(pick),
   });
   if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error);
+  // The thread's saved line for the switch; none when there was no model to name.
+  const { message } = (await res.json().catch(() => ({}))) as { message?: StoredMessage | null };
+  return message ?? null;
 }
 
 const ERRORS: Record<string, string> = {
@@ -110,6 +118,44 @@ const ERRORS: Record<string, string> = {
 };
 export const settingsError = (e: unknown) =>
   ERRORS[(e as Error).message] ?? "That didn't work. Check the fields and try again.";
+
+/** The server refused because the user's saved keys no longer open: the reset panel takes over. */
+export const needsVaultReset = (e: unknown) => (e as Error).message === "vault_reset_required";
+
+/** `GET /api/settings/vault`: whether the user's saved keys open (crypto review C-1). */
+export type VaultState = "ok" | "empty" | "reset_required" | "unavailable";
+
+/** The vault's state, or null when the server can't say (no vault configured, or offline). */
+export const vaultState = () =>
+  settingsApi<{ state: VaultState }>("/vault").then(
+    ({ state }) => state,
+    () => null,
+  );
+
+/**
+ * Deletes the user's saved keys after a passkey step-up for `vault.reset`. Rejects with the
+ * server's error code, or the browser's error when the passkey prompt is dismissed.
+ */
+export async function resetVault(retried = false): Promise<void> {
+  const res = await fetch("/api/auth/step-up/options", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "vault.reset" }),
+  });
+  const json = (await res.json().catch(() => ({}))) as {
+    options?: PublicKeyCredentialRequestOptionsJSON;
+    error?: string;
+  };
+  if (!res.ok || !json.options) throw new Error(json.error ?? "unknown");
+  const credential = await startAuthentication({ optionsJSON: json.options });
+  try {
+    await settingsApi("/vault/reset", "POST", { confirm: "reset", credential });
+  } catch (e) {
+    // The challenge expired or its cookie was lost: one fresh ceremony, without asking.
+    if ((e as Error).message === "step_up_required" && !retried) return resetVault(true);
+    throw e;
+  }
+}
 
 // The size of message prices are explained with: a short question with a little context, the
 // server's reference call (packages/server/src/chat-model.ts), so "cheapest" and the price

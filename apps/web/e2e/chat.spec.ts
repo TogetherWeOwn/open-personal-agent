@@ -52,6 +52,16 @@ test.beforeEach(async ({ page, baseURL }) => {
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings", (route) => route.fulfill({ json: SETTINGS }));
+  await page.route(/\/api\/attachments\/config/, (route) =>
+    route.fulfill({
+      json: {
+        maxBytes: 10 * 1024 * 1024,
+        accept: ".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.csv,.json",
+        types: [],
+        model: null,
+      },
+    }),
+  );
 });
 
 /** Tabs to the composer, types, presses Enter and waits for the whole reply. */
@@ -120,9 +130,15 @@ test("the context chip names the model and switches this chat to another (M3-06 
   page,
 }) => {
   const pins: unknown[] = [];
+  // The server answers with the thread's saved line for the switch (TWO-614).
   await page.route("/api/conversations/*/model", async (route) => {
-    pins.push(route.request().postDataJSON());
-    await route.fulfill({ status: 204 });
+    const pick = route.request().postDataJSON();
+    pins.push(pick);
+    const content = pick
+      ? "Switched to some/model via OpenRouter"
+      : "Switched to GPT-4.1 mini via OpenAI";
+    const message = { id: `line-${pins.length}`, role: "system", status: "complete", content };
+    await route.fulfill({ json: { message } });
   });
   await page.goto("/");
   const chip = page.getByRole("button", { name: /GPT-4\.1 mini · OpenAI, model for this chat/ });
@@ -146,6 +162,9 @@ test("the context chip names the model and switches this chat to another (M3-06 
   await page.getByRole("button", { name: /model for this chat/ }).click();
   await page.getByRole("menuitem", { name: /some\/model · OpenRouter/ }).click();
   await expect.poll(() => pins).toEqual([null, { provider: "p2", model: "some/model" }]);
+  // Each saved line takes the place of this tab's, so each switch reads once; the new chat's
+  // first pick was never saved, so its line stays this tab's.
+  await expect(page.getByRole("log").getByText(/^Switched to/)).toHaveCount(3);
 });
 
 test("a send right after a switch waits for the switch to save, so the reply uses it", async ({
@@ -210,6 +229,116 @@ test("with no model set up, the chip says so and Send opens Settings › Models"
   await expect(page).toHaveURL(/\/settings\/models$/);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
   await expect(page.getByText("No model set up yet.")).toBeVisible();
+});
+
+test("what may be attached follows the chat's own model, even before the switch saves", async ({
+  page,
+}) => {
+  const asked: string[] = [];
+  await page.route(/\/api\/attachments\/config/, (route) => {
+    asked.push(new URL(route.request().url()).search);
+    const reads = route.request().url().includes("provider=p2");
+    return route.fulfill({
+      json: {
+        maxBytes: 1024,
+        accept: ".png,.txt",
+        types: [{ ext: "png", mediaType: "image/png", kind: "image" }],
+        model: { imageInput: reads, pdfInput: false },
+      },
+    });
+  });
+  await page.goto("/");
+  // The Chat role's, asked for again once Settings says which model that is.
+  await expect.poll(() => asked).toEqual(["", ""]);
+  await page.getByRole("button", { name: /model for this chat/ }).click();
+  await page.getByRole("menuitem", { name: /some\/model · OpenRouter/ }).click();
+  await expect.poll(() => asked.at(-1)).toBe("?provider=p2&model=some%2Fmodel");
+});
+
+test("attaching a file: chips, plain refusals, and what the model can't read", async ({ page }) => {
+  // A small cap and a model without image input, from config (M3-10 AC1–2).
+  await page.route(/\/api\/attachments\/config/, (route) =>
+    route.fulfill({
+      json: {
+        maxBytes: 1024,
+        accept: ".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.csv,.json",
+        types: [
+          { ext: "png", mediaType: "image/png", kind: "image" },
+          { ext: "txt", mediaType: "text/plain", kind: "text" },
+        ],
+        model: { imageInput: false, pdfInput: false },
+      },
+    }),
+  );
+  await page.route(/\/api\/attachments$/, (route) =>
+    route.fulfill({
+      status: 201,
+      json: { id: "f1", name: "cat.png", mediaType: "image/png", kind: "image", sizeBytes: 8 },
+    }),
+  );
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  await page.route(/\/api\/attachments\/f1$/, (route) =>
+    route.fulfill({ contentType: "image/png", body: png }),
+  );
+  await page.goto("/");
+  const input = page.locator('input[type="file"]');
+
+  // A type we don't read and a file over the config's cap are refused in plain words.
+  await input.setInputFiles({ name: "setup.exe", mimeType: "", buffer: Buffer.from("MZ") });
+  await expect(page.getByRole("alert")).toContainText(
+    "I can't read .exe files. I can read images, PDFs and text files.",
+  );
+  await page.getByRole("button", { name: "Remove setup.exe" }).click();
+  await input.setInputFiles({
+    name: "big.png",
+    mimeType: "image/png",
+    buffer: Buffer.alloc(2048),
+  });
+  await expect(page.getByRole("alert")).toContainText("Too large (max 1 KB)");
+  await page.getByRole("button", { name: "Remove big.png" }).click();
+
+  // A good pick uploads to a chip, with the warning that this model won't see it.
+  await input.setInputFiles({ name: "cat.png", mimeType: "image/png", buffer: png });
+  const chips = page.getByRole("list", { name: "Attached files" });
+  await expect(chips).toContainText("cat.png");
+  await expect(page.getByText("This model can't see images.")).toBeVisible();
+
+  // Sending files alone works; the thread keeps the file and the same plain line.
+  await page.getByRole("button", { name: "Send" }).click();
+  const log = page.getByRole("log", { name: "Messages" });
+  await expect(log).toContainText("a word at a time.");
+  await expect(log.getByRole("link", { name: /cat\.png/ })).toBeVisible();
+  await expect(log).toContainText("This model can't see images.");
+  await expect(chips).toHaveCount(0);
+  const { violations } = await new AxeBuilder({ page }).analyze();
+  expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+});
+
+test("returning from Settings reloads the model settings", async ({ page }) => {
+  // A chat model is picked while the chat stays mounted behind the screen.
+  let picked = false;
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: picked
+        ? SETTINGS
+        : {
+            ...SETTINGS,
+            providers: [],
+            roles: { chat: null, background: null, embedding: null },
+          },
+    }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: /No model set up/ })).toBeVisible();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/models$/);
+  picked = true;
+  await page.getByRole("link", { name: "Chats" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: /model for this chat/ })).toContainText(
+    "GPT-4.1 mini",
+  );
+  await expect(page.getByRole("link", { name: /No model set up/ })).toHaveCount(0);
 });
 
 for (const colorScheme of ["light", "dark"] as const) {

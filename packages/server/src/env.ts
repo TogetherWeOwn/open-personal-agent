@@ -28,6 +28,8 @@ export interface AppPorts extends DataPorts {
   TASK_WORKFLOW?: { create(...args: never[]): Promise<unknown> };
   OPA_SESSION_SECRET?: string | undefined;
   OPA_SETUP_TOKEN?: string | undefined;
+  /** The per-file attachment cap in bytes (M3-10 AC1); unset means the 10 MB default. */
+  OPA_ATTACHMENT_MAX_BYTES?: string | undefined;
   /**
    * The fetch for model-provider calls. Node's composition root sets an SSRF-guarded one
    * (ADR 0010 D8); on Workers it is unset and the runtime's fetch, which can't reach a private
@@ -73,6 +75,8 @@ export interface Session {
   userId: string;
   /** For the scoped repository (ADR 0010 D3). */
   scope: UserScope;
+  /** When this session last confirmed a passkey (`POST /api/auth/step-up/session`), or `null`. */
+  stepUpAt: number | null;
 }
 
 /** Hono's environment for the app: bindings, plus the session the guard resolved. */

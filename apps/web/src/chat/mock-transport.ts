@@ -28,6 +28,8 @@ export const MOCK_LIMITS = new Map<string, TurnLimit>([
   ["/mock slow down", "slow_down"],
   ["/mock limit reached", "limit_reached"],
 ]);
+/** Sending exactly this gets the refusal for saved keys that no longer open (TWO-650). */
+export const MOCK_VAULT_RESET = "/mock vault reset";
 /** Sending exactly this holds the turn's start for a second, as a slow server would. */
 export const MOCK_SLOW_START = "/mock slow start";
 const LIMIT_MESSAGES: Record<TurnLimit, string> = {
@@ -53,6 +55,15 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       const reason = MOCK_LIMITS.get(text);
       if (reason) {
         const payload = { message: LIMIT_MESSAGES[reason], reason };
+        const event = { v: 1, seq: 0, sessionId, turnId: "", type: "turn.failed", payload };
+        return queueMicrotask(() => onEvent(event as HarnessEvent));
+      }
+      if (text === MOCK_VAULT_RESET) {
+        const payload = {
+          message:
+            "Your saved keys can't be opened. Reset them in Settings, then enter your key again.",
+          code: "vault_reset_required",
+        };
         const event = { v: 1, seq: 0, sessionId, turnId: "", type: "turn.failed", payload };
         return queueMicrotask(() => onEvent(event as HarnessEvent));
       }
