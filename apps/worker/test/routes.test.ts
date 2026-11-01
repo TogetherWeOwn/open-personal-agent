@@ -80,5 +80,8 @@ describe("the route table", () => {
     for (const route of PUBLIC_ROUTES) {
       expect([route, (await call(new Browser(), route)).status]).not.toEqual([route, 401]);
     }
+    // Hono answers HEAD with the GET handler, so HEAD on a public GET is public too.
+    expect((await new Browser().req("/api/health", { method: "HEAD" })).status).not.toBe(401);
+    expect((await new Browser().req("/api/me", { method: "HEAD" })).status).toBe(401);
   });
 });

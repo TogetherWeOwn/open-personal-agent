@@ -36,7 +36,9 @@ export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!SAFE_METHODS.has(c.req.method) && c.req.header("Origin") !== new URL(c.req.url).origin) {
     return c.json({ error: "bad_origin" }, 403);
   }
-  if (PUBLIC_ROUTES.has(`${c.req.method} ${c.req.path}`)) return next();
+  // Hono answers HEAD with the GET handler, so the list's GET entries cover HEAD too.
+  const method = c.req.method === "HEAD" ? "GET" : c.req.method;
+  if (PUBLIC_ROUTES.has(`${method} ${c.req.path}`)) return next();
   const cookie = getCookie(c, auth.SESSION_COOKIE);
   if (!cookie) return c.json({ error: "unauthenticated" }, 401);
   const now = Date.now();
@@ -82,7 +84,10 @@ authRoutes.post("/login", async (c) => {
   const db = c.env.DB;
   const challenge = await auth.takeChallenge(db, getCookie(c, auth.CHALLENGE_COOKIE), "login");
   deleteCookie(c, auth.CHALLENGE_COOKIE, auth.COOKIE_OPTIONS);
-  if (!challenge) return c.json({ error: "no_challenge" }, 400);
+  if (!challenge) {
+    await audit(c, null, "auth.login", "denied").run();
+    return c.json({ error: "no_challenge" }, 400);
+  }
 
   const body = await c.req.json().catch(() => null);
   const response = body?.credential as AuthenticationResponseJSON | undefined;
@@ -177,13 +182,14 @@ sessionRoutes.get("/", async (c) => {
 sessionRoutes.delete("/:id", async (c) => {
   const { id, userId } = c.var.session;
   const target = c.req.param("id");
-  const [update] = await c.env.DB.batch([
-    c.env.DB.prepare(
-      "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
-    ).bind(Date.now(), target, userId),
-    audit(c, userId, "auth.session_revoke", "ok"),
-  ]);
-  if (!update?.meta.changes) return c.json({ error: "not_found" }, 404);
+  const update = await c.env.DB.prepare(
+    "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+  )
+    .bind(Date.now(), target, userId)
+    .run();
+  const revoked = update.meta.changes > 0;
+  await audit(c, userId, "auth.session_revoke", revoked ? "ok" : "denied").run();
+  if (!revoked) return c.json({ error: "not_found" }, 404);
   if (target === id) deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   return c.json({ ok: true });
 });

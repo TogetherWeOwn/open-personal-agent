@@ -63,6 +63,7 @@ describe("passkey login", () => {
     br.cookies.set(CHALLENGE_COOKIE, challenge);
     const replay = await br.req("/api/auth/login", { body: { credential } });
     expect(await replay.json()).toEqual({ error: "no_challenge" });
+    expect(await count("audit_log", "action = 'auth.login' AND result = 'denied'")).toBe(1);
   });
 
   it("purges expired challenges", async () => {
@@ -183,6 +184,7 @@ describe("logout and session management", () => {
         .bind(Date.now() + DAY),
     ]);
     expect((await br.req("/api/sessions/s2", { method: "DELETE" })).status).toBe(404);
+    expect(await count("audit_log", "action = 'auth.session_revoke' AND result = 'ok'")).toBe(0);
     expect(await count("sessions", "id = 's2' AND revoked_at IS NULL")).toBe(1);
     const list = await (await br.req("/api/sessions")).json<SessionList>();
     expect(list.sessions.map((s) => s.id)).not.toContain("s2");
