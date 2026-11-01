@@ -346,6 +346,32 @@ describe("the pending list (M3-07 AC8)", () => {
     expect(batches.map((b) => b.batchId)).toEqual(["b_live"]);
   });
 
+  it("still lists the rest when a row's taint or scopes can't be read, and keeps it careful", async () => {
+    const { browser, owner } = await claim();
+    const insert = (batch: string, taint: string | null, scopes: string) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, taint, canonical, binding_hash, expires_at)
+           VALUES (?, ?, 0, ?, 'c-bad', 'turn-1', 'send', 'c1', 'consequential', 'default_consequential', 0, ?, ?, '{}', 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}`, owner, scopes, taint, Date.now() + 60_000);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-bad', ?)").bind(owner),
+      insert("b_bad", "{not json", "not json"),
+      insert("b_good", null, '["once","hour"]'),
+    ]);
+    const { batches } = await (await pending(browser)).json<{
+      batches: { batchId: string; items: { taint?: unknown; scopes: string[] }[] }[];
+    }>();
+    const items = Object.fromEntries(batches.map((b) => [b.batchId, b.items[0]]));
+    expect(items.b_good).toMatchObject({ scopes: ["once", "hour"] });
+    expect(items.b_good?.taint).toBeUndefined();
+    expect(items.b_bad).toMatchObject({
+      scopes: ["once"],
+      taint: { kind: "tool", label: "a source I couldn't read" },
+    });
+  });
+
   it("limits by batch, never cutting one, and keeps a batch's items in their stored order", async () => {
     const { owner } = await claim();
     const now = Date.now();

@@ -89,7 +89,7 @@ function match(
   for (const row of pending) {
     const d = decisions.find((x) => x.approvalId === row.approvalId);
     if (!d) return { error: "incomplete" };
-    const offered = JSON.parse(row.scopes) as ApprovalScope[];
+    const offered = scopesOf(row);
     if (d.decision === "approve" && !offered.includes(d.scope)) return { error: "invalid_scope" };
     items.push({ row, d });
   }
@@ -157,6 +157,29 @@ export type PendingBatch = {
 };
 
 /**
+ * A row's offered scopes. One that can't be read offers only "once", so a damaged row neither
+ * fails the whole list nor widens what an approval grants.
+ */
+function scopesOf(row: ApprovalRow): ApprovalScope[] {
+  try {
+    const scopes = JSON.parse(row.scopes) as unknown;
+    if (Array.isArray(scopes) && scopes.length) return scopes as ApprovalScope[];
+  } catch {}
+  return ["once"];
+}
+
+/** A row's taint. One that can't be read still says the context was tainted, never that it wasn't. */
+function taintOf(taint: string): NonNullable<ApprovalItem["taint"]> {
+  try {
+    const parsed = JSON.parse(taint) as Partial<NonNullable<ApprovalItem["taint"]>> | null;
+    if (parsed && typeof parsed.kind === "string" && typeof parsed.label === "string") {
+      return parsed as NonNullable<ApprovalItem["taint"]>;
+    }
+  } catch {}
+  return { kind: "tool", label: "a source I couldn't read" };
+}
+
+/**
  * One row as its card shows it: the arguments exactly as bound (the canonical envelope's), so the
  * user judges what would run. Never the nonce, the binding hash or the step-up columns.
  */
@@ -172,8 +195,8 @@ function itemOf(row: ApprovalRow): ApprovalItem {
     ...(row.target ? { target: row.target } : {}),
     risk: row.risk as ApprovalItem["risk"],
     rule: row.rule as ApprovalItem["rule"],
-    ...(row.taint ? { taint: JSON.parse(row.taint) as NonNullable<ApprovalItem["taint"]> } : {}),
-    scopes: JSON.parse(row.scopes) as ApprovalScope[],
+    ...(row.taint ? { taint: taintOf(row.taint) } : {}),
+    scopes: scopesOf(row),
     expiresAt: row.expiresAt,
   };
 }
