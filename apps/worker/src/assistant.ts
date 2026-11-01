@@ -2,7 +2,13 @@
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
 // tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
-import type { HarnessEvent, ModelAttachment, TurnFailure, TurnLimit } from "@opa/core";
+import {
+  type HarnessEvent,
+  type ModelAttachment,
+  TASK_LIMITS,
+  type TurnFailure,
+  type TurnLimit,
+} from "@opa/core";
 import {
   type AttachmentRow,
   createRepository,
@@ -11,6 +17,7 @@ import {
   type TurnRecord,
 } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
+import { TURN_LIMITS } from "@opa/harness-builtin";
 import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import {
   Agent,
@@ -23,9 +30,11 @@ import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import {
   type CallScope,
+  checkSpending,
   Limits,
   type Refusal,
   type Reservation,
+  SPENDING_DEFAULTS,
   type SpendingSettings,
 } from "./limits";
 
@@ -147,12 +156,23 @@ export class Assistant extends Agent<Bindings> {
 
   /** The Spending settings and what they limit so far, for Settings › Spending (M3-17 AC5). */
   spending() {
-    return { settings: this.limits.settings(), ...this.limits.totals() };
+    return {
+      settings: this.limits.settings(),
+      defaults: SPENDING_DEFAULTS,
+      // Read-only in M3 (§4.2): shown with the editable limits so every limit is in one place.
+      executionLimits: {
+        callsPerMessage: TURN_LIMITS.calls,
+        toolCallsPerMessage: TURN_LIMITS.tools,
+        stepsPerTask: TASK_LIMITS.steps,
+      },
+      ...this.limits.totals(),
+    };
   }
 
-  /** Saves Spending settings the route has checked. */
-  setSpending(changes: Partial<SpendingSettings>): SpendingSettings {
-    return this.limits.setSettings(changes);
+  /** Saves a Spending change if every field is valid (`checkSpending`); `null` if not. */
+  setSpending(body: unknown): SpendingSettings | null {
+    const changes = checkSpending(body);
+    return changes && this.limits.setSettings(changes);
   }
 
   /**
