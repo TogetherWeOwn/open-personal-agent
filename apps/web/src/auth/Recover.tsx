@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Recovery with a code (M2-10b): one of the codes saved at the claim and a new passkey sign the
-// owner back in. The server ends every other session, keeps the old passkeys and lists them here,
-// so the owner can tell whether someone else holds one.
+// owner back in. The server replaces every other passkey and code and ends every other session,
+// so someone else holding one is out too. The new codes are shown once, as after the claim.
 import {
   type PublicKeyCredentialCreationOptionsJSON,
   startRegistration,
 } from "@simplewebauthn/browser";
 import { useState } from "react";
 import { Button, Input, Label, TextField } from "react-aria-components";
+import { RecoveryCodes } from "./Setup";
 import { Alert, cancelled, type Failure, input, post, primary, Screen } from "./ui";
 
 interface Recovered {
-  /** Null when the server signed the owner in but couldn't read these back. */
-  codesLeft: number | null;
-  passkeys:
-    | { createdAt: number; lastUsedAt: number | null; synced: boolean; current: boolean }[]
-    | null;
+  recoveryCodes: string[];
 }
 
 const FAILURES: Record<string, string> = {
@@ -61,7 +58,21 @@ export function Recover() {
     }
   };
 
-  if (done) return <BackIn {...done} />;
+  if (done) {
+    return (
+      <RecoveryCodes
+        codes={done.recoveryCodes}
+        mode="recovery"
+        notice={
+          <p>
+            You're back in with a new passkey.{" "}
+            <strong>Your other passkeys and your old recovery codes no longer work</strong>, and
+            every other session was signed out.
+          </p>
+        }
+      />
+    );
+  }
   return (
     <Screen title="Use a recovery code">
       <p>
@@ -75,46 +86,6 @@ export function Recover() {
       <Alert failure={error} />
       <Button onPress={start} isDisabled={busy || !code.trim()} className={`${primary} self-start`}>
         {error ? "Try again" : "Create a new passkey"}
-      </Button>
-    </Screen>
-  );
-}
-
-const day = (ms: number) => new Date(ms).toLocaleDateString(undefined, { dateStyle: "medium" });
-// With the time, so two passkeys made on one day can be told apart.
-const moment = (ms: number) =>
-  new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-
-function BackIn({ codesLeft, passkeys }: Recovered) {
-  return (
-    <Screen title="You're back in">
-      <p>
-        You're signed in with a new passkey, and every other session was signed out.{" "}
-        {codesLeft !== null && (
-          <strong>
-            {codesLeft === 1 ? "1 recovery code is" : `${codesLeft} recovery codes are`} left.
-          </strong>
-        )}
-      </p>
-      {passkeys ? (
-        <p>These passkeys can sign in to your assistant. Check that you know each one.</p>
-      ) : (
-        <p>The list of your passkeys couldn't be loaded.</p>
-      )}
-      <ul aria-label="Passkeys" className="flex flex-col gap-2">
-        {passkeys?.map((p, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: the list never changes once shown
-          <li key={i} className="rounded-lg bg-surface-sunken p-3">
-            {p.current ? "This device, new" : `Created ${moment(p.createdAt)}`}
-            <span className="block text-sm text-text-muted">
-              {p.lastUsedAt ? `Last used ${day(p.lastUsedAt)}` : "Never used to sign in"}
-              {p.synced && " · synced between devices"}
-            </span>
-          </li>
-        ))}
-      </ul>
-      <Button className={`${primary} self-start`} onPress={() => window.location.assign("/")}>
-        Continue
       </Button>
     </Screen>
   );

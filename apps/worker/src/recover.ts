@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Redeeming a recovery code (M2-10b, ADR 0010 D2). A code and a new passkey sign the owner back
 // in, in the same two steps as `/setup`. The code is burned in the D1 batch that adds the passkey
-// and the session, so two browsers racing with one code can't both win. A recovery ends every
-// session and keeps the passkeys; the answer lists them so the owner can spot one they don't know.
+// and the session, so two browsers racing with one code can't both win. Like a recovery with the
+// setup token, it replaces every credential: the other passkeys go, the other codes stop working
+// and a new set is shown once, and every other session ends. So whoever else held a passkey or a
+// code is out once the owner recovers.
 // Every attempt is audited. Denied rows carry a keyed hash of the address, and they are the limit.
 // There is no deployment-wide lock: codes have 130 bits, so it would add no brute-force protection,
 // and anyone could use it to keep the owner out (TWO-447).
@@ -101,33 +103,28 @@ recover.post("/", async (c) => {
   const passkey = await auth.verifyPasskey(c.req.url, credential, challenge.challenge, code.owner);
   if (!passkey) return c.json({ error: "not_verified" }, 400);
 
+  const codes = Array.from({ length: auth.RECOVERY_CODE_COUNT }, auth.newRecoveryCode);
+  const codeHashes = await Promise.all(codes.map(auth.hashRecoveryCode));
   const session = await auth.newSession(code.owner);
-  const redemption = { codeId: code.id, passkey, session: session.row, now: Date.now() };
+  const redemption = {
+    codeId: code.id,
+    passkey,
+    recoveryCodes: codeHashes.map((hash) => ({ id: auth.randomId(), hash })),
+    session: session.row,
+    now: Date.now(),
+  };
   try {
     await store.recovery.redeem(redemption);
   } catch {
-    // Another browser used the same code first. The owner's race doesn't count towards the limit.
+    // Another browser used the same code, or another code, first. The owner's race doesn't count
+    // towards the limit.
     await store.audit(code.owner, "recovery.code", "auth", "conflict");
     return c.json({ error: "invalid_code" }, 403);
   }
 
-  // The code is spent and the old sessions are gone, so the new session goes out whatever
-  // happens next. The count and the list are best-effort: null if they can't be read.
   const maxAge = auth.SESSION_ABSOLUTE_MS / 1000;
   setCookie(c, auth.SESSION_COOKIE, session.cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
-  const [left, passkeys] = await Promise.all([
-    store.recovery.unused().catch(() => null),
-    store.recovery.passkeys(code.owner).catch(() => null),
-  ]);
-  return c.json({
-    codesLeft: left?.length ?? null,
-    passkeys:
-      passkeys?.map((p) => ({
-        createdAt: p.created_at,
-        lastUsedAt: p.last_used_at,
-        synced: p.backed_up === 1,
-        current: p.id === passkey.id,
-      })) ?? null,
-  });
+  // The only time the new codes leave the server in plaintext.
+  return c.json({ recoveryCodes: codes });
 });
