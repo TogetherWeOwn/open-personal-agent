@@ -12,6 +12,7 @@ import {
   gte,
   inArray,
   isNull,
+  lt,
   notInArray,
   or,
   type SQL,
@@ -23,6 +24,7 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
 import {
+  artifacts,
   attachments,
   auditLog,
   conversations,
@@ -94,6 +96,15 @@ export interface DataBindings<Stub, Id> {
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
     /**
+     * R2's listing, a page at a time with each object's size: the allowance meter (COST-5) sums
+     * the whole bucket with it. Absent where the store has none (Node).
+     */
+    list?(options: { cursor?: string; limit?: number }): Promise<{
+      objects: { size: number }[];
+      truncated: boolean;
+      cursor?: string;
+    }>;
+    /**
      * R2's multipart upload, for streaming a body whose length is not known up front: `put`
      * there takes only a known-length stream. Absent where the store streams any body (Node).
      */
@@ -124,6 +135,22 @@ export type AttachmentRow = Pick<
   typeof attachments.$inferSelect,
   "id" | "name" | "mediaType" | "kind" | "sizeBytes" | "sentToModel" | "createdAt"
 >;
+
+/** Where a tool's file came from (M3-11): the run that wrote it. The host fills it, never a tool. */
+export type ArtifactSource = {
+  conversationId?: string | null;
+  taskId?: string | null;
+  turnId?: string | null;
+};
+
+/** An Outputs row: the file's facts and its source run, never the R2 key. */
+export type ArtifactRow = Pick<
+  typeof artifacts.$inferSelect,
+  "id" | "name" | "mediaType" | "sizeBytes" | "conversationId" | "taskId" | "turnId" | "createdAt"
+> & { conversationTitle: string | null };
+
+/** The most Outputs rows one list read returns; older ones page with `before`. */
+export const ARTIFACT_PAGE = 100;
 
 /** The `user_settings` columns a route may write; the user and timestamps come from here. */
 export type SettingsUpdate = Partial<
@@ -289,6 +316,59 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(usage)
             .where(gte(usage.createdAt, since))
         )[0]?.n ?? 0,
+      /**
+       * The database's size in bytes (M3-16 AC3): D1 reports it with every result as
+       * `meta.size_after`; Node's SQLite doesn't, so there it is pages × page size.
+       */
+      databaseBytes: async () => {
+        const raw = DB as unknown as {
+          prepare(sql: string): {
+            run(): Promise<{ meta: { size_after?: number } }>;
+            first<T>(column: string): Promise<T | null>;
+          };
+        };
+        const { meta } = await raw.prepare("SELECT 1").run();
+        if (typeof meta.size_after === "number") return meta.size_after;
+        const pages = (await raw.prepare("PRAGMA page_count").first<number>("page_count")) ?? 0;
+        const size = (await raw.prepare("PRAGMA page_size").first<number>("page_size")) ?? 0;
+        return pages * size;
+      },
+      /**
+       * What the file store holds, in bytes: every object, whoever wrote it (uploads, saved
+       * outputs, offloaded step outputs, exports). Where the store can't list (Node), the sum of
+       * the attachment rows' sizes stands in.
+       */
+      fileBytes: async () => {
+        if (FILES.list) {
+          let bytes = 0;
+          let cursor: string | undefined;
+          do {
+            const page = await FILES.list({ limit: 1000, ...(cursor ? { cursor } : {}) });
+            for (const object of page.objects) bytes += object.size;
+            cursor = page.truncated ? page.cursor : undefined;
+          } while (cursor);
+          return bytes;
+        }
+        return (
+          (
+            await db
+              .select({
+                n: sql<number>`coalesce(sum(${attachments.sizeBytes}), 0)`.mapWith(Number),
+              })
+              .from(attachments)
+          )[0]?.n ?? 0
+        );
+      },
+      /**
+       * The owner's assistant, for deployment-wide notices only the owner sees (the allowance
+       * warnings, COST-5); `null` before the claim.
+       */
+      ownerAssistant: async () => {
+        const owner = (
+          await db.select({ id: users.id }).from(users).where(eq(users.role, "owner")).limit(1)
+        )[0];
+        return owner ? ASSISTANT.get(ASSISTANT.idFromName(`u:${owner.id}`)) : null;
+      },
     },
 
     forUser(scope: UserScope) {
@@ -403,6 +483,72 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       ) => {
         const model = { modelProvider: pin?.provider ?? null, model: pin?.model ?? null };
         await db.insert(conversations).values({ id: checkId(id), userId, title, ...model });
+      };
+      const artifactRows = () =>
+        db
+          .select({
+            id: artifacts.id,
+            name: artifacts.name,
+            mediaType: artifacts.mediaType,
+            sizeBytes: artifacts.sizeBytes,
+            conversationId: artifacts.conversationId,
+            taskId: artifacts.taskId,
+            turnId: artifacts.turnId,
+            createdAt: artifacts.createdAt,
+            conversationTitle: conversations.title,
+          })
+          .from(artifacts)
+          .leftJoin(
+            conversations,
+            and(eq(conversations.id, artifacts.conversationId), eq(conversations.userId, userId)),
+          );
+      /**
+       * Stores a tool's file and its Outputs row in one call (M3-11): the object first, then the
+       * row, and the object is removed again if the row can't be written — so every file a tool
+       * wrote is listed, and nothing listed is missing. The source must be the user's own.
+       */
+      const saveArtifact = async (input: {
+        id: string;
+        name: string;
+        mediaType: string;
+        content: string;
+        source: ArtifactSource;
+      }) => {
+        const { conversationId = null, taskId = null, turnId = null } = input.source;
+        if (conversationId !== null && !(await getConversation(conversationId)))
+          throw new Error("not the user's conversation");
+        if (taskId !== null) {
+          const own = isId(taskId)
+            ? await db
+                .select({ id: tasks.id })
+                .from(tasks)
+                .where(and(eq(tasks.id, taskId), eq(tasks.userId, userId)))
+                .limit(1)
+            : [];
+          if (!own.length) throw new Error("not the user's task");
+        }
+        const key = fileKey(input.id);
+        const sizeBytes = new TextEncoder().encode(input.content).length;
+        // The row first: a taken ID fails here, before the put could overwrite that file's bytes.
+        await db.insert(artifacts).values({
+          id: input.id,
+          userId,
+          conversationId,
+          taskId,
+          turnId,
+          name: input.name,
+          mediaType: input.mediaType,
+          sizeBytes,
+        });
+        try {
+          await FILES.put(key, input.content, { httpMetadata: { contentType: input.mediaType } });
+        } catch (err) {
+          await db
+            .delete(artifacts)
+            .where(eq(artifacts.id, input.id))
+            .catch(() => {});
+          throw err;
+        }
       };
       return {
         /** The user's own `users` row; `undefined` if it was deleted. */
@@ -1283,8 +1429,81 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           get: (id: string) => FILES.get(`u/${userId}/task-outputs/${checkId(id)}`),
         },
         getFile: (id: string) => FILES.get(fileKey(id)),
-        putFile: (id: string, value: string, contentType: string) =>
-          FILES.put(fileKey(id), value, { httpMetadata: { contentType } }),
+        /**
+         * The built-in tools' file ports (M3-08 AC3), bound to the run that writes: whatever a
+         * tool saves joins Outputs with that run as its source (M3-11).
+         */
+        files: (source: ArtifactSource) => ({
+          getFile: (id: string) => FILES.get(fileKey(id)),
+          putFile: (id: string, content: string, mediaType: string, name: string) =>
+            saveArtifact({ id, name, mediaType, content, source }),
+        }),
+        /**
+         * Outputs (M3-11): the files tools wrote. Every read matches the user, so another
+         * user's artifact ID reads as missing.
+         */
+        artifacts: {
+          save: saveArtifact,
+          /**
+           * Newest first, a page at a time; `conversationId` narrows to one chat's files. The
+           * cursor is the last row's `createdAt` and `id`, matching the sort, so a page that ends
+           * inside a same-millisecond tie still reaches the rest of it.
+           */
+          list: async (
+            options: { conversationId?: string; before?: number; beforeId?: string } = {},
+          ): Promise<ArtifactRow[]> =>
+            artifactRows()
+              .where(
+                and(
+                  eq(artifacts.userId, userId),
+                  options.conversationId !== undefined
+                    ? eq(artifacts.conversationId, options.conversationId)
+                    : undefined,
+                  options.before === undefined
+                    ? undefined
+                    : options.beforeId === undefined
+                      ? lt(artifacts.createdAt, options.before)
+                      : or(
+                          lt(artifacts.createdAt, options.before),
+                          and(
+                            eq(artifacts.createdAt, options.before),
+                            lt(artifacts.id, options.beforeId),
+                          ),
+                        ),
+                ),
+              )
+              .orderBy(desc(artifacts.createdAt), desc(artifacts.id))
+              .limit(ARTIFACT_PAGE),
+          /** `undefined` when the row is missing or someone else's: answer 404 for both. */
+          get: async (id: string): Promise<ArtifactRow | undefined> =>
+            isId(id)
+              ? (
+                  await artifactRows()
+                    .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId)))
+                    .limit(1)
+                )[0]
+              : undefined,
+          /** The stored bytes, or `null` when the object is gone. */
+          getObject: (id: string) => FILES.get(fileKey(id)),
+          /**
+           * Deletes the object, then the row; `false` when it isn't the user's. The row goes last
+           * so a failed object delete leaves the file listed, and the delete can be retried.
+           */
+          remove: async (id: string) => {
+            if (!isId(id)) return false;
+            const own = await db
+              .select({ id: artifacts.id })
+              .from(artifacts)
+              .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId)))
+              .limit(1);
+            if (!own.length) return false;
+            await FILES.delete(fileKey(id));
+            await db
+              .delete(artifacts)
+              .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId)));
+            return true;
+          },
+        },
       };
     },
   };

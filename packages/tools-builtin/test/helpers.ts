@@ -25,15 +25,18 @@ export const redirect = (location: string, status = 302) =>
   new Response(null, { status, headers: { location } });
 
 /** Scoped file ports over one shared store, as `forUser(scope)` hands them out. */
-export function filePorts(store: Map<string, { content: string; type: string }>, user: string) {
+export function filePorts(
+  store: Map<string, { content: string; type: string; name?: string }>,
+  user: string,
+) {
   const key = (id: string) => {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("invalid id");
     return `u/${user}/files/${id}`;
   };
   let ids = 0;
   return {
-    putFile: async (id: string, content: string, type: string) => {
-      store.set(key(id), { content, type });
+    putFile: async (id: string, content: string, type: string, name: string) => {
+      store.set(key(id), { content, type, name });
     },
     getFile: async (id: string) => {
       const found = store.get(key(id));

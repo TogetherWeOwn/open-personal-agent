@@ -54,7 +54,7 @@ export const SETTINGS: {
   },
   { id: "apps", label: "Apps & tools" },
   { id: "memory", label: "Memory" },
-  { id: "spending", label: "Spending" },
+  { id: "spending", label: "Spending", shipped: true },
   { id: "privacy", label: "Privacy & security" },
   { id: "deployment", label: "Deployment" },
 ];
@@ -66,7 +66,7 @@ function SettingsList() {
         {SETTINGS.map((s) => (
           <li key={s.id}>
             <Link
-              href={s.id === "spending" ? "/usage" : `/settings/${s.id}`}
+              href={`/settings/${s.id}`}
               className="flex min-h-11 items-center rounded-lg px-3 hover:bg-surface-raised"
             >
               {s.label}
@@ -81,7 +81,6 @@ function SettingsList() {
 function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
-  if (page.id === "spending") return <Redirect to="/usage" />;
   // Models and Agent engine already shipped with real screens; the table serves them instead of
   // their placeholders, so the rebase keeps what `main` already gives those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
