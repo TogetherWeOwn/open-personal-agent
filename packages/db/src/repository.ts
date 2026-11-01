@@ -23,11 +23,13 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
+import { RETENTION_DEFAULTS, type RetentionSettings, toSettings } from "./retention";
 import {
   artifacts,
   attachments,
   auditLog,
   conversations,
+  dataExports,
   grants,
   messages,
   modelProviders,
@@ -115,6 +117,16 @@ export interface DataBindings<Stub, Id> {
       complete(parts: UploadedPart[]): Promise<unknown>;
       abort(): Promise<unknown>;
     }>;
+    /**
+     * The keys under a prefix, for enumerating the file and task-output stores an export
+     * walks (M3-20 AC1). Absent where the store has no listing (Node); the walk then treats
+     * the store as empty. The export Workflow runs on Workers, where R2 always lists.
+     */
+    list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
+      objects: { key: string; size: number }[];
+      truncated: boolean;
+      cursor?: string;
+    }>;
   };
   ASSISTANT: { idFromName(name: string): Id; get(id: Id): Stub };
 }
@@ -166,9 +178,79 @@ export type ProviderValues = Pick<
 /** R2's smallest multipart part, except the last: an upload streams through in parts this size. */
 const PART_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Stores a stream body whose length is not known up front: through `FixedLengthStream` where
+ * the caller declares it, else a multipart upload in bounded parts — the body is never buffered
+ * whole on any path (M3-10 AC1). A store with no multipart (Node) streams any body. R2's `put`
+ * takes only a known-length stream, so callers never put a stream directly.
+ */
+async function putStreamed(
+  files: DataBindings<unknown, unknown>["FILES"],
+  key: string,
+  body: ReadableStream,
+  options: { httpMetadata: { contentType: string } },
+  knownLength?: number,
+): Promise<void> {
+  const FixedLengthStream = (
+    globalThis as { FixedLengthStream?: new (length: number) => TransformStream }
+  ).FixedLengthStream;
+  if (knownLength !== undefined && FixedLengthStream) {
+    await files.put(key, body.pipeThrough(new FixedLengthStream(knownLength)), options);
+    return;
+  }
+  if (files.createMultipartUpload) {
+    const upload = await files.createMultipartUpload(key, options);
+    try {
+      // R2 wants every part but the last the same size, so each is cut at exactly
+      // `PART_BYTES` and a chunk that straddles the cut carries into the next part.
+      const parts: UploadedPart[] = [];
+      let part = new Uint8Array(PART_BYTES);
+      let filled = 0;
+      const reader = body.getReader();
+      for (let next = await reader.read(); !next.done; next = await reader.read()) {
+        let chunk = next.value;
+        while (chunk.byteLength) {
+          const take = Math.min(chunk.byteLength, PART_BYTES - filled);
+          part.set(chunk.subarray(0, take), filled);
+          filled += take;
+          chunk = chunk.subarray(take);
+          if (filled === PART_BYTES) {
+            parts.push(await upload.uploadPart(parts.length + 1, part));
+            part = new Uint8Array(PART_BYTES);
+            filled = 0;
+          }
+        }
+      }
+      if (filled || !parts.length) {
+        parts.push(await upload.uploadPart(parts.length + 1, part.slice(0, filled)));
+      }
+      await upload.complete(parts);
+    } catch (err) {
+      await upload.abort().catch(() => {});
+      throw err;
+    }
+    return;
+  }
+  await files.put(key, body, options);
+}
+
 /** A conversation ID comes from the client, so it is checked before it reaches a query. */
 export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+
+/**
+ * Whether `error` is a uniqueness refusal from the store. D1 reports the violated constraint
+ * in the cause, under drizzle's "Failed query" wrapper — so a racing insert that loses a
+ * partial unique index reads as one, and the caller can answer what the check would have.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  while (current instanceof Error) {
+    if (/unique constraint failed/i.test(current.message)) return true;
+    current = current.cause;
+  }
+  return false;
+}
 
 /** The bound `scopeForTask` accepts, so a row it could never resolve is never written. */
 const isInstanceId = (id: unknown): id is string =>
@@ -194,6 +276,10 @@ export type HistoryHit = {
 
 /** A task row (M3-12): the durable run's authority and state. */
 export type TaskRow = typeof tasks.$inferSelect;
+/** An export row (M3-20): the durable run's authority, size and expiry. */
+export type ExportRow = typeof dataExports.$inferSelect;
+/** Export rows the run moves through; anything else ends it (a step that finds one stops). */
+export const EXPORT_TERMINAL_STATUSES = ["ready", "failed", "expired"] as const;
 export type TaskStatus = TaskRow["status"];
 /** Statuses a task never leaves; a step that finds one does nothing (M3-12 AC3). */
 export const TASK_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "interrupted"] as const;
@@ -250,6 +336,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         .where(eq(tasks.workflowInstanceId, instanceId))
         .limit(1);
       return task ? { scope: issue(task.userId), task } : null;
+    },
+    /**
+     * For the export Workflow entrypoint only: the scope of the user whose exports row names
+     * this Workflow instance, with the row itself. The same authority rule as `scopeForTask`
+     * (M3-12 AC9) over the exports table, which carries the expiry and size a task row has no
+     * room for: instance params are never consulted, so a parameter naming another user mints
+     * nothing. `null` when no exports row claims the instance.
+     */
+    scopeForExport: async (
+      instanceId: string,
+    ): Promise<{ scope: UserScope; export: ExportRow } | null> => {
+      if (!isInstanceId(instanceId)) return null;
+      const [row] = await db
+        .select()
+        .from(dataExports)
+        .where(eq(dataExports.workflowInstanceId, instanceId))
+        .limit(1);
+      return row ? { scope: issue(row.userId), export: row } : null;
     },
     /** Deployment-level checks that read no user's data. */
     deployment: {
@@ -328,7 +432,44 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       if (!issued.has(scope)) throw new Error("scope was not issued by the session layer");
       const { userId } = scope;
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
+      const memory = memoryService(db, userId);
       const attachmentKey = (id: string) => `u/${userId}/attachments/${checkId(id)}`;
+      const exportZipKey = (id: string) => `u/${userId}/exports/${checkId(id)}.zip`;
+      const exportStagedPrefix = (id: string) => `u/${userId}/exports/${checkId(id)}/staged/`;
+      /**
+       * One staged item file's key, under the export's own directory. Each path segment is
+       * flattened to safe characters (R2 keys are opaque, so `..` could never escape, but a
+       * staged tree with dot segments parses badly), keeping the key under the prefix.
+       */
+      const exportStagedKey = (id: string, name: string) =>
+        `${exportStagedPrefix(id)}${name
+          .split("/")
+          .map((part) => part.replace(/[^A-Za-z0-9._-]/g, "_"))
+          .map((part) => (/^\.+$/.test(part) || part === "" ? "_" : part))
+          .join("/")}`;
+      /**
+       * Every key under a prefix, in order, following cursors. `[]` where the store has no
+       * listing (Node); the export Workflow runs on Workers, where R2 always lists.
+       * The prefix must stay inside the user's namespace, like `getObject`: a caller can
+       * only name its own objects, never another user's.
+       */
+      const listR2Prefix = async (prefix: string): Promise<{ key: string; size: number }[]> => {
+        if (!prefix.startsWith(`u/${userId}/`)) throw new Error("invalid prefix");
+        if (!FILES.list) return [];
+        const keys: { key: string; size: number }[] = [];
+        let cursor: string | undefined;
+        for (;;) {
+          const page = await FILES.list({
+            prefix,
+            limit: 1000,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          for (const o of page.objects) keys.push({ key: o.key, size: o.size });
+          if (!page.truncated) break;
+          cursor = page.cursor;
+        }
+        return keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      };
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
       const getConversation = async (id: string) =>
@@ -683,9 +824,12 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           record: async (call: LedgerCall) => {
             await db.insert(usage).values({ ...ledgerValues(call), userId });
           },
+          /** Every ledger row, oldest first, for the data export (M3-20 AC1). */
+          list: () =>
+            db.select().from(usage).where(eq(usage.userId, userId)).orderBy(usage.createdAt),
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
-        memory: memoryService(db, userId),
+        memory,
         /** Onboarding answers and the model roles (M2-15, M3-06). */
         settings: {
           get: async () =>
@@ -724,6 +868,61 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .update(secrets)
               .set({ lastUsedAt: Date.now() })
               .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
+          },
+          /** Retention (COST-10, M3-18 AC1); the defaults until the user changes one. */
+          retention: async (): Promise<RetentionSettings> => {
+            const row = (
+              await db
+                .select({
+                  messageRetentionDays: userSettings.messageRetentionDays,
+                  toolOutputRetentionDays: userSettings.toolOutputRetentionDays,
+                  memoryInboxDays: userSettings.memoryInboxDays,
+                })
+                .from(userSettings)
+                .where(eq(userSettings.userId, userId))
+                .limit(1)
+            )[0];
+            return row ? toSettings(row) : { ...RETENTION_DEFAULTS };
+          },
+          /**
+           * Saves retention with its audit row (old and new values) and, for a new memory-inbox
+           * expiry, the pending suggestions dated again from when each was made: all or none.
+           * Only the changed fields are written, so two saves of different fields both stand.
+           */
+          saveRetention: async (from: RetentionSettings, to: RetentionSettings) => {
+            const columns = {
+              messageRetentionDays: to.messageDays ?? 0,
+              toolOutputRetentionDays: to.toolOutputDays ?? 0,
+              memoryInboxDays: to.memoryInboxDays,
+            };
+            const set = {
+              ...(from.messageDays !== to.messageDays && {
+                messageRetentionDays: columns.messageRetentionDays,
+              }),
+              ...(from.toolOutputDays !== to.toolOutputDays && {
+                toolOutputRetentionDays: columns.toolOutputRetentionDays,
+              }),
+              ...(from.memoryInboxDays !== to.memoryInboxDays && {
+                memoryInboxDays: columns.memoryInboxDays,
+              }),
+              updatedAt: Date.now(),
+            };
+            const save = [
+              db
+                .insert(userSettings)
+                .values({ ...columns, userId, updatedAt: set.updatedAt })
+                .onConflictDoUpdate({ target: userSettings.userId, set }),
+              db.insert(auditLog).values({
+                userId,
+                action: "settings.retention",
+                module: "settings",
+                result: "ok",
+                detail: JSON.stringify({ from, to }),
+              }),
+            ] as const;
+            await (from.memoryInboxDays !== to.memoryInboxDays
+              ? db.batch([...save, memory.redate()])
+              : db.batch(save));
           },
         },
         /** The per-tool overrides and standing grants the policy engine reads (M3-02). */
@@ -842,6 +1041,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
         },
         /**
+         * The user's own audit trail, oldest first, for the data export (M3-20 AC1) and the
+         * activity log: deployment-level rows (`user_id` null) belong to nobody's export.
+         */
+        audit: {
+          list: () =>
+            db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
+        },
+        /**
          * Saved model providers (M3-06). A foreign key proves only that a row exists, so every
          * read here also matches the user: a role or conversation can never name another's key.
          */
@@ -927,51 +1134,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             body: ReadableStream<Uint8Array>,
             contentType: string,
             knownLength?: number,
-          ) => {
-            const key = attachmentKey(id);
-            const options = { httpMetadata: { contentType } };
-            const FixedLengthStream = (
-              globalThis as { FixedLengthStream?: new (length: number) => TransformStream }
-            ).FixedLengthStream;
-            if (knownLength !== undefined && FixedLengthStream) {
-              await FILES.put(key, body.pipeThrough(new FixedLengthStream(knownLength)), options);
-              return;
-            }
-            if (FILES.createMultipartUpload) {
-              const upload = await FILES.createMultipartUpload(key, options);
-              try {
-                // R2 wants every part but the last the same size, so each is cut at exactly
-                // `PART_BYTES` and a chunk that straddles the cut carries into the next part.
-                const parts: UploadedPart[] = [];
-                let part = new Uint8Array(PART_BYTES);
-                let filled = 0;
-                const reader = body.getReader();
-                for (let next = await reader.read(); !next.done; next = await reader.read()) {
-                  let chunk = next.value;
-                  while (chunk.byteLength) {
-                    const take = Math.min(chunk.byteLength, PART_BYTES - filled);
-                    part.set(chunk.subarray(0, take), filled);
-                    filled += take;
-                    chunk = chunk.subarray(take);
-                    if (filled === PART_BYTES) {
-                      parts.push(await upload.uploadPart(parts.length + 1, part));
-                      part = new Uint8Array(PART_BYTES);
-                      filled = 0;
-                    }
-                  }
-                }
-                if (filled || !parts.length) {
-                  parts.push(await upload.uploadPart(parts.length + 1, part.slice(0, filled)));
-                }
-                await upload.complete(parts);
-              } catch (err) {
-                await upload.abort().catch(() => {});
-                throw err;
-              }
-              return;
-            }
-            await FILES.put(key, body, options);
-          },
+          ) =>
+            putStreamed(
+              FILES,
+              attachmentKey(id),
+              body,
+              { httpMetadata: { contentType } },
+              knownLength,
+            ),
           /** The stored bytes, or `null` when the object is gone. */
           getObject: (id: string) => FILES.get(attachmentKey(id)),
           /** Removes a stored object whose row was never (or is no longer) written. */
@@ -1021,6 +1191,26 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .where(and(eq(attachments.userId, userId), inArray(attachments.id, [...ids])))
                   .orderBy(attachments.createdAt)
               : [],
+          /**
+           * Every attachment row, oldest first, each with the message carrying it, for the data
+           * export (M3-20 AC1). The bytes stay in R2; the export's finish step streams them.
+           */
+          list: () =>
+            db
+              .select({
+                id: attachments.id,
+                name: attachments.name,
+                mediaType: attachments.mediaType,
+                kind: attachments.kind,
+                sizeBytes: attachments.sizeBytes,
+                sentToModel: attachments.sentToModel,
+                conversationId: attachments.conversationId,
+                messageId: attachments.messageId,
+                createdAt: attachments.createdAt,
+              })
+              .from(attachments)
+              .where(eq(attachments.userId, userId))
+              .orderBy(attachments.createdAt),
           /** Deletes the row and its object; `false` when it isn't the user's. */
           remove: async (id: string) => {
             if (!isId(id)) return false;
@@ -1072,6 +1262,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
                 .limit(1)
             )[0],
+          /** Every task row, oldest first, for the data export (M3-20 AC1). */
+          list: () =>
+            db.select().from(tasks).where(eq(tasks.userId, userId)).orderBy(tasks.createdAt),
           /**
            * Moves a task to `running`, stamping `started_at` the first time. Returns the row as
            * updated, or `undefined` when it was already terminal (a cancelled task never runs).
@@ -1187,6 +1380,187 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ).length > 0
             );
           },
+        },
+        /**
+         * Data exports (M3-20 AC1). The R2 keys are derived, never stored: the final ZIP at
+         * `key`, the item files the run stages at `stagedKey`, both under the user's prefix so
+         * no export can name another user's objects (and M3-20b's deletion walks the prefix).
+         */
+        exports: {
+          /** The final ZIP's key; `checkId` keeps it inside the user's exports prefix. */
+          key: exportZipKey,
+          /** One staged item file's key, under the export's own directory. */
+          stagedKey: exportStagedKey,
+          /** The export's directory: the final ZIP beside it is not staged, so it is excluded. */
+          stagedPrefix: exportStagedPrefix,
+          /** Every key under a prefix, in order, following cursors (`[]` without a listing). */
+          listPrefix: listR2Prefix,
+          /**
+           * The user's other R2 stores the export's artifacts step walks (and M3-20b's deletion
+           * walks): the tool artifacts under `files/` and the offloaded task outputs under
+           * `task-outputs/`, both opaque objects with no D1 index, each with its ZIP directory.
+           */
+          artifactStores: () =>
+            [
+              { prefix: `u/${userId}/files/`, dir: "artifacts/files" },
+              { prefix: `u/${userId}/task-outputs/`, dir: "artifacts/task-outputs" },
+            ] as const,
+          /**
+           * One of the user's R2 objects as a stream, by full key: a staged file, an
+           * attachment, or an object from a store the export walks. `null` when it is gone;
+           * keys outside the user's prefix are rejected, so no call names another's objects.
+           */
+          getObject: (key: string) => {
+            if (!key.startsWith(`u/${userId}/`)) throw new Error("invalid key");
+            return FILES.get(key);
+          },
+          /**
+           * Stages one item file under the export's directory. Bodies stream through, never
+           * buffer: a string for the JSON manifests, a stream for attachment and artifact bytes
+           * (through a multipart upload — R2's `put` takes only a known-length stream).
+           */
+          putStaged: (
+            id: string,
+            name: string,
+            body: string | ReadableStream,
+            contentType: string,
+          ) => {
+            const key = exportStagedKey(id, name);
+            const options = { httpMetadata: { contentType } };
+            return typeof body === "string"
+              ? FILES.put(key, body, options)
+              : putStreamed(FILES, key, body, options);
+          },
+          /** Deletes the export's staged files once the ZIP is built (or the run failed). */
+          removeStaged: async (id: string) => {
+            for (const object of await listR2Prefix(exportStagedPrefix(id)))
+              await FILES.delete(object.key);
+          },
+          /**
+           * A multipart upload for the final ZIP. Throws where the store streams any body
+           * (Node): an export only ever runs on Workers, where R2 always offers it.
+           */
+          createZipUpload: async (id: string) => {
+            const create = FILES.createMultipartUpload;
+            if (!create) throw new Error("multipart upload is unavailable");
+            // Bound to FILES: the binding's methods reject a detached call.
+            return create.call(FILES, exportZipKey(id), {
+              httpMetadata: { contentType: "application/zip" },
+            });
+          },
+          /**
+           * Creates the row a run fills; the instance id names it for `scopeForExport`. `false`
+           * when the instance already names a row, so a retry or a racing second POST claims
+           * nothing new; anything else (a real database failure) still throws.
+           */
+          create: async (input: {
+            id: string;
+            workflowInstanceId: string;
+            expiresAt: number;
+          }): Promise<boolean> => {
+            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
+            try {
+              await db.insert(dataExports).values({
+                id: checkId(input.id),
+                userId,
+                workflowInstanceId: input.workflowInstanceId,
+                expiresAt: input.expiresAt,
+              });
+            } catch (error) {
+              const [claimed] = await db
+                .select({ id: dataExports.id })
+                .from(dataExports)
+                .where(eq(dataExports.workflowInstanceId, input.workflowInstanceId))
+                .limit(1);
+              if (!claimed) throw error;
+              return false;
+            }
+            return true;
+          },
+          /** The user's export row; `undefined` when it is missing or someone else's. */
+          get: async (id: string) =>
+            isId(id)
+              ? (
+                  await db
+                    .select()
+                    .from(dataExports)
+                    .where(and(eq(dataExports.id, id), eq(dataExports.userId, userId)))
+                    .limit(1)
+                )[0]
+              : undefined,
+          /** Every export row, newest first, for the status list. */
+          list: () =>
+            db
+              .select()
+              .from(dataExports)
+              .where(eq(dataExports.userId, userId))
+              .orderBy(desc(dataExports.createdAt)),
+          /** The still-running row, if any: the UI's "already being made" state (m3-ux §3.11). */
+          running: async () =>
+            (
+              await db
+                .select()
+                .from(dataExports)
+                .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running")))
+                .orderBy(desc(dataExports.createdAt))
+                .limit(1)
+            )[0],
+          /**
+           * Marks a running export ready. `false` when it had already ended, or when its
+           * expiry had passed: a late finish never turns a past-expiry row ready, even if
+           * the expiry landed between the caller's re-read and this conditional update.
+           */
+          finishReady: async (id: string, sizeBytes: number, now: number) =>
+            (
+              await db
+                .update(dataExports)
+                .set({ status: "ready", sizeBytes, readyAt: now })
+                .where(
+                  and(
+                    eq(dataExports.id, id),
+                    eq(dataExports.userId, userId),
+                    eq(dataExports.status, "running"),
+                    gt(dataExports.expiresAt, now),
+                  ),
+                )
+                .returning({ id: dataExports.id })
+            ).length > 0,
+          /** Marks a running export failed, keeping the reason; `false` when it had ended. */
+          finishFailed: async (id: string, error: string) =>
+            (
+              await db
+                .update(dataExports)
+                .set({ status: "failed", error: error.slice(0, 500) })
+                .where(
+                  and(
+                    eq(dataExports.id, id),
+                    eq(dataExports.userId, userId),
+                    eq(dataExports.status, "running"),
+                  ),
+                )
+                .returning({ id: dataExports.id })
+            ).length > 0,
+          /**
+           * Moves a running export to expired, for a finish that finds its row past expiry: a
+           * past-expiry row must never turn ready. `false` when it had already ended. (The
+           * sweep moves rows of any status with its own update; this is the running-only guard.)
+           */
+          finishExpired: async (id: string) =>
+            (
+              await db
+                .update(dataExports)
+                .set({ status: "expired" })
+                .where(
+                  and(
+                    eq(dataExports.id, id),
+                    eq(dataExports.userId, userId),
+                    eq(dataExports.status, "running"),
+                  ),
+                )
+                .returning({ id: dataExports.id })
+            ).length > 0,
+          /** Deletes the final ZIP, for a finish that expired before it could turn ready. */
+          removeZip: (id: string) => FILES.delete(`u/${userId}/exports/${checkId(id)}.zip`),
         },
         /**
          * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they
