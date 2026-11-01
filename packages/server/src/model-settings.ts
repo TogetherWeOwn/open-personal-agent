@@ -10,7 +10,7 @@ import {
   STARTER_MODEL,
   usesOpenAIResponses,
 } from "@opa/providers";
-import { encrypt, type UserScope as VaultScope } from "@opa/vault";
+import { decrypt, encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
 import {
   billerOf,
@@ -177,6 +177,13 @@ async function keyedValues(
     ) {
       return { status: 400, error: "key_required" } as const;
     }
+    // Keeping the key is only honest if it still opens under this binding. One sealed before the
+    // binding covered the path does not (crypto review I-2), and neither does one whose master
+    // key is gone; both are entered again rather than accepted here and refused at chat.
+    if (!c.env.VAULT) return { status: 503, error: "vault_unavailable" } as const;
+    const ref = { secretId, purpose: PURPOSE, binding, caller: CALLER };
+    const opened = await decrypt(c.env.VAULT, vaultScope(c), ref).catch(() => null);
+    if (opened === null) return { status: 400, error: "key_required" } as const;
   }
   return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
 }

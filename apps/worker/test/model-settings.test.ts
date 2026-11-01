@@ -259,6 +259,34 @@ describe("model settings", () => {
     await env.DB.prepare(move).bind(OPENAI.baseUrl).run();
   });
 
+  it("does not accept a keyless save that keeps a key it can no longer open", async () => {
+    // The saved key above is sealed under the old origin-only binding, so no current read can
+    // open it. A save without a replacement key must say so at save time, on onboarding's route
+    // and on the provider update, rather than reporting success and failing later at chat.
+    const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
+    const chatKey =
+      "SELECT key_secret_id AS id FROM model_providers " +
+      "WHERE id = (SELECT chat_provider FROM user_settings)";
+    const row = await env.DB.prepare(chatKey).first();
+    const secretId = row?.id as string;
+    const binding = "model:openai|https://api.example.com";
+    const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
+    await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
+
+    const required = { status: 400, text: '{"error":"key_required"}' };
+    expect(await put("/model", { ...OPENAI, model: "gpt-new" })).toEqual(required);
+    // The refused save changed nothing: the Chat role still names the earlier model.
+    expect(JSON.parse((await call("")).text).model.model).not.toBe("gpt-new");
+
+    const view = JSON.parse((await call("")).text);
+    const provider = view.providers.find(
+      (p: { providerId: string; baseUrl: string }) =>
+        p.providerId === "openai" && p.baseUrl === OPENAI.baseUrl,
+    ) as { id: string };
+    const update = { providerId: "openai", baseUrl: OPENAI.baseUrl, model: "gpt-new" };
+    expect(await put(`/providers/${provider.id}`, update)).toEqual(required);
+  });
+
   it("does not open a saved key when the stored path changes", async () => {
     expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
