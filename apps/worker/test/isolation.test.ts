@@ -59,6 +59,18 @@ const CASES: Record<string, Case> = {
   // The task is resumed, then put back: no Workflow instance runs in the test to wake ("ended").
   "POST /api/tasks/:id/continue": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
   "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
+  "GET /api/memory/:id/versions": { params: (v) => ({ id: v.memory }), own: 200 },
+  "PUT /api/memory/:id": {
+    params: (v) => ({ id: v.memory }),
+    body: () => ({ text: "an edit" }),
+    own: 200,
+  },
+  // The spare note: the edit above superseded the first one.
+  "DELETE /api/memory/:id": { params: (v) => ({ id: v.spareMemory }), own: 204 },
+  "POST /api/memory/proposals/:id/:decision": {
+    params: (v) => ({ id: v.proposal, decision: "reject" }),
+    own: 204,
+  },
   // A tool name, not an item: the attacker sets their own override, and the victim's stays.
   "PUT /api/settings/tools/:name": {
     params: () => ({ name: TOOL }),

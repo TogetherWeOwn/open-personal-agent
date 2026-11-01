@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "573ae5c0-2053-4824-b0b3-b4b1890631b9",
+  "id": "72d8f798-30ab-4405-92a9-51432b569824",
   "prevId": "5cf63dbc-c4e0-4a2c-81ae-3952a19867cc",
   "tables": {
     "artifacts": {
@@ -1794,113 +1794,6 @@
         }
       }
     },
-    "turn_states": {
-      "name": "turn_states",
-      "columns": {
-        "turn_id": {
-          "name": "turn_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "conversation_id": {
-          "name": "conversation_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "reply_id": {
-          "name": "reply_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "provider_id": {
-          "name": "provider_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        }
-      },
-      "indexes": {
-        "turn_states_user_conversation_idx": {
-          "name": "turn_states_user_conversation_idx",
-          "columns": ["user_id", "conversation_id"],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "turn_states_user_id_users_id_fk": {
-          "name": "turn_states_user_id_users_id_fk",
-          "tableFrom": "turn_states",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "turn_states_conversation_id_conversations_id_fk": {
-          "name": "turn_states_conversation_id_conversations_id_fk",
-          "tableFrom": "turn_states",
-          "tableTo": "conversations",
-          "columnsFrom": ["conversation_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "usage": {
       "name": "usage",
       "columns": {
@@ -2208,6 +2101,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": 14
+        },
+        "learn_from_chats": {
+          "name": "learn_from_chats",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
         },
         "updated_at": {
           "name": "updated_at",
