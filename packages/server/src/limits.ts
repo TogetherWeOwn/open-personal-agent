@@ -407,6 +407,11 @@ export class Limits {
     this.#end(holdId, () => 0);
   }
 
+  /** The IDs of calls still holding budget, for a restart sweep. */
+  heldIds(): string[] {
+    return Object.keys(this.#spend().held);
+  }
+
   /** Today's and this month's settled spend, and what calls running now hold. */
   totals(): { todayMicroUsd: number; monthMicroUsd: number; heldMicroUsd: number } {
     const spend = this.#spend();
