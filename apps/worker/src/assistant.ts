@@ -740,6 +740,10 @@ export class Assistant extends Agent<Bindings> {
     reason?: TurnLimit,
     code?: TurnFailure,
   ): Promise<void> {
+    // First, synchronously: the caller doesn't await this, so the fiber's end would otherwise
+    // drain before the preference lands — and the stale value would steer a later drain.
+    // The broadcast stays after the settle, so a reloading tab never reads the pair mid-write.
+    this.#drainAfter = item.conversationId;
     await this.#chat.settle({ replyId: item.replyId, reply: message }, "error").catch(() => {});
     this.#send(item.conversationId, turnId, "turn.failed", {
       message,
@@ -747,7 +751,6 @@ export class Assistant extends Agent<Bindings> {
       ...(code && { code }),
     });
     this.#events.trim(item.conversationId, turnId);
-    this.#drainAfter = item.conversationId;
   }
 
   /**
