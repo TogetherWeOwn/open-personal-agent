@@ -311,6 +311,52 @@ const providerRef = (name: string) =>
   text(name).references(() => modelProviders.id, { onDelete: "set null" });
 
 /**
+ * A durable run of the agent loop (M3-12): a promoted turn or explicit background work, executed
+ * by one Workflow instance (`workflow_instance_id`). The row is the task's authority: the
+ * Workflow mints its `UserScope` from `user_id` here, never from its instance params (AC9), and
+ * every step re-reads `status` before it acts, so `cancelled` stops the run (AC3). `state` is
+ * the loop's resumable state as JSON (history and turn state), written at step boundaries.
+ * Status words are the Tasks view vocabulary (M3-13), plus `queued` before the instance starts.
+ */
+export const tasks = sqliteTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    workflowInstanceId: text("workflow_instance_id").unique(),
+    /** What runs it: `turn` is the builtin loop continuing a conversation's turn. */
+    kind: text("kind").notNull(),
+    /** Which duration limit applies (M3-12 AC6): 30 minutes interactive, 6 hours background. */
+    mode: text("mode", { enum: ["interactive", "background"] }).notNull(),
+    status: text("status", {
+      enum: [
+        "queued",
+        "running",
+        "waiting_for_approval",
+        "budget_limited",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "interrupted",
+      ],
+    })
+      .notNull()
+      .default("queued"),
+    title: text("title"),
+    state: text("state"),
+    error: text("error"),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+    startedAt: integer("started_at"),
+    finishedAt: integer("finished_at"),
+  },
+  (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
+);
+
+/**
  * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
  * a model; a null Background role means the cheapest configured one. Embedding has no column
  * until it has a user (ADR 0008).
