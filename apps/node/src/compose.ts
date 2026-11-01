@@ -153,8 +153,8 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     // The Worker's reconciler without the parts that need its bindings: the owner's assistant
     // and the export Workflow.
     scheduled: async () => {
-      const { rotation, retention, approvals } = reconcilerParts;
-      await Promise.all(reconcile(env, Date.now(), { rotation, retention, approvals }));
+      const { rotation, database, retention, approvals } = reconcilerParts;
+      await Promise.all(reconcile(env, Date.now(), { rotation, database, retention, approvals }));
     },
     db,
     assistantFor,
