@@ -6,6 +6,8 @@ import { expect, type Page, test } from "@playwright/test";
 test.beforeEach(async ({ page, baseURL }) => {
   page.on("request", (req) => expect(new URL(req.url()).origin).toBe(baseURL));
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
 });
 
 /** Tabs to the composer, types, presses Enter and waits for the whole reply. */

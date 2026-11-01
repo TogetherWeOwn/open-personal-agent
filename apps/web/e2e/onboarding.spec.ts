@@ -12,6 +12,7 @@ test("onboarding saves a key, shows only its last 4, tests it and opens the chat
   const bodies: unknown[] = [];
   let onboarded = false;
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (route.request().method() !== "GET") bodies.push(route.request().postDataJSON());
@@ -78,6 +79,7 @@ test("a resumed setup keeps the saved provider, so Save reuses the saved key", a
   };
   const bodies: unknown[] = [];
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (route.request().method() !== "GET") bodies.push(route.request().postDataJSON());
