@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ApprovalError,
   continueTurn,
+  LimitStop,
   newTurn,
   resolveApprovals,
   type ToolOutput,
@@ -180,6 +181,19 @@ describe("stop-and-resume approvals (M3-03 AC4)", () => {
     expect(() => resolveApprovals(state, batchId, [ok], NOW)).toThrow("already decided");
   });
 
+  it("refuses a gated call too large to approve instead of asking", async () => {
+    const send = tool("send", "consequential");
+    const big = "x".repeat(70_000);
+    const { provider } = scripted([{ calls: [["send", { q: big }]] }, { text: "Too big." }]);
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, [send]), state);
+    expect(outcome).toBe("completed");
+    expect(state.pending).toBeNull();
+    expect(ofType(events, "approval.requested")).toEqual([]);
+    expect(send.inputs).toEqual([]);
+    expect(state.messages.find((m) => m.role === "tool")?.content).toMatch(/too large to ask/);
+  });
+
   it("waits for the whole batch, then runs the approved call and the model goes on", async () => {
     const { send, h, requests, state } = await stop();
     const batchId = state.pending?.batchId as string;
@@ -296,6 +310,76 @@ describe("stop-and-resume approvals (M3-03 AC4)", () => {
       "Policy no longer allows this call.",
       "Policy no longer allows this call.",
     ]);
+  });
+
+  it("records how each approved call ended, and runs none whose row it can't claim (AC12)", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    const approve = (approvalId: string) =>
+      ({ approvalId, decision: "approve", scope: "once" }) as const;
+    resolveApprovals(state, batchId, [approve("appr_call_1"), approve("appr_call_2")], NOW);
+    const ended: [string, string][] = [];
+    const approvals = {
+      // The first call's row was claimed elsewhere (a second tab, a run that died).
+      claim: async (id: string) => (id === "call_1" ? "Already used." : null),
+      finish: async (id: string, outcome: { status: string }) => {
+        ended.push([id, outcome.status]);
+      },
+    };
+    const { events } = await drain({ ...h, approvals }, state);
+    expect(send.inputs).toEqual([{ q: "b" }]);
+    expect(ofType(events, "tool.result").map((e) => e.payload.error ?? "ok")).toEqual([
+      "Already used.",
+      "ok",
+    ]);
+    expect(ofType(events, "step.completed").map((e) => e.payload.status)).toContain("denied");
+    expect(ended).toEqual([["call_2", "executed"]]);
+  });
+
+  it("denies at the re-check on the row, and expires an undecided item on it (AC12)", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    resolveApprovals(
+      state,
+      batchId,
+      [{ approvalId: "appr_call_1", decision: "approve", scope: "once" }],
+      NOW,
+    );
+    const ended: unknown[] = [];
+    const claims: string[] = [];
+    const approvals = {
+      claim: async (id: string) => {
+        claims.push(id);
+        return null;
+      },
+      finish: async (id: string, outcome: unknown) => {
+        ended.push([id, outcome]);
+      },
+    };
+    const later = { ...h, now: () => NOW + 24 * 3_600_000, approvals };
+    await drain({ ...later, policy: () => ({ override: "never" }) }, state);
+    expect(send.inputs).toEqual([]);
+    expect(claims).toEqual([]); // a denied call is never claimed
+    expect(ended).toEqual([
+      ["call_2", { status: "expired", reason: "expired" }],
+      ["call_1", { status: "denied", reason: "override_never" }],
+    ]);
+  });
+
+  it("refuses an approved call when the host can't check its row", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    const approve = (approvalId: string) =>
+      ({ approvalId, decision: "approve", scope: "once" }) as const;
+    resolveApprovals(state, batchId, [approve("appr_call_1"), approve("appr_call_2")], NOW);
+    const approvals = {
+      claim: async () => {
+        throw new Error("D1 is down");
+      },
+      finish: async () => {},
+    };
+    await drain({ ...h, approvals }, state);
+    expect(send.inputs).toEqual([]);
   });
 
   it("keeps the model's order across writes and decides each call on the taint when it starts", async () => {
@@ -449,6 +533,57 @@ describe("per-turn limits (M3-03 AC7)", () => {
       kind: "daily",
       detail: "daily cap",
     });
+  });
+});
+
+describe("limits the host enforces (M3-17)", () => {
+  it("stops resumably when the provider refuses the call for a limit, without counting it", async () => {
+    let refuse = true;
+    const { provider: inner, requests } = scripted([{ text: "hello" }]);
+    const provider = {
+      ...inner,
+      stream: (req: Parameters<typeof inner.stream>[0]) =>
+        (async function* () {
+          if (refuse) throw new LimitStop("task_budget", "$0.10 task budget");
+          yield* inner.stream(req);
+        })(),
+    };
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, []), state);
+    expect(outcome).toBe("limit_reached");
+    expect(ofType(events, "limit.reached")[0]?.payload).toEqual({
+      kind: "task_budget",
+      detail: "$0.10 task budget",
+    });
+    expect(types(events)).not.toContain("turn.failed");
+    expect(state.counts.calls).toBe(0);
+    expect(state.messages).toEqual([]);
+    refuse = false; // Continue raised the budget
+    expect((await drain(host(provider, []), state)).outcome).toBe("completed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("stops with tool_rate after a call the host refused to run, and closes the rest", async () => {
+    let allowed = 1;
+    const look = tool("look", "read", () =>
+      allowed-- > 0
+        ? { ok: true, content: "page", context: { kind: "system" } }
+        : { ok: false, content: "slow down", slowDown: true },
+    );
+    const { provider } = scripted([
+      {
+        calls: [
+          ["look", { q: "a" }],
+          ["look", { q: "b" }],
+        ],
+      },
+    ]);
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, [look]), state);
+    expect(outcome).toBe("limit_reached");
+    expect(ofType(events, "limit.reached")[0]?.payload.kind).toBe("tool_rate");
+    const results = state.messages.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(results).toEqual(["page", "slow down"]);
   });
 });
 

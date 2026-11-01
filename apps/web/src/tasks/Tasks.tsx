@@ -62,6 +62,8 @@ export function Tasks() {
   const visit = useRef(0);
 
   useEffect(() => {
+    // A late response for one tab must not overwrite the other: without this a slow Now
+    // fetch lands after the move to History and swaps its rows out from under the toggle.
     const mine = ++visit.current;
     setPages(null);
     setFailed(false);

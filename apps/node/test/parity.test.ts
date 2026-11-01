@@ -94,6 +94,9 @@ async function connectTaskContext(
     release: async (key) => {
       budgetCalls.push(`release:${key}`);
     },
+    start: async (budgetMicroUsd) => ({ budgetMicroUsd: budgetMicroUsd ?? 500_000 }),
+    end: async () => 0,
+    allowToolCall: async () => true,
   };
   const deps: SqliteTaskContextDeps = {
     db: DB,

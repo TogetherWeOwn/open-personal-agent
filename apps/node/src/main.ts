@@ -25,7 +25,7 @@ const server = serve({ fetch: app.fetch, hostname, port }, (info) => {
   console.log(`Open Personal Agent on http://${hostname}:${info.port}`);
 });
 
-// The Worker's */10 cron (wrangler.jsonc), once at start too: it runs a pending key rotation.
+// The Worker's */10 cron (wrangler.jsonc), once at start too: a pending key rotation and retention.
 const TICK_MS = 10 * 60_000;
 void app.scheduled();
 const tick = setInterval(() => void app.scheduled(), TICK_MS);

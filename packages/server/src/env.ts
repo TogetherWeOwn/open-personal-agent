@@ -24,8 +24,17 @@ export interface AppPorts extends DataPorts {
   ASSETS: { fetch(request: Request): Response | Promise<Response> };
   /** Workers AI. Absent where the runtime has none; health reports it by presence only. */
   AI?: WorkersAIBinding;
-  /** Background task runs. Health reports it by presence only, so it never creates one. */
-  TASK_WORKFLOW?: { create(...args: never[]): Promise<unknown> };
+  /**
+   * Background task runs. Health reports it by presence only, so it never creates one.
+   * The Tasks cancel route terminates the run's instance through `get`; a root without the
+   * binding (apps/node) leaves it absent and the cancel is row-only.
+   */
+  TASK_WORKFLOW?: {
+    create(...args: never[]): Promise<unknown>;
+    get(id: string): Promise<{ terminate(): Promise<void> }>;
+  };
+  /** Data export runs (M3-20 AC1). Like the task runs, reported by presence, never created. */
+  EXPORT_WORKFLOW?: { create(...args: never[]): Promise<unknown> };
   OPA_SESSION_SECRET?: string | undefined;
   OPA_SETUP_TOKEN?: string | undefined;
   /** The per-file attachment cap in bytes (M3-10 AC1); unset means the 10 MB default. */

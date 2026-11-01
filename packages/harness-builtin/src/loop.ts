@@ -14,9 +14,9 @@ import {
   addContext,
   type ContextEvent,
   decide,
+  fitsApproval,
   type PolicyDecision,
   type RegisteredTool,
-  type RiskClass,
   type StandingGrant,
   type TaintState,
   type ToolManifest,
@@ -29,6 +29,8 @@ import { canonical, parseInput } from "./schema";
 
 /** COST-1 per-turn limits (M3-03 AC7). They replace M2's one call a turn. */
 export const TURN_LIMITS = { calls: 8, tools: 20 } as const;
+/** Tool calls a user may make in any minute (COST-2); the host counts them, the loop names it. */
+export const TOOL_RATE = 60;
 /** How long an interactive approval waits (M3-07 AC1, ADR 0010 D9). */
 export const APPROVAL_TTL_MS = 24 * 3_600_000;
 /** What a gated call's result reads while it waits, so the history stays valid for every provider. */
@@ -44,15 +46,36 @@ export type ToolOutput = {
   // A file the call created (M3-08 AC3): the loop announces it with `artifact.created`, so the
   // transcript and Outputs learn about it from the event log, not from the tool's text.
   artifact?: { artifactId: string; name: string; type: string; bytes: number };
+  // The host refused to run the tool: the user made 60 tool calls in the last minute (COST-2).
+  // The loop stops with `limit.reached{tool_rate}` once the calls started with it have finished.
+  slowDown?: true;
 };
 
 export interface LoopTool extends RegisteredTool {
   /** What the call reaches, e.g. a URL's host: shown on the card and matched by grants. */
   target?(input: Record<string, unknown>): string | undefined;
-  execute(input: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput>;
+  /**
+   * `call` names the model's call; `approved` when it runs under an approval the host claimed,
+   * so a durable host can keep it to one run (crypto review W3).
+   */
+  execute(
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    call?: { toolCallId: string; approved: boolean },
+  ): Promise<ToolOutput>;
 }
 
-export type PendingItem = ApprovalItem & { toolCallId: string; decision?: ApprovalDecision };
+/** A gated call as the turn keeps it. `stepUp`: approving needs a passkey (M3-07 AC4). */
+export type PendingItem = ApprovalItem & {
+  toolCallId: string;
+  stepUp: boolean;
+  decision?: ApprovalDecision;
+};
+
+/** How an approved call ended, for its approval row and the audit log (M3-07 AC12). */
+export type ApprovedOutcome =
+  | { status: "executed" | "failed" }
+  | { status: "denied" | "expired"; reason: string };
 
 /** A turn's resumable state. Plain JSON, so the host can store it (in D1, M3-03c). */
 export type TurnState = {
@@ -82,7 +105,31 @@ export type LoopHost = {
   taskId?: string;
   now(): number;
   newId(): string; // step and batch ids
+  /**
+   * The approval rows behind a resumed batch (M3-07 AC12). `claim` runs just before an approved
+   * call would start, after the policy re-check allowed it: `null` lets it run, a reason stops
+   * it as denied. `finish` records how every decided call of the batch ended.
+   */
+  approvals?: {
+    claim(toolCallId: string): Promise<string | null>;
+    finish(toolCallId: string, outcome: ApprovedOutcome): Promise<void>;
+  };
 };
+
+/**
+ * Thrown by a host's provider before it yields anything, when a spend limit refused the call
+ * (M3-17): the call never ran, so it isn't counted, and the turn stops resumably with
+ * `limit.reached` instead of failing.
+ */
+export class LimitStop extends Error {
+  constructor(
+    readonly kind: LimitKind,
+    readonly detail: string,
+  ) {
+    super(`limit reached (${kind}): ${detail}`);
+    this.name = "LimitStop";
+  }
+}
 
 export class ApprovalError extends Error {
   constructor(
@@ -175,6 +222,7 @@ export async function* runTurn(
 ): AsyncGenerator<LoopEvent, TurnOutcome> {
   const { messages } = state;
   let stepId = "";
+  let slowed = false; // a tool call was refused by the per-minute tool limit
 
   /** Records a call's result, replacing its placeholder if it has one. */
   function* result(call: ModelToolCall, ok: boolean, content: string): Generator<LoopEvent> {
@@ -224,6 +272,25 @@ export async function* runTurn(
     }
   }
 
+  /** Claims an approved call's row; a reason when it can't run. A host failure refuses it. */
+  async function claimed(toolCallId: string): Promise<string | null> {
+    if (!host.approvals) return null;
+    try {
+      return await host.approvals.claim(toolCallId);
+    } catch {
+      return "The approval couldn't be checked, so the call didn't run.";
+    }
+  }
+
+  /**
+   * Records how a decided call ended; the resume awaits them all before its next model call. A
+   * failure leaves the row as it was (an `executing` row is never run again).
+   */
+  const finishing: Promise<void>[] = [];
+  const finish = (toolCallId: string, outcome: ApprovedOutcome) => {
+    if (host.approvals) finishing.push(host.approvals.finish(toolCallId, outcome).catch(() => {}));
+  };
+
   /**
    * Decides and runs calls in the model's order. Each call is decided against the taint when it
    * starts, so a write after an untrusted read is decided as tainted. Consecutive reads start
@@ -239,15 +306,31 @@ export async function* runTurn(
       const group = [];
       for (const run of runs.slice(i, end)) {
         const d = decision(run.tool, run.manifest, run.input);
-        if (!d || d.outcome === "deny") {
-          yield* skip(run.call, deniedText(d, approved), "denied");
-        } else if (d.outcome === "ask" && !approved) {
-          asks.push({ ...run, d });
+        // An approved call is checked again against the policy as it is now (M3-07 AC12): the
+        // override may be `never` by now. Then the host claims its approval row; a call whose
+        // row it can't claim (decided twice, expired, rebound) doesn't run either.
+        const refused =
+          !d || d.outcome === "deny"
+            ? deniedText(d, approved)
+            : approved
+              ? await claimed(run.call.id)
+              : null;
+        if (refused !== null) {
+          if (approved && (!d || d.outcome === "deny")) {
+            finish(run.call.id, { status: "denied", reason: d?.rule ?? "policy_unreadable" });
+          }
+          yield* skip(run.call, refused, "denied");
+        } else if (d?.outcome === "ask" && !approved) {
+          // An approval binds the arguments exactly; past its limit there is nothing to ask.
+          if (fitsApproval(run.input, run.tool.target?.(run.input) ?? null))
+            asks.push({ ...run, d });
+          else yield* skip(run.call, TOO_LARGE_TO_APPROVE, "error");
         } else {
           const id = host.newId();
           const began = host.now();
           // Through an async function, so a tool that throws before its promise yields an error.
-          const out = (async () => run.tool.execute(run.input, signal))()
+          const out = (async () =>
+            run.tool.execute(run.input, signal, { toolCallId: run.call.id, approved }))()
             .catch(failed)
             .then((o) => ({ ...o, ended: host.now() }));
           group.push({ run, id, began, out });
@@ -256,6 +339,8 @@ export async function* runTurn(
       }
       for (const { run, id, began, out } of group) {
         const o = await out;
+        if (approved) finish(run.call.id, { status: o.ok ? "executed" : "failed" });
+        if (o.slowDown) slowed = true;
         stepId = id;
         yield* result(run.call, o.ok, o.content);
         if (o.ok && o.artifact) yield ev("artifact.created", o.artifact);
@@ -314,12 +399,15 @@ export async function* runTurn(
       const entry = host.tools.get(item.tool);
       const parsed = entry && parseInput(entry.manifest.inputSchema, item.args);
       if (!item.decision) {
+        finish(call.id, { status: "expired", reason: "expired" });
         yield* skip(call, "The approval expired, so the call didn't run.", "denied");
       } else if (item.decision.decision === "deny") {
         yield* skip(call, "The user denied this call.", "denied");
       } else if (!entry || !parsed) {
+        finish(call.id, { status: "denied", reason: "tool_missing" });
         yield* skip(call, `There is no tool named "${item.tool}".`, "error");
       } else if (!parsed.ok) {
+        finish(call.id, { status: "denied", reason: "invalid_input" });
         yield* skip(call, parsed.error, "error");
       } else {
         runs.push({ call, tool: entry.tool, manifest: entry.manifest, input: parsed.input });
@@ -327,6 +415,8 @@ export async function* runTurn(
     }
     state.pending = null;
     yield* execute(runs, true);
+    await Promise.all(finishing);
+    if (slowed) return yield* limit("tool_rate", `${TOOL_RATE} tool calls a minute`);
   }
 
   for (;;) {
@@ -350,6 +440,7 @@ export async function* runTurn(
     let usage: ModelUsage | null = null;
     let failure: string | undefined;
     let finish: FinishReason | undefined;
+    let stop: LimitStop | undefined;
     try {
       for await (const event of host.provider.stream({
         model: host.model,
@@ -367,9 +458,15 @@ export async function* runTurn(
         else if (event.type === "error") failure = event.message;
       }
     } catch (e) {
-      failure = e instanceof Error ? e.message : "The model call failed.";
+      if (e instanceof LimitStop) stop = e;
+      else failure = e instanceof Error ? e.message : "The model call failed.";
     } finally {
       if (budget) host.budget?.settle(usage);
+    }
+    if (stop) {
+      state.counts.calls -= 1; // refused before it ran
+      yield ev("step.completed", { stepId, status: "error", durationMs: host.now() - began });
+      return yield* limit(stop.kind, stop.detail);
     }
     if (usage) {
       for (const k of Object.keys(ZERO) as (keyof ModelUsage)[]) state.usage[k] += usage[k] ?? 0;
@@ -433,6 +530,10 @@ export async function* runTurn(
     }
     const asks = yield* execute(runs);
     if (signal.aborted) return yield* cancelled();
+    if (slowed) {
+      yield* closeOpen("Not run: too many tool calls in the last minute.");
+      return yield* limit("tool_rate", `${TOOL_RATE} tool calls a minute`);
+    }
     if (asks.length > 0) {
       // One batch for the step; each gated call gets a placeholder result while it waits.
       const source = state.taint.sources[0];
@@ -450,16 +551,20 @@ export async function* runTurn(
           ...(d.taint === "untrusted" && source ? { taint: source } : {}),
           scopes: d.scopes,
           expiresAt: host.now() + APPROVAL_TTL_MS,
+          stepUp: d.stepUp,
         };
       });
       const batchId = `batch_${host.newId()}`;
       state.pending = { batchId, items };
-      const card = items.map(({ toolCallId: _, decision: __, ...item }) => item);
+      const card = items.map(({ toolCallId: _, decision: __, stepUp: ___, ...item }) => item);
       yield ev("approval.requested", { batchId, items: card });
       return "awaiting_approval";
     }
   }
 }
+
+const TOO_LARGE_TO_APPROVE =
+  "The arguments are too large to ask the user to approve, so the call didn't run.";
 
 const CUT_SHORT = {
   length: "The reply was cut off at the output limit.",

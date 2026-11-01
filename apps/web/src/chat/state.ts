@@ -32,9 +32,20 @@ export interface ChatState {
   activeId: string;
   /**
    * The assistant message the running turn streams into, from this tab or another. One turn runs
-   * at a time. `turnId` is `null` until `turn.started` names the turn this tab sent.
+   * at a time. `turnId` is `null` until `turn.started` names the turn this tab sent. `seq` is
+   * the last event applied for it, so a replay after a reconnect can't apply one twice.
    */
-  pending: { conversationId: string; turnId: string | null; messageId: string } | null;
+  pending: {
+    conversationId: string;
+    turnId: string | null;
+    messageId: string;
+    seq: number;
+    /**
+     * Set when this tab adopted a turn mid-reply: the reply's length then. Its first deltas came
+     * before, so the first `message.completed` replaces the text from here with the whole segment.
+     */
+    base?: number;
+  } | null;
   /** Text for the polite live region: start, finish and failure, never each token. */
   announcement: string;
   /**
@@ -115,6 +126,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversationId: action.conversationId,
         turnId: null,
         messageId: `${action.id}-reply`,
+        seq: 0,
       };
       const firstLine = text.split("\n", 1)[0] ?? "";
       const sent: Message = {
@@ -205,7 +217,12 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
   const { pending } = state;
   if (event.type === "turn.started") {
     const { messageId } = event.payload;
-    const turn = { conversationId: event.sessionId, turnId: event.turnId, messageId };
+    const turn = {
+      conversationId: event.sessionId,
+      turnId: event.turnId,
+      messageId,
+      seq: event.seq,
+    };
     if (pending?.turnId === null && pending.conversationId === event.sessionId) {
       // The turn this tab sent: its reply takes the server's message ID.
       const next = updateMessage(state, pending, () => ({ id: messageId }));
@@ -246,7 +263,13 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     // A turn that was already running when this tab (re)connected: stream into its reply.
     const last = state.conversations.find((c) => c.id === event.sessionId)?.messages.at(-1);
     if (!pending && event.type === "message.delta" && last?.status === "streaming") {
-      const adopted = { conversationId: event.sessionId, turnId: event.turnId, messageId: last.id };
+      const adopted = {
+        conversationId: event.sessionId,
+        turnId: event.turnId,
+        messageId: last.id,
+        seq: 0,
+        base: last.text.length,
+      };
       return onEvent({ ...state, pending: adopted }, event);
     }
     // A turn ended unseen: the next load of its conversation shows how.
@@ -255,27 +278,77 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     }
     return state;
   }
+  // A replayed event this tab already applied live: on a reconnect the log replays what the
+  // dropped socket missed, and the live stream can deliver the same event too (M3-03 AC11).
+  let seen = state;
+  if (event.seq > 0 && event.turnId === pending.turnId) {
+    if (event.seq <= pending.seq) return state;
+    seen = { ...state, pending: { ...pending, seq: event.seq } };
+  }
   switch (event.type) {
     case "status":
-      return { ...state, announcement: event.payload.text };
+      return { ...seen, announcement: event.payload.text };
     case "message.delta":
-      return updateMessage(state, pending, (m) => ({ text: m.text + event.payload.text }));
-    case "message.completed":
+      return updateMessage(seen, pending, (m) => ({ text: m.text + event.payload.text }));
+    case "message.completed": {
+      // An adopted reply's text from `base` is only the segment's tail: the whole segment
+      // replaces it, once; later segments streamed whole here.
+      const { base, ...unbased } = seen.pending ?? pending;
+      const next = base === undefined ? seen : { ...seen, pending: unbased };
+      const from = (text: string) => (base === undefined ? text : text.slice(0, base));
       return {
-        ...updateMessage(state, pending, () => ({ text: event.payload.text })),
+        ...updateMessage(next, pending, (m) => ({
+          text: withSegment(from(m.text), event.payload.text),
+        })),
         announcement: `Assistant replied: ${event.payload.text}`,
       };
+    }
     case "turn.completed":
-      return finish(state, "complete", state.announcement);
+      return finish(seen, "complete", seen.announcement);
+    // `turn.cancelled` is the user's Stop; `turn.interrupted` is the server going away
+    // mid-reply (M3-03 AC6). On screen both are the same cut-short reply.
+    case "turn.cancelled":
     case "turn.interrupted":
-      return finish(state, "interrupted", "The reply stopped before it finished.");
+      return finish(seen, "interrupted", "The reply stopped before it finished.");
     case "turn.failed": {
       const { message, code } = event.payload;
-      return finish(state, "error", `Something went wrong: ${message}`, code && { failure: code });
+      return finish(seen, "error", `Something went wrong: ${message}`, code && { failure: code });
     }
+    // The turn stopped without settling: it waits in D1 for a decision or a Continue, and its
+    // reply stays `streaming`, so its later deltas stream into the same message. The cards
+    // that act on these come with the timeline (M3-07b); the composer frees up either way.
+    case "approval.requested":
+      return {
+        ...seen,
+        pending: null,
+        announcement: "The assistant is waiting for your approval.",
+      };
+    case "limit.reached":
+      return { ...seen, pending: null, announcement: "The assistant stopped at a limit." };
     case "usage.updated":
-      return state;
+      return seen;
+    // The remaining M3 events (steps, tools, taint) get their timeline with the cards that
+    // render them; until then they leave the thread as it is.
+    case "step.started":
+    case "step.completed":
+    case "tool.called":
+    case "tool.result":
+    case "approval.resolved":
+    case "context.tainted":
+    case "task.promoted":
+    case "artifact.created":
+    case "memory.proposed":
+      return seen;
   }
+}
+
+/**
+ * A turn can speak before and after its tools, so each `message.completed` is one segment of
+ * the reply (already streamed by its deltas). Segments join as paragraphs, as D1 stores them.
+ */
+function withSegment(text: string, segment: string): string {
+  const base = text.endsWith(segment) ? text.slice(0, text.length - segment.length) : text;
+  return base && segment ? `${base}\n\n${segment}` : base + segment;
 }
 
 /** Replaces a conversation's messages with the server's, keeping what streams here meanwhile. */
@@ -284,7 +357,7 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   const current = state.conversations.find((c) => c.id === id);
   if (!current) return state;
   const local = new Map(current.messages.map((m) => [m.id, m]));
-  // D1 holds a streaming reply's text only once it ends; the stream here is ahead.
+  // D1 holds a streaming reply's text only at its stops; the stream here is ahead.
   const messages = stored.map(({ id, role, status, content, attachments }): Message => {
     const m = local.get(id);
     return m?.status === "streaming" && status === "streaming"

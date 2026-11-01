@@ -18,12 +18,12 @@ describe("createMockTransport", () => {
     expect(events.map((e) => [e.type, e.turnId === ""])).toEqual([
       ["turn.started", false],
       ["turn.failed", true],
-      ["turn.interrupted", false],
+      ["turn.cancelled", false],
     ]);
     expect(events[1]?.payload).toMatchObject({ reason: "slow_down" });
   });
 
-  it("starts a slow-start turn stopped before its start, then interrupts it", () => {
+  it("starts a slow-start turn stopped before its start, then cancels it", () => {
     const events: HarnessEvent[] = [];
     const transport = createMockTransport(60_000);
     transport.connect(
@@ -35,7 +35,7 @@ describe("createMockTransport", () => {
     transport.cancel();
     expect(events.map((e) => [e.type, e.turnId])).toEqual([
       ["turn.started", "mock-1"],
-      ["turn.interrupted", "mock-1"],
+      ["turn.cancelled", "mock-1"],
     ]);
   });
 });
