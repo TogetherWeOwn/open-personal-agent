@@ -15,10 +15,25 @@ import type {
   ModelUsage,
 } from "@opa/core";
 import { aborted, error } from "./chat-chunks";
+import { canonicalOrigin } from "./credential-binding";
 import { type EndpointOptions, endpoint, listModels, openStream } from "./http";
 import { sseData } from "./sse";
 
 export const OPENAI_RESPONSES_API = "openai-responses";
+
+/**
+ * The OpenAI preset talks Responses; every other OpenAI-compatible host stays on Chat
+ * Completions. The wire API is a property of the preset and never part of `providerId`, so the
+ * key's `model:<providerId>|<origin>` binding doesn't change when an adapter does (ADR 0006 #5).
+ */
+export function usesOpenAIResponses(providerId: string | null, baseUrl: string | null): boolean {
+  if (providerId !== "openai" || !baseUrl) return false;
+  try {
+    return canonicalOrigin(baseUrl) === "https://api.openai.com";
+  } catch {
+    return false;
+  }
+}
 
 export interface OpenAIResponsesOptions extends EndpointOptions {
   providerId: string;
