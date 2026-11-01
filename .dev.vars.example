@@ -22,3 +22,8 @@ OPA_SETUP_TOKEN=
 # connection's address: right with nothing in front, but behind a proxy every client then shares
 # the proxy's address, and one busy client can hold the others back from signing in.
 # OPA_CLIENT_IP_HEADER=
+
+# Not a secret, and optional. The largest file a user may attach to a message, in bytes.
+# Unset (or anything that isn't a whole number of bytes), the cap is 10 MB; it is never
+# more than 100 MB. The composer reads the cap in force from the server.
+# OPA_ATTACHMENT_MAX_BYTES=

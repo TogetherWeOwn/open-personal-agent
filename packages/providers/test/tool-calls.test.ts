@@ -208,7 +208,12 @@ describe("workers-ai-binding tool calls", () => {
     expect(events[0]).toMatch(/ get_weather \{"city":"Lisbon"\}$/);
     expect(events.slice(1)).toEqual(["usage 312/18/0/0", "done tool_calls"]);
     expect(inputs[0]).toEqual({ messages: ask, stream: true, tools: [wireTool] });
-    expect(p.capabilities(MODEL)).toEqual({ tools: true, usageInStream: true });
+    expect(p.capabilities(MODEL)).toEqual({
+      tools: true,
+      usageInStream: true,
+      imageInput: false,
+      pdfInput: false,
+    });
     // A model the catalogue doesn't list as taking tools isn't reported as supporting them.
     expect(p.capabilities("@cf/meta/llama-2-7b-chat-int8").tools).toBe(false);
   });

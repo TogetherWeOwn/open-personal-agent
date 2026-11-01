@@ -21,6 +21,8 @@ export interface ModelPrice {
   name: string;
   inputUsdPerMTok: number;
   cachedInputUsdPerMTok?: number;
+  /** Writing to the prompt cache, where the provider bills it above input (Anthropic). */
+  cacheWriteUsdPerMTok?: number;
   outputUsdPerMTok: number;
   neuronsPerMInputTok?: number;
   neuronsPerMOutputTok?: number;
@@ -68,11 +70,12 @@ export function isStale(verifiedAt: string, now = Date.now()): boolean {
   return days > STALE_AFTER_DAYS;
 }
 
-/** `inputTokens` includes `cachedInputTokens`, as in `ModelUsage`. */
+/** `inputTokens` includes the cache reads and writes, as in `ModelUsage`. */
 export interface TokenCounts {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheWriteInputTokens?: number;
 }
 
 /** Rounds up after dropping float noise, so 1000 × 0.293 is 293, not 294. */
@@ -84,9 +87,11 @@ const up = (n: number) => Math.ceil(Number(n.toFixed(6)));
  */
 export function estimate(price: ModelPrice, usage: TokenCounts) {
   const cached = Math.min(usage.cachedInputTokens, usage.inputTokens);
+  const written = Math.min(usage.cacheWriteInputTokens ?? 0, usage.inputTokens - cached);
   const micro =
-    (usage.inputTokens - cached) * price.inputUsdPerMTok +
+    (usage.inputTokens - cached - written) * price.inputUsdPerMTok +
     cached * (price.cachedInputUsdPerMTok ?? price.inputUsdPerMTok) +
+    written * (price.cacheWriteUsdPerMTok ?? price.inputUsdPerMTok) +
     usage.outputTokens * price.outputUsdPerMTok;
   const neurons =
     price.neuronsPerMInputTok !== undefined && price.neuronsPerMOutputTok !== undefined

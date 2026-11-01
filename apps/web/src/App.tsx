@@ -1,8 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
-import { Button, Heading, Link } from "react-aria-components";
+import { Heading, Link } from "react-aria-components";
+import {
+  type AttachmentConfig,
+  DEFAULT_CONFIG,
+  deleteAttachment,
+  fetchAttachmentConfig,
+  isRetryable,
+  MAX_FILES,
+  type PendingAttachment,
+  pickProblem,
+  UploadFailure,
+  uploadAttachment,
+  uploadProblem,
+  willRead,
+} from "./chat/attachments";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
+import { ModelChip } from "./chat/ModelChip";
 import {
   type ChatAction,
   type ChatState,
@@ -11,13 +26,20 @@ import {
   initialState,
 } from "./chat/state";
 import { Thread } from "./chat/Thread";
-import type { ChatTransport } from "./chat/transport";
+import type { ChatTransport, StoredAttachment } from "./chat/transport";
+import {
+  describePick,
+  type ModelSettings,
+  type RolePick,
+  setConversationModel,
+  settingsApi,
+} from "./models/settings-api";
+import { hasNavigated, match, navigate, usePath } from "./router";
+import { NotFound, routes } from "./routes";
 import { ThemeToggle } from "./ThemeToggle";
+import { APP_NAME, Banner, Button, buttonClass, pageTitle } from "./ui";
 
 const newId = () => crypto.randomUUID();
-
-const buttonClass =
-  "min-h-11 rounded-lg px-3 text-sm font-medium hover:bg-surface-raised data-pressed:bg-border data-selected:bg-surface-raised";
 
 /** Loads a stale chat's messages from the server. */
 function useLoad(
@@ -39,15 +61,72 @@ function useLoad(
   }, [transport, id, stale, dispatch]);
 }
 
-export function App({ transport }: { transport: ChatTransport }) {
+interface AppProps {
+  transport: ChatTransport;
+}
+
+export function App({ transport }: AppProps) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
+  const path = usePath();
+  const matched = match(routes, path);
+  const Screen = matched ? matched.route.screen : NotFound;
+  const chat = !Screen;
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!chat) return;
+    document.title = pageTitle("Chat");
+    if (hasNavigated()) heading.current?.focus();
+  }, [chat]);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
   const [healthy, setHealthy] = useState(true);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // The saved providers and roles behind the context chip; null until they load, and after a
+  // failed load the composer simply has no chip.
+  const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  // The chat stays mounted while another screen shows; becoming visible again reloads the
+  // model settings, so a model picked in Settings › Models is live on return (#88).
+  useEffect(() => {
+    if (!chat) return;
+    let current = true;
+    settingsApi<ModelSettings>("").then(
+      (loaded) => {
+        if (current && Array.isArray(loaded.providers) && loaded.roles) setModelSettings(loaded);
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  }, [chat]);
+
+  // The chats the server has: listed, or one whose turn has started. A switch in any other chat
+  // waits in `pendingPins`, and the chat's first send carries it, so its first reply already uses
+  // it and the server saves it with the new chat. Between that send and its turn starting, the
+  // chip doesn't switch (`starting`), so nothing can change behind the send.
+  const onServer = useRef(new Set<string>());
+  const pendingPins = useRef(new Map<string, RolePick | null>());
+  // Each chat's saved switches go in order, and a send waits for them, so a reply always uses the
+  // latest switch.
+  const saves = useRef(new Map<string, Promise<void>>());
+  // Removing a provider in Settings clears the server's pins on it, so a pin naming one that is
+  // gone follows the Chat role here too.
+  const live = (pick: RolePick | null | undefined) =>
+    pick && (!modelSettings || modelSettings.providers.some((p) => p.id === pick.provider))
+      ? pick
+      : null;
+  const pinned = live(active.model);
+  // Files picked but not yet sent belong to a conversation, like its draft.
+  const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
+  const [config, setConfig] = useState<AttachmentConfig>(DEFAULT_CONFIG);
+  const uploads = useRef(new Map<string, { abort: () => void }>());
+  // A send pressed while uploads run: it goes once they finish (m3-ux §3.2).
+  const [queuedSend, setQueuedSend] = useState<{ conversationId: string; text: string } | null>(
+    null,
+  );
 
   // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
   useEffect(() => {
@@ -69,14 +148,25 @@ export function App({ transport }: { transport: ChatTransport }) {
     const list = () =>
       transport
         .conversations()
-        .then((conversations) => dispatch({ type: "listed", conversations }))
+        .then((conversations) => {
+          for (const { id } of conversations) {
+            onServer.current.add(id);
+            pendingPins.current.delete(id);
+          }
+          dispatch({ type: "listed", conversations });
+        })
         .catch(() => {});
     const connected = () => {
       dispatch({ type: "connected" });
       void list();
     };
     return transport.connect((event) => {
-      if (event.type === "turn.started" && !known.current.has(event.sessionId)) void list();
+      if (event.type === "turn.started") {
+        if (!known.current.has(event.sessionId)) void list();
+        // The send that started it saved the chat's pick with the new chat.
+        onServer.current.add(event.sessionId);
+        pendingPins.current.delete(event.sessionId);
+      }
       dispatch({ type: "event", event });
     }, connected);
   }, [transport]);
@@ -87,84 +177,318 @@ export function App({ transport }: { transport: ChatTransport }) {
   useLoad(transport, active, dispatch);
   useLoad(transport, running === active ? undefined : running, dispatch);
 
-  // A send a limit refused goes back to the composer, unless something new was typed meanwhile.
+  // What may be attached, and what the model reads, follow the open chat's model: its own pick,
+  // asked for by name so a switch not yet saved counts, or else the Chat role, asked for again
+  // when Settings changes it.
+  const { provider: pinnedProvider, model: pinnedModel } = pinned ?? {};
+  const { provider: roleProvider, model: roleModel } = modelSettings?.roles.chat ?? {};
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the Chat role is what the server reads
+  useEffect(() => {
+    let current = true;
+    const named =
+      pinnedProvider && pinnedModel ? { provider: pinnedProvider, model: pinnedModel } : undefined;
+    fetchAttachmentConfig(named)
+      .then((next) => current && setConfig(next))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [pinnedProvider, pinnedModel, roleProvider, roleModel]);
+
+  // A send a limit refused goes back to the composer — its files too, still stored — unless
+  // something new was typed meanwhile. (Re-adding a file already back would double it.)
   const { limit } = state;
   useEffect(() => {
     if (!limit) return;
-    const { conversationId: id, text } = limit;
+    const { conversationId: id, text, attachments } = limit;
     setDrafts((d) => (d[id] ? d : { ...d, [id]: text }));
+    if (!attachments.length) return;
+    setPendingFiles((p) => {
+      const kept = new Set((p[id] ?? []).flatMap((f) => (f.uploaded ? [f.uploaded.id] : [])));
+      const back = attachments
+        .filter((a) => !kept.has(a.id))
+        .map(
+          (a): PendingAttachment => ({
+            key: newId(),
+            file: null,
+            name: a.name,
+            size: a.sizeBytes,
+            status: "ready",
+            progress: 1,
+            uploaded: a,
+          }),
+        );
+      return back.length ? { ...p, [id]: [...back, ...(p[id] ?? [])] } : p;
+    });
   }, [limit]);
+
+  const patchFile = (conversationId: string, key: string, patch: Partial<PendingAttachment>) =>
+    setPendingFiles((p) => ({
+      ...p,
+      [conversationId]: (p[conversationId] ?? []).map((f) =>
+        f.key === key ? { ...f, ...patch } : f,
+      ),
+    }));
+
+  const runUpload = (conversationId: string, entry: PendingAttachment) => {
+    if (!entry.file) return;
+    const { promise, abort } = uploadAttachment(entry.file, (progress) =>
+      patchFile(conversationId, entry.key, { progress }),
+    );
+    uploads.current.set(entry.key, { abort });
+    promise
+      .then((uploaded) =>
+        patchFile(conversationId, entry.key, { status: "ready", progress: 1, uploaded }),
+      )
+      .catch((err: unknown) => {
+        if (err instanceof UploadFailure && err.code === "aborted") return; // the chip is gone
+        const failure = err instanceof UploadFailure ? err : new UploadFailure("failed");
+        patchFile(conversationId, entry.key, {
+          status: "error",
+          error: uploadProblem(failure, entry.name, config),
+          retryable: isRetryable(failure),
+        });
+      })
+      .finally(() => uploads.current.delete(entry.key));
+  };
+
+  const pick = (picked: File[]) => {
+    const conversationId = active.id;
+    const room = MAX_FILES - (pendingFiles[conversationId]?.length ?? 0);
+    const added: PendingAttachment[] = picked.map((file, i) => {
+      const problem =
+        i >= room ? `You can attach up to ${MAX_FILES} files.` : pickProblem(file, config);
+      return {
+        key: newId(),
+        file,
+        name: file.name,
+        size: file.size,
+        status: problem ? "error" : "uploading",
+        progress: 0,
+        ...(problem ? { error: problem } : {}),
+      };
+    });
+    setPendingFiles((p) => ({ ...p, [conversationId]: [...(p[conversationId] ?? []), ...added] }));
+    for (const entry of added) if (entry.status === "uploading") runUpload(conversationId, entry);
+  };
+
+  const removeFile = (key: string) => {
+    const entry = (pendingFiles[active.id] ?? []).find((f) => f.key === key);
+    if (!entry) return;
+    uploads.current.get(key)?.abort();
+    // A stored file the user took back shouldn't linger in their storage.
+    if (entry.uploaded) void deleteAttachment(entry.uploaded.id).catch(() => {});
+    setPendingFiles((p) => ({
+      ...p,
+      [active.id]: (p[active.id] ?? []).filter((f) => f.key !== key),
+    }));
+  };
+
+  const retryFile = (key: string) => {
+    const entry = (pendingFiles[active.id] ?? []).find((f) => f.key === key);
+    if (!entry?.file) return;
+    patchFile(active.id, key, { status: "uploading", progress: 0, error: undefined });
+    runUpload(active.id, entry);
+  };
+
+  /** Sends now: the ready files go with the text; a failed chip stays for the next message. */
+  const doSend = (conversationId: string, text: string, ready: PendingAttachment[]) => {
+    const attachments: StoredAttachment[] = ready.flatMap((f) =>
+      f.uploaded ? [{ ...f.uploaded, sentToModel: willRead(f.uploaded.kind, config.model) }] : [],
+    );
+    dispatch({ type: "send", id: newId(), conversationId, text, attachments });
+    const ids = attachments.map((a) => a.id);
+    const go = () =>
+      transport.send(
+        conversationId,
+        text,
+        live(pendingPins.current.get(conversationId)) ?? undefined,
+        ids,
+      );
+    const saving = saves.current.get(conversationId);
+    if (saving) void saving.then(go);
+    else go();
+    const sent = new Set(ready.map((f) => f.key));
+    setPendingFiles((p) => ({
+      ...p,
+      [conversationId]: (p[conversationId] ?? []).filter((f) => !sent.has(f.key)),
+    }));
+  };
+
+  const send = (text: string): boolean => {
+    if (state.pending || queuedSend) return false;
+    const files = pendingFiles[active.id] ?? [];
+    if (files.some((f) => f.status === "uploading")) {
+      setQueuedSend({ conversationId: active.id, text });
+      return true;
+    }
+    const ready = files.filter((f) => f.status === "ready");
+    if (!text.trim() && !ready.length) return false;
+    doSend(active.id, text, ready);
+    return true;
+  };
+
+  // The queued send goes once its uploads settle. A failed upload holds it: sending past the
+  // failure would quietly leave that file behind, so the text goes back to the composer.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: doSend reads this render's config
+  useEffect(() => {
+    if (!queuedSend) return;
+    const { conversationId, text } = queuedSend;
+    const files = pendingFiles[conversationId] ?? [];
+    if (files.some((f) => f.status === "uploading")) return;
+    setQueuedSend(null);
+    const ready = files.filter((f) => f.status === "ready");
+    if (
+      state.pending ||
+      files.some((f) => f.status === "error") ||
+      (!text.trim() && !ready.length)
+    ) {
+      setDrafts((d) => (d[conversationId] ? d : { ...d, [conversationId]: text }));
+      return;
+    }
+    doSend(conversationId, text, ready);
+  }, [queuedSend, pendingFiles, state.pending]);
 
   const open = (action: ChatAction) => {
     dispatch(action);
     setThreadOpen(true);
   };
 
-  const send = (text: string): boolean => {
-    if (state.pending || !text.trim()) return false;
-    dispatch({ type: "send", id: newId(), text });
-    transport.send(active.id, text);
-    return true;
+  // The route table serves /settings/models in-app, so stay client-side.
+  const goModels = () => navigate("/settings/models");
+
+  // A new chat's first message is on its way, so the chat isn't on the server yet.
+  const starting =
+    state.pending?.conversationId === active.id &&
+    state.pending.turnId === null &&
+    !onServer.current.has(active.id);
+
+  /** Switches the open chat's model (M3-06 AC3); the thread records it, history is kept. */
+  const switchModel = (pick: RolePick | null) => {
+    if (!modelSettings || starting) return;
+    const effective = pick ?? modelSettings.roles.chat;
+    if (!effective) return;
+    const { modelName, providerName } = describePick(modelSettings, effective);
+    const { id } = active;
+    const previous = pinned;
+    const noticeId = newId();
+    dispatch({
+      type: "model",
+      id,
+      noticeId,
+      pick,
+      notice: `Switched to ${modelName} via ${providerName}`,
+    });
+    if (!onServer.current.has(id)) {
+      pendingPins.current.set(id, pick);
+      return;
+    }
+    const save = (saves.current.get(id) ?? Promise.resolve()).then(() =>
+      setConversationModel(id, pick).then(
+        // The thread's line becomes the server's, so a reload keeps it.
+        (message) => {
+          if (message) dispatch({ type: "saved", id, noticeId, message });
+        },
+        () =>
+          // The failure line takes the place of the optimistic "Switched to" line.
+          dispatch({
+            type: "model",
+            id,
+            noticeId,
+            pick: previous,
+            notice: "Couldn't switch the model, so nothing changed.",
+          }),
+      ),
+    );
+    saves.current.set(id, save);
+    void save.then(() => saves.current.get(id) === save && saves.current.delete(id));
   };
 
+  const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
+
   return (
-    <div className="flex h-dvh">
-      <header className="sr-only">
-        <h1>Open Personal Agent</h1>
-      </header>
-      <aside
-        aria-label="Conversations"
-        className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
-      >
-        <div className="flex items-center justify-between gap-2 p-3">
-          <Heading level={2} className="px-1 text-lg font-semibold">
-            Chats
-          </Heading>
-          <ThemeToggle className={buttonClass} />
-        </div>
-        <Button
-          className={`${buttonClass} mx-3 mb-2 border border-border-strong`}
-          onPress={() => open({ type: "new", id: newId() })}
-        >
-          New chat
-        </Button>
-        <Link href="/usage" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
-          Usage
-        </Link>
-        <ConversationList
-          conversations={state.conversations}
-          activeId={active.id}
-          onOpen={(id) => open({ type: "select", id })}
-        />
-      </aside>
-      <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
-        <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
-          <Button className={`${buttonClass} sm:hidden`} onPress={() => setThreadOpen(false)}>
-            <span aria-hidden="true">← </span>Chats
-          </Button>
-          <Heading level={2} className="truncate px-1 font-semibold">
-            {active.title}
-          </Heading>
+    <>
+      {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
+      <div hidden={!chat} className="flex h-dvh">
+        <header className="sr-only">
+          <h1 ref={heading} tabIndex={-1}>
+            {APP_NAME}
+          </h1>
         </header>
-        {!healthy && (
-          <p role="alert" className="border-b border-border bg-surface-sunken px-4 py-2 text-sm">
-            Your assistant's server isn't responding properly, so replies may fail.
-          </p>
-        )}
-        <Thread key={active.id} conversation={active} />
-        {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
-        <Composer
-          text={drafts[active.id] ?? ""}
-          setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
-          busy={state.pending !== null}
-          onSend={send}
-          onStop={() => transport.cancel()}
-        />
-      </main>
-      <div role="status" className="sr-only">
+        <aside
+          aria-label="Conversations"
+          className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
+        >
+          <div className="flex items-center justify-between gap-2 p-3">
+            <Heading level={2} className="px-1 text-lg font-semibold">
+              Chats
+            </Heading>
+            <ThemeToggle className={buttonClass("quiet")} />
+          </div>
+          <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
+            New chat
+          </Button>
+          <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
+            Usage
+          </Link>
+          <Link
+            href="/settings/models"
+            className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
+          >
+            Settings
+          </Link>
+          <ConversationList
+            conversations={state.conversations}
+            activeId={active.id}
+            onOpen={(id) => open({ type: "select", id })}
+          />
+        </aside>
+        <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
+          <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
+            <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
+              <span aria-hidden="true">← </span>Chats
+            </Button>
+            <Heading level={2} className="truncate px-1 font-semibold">
+              {active.title}
+            </Heading>
+          </header>
+          {!healthy && (
+            <Banner tone="danger" alert>
+              Your assistant's server isn't responding properly, so replies may fail.
+            </Banner>
+          )}
+          <Thread key={active.id} conversation={active} />
+          {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
+          <Composer
+            text={drafts[active.id] ?? ""}
+            setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
+            busy={state.pending !== null}
+            onSend={send}
+            onStop={() => transport.cancel()}
+            onNoModel={noModel ? goModels : undefined}
+            chip={
+              modelSettings && (
+                <ModelChip
+                  settings={modelSettings}
+                  pinned={pinned}
+                  onSwitch={switchModel}
+                  starting={starting}
+                />
+              )
+            }
+            config={config}
+            files={pendingFiles[active.id] ?? []}
+            onPick={pick}
+            onRemove={removeFile}
+            onRetry={retryFile}
+          />
+        </main>
+      </div>
+      {!chat && <Screen params={matched?.params ?? {}} />}
+      <div role="status" className="sr-only" hidden={!chat}>
         {state.announcement}
       </div>
-    </div>
+    </>
   );
 }
 

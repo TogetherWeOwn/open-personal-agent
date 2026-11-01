@@ -96,3 +96,51 @@ test("a resumed setup keeps the saved provider, so Save reuses the saved key", a
   await expect(page.getByRole("button", { name: "Test" })).toBeVisible();
   expect(bodies).toContainEqual(saved);
 });
+
+for (const colorScheme of ["light", "dark"] as const) {
+  for (const width of [375, 1280]) {
+    test(`the Anthropic preset, ${colorScheme}, ${width} px: saves its URL and model, axe clean`, async ({
+      page,
+    }) => {
+      const bodies: unknown[] = [];
+      await page.emulateMedia({ colorScheme });
+      await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
+      await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+      await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+      await page.route("/api/settings**", async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (route.request().method() !== "GET") bodies.push(route.request().postDataJSON());
+        const settings = { displayName: "Sam", about: "", onboarded: false, model: null };
+        if (path.endsWith("/profile")) return route.fulfill({ status: 204 });
+        if (path.endsWith("/model")) {
+          const body = route.request().postDataJSON();
+          const model = { ...body, apiKey: undefined, key: { last4: "WXYZ" } };
+          return route.fulfill({ json: { ...settings, model } });
+        }
+        return route.fulfill({ json: settings });
+      });
+
+      await page.goto("/onboarding");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByText("Anthropic", { exact: true }).click();
+      await expect(page.getByLabel("Model", { exact: true })).toHaveAttribute(
+        "placeholder",
+        "claude-sonnet-5-5",
+      );
+      expect(await new AxeBuilder({ page }).analyze()).toHaveProperty("violations", []);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      ).toBe(true);
+      await page.getByLabel("API key", { exact: true }).fill(KEY);
+      await page.getByRole("button", { name: "Save and continue" }).click();
+      await expect(page.getByRole("button", { name: "Test" })).toBeVisible();
+      expect(bodies).toContainEqual({
+        kind: "openai-chat",
+        providerId: "anthropic",
+        baseUrl: "https://api.anthropic.com/v1",
+        model: "claude-sonnet-5-5",
+        apiKey: KEY,
+      });
+    });
+  }
+}

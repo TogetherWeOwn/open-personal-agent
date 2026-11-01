@@ -83,8 +83,11 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
   );
   const until = (type: HarnessEvent["type"]) =>
     vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type), SOCKET_WAIT);
-  const send = (conversationId: string, text: string) =>
-    ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
+  const send = (
+    conversationId: string,
+    text: string,
+    model?: { provider: string; model: string },
+  ) => ws.send(JSON.stringify({ type: "chat.send", conversationId, text, model }));
   return { res, ws, events, until, send, closed };
 }
 
@@ -175,10 +178,16 @@ describe("chat transport", () => {
     ]);
 
     // A conversation's own model overrides the Chat role, and the model gets the whole history
-    // from the other model's turns (M3-06 AC3).
+    // from the other model's turns (M3-06 AC3), but never the thread's switch line (TWO-614).
     const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
     const keyedRow = (await user.providers.list()).find((p) => p.kind === "openai-chat");
-    await user.chat.setModel("conv-6", { provider: String(keyedRow?.id), model: "gpt-y" });
+    const own6 = { provider: String(keyedRow?.id), model: "gpt-y" };
+    const pinned = await browser.req("/api/conversations/conv-6/model", {
+      method: "PUT",
+      body: own6,
+    });
+    const { message: line } = await pinned.json<{ message: { content: string } }>();
+    expect(line.content).toBe("Switched to gpt-y via api.example.com");
     tab.events.length = 0;
     tab.send?.("conv-6", "Back to you");
     await tab.until?.("turn.completed");
@@ -192,6 +201,43 @@ describe("chat transport", () => {
       "From the starter",
       "Back to you",
     ]);
+    // The thread keeps the line where the switch happened, for a reload or another tab.
+    const thread = await (await browser.req("/api/conversations/conv-6/messages")).json<{
+      messages: { role: string; content: string }[];
+    }>();
+    expect(thread.messages.map((m) => `${m.role}: ${m.content}`)).toEqual([
+      "user: Who are you?",
+      "assistant: From gpt-x",
+      "user: And now?",
+      "assistant: From the starter",
+      `system: ${line.content}`,
+      "user: Back to you",
+      "assistant: From gpt-x",
+    ]);
+
+    // A chat picked before the server had it sends its model with its first message, and that
+    // reply already uses it; the pick is saved with the new chat.
+    const own = { provider: String(keyedRow?.id), model: "gpt-z" };
+    tab.events.length = 0;
+    tab.send?.("conv-7", "Hi from a new chat", own);
+    await tab.until?.("turn.completed");
+    expect(JSON.parse(fetch.mock.calls[2]?.[1]?.body as string).model).toBe("gpt-z");
+    expect((await user.getConversation("conv-7"))?.model).toBe("gpt-z");
+    // An existing chat keeps its saved pin: a send's pick never overwrites a newer switch.
+    tab.events.length = 0;
+    tab.send?.("conv-6", "Still you?", own);
+    await tab.until?.("turn.completed");
+    expect(JSON.parse(fetch.mock.calls[3]?.[1]?.body as string).model).toBe("gpt-y");
+    expect((await user.getConversation("conv-6"))?.model).toBe("gpt-y");
+    // A pick naming no saved provider of this user's is refused, and writes nothing.
+    tab.events.length = 0;
+    tab.send?.("conv-8", "Hi", { provider: "not-mine", model: "gpt-z" });
+    const refused = {
+      type: "turn.failed",
+      payload: { message: "Pick a model in Settings first." },
+    };
+    await vi.waitFor(() => expect(tab.events).toMatchObject([refused]), SOCKET_WAIT);
+    expect(await count("conversations", "id = 'conv-8'")).toBe(0);
   });
 
   it.each([
@@ -321,8 +367,22 @@ describe("chat transport", () => {
     // The list holds the user's own conversations only.
     const list = await (await browser.req("/api/conversations")).json<{ conversations: unknown }>();
     expect(list.conversations).toEqual([
-      { id: "mine", title: "first", updatedAt: expect.any(Number) },
+      { id: "mine", title: "first", updatedAt: expect.any(Number), model: null },
     ]);
+  });
+
+  it("names a vault that needs a reset, so the tab can link to it (TWO-650)", async () => {
+    const { browser, owner } = await claim();
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveModel = async () => ({ error: "vault_reset_required" });
+    });
+    const tab = await openTab(browser);
+    tab.send?.("locked", "hi");
+    await tab.until?.("turn.failed");
+    expect(tab.events).toMatchObject([
+      { seq: 0, type: "turn.failed", payload: { code: "vault_reset_required" } },
+    ]);
+    expect(await count("conversations", "id = 'locked'")).toBe(0);
   });
 });
 
