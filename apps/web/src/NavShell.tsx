@@ -49,9 +49,7 @@ function AccountItems({ onSignOutError }: { onSignOutError: () => void }) {
       <MenuItem onAction={() => setDark(!dark)}>
         {dark ? "Switch to light theme" : "Switch to dark theme"}
       </MenuItem>
-      <MenuItem onAction={signOut}>
-        Sign out
-      </MenuItem>
+      <MenuItem onAction={signOut}>Sign out</MenuItem>
     </>
   );
 }
