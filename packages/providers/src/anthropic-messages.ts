@@ -12,20 +12,14 @@ import type {
 } from "@opa/core";
 import { ANTHROPIC_MESSAGES_API, messagesBody, type ReplayBlock } from "./anthropic-request";
 import { aborted, error } from "./chat-chunks";
-import { apiBase, httpError, redactor } from "./http";
+import { type EndpointOptions, endpoint, openStream } from "./http";
 import { sseData } from "./sse";
 
 /** Pinned; `messagesBody` leaves out the sampling parameters this version rejects. */
 const API_VERSION = "2026-10-21";
 
-export interface AnthropicMessagesOptions {
+export interface AnthropicMessagesOptions extends EndpointOptions {
   providerId: string;
-  /** For example `https://api.anthropic.com/v1`. The key is only ever sent to this origin. */
-  baseUrl: string;
-  apiKey?: string;
-  fetch?: typeof fetch;
-  /** As in `OpenAIChatOptions`: the caller's `fetch` guards plain HTTP to private hosts. */
-  privateHttp?: boolean;
 }
 
 const STOP_REASONS: Record<string, FinishReason> = {
@@ -46,14 +40,9 @@ const STREAM_ERRORS: Record<string, ModelErrorCode> = {
 };
 
 export function createAnthropicMessagesProvider(options: AnthropicMessagesOptions): ModelProvider {
-  const base = apiBase(options.baseUrl, options.apiKey, options.privateHttp);
-  const doFetch = options.fetch ?? fetch;
-  const redact = redactor(options.apiKey);
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "anthropic-version": API_VERSION,
-  };
-  if (options.apiKey) headers["x-api-key"] = options.apiKey;
+  // The Messages API takes the key as a bearer token as well as in `x-api-key`.
+  const base = endpoint(options);
+  const http = { ...base, headers: { ...base.headers, "anthropic-version": API_VERSION } };
   const origin = (model: string) => ({
     providerId: options.providerId,
     api: ANTHROPIC_MESSAGES_API,
@@ -64,7 +53,11 @@ export function createAnthropicMessagesProvider(options: AnthropicMessagesOption
     id: options.providerId,
 
     async listModels() {
-      const res = await doFetch(`${base}/models?limit=1000`, { headers, redirect: "manual" });
+      // The list is paged, 20 by default.
+      const res = await http.fetch(`${http.base}/models?limit=1000`, {
+        headers: http.headers,
+        redirect: "manual",
+      });
       if (!res.ok) throw new Error(`Listing models failed with HTTP ${res.status}`);
       const body = (await res.json()) as { data?: { id: string; display_name?: string }[] };
       return (body.data ?? []).map((m) => ({ id: m.id, label: m.display_name || m.id }));
@@ -76,33 +69,14 @@ export function createAnthropicMessagesProvider(options: AnthropicMessagesOption
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {
       const body = messagesBody(request, options.providerId);
-      let res: Response;
-      try {
-        res = await doFetch(`${base}/messages`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          // A followed redirect would carry the key to another origin.
-          redirect: "manual",
-          ...(request.signal ? { signal: request.signal } : {}),
-        });
-      } catch {
-        yield request.signal?.aborted
-          ? aborted()
-          : error("network", "Could not reach the provider");
+      const stream = await openStream(http, "/messages", body, request.signal);
+      if ("type" in stream) {
+        yield stream;
         return;
       }
-      if (!res.ok) {
-        yield await httpError(res, redact);
-        return;
-      }
-      if (!res.body) {
-        yield error("bad_response", "The provider returned no stream");
-        return;
-      }
-      yield* replayEvents(sseData(res.body, request.signal), {
+      yield* replayEvents(sseData(stream, request.signal), {
         signal: request.signal,
-        redact,
+        redact: http.redact,
         origin: origin(request.model),
       });
     },
@@ -155,7 +129,7 @@ class MessageAccumulator {
   private blocks: OpenBlock[] = [];
   private byIndex = new Map<number, OpenBlock>();
 
-  constructor(private origin: Omit<ModelReasoning, "data">) {}
+  constructor(private origin: Omit<ModelReasoning, "items">) {}
 
   /** Returns the events to emit, or one error that ends the stream. */
   push(event: RawEvent): ModelEvent[] {
@@ -258,8 +232,8 @@ class MessageAccumulator {
     // An unsigned block would be rejected on replay, and the rest can't go back without it.
     if (thinking && !unsigned) {
       events.push({
-        type: "reasoning.state",
-        reasoning: { ...this.origin, data: { blocks: replay } },
+        type: "reasoning",
+        reasoning: { ...this.origin, items: replay },
       });
     }
     const done: FinishReason =
@@ -271,7 +245,7 @@ class MessageAccumulator {
 interface ReplayOptions {
   signal?: AbortSignal | undefined;
   redact: (text: string) => string;
-  origin: Omit<ModelReasoning, "data">;
+  origin: Omit<ModelReasoning, "items">;
 }
 
 /** Turns the SSE `data` payloads of a Messages stream into normalized events. */

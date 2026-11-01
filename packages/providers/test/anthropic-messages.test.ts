@@ -48,7 +48,7 @@ async function collect(events: AsyncIterable<ModelEvent>) {
   let reasoning: ModelReasoning | undefined;
   for await (const e of events) {
     if (e.type === "tool_call") toolCalls.push(e.toolCall);
-    if (e.type === "reasoning.state") reasoning = e.reasoning;
+    if (e.type === "reasoning") reasoning = e.reasoning;
   }
   return { toolCalls, reasoning };
 }
@@ -74,32 +74,31 @@ describe("anthropic-messages", () => {
     expect(call?.url).toBe("https://api.anthropic.com/v1/messages");
     expect(call?.init.redirect).toBe("manual");
     expect(call?.init.headers).toMatchObject({
-      "x-api-key": "sk-ant-test",
+      authorization: "Bearer sk-ant-test",
       "anthropic-version": "2026-10-21",
     });
     expect(call?.body).toEqual(messagesBody({ model: MODEL, messages: ask }, "anthropic"));
   });
 
   it("assembles tool calls and keeps the signed thinking for replay", async () => {
-    const { p } = anthropic([thinkingToolCall]);
-    expect(await replay(p.stream({ model: MODEL, messages: ask, tools: [weather, time] }))).toEqual(
-      [
-        "text.delta Checking both.",
-        'tool_call toolu_wx1 get_weather {"city": "Lisbon"}',
-        'tool_call toolu_tm2 get_time {"zone": "Europe/Lisbon"}',
-        `reasoning.state anthropic/anthropic-messages/${MODEL} ${JSON.stringify({
-          blocks: [
-            SIGNED,
-            { type: "text", chars: 14 },
-            { type: "tool_use", id: "toolu_wx1" },
-            { type: "tool_use", id: "toolu_tm2" },
-          ],
-        })}`,
-        // 30 uncached + 1840 written to the cache.
-        "usage 1870/88/0/0/1840",
-        "done tool_calls",
-      ],
-    );
+    const { p } = anthropic([thinkingToolCall, thinkingToolCall]);
+    const request = { model: MODEL, messages: ask, tools: [weather, time] };
+    expect(await replay(p.stream(request))).toEqual([
+      "text.delta Checking both.",
+      'tool_call toolu_wx1 get_weather {"city": "Lisbon"}',
+      'tool_call toolu_tm2 get_time {"zone": "Europe/Lisbon"}',
+      `reasoning anthropic/anthropic-messages/${MODEL} 4`,
+      // 30 uncached + 1840 written to the cache.
+      "usage 1870/88/0/0/1840",
+      "done tool_calls",
+    ]);
+    const { reasoning } = await collect(p.stream(request));
+    expect(reasoning?.items).toEqual([
+      SIGNED,
+      { type: "text", chars: 14 },
+      { type: "tool_use", id: "toolu_wx1" },
+      { type: "tool_use", id: "toolu_tm2" },
+    ]);
   });
 
   it("round-trips the calls with their thinking unchanged and in order", async () => {
@@ -120,7 +119,7 @@ describe("anthropic-messages", () => {
       "reasoning.delta Both tools answered. ",
       "reasoning.delta Summarize.",
       "text.delta Sunny, 22 °C, and it is 14:05.",
-      expect.stringMatching(/^reasoning\.state .*redacted_thinking/),
+      `reasoning anthropic/anthropic-messages/${MODEL} 3`,
       "usage 2114/41/1840/0/210",
       "done stop",
     ]);

@@ -16,7 +16,7 @@ export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 const DEFAULT_MAX_TOKENS = 16_000;
 
 /**
- * A reply's content blocks in order, kept as `ModelReasoning.data`. Thinking blocks are verbatim;
+ * A reply's content blocks in order, kept as `ModelReasoning.items`. Thinking blocks are verbatim;
  * text and tool calls are placeholders, since their content is already on the message.
  */
 export type ReplayBlock =
@@ -85,8 +85,8 @@ function wireMessages(
   };
   for (const m of messages) {
     if (m.role === "assistant") {
-      const data = replays(m.reasoning) ? (m.reasoning?.data as { blocks?: ReplayBlock[] }) : {};
-      push("assistant", assistantContent(m.content, m.toolCalls ?? [], data.blocks));
+      const blocks = replays(m.reasoning) ? (m.reasoning?.items as ReplayBlock[]) : undefined;
+      push("assistant", assistantContent(m.content, m.toolCalls ?? [], blocks));
     } else if (m.role === "tool") {
       const result: WireBlock = { type: "tool_result", tool_use_id: m.toolCallId };
       if (m.content) result.content = m.content;

@@ -4,10 +4,11 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { STARTER_MODEL } from "@opa/providers";
+import { resolveChatModel } from "@opa/server/chat-model";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
-import { resolveChatModel } from "../src/chat-model";
 import { compose, type WorkerEnv } from "../src/compose";
 import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "../src/limits";
 import { workerApp } from "../src/worker-app";
@@ -54,8 +55,8 @@ async function useSavedModel(userId: string, AI: Ai) {
   const raw = { ...workerEnv, OPA_MASTER_KEY: btoa("k".repeat(32)) } as unknown as WorkerEnv;
   const { VAULT } = await compose(raw);
   await runInDurableObject(assistantOf(userId), (instance: Assistant) => {
-    instance.resolveModel = (doEnv, scope, caller) =>
-      resolveChatModel({ ...doEnv, VAULT, AI }, scope, caller);
+    instance.resolveModel = (doEnv, scope, caller, pick) =>
+      resolveChatModel({ ...doEnv, VAULT, AI }, scope, caller, pick);
   });
   return { ...env, VAULT };
 }
@@ -171,6 +172,25 @@ describe("chat transport", () => {
     expect(ledger.results).toEqual([
       { provider_id: "api.example.com", model: "gpt-x" },
       { provider_id: "workers-ai", model: STARTER_MODEL },
+    ]);
+
+    // A conversation's own model overrides the Chat role, and the model gets the whole history
+    // from the other model's turns (M3-06 AC3).
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    const keyedRow = (await user.providers.list()).find((p) => p.kind === "openai-chat");
+    await user.chat.setModel("conv-6", { provider: String(keyedRow?.id), model: "gpt-y" });
+    tab.events.length = 0;
+    tab.send?.("conv-6", "Back to you");
+    await tab.until?.("turn.completed");
+    expect(AI.run).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetch.mock.calls[1]?.[1]?.body as string);
+    expect(body.model).toBe("gpt-y");
+    expect(body.messages.map((m: { content: string }) => m.content)).toEqual([
+      "Who are you?",
+      "From gpt-x",
+      "And now?",
+      "From the starter",
+      "Back to you",
     ]);
   });
 

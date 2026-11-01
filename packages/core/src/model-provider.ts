@@ -17,16 +17,16 @@ export interface ModelTool {
 }
 
 /**
- * Provider-specific reasoning state from one reply: Anthropic thinking blocks with their
- * signatures, or Responses reasoning items. `data` is plain JSON that only the adapter `api`
- * reads, and it replays it only when provider, API and model all match the request (A-M2).
+ * Provider-specific reasoning state from one assistant reply (OpenAI reasoning items, Anthropic
+ * thinking signatures). `items` is opaque to everything but the adapter that wrote it, and it is
+ * replayed only when provider, API and model all match the request (A-M2); otherwise it is
+ * dropped and the history still holds the text and tool calls.
  */
 export interface ModelReasoning {
   providerId: string;
-  /** The wire adapter that wrote it, for example `anthropic-messages`. */
   api: string;
   model: string;
-  data: unknown;
+  items: unknown[];
 }
 
 export type ModelMessage =
@@ -35,7 +35,6 @@ export type ModelMessage =
       role: "assistant";
       content: string;
       toolCalls?: ModelToolCall[];
-      /** Kept from the reply's `reasoning.state` event. */
       reasoning?: ModelReasoning;
     }
   /** The result of the assistant's call `toolCallId`. */
@@ -60,7 +59,7 @@ export interface ModelUsage {
   outputTokens: number;
   cachedInputTokens: number;
   reasoningTokens: number;
-  /** Absent when the provider doesn't report cache writes or doesn't bill them apart. */
+  /** Absent when the provider doesn't report cache writes apart from input. */
   cacheWriteInputTokens?: number;
 }
 
@@ -77,15 +76,16 @@ export type ModelErrorCode =
 
 /**
  * Normalized stream events. A stream always ends with exactly one `done` or `error`. Each
- * `tool_call` arrives once, complete, after the deltas. `reasoning.state` comes at most once,
- * after the tool calls; the caller keeps it on the assistant message. `usage` comes after those
- * and before `done`, and is absent when the upstream reported none.
+ * `tool_call` arrives once, complete, after the deltas. `reasoning` arrives at most once, after
+ * the tool calls, from adapters with replayable state; the caller saves it on the assistant
+ * message. `usage` comes after the last delta and tool call and before `done`, and is absent when
+ * the upstream reported none.
  */
 export type ModelEvent =
   | { type: "text.delta"; text: string }
   | { type: "reasoning.delta"; text: string }
   | { type: "tool_call"; toolCall: ModelToolCall }
-  | { type: "reasoning.state"; reasoning: ModelReasoning }
+  | { type: "reasoning"; reasoning: ModelReasoning }
   | { type: "usage"; usage: ModelUsage }
   | { type: "done"; finishReason: FinishReason }
   | { type: "error"; code: ModelErrorCode; message: string; status?: number };
