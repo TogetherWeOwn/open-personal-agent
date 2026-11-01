@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Hono } from "hono";
+import { chatRoutes } from "./chat";
 import type { AppEnv } from "./env";
 import { checkHealth } from "./health";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
@@ -32,6 +33,7 @@ app.get("/setup", async (c) => {
 app.route("/setup", setup);
 app.route("/api/auth", authRoutes);
 app.route("/api/sessions", sessionRoutes);
+app.route("/api", chatRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */
 app.get("/api/me", async (c) => {
