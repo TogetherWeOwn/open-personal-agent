@@ -113,6 +113,26 @@ WHEN NEW.`conversation_id` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `conversati
 BEGIN
 	SELECT RAISE(ABORT, 'cross_user_reference');
 END;--> statement-breakpoint
+CREATE TRIGGER `artifacts_conversation_id_owner_insert` BEFORE INSERT ON `artifacts`
+WHEN NEW.`conversation_id` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `conversations` WHERE `id` = NEW.`conversation_id` AND `user_id` = NEW.`user_id`)
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
+CREATE TRIGGER `artifacts_conversation_id_owner_update` BEFORE UPDATE OF `conversation_id`, `user_id` ON `artifacts`
+WHEN NEW.`conversation_id` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `conversations` WHERE `id` = NEW.`conversation_id` AND `user_id` = NEW.`user_id`)
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
+CREATE TRIGGER `artifacts_task_id_owner_insert` BEFORE INSERT ON `artifacts`
+WHEN NEW.`task_id` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `tasks` WHERE `id` = NEW.`task_id` AND `user_id` = NEW.`user_id`)
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
+CREATE TRIGGER `artifacts_task_id_owner_update` BEFORE UPDATE OF `task_id`, `user_id` ON `artifacts`
+WHEN NEW.`task_id` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `tasks` WHERE `id` = NEW.`task_id` AND `user_id` = NEW.`user_id`)
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
 CREATE TRIGGER `conversations_user_id_fixed` BEFORE UPDATE OF `user_id` ON `conversations`
 WHEN NEW.`user_id` IS NOT OLD.`user_id`
 BEGIN
@@ -133,5 +153,10 @@ WHEN NEW.`user_id` IS NOT OLD.`user_id`
 BEGIN
 	SELECT RAISE(ABORT, 'cross_user_reference');
 END;--> statement-breakpoint
+CREATE TRIGGER `tasks_user_id_fixed` BEFORE UPDATE OF `user_id` ON `tasks`
+WHEN NEW.`user_id` IS NOT OLD.`user_id`
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (11);
+INSERT INTO `schema_version` (`version`) VALUES (12);

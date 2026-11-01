@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // TWO-427 L-4 (M3-21 AC6): every reference from one user's row to another user-owned row is
-// bound to `user_id`, by a composite foreign key or by migration 0011's triggers. The test finds
+// bound to `user_id`, by a composite foreign key or by migration 0012's triggers. The test finds
 // the references in the schema itself, so a new one that isn't bound fails here.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
@@ -134,6 +134,7 @@ describe("a reference to another user-owned row", () => {
       ["messages", a.message],
       ["model_providers", a.provider],
       ["secrets", a.secret],
+      ["tasks", a.task],
     ] as const) {
       const move = db.prepare(`UPDATE "${table}" SET user_id = ? WHERE id = ?`).bind(b.id, id);
       await expect(move.run(), table).rejects.toThrow("cross_user_reference");

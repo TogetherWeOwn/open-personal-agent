@@ -24,35 +24,47 @@ interface Case {
   body?: (victim: Seeded, attacker: Seeded) => unknown;
   /** The attacker's status: 404 unless the param names something no user owns. */
   status?: number;
+  /** The owner's own status: proof the route found the item, so the attacker's 404 means "not yours". */
+  own: number;
 }
 
 /** One case per protected route that takes a param, as `METHOD /path`. */
 const CASES: Record<string, Case> = {
-  "GET /api/conversations/:id/messages": { params: (v) => ({ id: v.conversation }) },
+  "GET /api/conversations/:id/messages": { params: (v) => ({ id: v.conversation }), own: 200 },
   "PUT /api/conversations/:id/model": {
     params: (v) => ({ id: v.conversation }),
     body: (_v, a) => ({ provider: a.provider, model: "gpt-4o" }),
+    own: 200,
   },
-  "GET /api/attachments/:id": { params: (v) => ({ id: v.attachment }) },
-  "DELETE /api/attachments/:id": { params: (v) => ({ id: v.attachment }) },
-  "DELETE /api/sessions/:id": { params: (v) => ({ id: v.session }) },
+  "GET /api/artifacts/:id": { params: (v) => ({ id: v.artifact }), own: 200 },
+  "GET /api/artifacts/:id/content": { params: (v) => ({ id: v.artifact }), own: 200 },
+  "DELETE /api/artifacts/:id": { params: (v) => ({ id: v.artifact }), own: 204 },
+  "GET /api/attachments/:id": { params: (v) => ({ id: v.attachment }), own: 200 },
+  "DELETE /api/attachments/:id": { params: (v) => ({ id: v.attachment }), own: 204 },
+  // The spare session: revoking the one the owner signs in with would 401 every later route.
+  "DELETE /api/sessions/:id": { params: (v) => ({ id: v.spareSession }), own: 200 },
   "PUT /api/settings/providers/:id": {
     params: (v) => ({ id: v.provider }),
     body: () => ({ providerId: "openai", baseUrl: BASE_URL, model: "gpt-4o-mini" }),
+    own: 200,
   },
-  "DELETE /api/settings/providers/:id": { params: (v) => ({ id: v.provider }) },
+  // The owner's provider is their Chat role, so it's refused as in use, after it was found.
+  "DELETE /api/settings/providers/:id": { params: (v) => ({ id: v.provider }), own: 409 },
   "POST /api/settings/providers/:id/test": {
     params: (v) => ({ id: v.provider }),
     body: () => ({}),
+    own: 200,
   },
-  "DELETE /api/settings/grants/:id": { params: (v) => ({ id: v.grant }) },
-  "POST /api/tasks/:id/continue": { params: (v) => ({ id: v.task }), body: () => ({}) },
-  "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}) },
+  "DELETE /api/settings/grants/:id": { params: (v) => ({ id: v.grant }), own: 204 },
+  // The task is resumed, then put back: no Workflow instance runs in the test to wake ("ended").
+  "POST /api/tasks/:id/continue": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
+  "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
   // A tool name, not an item: the attacker sets their own override, and the victim's stays.
   "PUT /api/settings/tools/:name": {
     params: () => ({ name: TOOL }),
     body: () => ({ override: "never" }),
     status: 200,
+    own: 200,
   },
 };
 
@@ -132,11 +144,13 @@ describe.each([
     expect(leaked(victim, await snapshot(attacker, { audit: false }))).toEqual([]);
   });
 
-  it("gets something other than 404 for the owner's own ID, so each 404 above means something", async () => {
+  it("gets the route's own answer for the owner's own ID, so each 404 above means something", async () => {
     for (const route of idRoutes) {
-      const { status, text } = await send(route, victim, victim, victim);
-      expect([route, status, text]).not.toEqual([route, 404, expect.anything()]);
+      const { status } = await send(route, victim, victim, victim);
+      expect([route, status]).toEqual([route, CASES[route]?.own]);
     }
+    // The owner was signed in throughout: no route above answered for a revoked session.
+    expect((await as(victim, "GET", "/api/me")).status).toBe(200);
   });
 
   it("never sees the victim's items in a list", async () => {
@@ -149,6 +163,7 @@ describe.each([
     // The same lists do carry the user's own items.
     const own = async (path: string) => (await as(victim, "GET", path)).text();
     expect(await own("/api/conversations")).toContain(victim.conversation);
+    expect(await own("/api/artifacts")).toContain(victim.artifact);
     expect(await own("/api/sessions")).toContain(victim.session);
     expect(await own("/api/settings")).toContain(victim.provider);
     expect(await own("/api/settings/grants")).toContain(victim.grant);
