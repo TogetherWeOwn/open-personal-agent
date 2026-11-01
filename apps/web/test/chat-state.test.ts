@@ -78,12 +78,12 @@ describe("chatReducer", () => {
       ["user", "Hi", "complete"],
       ["assistant", "Hello", "streaming"],
     ]);
-    expect(c9?.stale).toBe(false);
+    expect(c9?.stale).toBe(0);
     // This tab can't send while that turn runs, and it ends here too.
     expect(chatReducer(state, send)).toBe(state);
     expect(chatReducer(state, ev("turn.completed", {}, "t9", "c9")).pending).toBe(null);
     // A chat this tab never listed appears with the turn.
-    expect(run(started("t8", "c8")).conversations[0]).toMatchObject({ id: "c8", stale: true });
+    expect(run(started("t8", "c8")).conversations[0]).toMatchObject({ id: "c8", stale: 1 });
   });
 
   it("shows the persisted state after a reload: an interrupted reply, or one still streaming", () => {
@@ -112,10 +112,12 @@ describe("chatReducer", () => {
     expect(offline.pending).toBe(null);
     expect(reply(offline)).toMatchObject({ text: "Done.", status: "complete" });
     // A turn that ended unseen marks its chat for reloading.
-    expect(run(ev("turn.completed", {}, "t5")).conversations[0]?.stale).toBe(true);
+    expect(run(ev("turn.completed", {}, "t5")).conversations[0]?.stale).toBe(1);
     // A send whose turn.started was lost with the socket: the reload shows whether it ran.
     const lost = run(send, { type: "connected" });
     expect(lost.pending).toBe(null);
-    expect(lost.conversations[0]).toMatchObject({ messages: [], stale: true });
+    expect(lost.conversations[0]).toMatchObject({ messages: [], stale: 1 });
+    // If it did run, its start reloads the chat again, even after a load that came too early.
+    expect(chatReducer(lost, started()).conversations[0]?.stale).toBe(2);
   });
 });
