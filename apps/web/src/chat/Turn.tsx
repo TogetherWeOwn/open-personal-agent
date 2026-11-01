@@ -47,12 +47,18 @@ export function TurnView({
   const current = [...steps].reverse().find((s) => s.status === "running") ?? steps.at(-1) ?? null;
   const elapsed = formatElapsed(Math.max(0, now - turn.startedAt));
   // Visual only: the app's status region announces the turn's start and finish (UX §4.2).
+  // A paused turn reads paused, never working: its timer stopped at the pause, and the chip
+  // below names the pause (M3-09 AC1).
   const header =
-    current === null
-      ? `Working · ${elapsed}`
-      : isStillWorking(turn, now)
-        ? `Still working on: ${current.label} · ${elapsed}`
-        : `Working · ${elapsed} · ${current.label}`;
+    turn.outcome !== "running"
+      ? current === null
+        ? `Paused · ${elapsed}`
+        : `Paused · ${elapsed} · ${current.label}`
+      : current === null
+        ? `Working · ${elapsed}`
+        : isStillWorking(turn, now)
+          ? `Still working on: ${current.label} · ${elapsed}`
+          : `Working · ${elapsed} · ${current.label}`;
   const summary = formatSummary({
     durationMs: Math.max(0, (live ? now : turn.updatedAt) - turn.startedAt),
     tools: turn.tools.length,

@@ -33,11 +33,10 @@ import {
 } from "./chat/state";
 import { Thread } from "./chat/Thread";
 import type { ChatTransport, StoredAttachment } from "./chat/transport";
-import { type PriceTable, priceKey } from "./chat/turn-summary";
+import { buildPriceTable, type PriceTable } from "./chat/turn-summary";
 import {
   describePick,
   type ModelSettings,
-  type PriceHint,
   type RolePick,
   setConversationModel,
   settingsApi,
@@ -114,11 +113,7 @@ export function App({ transport }: AppProps) {
   // saved value from the next part, until then every thread starts collapsed.
   const [showWork] = useState<ShowWork>(SHOW_WORK_DEFAULT);
   // The turn summary prices each call under its own pair, like the usage page does.
-  const prices: PriceTable = new Map(
-    (modelSettings?.providers ?? []).flatMap((p): [string, PriceHint][] =>
-      p.providerId && p.model && p.price ? [[priceKey(p.providerId, p.model), p.price]] : [],
-    ),
-  );
+  const prices: PriceTable = buildPriceTable(modelSettings?.providers ?? []);
   // The chat stays mounted while another screen shows; becoming visible again reloads the
   // model settings, so a model picked in Settings › Models is live on return (#88).
   useEffect(() => {

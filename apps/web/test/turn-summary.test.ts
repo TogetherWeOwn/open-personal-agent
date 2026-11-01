@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { Turn } from "../src/chat/state";
 import {
+  buildPriceTable,
   formatDuration,
   formatElapsed,
   formatSummary,
@@ -79,6 +80,42 @@ describe("turn summary", () => {
     expect(turnCostMicroUsd([usage(1, 1, "openai", "m"), usage(1, 1, "other", "m")], prices)).toBe(
       null,
     );
+  });
+
+  it("bills output once when the provider reports reasoning inside it", () => {
+    const prices = new Map([[priceKey("openai", "m"), price(0.4, 1.6)]]);
+    const reasoning = {
+      usage: {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        cachedInputTokens: 0,
+        reasoningTokens: 400_000,
+      },
+      providerId: "openai",
+      model: "m",
+    };
+    // The 400k reasoning tokens are part of the 1M output, not extra.
+    expect(turnCostMicroUsd([reasoning], prices)).toBe(2_000_000);
+  });
+
+  it("leaves the cost out for a turn with no usage", () => {
+    const prices = new Map([[priceKey("openai", "m"), price(0.4, 1.6)]]);
+    expect(turnCostMicroUsd([], prices)).toBe(null);
+  });
+
+  it("prices Workers AI rows under the id the harness reports", () => {
+    const table = buildPriceTable([
+      { kind: "workers-ai", providerId: null, model: "m", price: price(0.4, 1.6) },
+    ]);
+    expect(table.get(priceKey("workers-ai", "m"))).toBeDefined();
+    const keyed = buildPriceTable([
+      { kind: "openai-chat", providerId: "openai", model: "m", price: price(0.4, 1.6) },
+    ]);
+    expect(keyed.get(priceKey("openai", "m"))).toBeDefined();
+    const unpriced = buildPriceTable([
+      { kind: "openai-chat", providerId: "openai", model: "m", price: null },
+    ]);
+    expect(unpriced.size).toBe(0);
   });
 
   it("calls a run still working after 10 s without a visible change", () => {

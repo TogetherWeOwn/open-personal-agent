@@ -3,7 +3,7 @@
 // collapsed "Worked for …" summary, the still-working timer and the turn's cost. Pure, so the
 // unit tests pin the copy without rendering anything.
 
-import type { PriceHint } from "../models/settings-api";
+import type { PriceHint, SavedProvider } from "../models/settings-api";
 import type { Status } from "../ui";
 import { money } from "../usage/usage-data";
 import type { Turn } from "./state";
@@ -33,12 +33,14 @@ export function formatWorked(ms: number): string {
 }
 
 /**
- * The turn's model calls at the settings' prices, in micro-USD. Reasoning tokens bill as
- * output and cached input at the input price (packages/pricing shades them finer; the summary
- * is an estimate). Null when any call has no price on file, so the summary never mixes a
- * partial total with "about".
+ * The turn's model calls at the settings' prices, in micro-USD. Providers report reasoning
+ * tokens inside their output total, so output bills once, as in packages/pricing; cached
+ * input bills at the input price, and the summary stays an estimate. Null for a turn with
+ * no usage, and when any call has no price on file, so the summary never mixes a partial
+ * total with "about".
  */
 export function turnCostMicroUsd(usage: Turn["usage"], prices: PriceTable): number | null {
+  if (usage.length === 0) return null;
   let total = 0;
   for (const entry of usage) {
     const price = prices.get(priceKey(entry.providerId, entry.model));
@@ -46,9 +48,25 @@ export function turnCostMicroUsd(usage: Turn["usage"], prices: PriceTable): numb
     // Tokens times dollars-per-million-tokens is micro-USD, as in packages/pricing.
     total +=
       entry.usage.inputTokens * price.inputUsdPerMTok +
-      (entry.usage.outputTokens + entry.usage.reasoningTokens) * price.outputUsdPerMTok;
+      entry.usage.outputTokens * price.outputUsdPerMTok;
   }
   return Math.round(total);
+}
+
+/**
+ * The summary's price table from the settings providers. A row with no saved provider ID
+ * is Workers AI: the harness reports those calls under `workers-ai`, so the row keys under
+ * it instead of dropping out and losing the turn's cost (M3-09 AC2).
+ */
+export function buildPriceTable(
+  providers: Pick<SavedProvider, "kind" | "providerId" | "model" | "price">[],
+): PriceTable {
+  return new Map(
+    providers.flatMap((p): [string, PriceHint | null][] => {
+      const id = p.providerId ?? (p.kind === "workers-ai" ? "workers-ai" : null);
+      return id && p.model && p.price ? [[priceKey(id, p.model), p.price]] : [];
+    }),
+  );
 }
 
 export interface SummaryFacts {
