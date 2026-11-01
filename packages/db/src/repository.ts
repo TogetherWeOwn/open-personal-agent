@@ -957,9 +957,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * Marks a claimed call as handed to its tool, `executing` to `dispatched`, as the first
            * thing its durable step does (crypto review W3). `false` when the row is past
            * `executing`: an engine crash reran the step after the call may already have acted,
-           * so it must not run again.
+           * so it must not run again. A read may: with `rerun`, a row already `dispatched` is
+           * handed to its tool again, so a read's step still retries a transient failure.
            */
-          dispatch: async (batchId: string, approvalId: string) => {
+          dispatch: async (batchId: string, approvalId: string, rerun = false) => {
             const rows = await db
               .update(approvals)
               .set({ status: "dispatched" })
@@ -968,7 +969,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   eq(approvals.batchId, batchId),
                   eq(approvals.approvalId, approvalId),
                   eq(approvals.userId, userId),
-                  eq(approvals.status, "executing"),
+                  rerun
+                    ? inArray(approvals.status, ["executing", "dispatched"])
+                    : eq(approvals.status, "executing"),
                 ),
               )
               .returning({ approvalId: approvals.approvalId });

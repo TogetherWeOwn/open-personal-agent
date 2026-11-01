@@ -234,6 +234,7 @@ describe("the approvals store", () => {
     expect(await bob.approvals.dispatch("batch_5", "appr_d")).toBe(false);
     expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(true);
     expect(await alice.approvals.dispatch("batch_5", "appr_d")).toBe(false);
+    expect(await alice.approvals.dispatch("batch_5", "appr_d", true)).toBe(true); // a read reruns
     const unknown = { status: "failed", reason: "outcome_unknown" } as const;
     expect(await alice.approvals.finish("batch_5", "appr_d", unknown)).toBe(true);
     expect(await status("appr_d", "batch_5")).toBe("failed");

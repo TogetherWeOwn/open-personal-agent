@@ -145,6 +145,8 @@ export class Assistant extends Agent<Bindings> {
     policy: () => ({}),
   });
   #running: AbortController | null = null;
+  /** Whether a `#drain` owns the resume queue: there is only ever one, so batches keep order. */
+  #draining = false;
   /** Turn rate and daily spend, in this DO's storage (M2-22). */
   readonly limits = new Limits(this.ctx.storage.kv);
   /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
@@ -557,8 +559,22 @@ export class Assistant extends Agent<Bindings> {
     return "queued";
   }
 
-  /** Resumes the next queued batch, if no turn runs. Called as every turn's fiber ends. */
+  /**
+   * Resumes the next queued batch, if no turn runs. Called as every turn's fiber ends. A resume
+   * that fails releases its claim before this drain puts its batch back, so a second drain then
+   * would run the next batch first; instead the one running re-checks the slot after each resume.
+   */
   async #drain(): Promise<void> {
+    if (this.#draining) return;
+    this.#draining = true;
+    try {
+      await this.#drainQueue();
+    } finally {
+      this.#draining = false;
+    }
+  }
+
+  async #drainQueue(): Promise<void> {
     while (!this.#running) {
       const [next, ...rest] = this.ctx.storage.kv.get<string[]>(QUEUE_KEY) ?? [];
       if (next === undefined) return;

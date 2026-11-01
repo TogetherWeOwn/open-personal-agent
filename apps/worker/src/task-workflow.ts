@@ -272,16 +272,21 @@ async function driveLoop(
         // Only a read retries: a write that acted and then failed must not act again. Steps are
         // still at-least-once (an engine crash mid-step reruns it), so an approved call first
         // marks its row dispatched inside this step: a rerun finds it so and doesn't run the
-        // call again (crypto review W3). A step that completed replays from its record.
+        // call again (crypto review W3), unless it is a read, which may run twice. A step that
+        // completed replays from its record.
+        const read = tool.manifest.riskClass === "read";
         const out = (await ctx.step(
           `tool:${toolSeq}`,
           async () => {
-            if (under && !(await user.approvals.dispatch(under.batchId, `appr_${under.id}`))) {
+            if (
+              under &&
+              !(await user.approvals.dispatch(under.batchId, `appr_${under.id}`, read))
+            ) {
               return { ok: false, content: OUTCOME_UNKNOWN } satisfies ToolOutput;
             }
             return tool.execute(input, new AbortController().signal);
           },
-          tool.manifest.riskClass === "read" ? undefined : { retries: { limit: 0, delayMs: 0 } },
+          read ? undefined : { retries: { limit: 0, delayMs: 0 } },
         )) as ToolOutput;
         if (under && !out.ok && out.content === OUTCOME_UNKNOWN) unknown.add(under.id);
         return out;
