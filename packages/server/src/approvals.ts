@@ -19,8 +19,6 @@ import {
   newNonce,
   type StandingGrant,
   stepUpChallenge,
-  type TaintState,
-  TRUSTED,
   toBase64Url,
 } from "@opa/policy";
 import {
@@ -206,21 +204,26 @@ export function approvalRoutes(forward: ApprovalForward) {
     const loaded = await load(c, batchId);
     if ("error" in loaded) return c.json({ error: loaded.error }, loaded.status);
     const { user, rows } = loaded;
+    // Every refusal of a decision on the user's own batch is in the audit log, as a step-up's is.
+    const refuse = async (error: string, status: 400 | 409) => {
+      await user.approvals
+        .audit(batchId, "approval.decide", "denied", { reason: error })
+        .catch(() => {});
+      return c.json({ error }, status);
+    };
     const body = await c.req.json().catch(() => null);
     const decisions = readDecisions(body);
-    if (!decisions) return c.json({ error: "invalid_decisions" }, 400);
+    if (!decisions) return refuse("invalid_decisions", 400);
     const now = Date.now();
     const live = rows.filter((r) => r.status === "pending" && r.expiresAt > now);
     if (!live.length) {
       if (!decisions.length) return c.json({ status: await forward(c, rows) });
       const expired = rows.some((r) => r.status === "pending" || r.status === "expired");
-      return c.json({ error: expired ? "expired" : "already_decided" }, 409);
+      return refuse(expired ? "expired" : "already_decided", 409);
     }
     const matched = match(rows, decisions);
-    if ("error" in matched) return c.json({ error: matched.error }, 400);
-    if (matched.items.some(({ row }) => row.expiresAt <= now)) {
-      return c.json({ error: "expired" }, 409);
-    }
+    if ("error" in matched) return refuse(matched.error, 400);
+    if (matched.items.some(({ row }) => row.expiresAt <= now)) return refuse("expired", 409);
 
     const stepUp = needsStepUp(matched.items);
     if (stepUp) {
@@ -233,12 +236,19 @@ export function approvalRoutes(forward: ApprovalForward) {
     }
 
     try {
+      // Standing grants come only from an untainted context (M3-02 AC2): the card offered only
+      // "once" otherwise. They commit with the decisions, all or none, so a decision never
+      // stands without the grant the user chose.
       await user.approvals.decide(
         batchId,
-        matched.items.map(({ row, d }) => ({
-          ...d,
-          detail: { tool: row.tool, risk: row.risk, rule: row.rule, stepUp: row.stepUp },
-        })),
+        matched.items.map(({ row, d }) => {
+          const grant = d.decision === "approve" && !row.taint ? grantFor(row, d.scope, now) : null;
+          return {
+            ...d,
+            detail: { tool: row.tool, risk: row.risk, rule: row.rule, stepUp: row.stepUp },
+            ...(grant ? { grant } : {}),
+          };
+        }),
         now,
       );
     } catch {
@@ -249,14 +259,7 @@ export function approvalRoutes(forward: ApprovalForward) {
           .audit(batchId, "approval.step_up", "denied", { reason: "stale", decided: false })
           .catch(() => {});
       }
-      return c.json({ error: "stale" }, 409);
-    }
-    // Standing grants come only from an untainted context (M3-02 AC2); the card offered only
-    // "once" otherwise, and the store refuses a tainted one again.
-    for (const { row, d } of matched.items) {
-      const grant = d.decision === "approve" ? grantFor(row, d.scope, now) : null;
-      const taint: TaintState = row.taint ? { taint: "untrusted", sources: [] } : TRUSTED;
-      if (grant) await user.policy.grant(grant, taint).catch(() => {});
+      return refuse("stale", 409);
     }
     return c.json({ status: await forward(c, rows) });
   });

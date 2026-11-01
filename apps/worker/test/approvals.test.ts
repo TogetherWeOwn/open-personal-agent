@@ -222,6 +222,9 @@ describe("approve and deny (M3-07 AC10)", () => {
     }
     expect(await rowStatus(batchId)).toBe("pending");
     expect(send.inputs).toEqual([]);
+    // Each refusal is in the audit log.
+    const refused = `action = 'approval.decide' AND result = 'denied' AND target_id = '${batchId}'`;
+    expect(await count("audit_log", refused)).toBe(5);
   });
 
   it("takes decisions only from this exact origin with a session, never a socket frame", async () => {
