@@ -120,20 +120,9 @@ type SettingsStore = User["settings"];
 type SettingsRow = NonNullable<Awaited<ReturnType<SettingsStore["get"]>>>;
 
 const setupOf = (row: SettingsRow): SetupState => ({
-  skipped: row.setupSkipped?.filter(isStep) ?? null,
+  skipped: row.setupSkipped ? SETUP_STEPS.filter((s) => row.setupSkipped?.includes(s)) : null,
   hidden: row.setupHidden ?? false,
 });
-
-/**
- * Takes a finished step off the setup checklist (M3-24 AC1): a profile saved in Settings ›
- * Assistant finishes "About you" wherever it was skipped. A list with nothing on it stays an empty
- * list, so Settings › Assistant can still say setup is complete.
- */
-export async function finishSetup(store: SettingsStore, step: SetupStep) {
-  const skipped = (await store.get())?.setupSkipped;
-  if (!skipped?.includes(step)) return;
-  await store.save({ setupSkipped: skipped.filter((s) => s !== step) });
-}
 
 /** The dated price hint (COST-7), from the table; null when it has no price for the model. */
 function priceHint(billingId: string, model: string | null) {
@@ -384,7 +373,8 @@ settings.put("/profile", async (c) => {
       audit: audit("settings.profile", was, { displayName, about: about.trim() }, ["about"]),
     },
   );
-  await finishSetup(user.settings, "about");
+  // A profile saved in Settings › Assistant finishes "About you" wherever it was skipped.
+  await user.settings.finishSetup("about");
   return c.body(null, 204);
 });
 
@@ -395,15 +385,12 @@ settings.put("/profile", async (c) => {
 settings.post("/setup", async (c) => {
   const body = await c.req.json().catch(() => null);
   const store = userOf(c).settings;
-  const row = await store.get();
-  if (!row) return fail(c, 404, "not_found");
   if (typeof body?.hidden === "boolean") {
     await store.save({ setupHidden: body.hidden });
   } else if (isStep(body?.skip)) {
-    const skipped = new Set([...(row.setupSkipped ?? []), body.skip]);
-    await store.save({ setupSkipped: SETUP_STEPS.filter((s) => skipped.has(s)) });
+    await store.skipSetup(body.skip);
   } else if (isStep(body?.done)) {
-    await finishSetup(store, body.done);
+    await store.finishSetup(body.done);
   } else {
     return fail(c, 400, "invalid_setup");
   }

@@ -72,6 +72,19 @@ describe("setup checklist", () => {
     expect((await setup()).skipped).toEqual(["costs"]);
   });
 
+  it("keeps every change when skips and finishes overlap", async () => {
+    const { browser, setup, post } = await signedIn();
+    await post({ skip: "about" });
+    const profile = { displayName: "Sam", about: "I garden." };
+    await Promise.all([
+      post({ skip: "chat" }),
+      post({ skip: "safety" }),
+      browser.req("/api/settings/profile", { method: "PUT", body: profile }),
+      post({ skip: "costs" }),
+    ]);
+    expect((await setup()).skipped).toEqual(["costs", "safety", "chat"]);
+  });
+
   it("hides the card and shows it again without touching the list", async () => {
     const { setup, post } = await signedIn();
     await post({ skip: "chat" });

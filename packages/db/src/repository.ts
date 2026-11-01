@@ -1870,6 +1870,38 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ...(o.audit ? [db.insert(auditLog).values(auditValues(userId, o.audit))] : []),
             ]);
           },
+          /**
+           * Puts a step on the setup checklist (M3-24 AC1) in one statement, so two overlapping
+           * skips or finishes can't write over each other's list.
+           */
+          skipSetup: async (step: string) => {
+            const list = sql`coalesce(${userSettings.setupSkipped}, '[]')`;
+            const has = sql`EXISTS (SELECT 1 FROM json_each(${list}) WHERE value = ${step})`;
+            const set = {
+              setupSkipped: sql`CASE WHEN ${has} THEN ${list} ELSE json_insert(${list}, '$[#]', ${step}) END`,
+              updatedAt: Date.now(),
+            };
+            await db
+              .insert(userSettings)
+              .values({ userId, setupSkipped: [step], updatedAt: set.updatedAt })
+              .onConflictDoUpdate({ target: userSettings.userId, set });
+          },
+          /** Takes a step off the checklist in one statement; the last one leaves an empty list. */
+          finishSetup: async (step: string) => {
+            const list = userSettings.setupSkipped;
+            await db
+              .update(userSettings)
+              .set({
+                setupSkipped: sql`(SELECT json_group_array(value) FROM json_each(${list}) WHERE value <> ${step})`,
+                updatedAt: Date.now(),
+              })
+              .where(
+                and(
+                  eq(userSettings.userId, userId),
+                  sql`EXISTS (SELECT 1 FROM json_each(${list}) WHERE value = ${step})`,
+                ),
+              );
+          },
           keyUsed: async (secretId: string) => {
             await db
               .update(secrets)
