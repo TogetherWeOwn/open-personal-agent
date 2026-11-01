@@ -17,6 +17,17 @@ describe("worker", () => {
     expect(await res.json()).toEqual({ error: "not_claimed" });
   });
 
+  // capnweb parks the cloudflare:workers module, master keys in its env, on globalThis (D4.1 #3).
+  it("leaves no module env reachable from globalThis once loaded", () => {
+    const holdsEnv = (key: PropertyKey) => {
+      const value = Reflect.getOwnPropertyDescriptor(globalThis, key)?.value;
+      return typeof value === "object" && value !== null && "env" in value;
+    };
+    // `process` comes from the nodejs_compat flag the test pool adds; wrangler.jsonc doesn't set it.
+    const keys = Reflect.ownKeys(globalThis).filter((k) => k !== "process");
+    expect(keys.filter(holdsEnv).map(String)).toEqual([]);
+  });
+
   it("runs the scheduled stub", async () => {
     const ctx = createExecutionContext();
     await worker.scheduled(

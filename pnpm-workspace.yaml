@@ -6,6 +6,9 @@ packages:
 onlyBuiltDependencies:
   - esbuild
   - workerd
+# Its postinstall only prints a funding banner (agents -> mimetext -> @babel/runtime-corejs3).
+ignoredBuiltDependencies:
+  - core-js-pure
 
 # Supply chain (ADR 0010 D12): pnpm resolves only versions published at least a day ago (minutes),
 # and fails the install if a dependency outside the allowlist above wants to run a build script.

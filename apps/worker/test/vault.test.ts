@@ -10,10 +10,10 @@ import { env as workerEnv } from "cloudflare:workers";
 import { d1VaultStore } from "@opa/db/vault-store";
 import { decrypt, encrypt, rewrap, type UserScope, type Vault } from "@opa/vault";
 import { beforeAll, describe, expect, it } from "vitest";
-import { app } from "../src/app";
 import { newSession, SESSION_COOKIE } from "../src/auth";
 import { compose, type WorkerEnv } from "../src/compose";
 import worker from "../src/index";
+import { workerApp as app } from "../src/worker-app";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));

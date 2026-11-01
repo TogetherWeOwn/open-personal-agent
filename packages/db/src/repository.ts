@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
-import { conversations, secrets, userSettings, users } from "./schema";
+import { conversations, messages, secrets, usage, userSettings, users } from "./schema";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
@@ -56,10 +56,29 @@ export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
 >;
 
-/** IDs are server-generated; the check also keeps a key inside the user's R2 prefix. */
+/** A conversation ID comes from the client, so it is checked before it reaches a query. */
+export const isId = (id: unknown): id is string =>
+  typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+
+/** The check also keeps a key inside the user's R2 prefix. */
 function checkId(id: string): string {
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("invalid id");
+  if (!isId(id)) throw new Error("invalid id");
   return id;
+}
+
+export type MessageStatus = "complete" | "streaming" | "interrupted" | "error";
+
+/** A running chat turn: also its eviction checkpoint, so it is plain JSON. */
+export interface TurnRecord {
+  conversationId: string;
+  turnId: string;
+  replyId: string;
+  providerId: string;
+  model: string;
+  reply: string;
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null;
+  /** The model call has started, so the messages exist and the call belongs in the ledger. */
+  called: boolean;
 }
 
 export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBindings<Stub, Id>) {
@@ -79,6 +98,12 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       const { userId } = scope;
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
+      /** `undefined` when the row is missing or someone else's: answer 404 for both. */
+      const getConversation = async (id: string) =>
+        (await db.select().from(conversations).where(own(id)).limit(1))[0];
+      const createConversation = async (id: string, title: string | null = null) => {
+        await db.insert(conversations).values({ id: checkId(id), userId, title });
+      };
       return {
         /** The user's own `users` row; `undefined` if it was deleted. */
         profile: async () =>
@@ -97,11 +122,80 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(conversations)
             .where(eq(conversations.userId, userId))
             .orderBy(desc(conversations.updatedAt)),
-        /** `undefined` when the row is missing or someone else's: answer 404 for both. */
-        getConversation: async (id: string) =>
-          (await db.select().from(conversations).where(own(id)).limit(1))[0],
-        createConversation: async (id: string, title: string | null = null) => {
-          await db.insert(conversations).values({ id: checkId(id), userId, title });
+        getConversation,
+        createConversation,
+        chat: {
+          /** The conversation's messages oldest first, or `null` when it isn't the user's. */
+          listMessages: async (conversationId: string) =>
+            (await getConversation(conversationId))
+              ? db
+                  .select({
+                    id: messages.id,
+                    role: sql<"user" | "assistant">`${messages.role}`, // the filter below
+                    status: messages.status,
+                    content: messages.content,
+                    createdAt: messages.createdAt,
+                  })
+                  .from(messages)
+                  .where(
+                    and(
+                      eq(messages.conversationId, conversationId),
+                      eq(messages.userId, userId),
+                      inArray(messages.role, ["user", "assistant"]),
+                    ),
+                  )
+                  .orderBy(messages.seq)
+              : null,
+          /** Creates the conversation on its first message; `false` if the ID is someone else's. */
+          open: async (id: string, title: string) => {
+            if (await getConversation(id)) return true;
+            // A conflict is either another user's row or this user's from a concurrent open.
+            await createConversation(id, title).catch(() => {});
+            return (await getConversation(id)) !== undefined;
+          },
+          /** Writes the user's message and the empty streaming reply after it, both or neither. */
+          startTurn: async (conversationId: string, text: string, replyId: string) => {
+            const message = (id: string, role: "user" | "assistant", content: string) =>
+              db.insert(messages).values({
+                id,
+                userId,
+                conversationId,
+                seq: sql`(SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE conversation_id = ${conversationId})`,
+                role,
+                status: role === "user" ? "complete" : "streaming",
+                content,
+              });
+            await db.batch([
+              message(crypto.randomUUID(), "user", text),
+              message(replyId, "assistant", ""),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+          },
+          /**
+           * Finishes a reply and writes the call's usage ledger row (ADR 0006) in one transaction.
+           * Pricing joins in M2-21, so cost is 0. A call that never started gets no row.
+           */
+          settle: async (turn: TurnRecord, status: MessageStatus) => {
+            await db.batch([
+              db
+                .update(messages)
+                .set({ status, content: turn.reply })
+                .where(and(eq(messages.id, turn.replyId), eq(messages.userId, userId))),
+              ...(turn.called
+                ? [
+                    db.insert(usage).values({
+                      id: crypto.randomUUID(),
+                      userId,
+                      conversationId: turn.conversationId,
+                      messageId: turn.replyId,
+                      providerId: turn.providerId,
+                      model: turn.model,
+                      ...turn.usage,
+                    }),
+                  ]
+                : []),
+            ]);
+          },
         },
         /** Onboarding answers and the chat model (M2-15). The key itself is in `secrets`. */
         settings: {

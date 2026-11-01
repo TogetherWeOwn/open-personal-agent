@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// Reads of a conversation's messages from D1, on both runtimes. The chat socket itself needs the
+// Assistant Durable Object, so only the Worker serves it (worker-app.ts).
+import { createRepository, isId } from "@opa/db/repository";
+import { Hono } from "hono";
+import type { AppEnv } from "./env";
+
+export const chatRoutes = new Hono<AppEnv>();
+
+chatRoutes.get("/conversations/:id/messages", async (c) => {
+  const id = c.req.param("id");
+  const chat = createRepository(c.env).forUser(c.var.session.scope).chat;
+  const messages = isId(id) ? await chat.listMessages(id) : null;
+  if (!messages) return c.json({ error: "not_found" }, 404);
+  c.header("Cache-Control", "no-store");
+  return c.json({ messages });
+});

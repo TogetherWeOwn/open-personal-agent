@@ -2,6 +2,7 @@
 import { createRepository } from "@opa/db/repository";
 import { log } from "@opa/log";
 import { Hono } from "hono";
+import { chatRoutes } from "./chat";
 import type { AppEnv } from "./env";
 import { checkHealth, setupRequired } from "./health";
 import { settings } from "./model-settings";
@@ -49,6 +50,7 @@ shared.route("/setup", setup);
 shared.route("/api/auth/recover", recover);
 shared.route("/api/auth", authRoutes);
 shared.route("/api/sessions", sessionRoutes);
+shared.route("/api", chatRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */
 shared.get("/api/me", async (c) => {
@@ -60,7 +62,7 @@ shared.get("/api/me", async (c) => {
 
 /**
  * The app, with `extra` mounted at `/api` behind the same guards. The Worker passes the routes
- * that need its Durable Objects; apps/node, which can't load them, passes none (ADR 0011 #3).
+ * that need its Durable Objects (worker-app.ts); apps/node, which can't load them, passes none.
  */
 export function createApp(extra?: Hono<AppEnv>) {
   const app = new Hono<AppEnv>();

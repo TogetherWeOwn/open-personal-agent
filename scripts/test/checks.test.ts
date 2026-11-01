@@ -6,11 +6,11 @@ import { findViolations } from "../check-builder-independence.mjs";
 import { checkBudget, findLeakedNames, serverOnlyNames } from "../check-bundles.mjs";
 import { bindingNames, checkDocsCost } from "../check-docs-cost.mjs";
 import {
+  bundledPackages,
   checkPnpmPolicy,
   checkRenovatePolicy,
   checkRuntimeDependencies,
   checkWorkflow,
-  runtimeClosure,
 } from "../check-supply-chain.mjs";
 import { disallowed, flatten } from "../generate-notices.mjs";
 import { parseJsonc } from "../lib/repo.mjs";
@@ -124,54 +124,37 @@ describe("supply chain", () => {
     ).toEqual(["ci.yml: uses pull_request_target"]);
   });
 
-  it("lists the Worker's runtime closure and flags unreviewed packages", () => {
-    const lock = `
-importers:
-  apps/worker:
-    dependencies:
-      '@opa/db': { specifier: 'workspace:*', version: link:../../packages/db }
-      hono: { specifier: 4.0.0, version: 4.0.0 }
-    devDependencies:
-      vitest: { specifier: 1.0.0, version: 1.0.0 }
-  packages/db:
-    dependencies:
-      drizzle-orm: { specifier: 1.0.0, version: 1.0.0(@cloudflare/workers-types@5.0.0) }
-snapshots:
-  hono@4.0.0: {}
-  vitest@1.0.0: { dependencies: { evil: 1.0.0 } }
-  drizzle-orm@1.0.0(@cloudflare/workers-types@5.0.0):
-    dependencies: { '@cloudflare/workers-types': 5.0.0, left-pad: 2.0.0 }
-    optionalDependencies: { strip: string-width@4.0.0 }
-`;
-    expect(runtimeClosure(lock)).toEqual([
-      "@cloudflare/workers-types",
-      "drizzle-orm",
-      "hono",
-      "left-pad",
-      "string-width",
-    ]);
-    expect(checkRuntimeDependencies(lock)).toHaveLength(2);
-    expect(checkRuntimeDependencies(lock)[1]).toContain('"string-width"');
+  it("lists the packages in the Worker bundle and flags unreviewed ones", () => {
+    const pnpm = "node_modules/.pnpm";
+    const meta = JSON.stringify({
+      inputs: {
+        "apps/worker/src/index.ts": {},
+        "packages/db/src/repository.ts": {},
+        "node-built-in-modules:path": {},
+        [`${pnpm}/hono@4.0.0/node_modules/hono/dist/index.js`]: {},
+        [`${pnpm}/agents@0.32.0_vite@8.0.0/node_modules/agents/dist/index.js`]: {},
+        [`${pnpm}/@scope+pkg@1.0.0/node_modules/@scope/pkg/index.js`]: {},
+        "../outside/evil.js": {},
+      },
+    });
+    expect(bundledPackages(meta)).toEqual(["../outside/evil.js", "@scope/pkg", "agents", "hono"]);
+    expect(checkRuntimeDependencies(meta)).toHaveLength(2);
+    expect(checkRuntimeDependencies(meta)[1]).toContain('"@scope/pkg"');
   });
 
-  it("follows importer optional dependencies and aliases", () => {
-    const lock = `
-importers:
-  apps/worker:
-    dependencies:
-      hono: { specifier: npm:evil@1.0.0, version: evil@1.0.0 }
-    optionalDependencies:
-      extra: { specifier: 1.0.0, version: 1.0.0 }
-snapshots:
-  evil@1.0.0: {}
-  extra@1.0.0: { dependencies: { deep: 2.0.0 } }
-`;
-    expect(runtimeClosure(lock)).toEqual(["deep", "evil", "extra"]);
+  it("doesn't count a build-only peer the bundle doesn't contain", () => {
+    // agents' lockfile snapshot lists vite as a dependency; esbuild never bundles it.
+    const meta = JSON.stringify({
+      inputs: { "node_modules/.pnpm/agents@0.32.0_vite@8.0.0/node_modules/agents/x.js": {} },
+    });
+    expect(bundledPackages(meta)).toEqual(["agents"]);
+    expect(checkRuntimeDependencies(meta)).toEqual([]);
   });
 
-  it("fails when the lockfile is missing", () => {
+  it("fails when the metafile is missing", () => {
     expect(checkRuntimeDependencies(null)).toEqual([
-      "pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked",
+      "dist/worker-meta.json: missing, so the Worker's bundled packages can't be checked; " +
+        "run `pnpm deploy:dry-run` first",
     ]);
   });
 });

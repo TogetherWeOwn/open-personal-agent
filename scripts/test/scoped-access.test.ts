@@ -97,4 +97,24 @@ describe("worker bundle check", () => {
     expect(findBundleViolations(bundle(dep, KEY), [entry])).toEqual([]);
     expect(findBundleViolations(bundle(dep, KEY), [{ ...entry, reason: "" }])).toHaveLength(1);
   });
+
+  it("fails when a dependency puts the module on globalThis, unless its symbol is the scrubbed one", () => {
+    const parks = (name: string) =>
+      `import * as cfw from "cloudflare:workers";\nvar S = Symbol("${name}");\nglobalThis[S] = cfw;`;
+    expect(findBundleViolations(bundle(dep, parks("workers-module")))).toEqual([
+      `${dep}: cloudflare-env (ADR 0010 D4.1 #3)`,
+      `${dep}: global-module (ADR 0010 D4.1 #3)`,
+    ]);
+    const allow = [
+      { module: dep, rule: "cloudflare-env", reason: "reviewed" },
+      { module: dep, rule: "global-module", reason: "reviewed", symbol: "workers-module" },
+    ];
+    expect(findBundleViolations(bundle(dep, parks("workers-module")), allow)).toEqual([]);
+    // A renamed symbol would slip past the scrub in src/index.ts.
+    expect(findBundleViolations(bundle(dep, parks("renamed")), allow)).toEqual([
+      `${dep}: global-module (ADR 0010 D4.1 #3)`,
+    ]);
+    const dotted = 'import * as w from "cloudflare:workers";\nglobalThis.mod = w;';
+    expect(findBundleViolations(bundle(dep, dotted), allow.slice(0, 1))).toHaveLength(1);
+  });
 });

@@ -48,7 +48,7 @@ a base URL can't be used to read your network. To use a model server on the same
 | `pnpm deploy:dry-run`             | Builds and bundles the Worker without deploying it                        |
 | `pnpm test:harness`               | Boots the dry-run bundle with `createTestHarness` (run it after)          |
 | `pnpm test:node`                  | Node adapters' storage contract, then boots `apps/node` (after `build`)   |
-| `pnpm check`                      | Ports rule, dependency guard, builder independence, supply chain          |
+| `pnpm check`                      | Dry run, ports rule, dependency guard, builder independence, supply chain |
 | `pnpm notices`                    | Writes `dist/THIRD_PARTY_NOTICES.md` for production dependencies          |
 | `pnpm --filter @opa/web test:e2e` | Playwright: axe, keyboard send and screenshot baselines (`visual` CI job) |
 

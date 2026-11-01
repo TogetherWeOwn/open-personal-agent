@@ -29,5 +29,6 @@ export default defineProject({
   test: {
     name: "worker",
     include: ["test/**/*.test.ts"],
+    testTimeout: 15_000, // a file's first test also loads the Worker bundle, Agents SDK included
   },
 });

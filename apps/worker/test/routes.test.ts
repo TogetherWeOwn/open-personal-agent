@@ -2,10 +2,11 @@
 // R7 M2-1 (every non-public route needs a session) and M2-3 (the public list is exact).
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { app, createApp } from "../src/app";
+import { createApp } from "../src/app";
 import { SESSION_COOKIE } from "../src/auth";
 import type { AppEnv } from "../src/env";
 import { PUBLIC_ROUTES } from "../src/session";
+import { workerApp as app } from "../src/worker-app";
 import { Browser, claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
 freshDatabase();

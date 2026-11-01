@@ -3,9 +3,9 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { beforeAll, beforeEach } from "vitest";
-import { app } from "../../src/app";
 import { newSession, SESSION_COOKIE } from "../../src/auth";
 import type { Env } from "../../src/env";
+import { workerApp as app } from "../../src/worker-app";
 import { SoftPasskey } from "./softauthn";
 
 export const ORIGIN = "https://opa.test";
