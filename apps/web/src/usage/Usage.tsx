@@ -11,7 +11,7 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from "react-aria-components";
-import { Page } from "../ui";
+import { buttonClass, Page } from "../ui";
 
 interface Line {
   model: string;
@@ -233,9 +233,6 @@ export function Usage() {
   const label = key === "today" ? "today" : "this month";
   return (
     <Page title="Usage">
-      <Link href="/" className={`${link} self-start`}>
-        <span aria-hidden="true">← </span>Chats
-      </Link>
       {failed && <p role="alert">Usage couldn't be loaded. Try again in a moment.</p>}
       {data && period && (
         <>
@@ -277,10 +274,7 @@ export function Usage() {
           {period.groups.length === 0 ? (
             <div className="flex flex-col items-start gap-3">
               <p>No usage yet. Once you chat, you'll see what each message costs here.</p>
-              <Link
-                href="/"
-                className="inline-flex min-h-11 items-center rounded-lg bg-accent px-4 font-medium text-accent-contrast"
-              >
+              <Link href="/" className={buttonClass("primary")}>
                 Start a chat
               </Link>
             </div>

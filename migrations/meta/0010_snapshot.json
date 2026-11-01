@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a8c2b3c4-8016-4c9c-b431-4c2465b99ac6",
+  "id": "99f542f1-8b63-45a6-bdb0-e87e44b310d5",
   "prevId": "9abd3d08-d743-402b-8e1b-7005dadd8c1a",
   "tables": {
     "attachments": {
@@ -293,107 +293,6 @@
           "columnsFrom": ["model_provider"],
           "columnsTo": ["id"],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "exports": {
-      "name": "exports",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'running'"
-        },
-        "workflow_instance_id": {
-          "name": "workflow_instance_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "size_bytes": {
-          "name": "size_bytes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        },
-        "ready_at": {
-          "name": "ready_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "exports_workflow_instance_id_unique": {
-          "name": "exports_workflow_instance_id_unique",
-          "columns": ["workflow_instance_id"],
-          "isUnique": true
-        },
-        "exports_user_idx": {
-          "name": "exports_user_idx",
-          "columns": ["user_id", "created_at"],
-          "isUnique": false
-        },
-        "exports_sweep_idx": {
-          "name": "exports_sweep_idx",
-          "columns": ["status", "expires_at"],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "exports_user_id_users_id_fk": {
-          "name": "exports_user_id_users_id_fk",
-          "tableFrom": "exports",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -1371,6 +1270,102 @@
           "value": "\"setup_state\".\"id\" = 1"
         }
       }
+    },
+    "task_events": {
+      "name": "task_events",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "instance_id": {
+          "name": "instance_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "payload": {
+          "name": "payload",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {
+        "task_events_instance_idx": {
+          "name": "task_events_instance_idx",
+          "columns": ["instance_id", "id"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "task_steps": {
+      "name": "task_steps",
+      "columns": {
+        "instance_id": {
+          "name": "instance_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "output": {
+          "name": "output",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "task_steps_instance_id_name_pk": {
+          "columns": ["instance_id", "name"],
+          "name": "task_steps_instance_id_name_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "tasks": {
       "name": "tasks",
