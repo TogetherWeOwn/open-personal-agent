@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { findDependencyViolations, findPortViolations } from "../check-boundaries.mjs";
 import { findViolations } from "../check-builder-independence.mjs";
 import { checkBudget, findLeakedNames, serverOnlyNames } from "../check-bundles.mjs";
-import { checkPnpmPolicy, checkRenovatePolicy, checkWorkflow } from "../check-supply-chain.mjs";
+import {
+  checkPnpmPolicy,
+  checkRenovatePolicy,
+  checkRuntimeDependencies,
+  checkWorkflow,
+  runtimeClosure,
+} from "../check-supply-chain.mjs";
 import { disallowed, flatten } from "../generate-notices.mjs";
 
 // Denylisted words are assembled at runtime so this file passes its own scan.
@@ -91,6 +97,36 @@ describe("supply chain", () => {
     expect(
       checkWorkflow("ci.yml", `on: [push, ${trigger}]\npermissions:\n  contents: read\n`),
     ).toEqual(["ci.yml: uses pull_request_target"]);
+  });
+
+  it("lists the Worker's runtime closure and flags unreviewed packages", () => {
+    const lock = `
+importers:
+  apps/worker:
+    dependencies:
+      '@opa/db': { specifier: 'workspace:*', version: link:../../packages/db }
+      hono: { specifier: 4.0.0, version: 4.0.0 }
+    devDependencies:
+      vitest: { specifier: 1.0.0, version: 1.0.0 }
+  packages/db:
+    dependencies:
+      drizzle-orm: { specifier: 1.0.0, version: 1.0.0(@cloudflare/workers-types@5.0.0) }
+snapshots:
+  hono@4.0.0: {}
+  vitest@1.0.0: { dependencies: { evil: 1.0.0 } }
+  drizzle-orm@1.0.0(@cloudflare/workers-types@5.0.0):
+    dependencies: { '@cloudflare/workers-types': 5.0.0, tslib: 2.0.0 }
+    optionalDependencies: { strip: string-width@4.0.0 }
+`;
+    expect(runtimeClosure(lock)).toEqual([
+      "@cloudflare/workers-types",
+      "drizzle-orm",
+      "hono",
+      "string-width",
+      "tslib",
+    ]);
+    expect(checkRuntimeDependencies(lock)).toHaveLength(2);
+    expect(checkRuntimeDependencies(lock)[0]).toContain('"string-width"');
   });
 });
 

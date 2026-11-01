@@ -1,14 +1,66 @@
 // SPDX-License-Identifier: Apache-2.0
 // Supply-chain policy (ADR 0010 D12; R7 M2-9, M2-10): a reviewed build-script allowlist, a
 // minimum release age in pnpm and Renovate, and workflows that pin every action by commit SHA,
-// default to read-only permissions and never use `pull_request_target`.
+// default to read-only permissions and never use `pull_request_target`. Also ADR 0010 D4.1 #8:
+// every third-party package the Worker can bundle is on a reviewed list.
+
 import { readdirSync } from "node:fs";
+import { posix } from "node:path";
 import { parse } from "yaml";
 import { isMain, readText, report, repoTextFiles } from "./lib/repo.mjs";
 
 /** Packages whose install scripts were reviewed. Extend only with a reviewed PR. */
 export const REVIEWED_BUILDS = ["esbuild", "workerd"];
 export const MIN_RELEASE_AGE_MINUTES = 1440;
+
+/**
+ * Third-party packages in the Worker's runtime dependency closure (D4.1 #8). Any of them can read
+ * `OPA_MASTER_KEY` at runtime (D4 residual risk), so a PR that extends this list needs a Security
+ * Engineer review stage. Version bumps don't; a new package, direct or transitive, does.
+ */
+export const REVIEWED_RUNTIME = ["@cloudflare/workers-types", "drizzle-orm", "hono"];
+export const WORKER_IMPORTER = "apps/worker";
+
+/** Every third-party package `apps/worker` reaches through `dependencies`, from pnpm-lock.yaml. */
+export function runtimeClosure(lockYaml, importer = WORKER_IMPORTER) {
+  const lock = parse(lockYaml) ?? {};
+  const seen = new Set();
+  const names = new Set();
+  const visitPackage = (key) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    names.add(key.slice(0, key.indexOf("@", 1)));
+    const snap = lock.snapshots?.[key] ?? {};
+    for (const [name, version] of Object.entries({
+      ...snap.dependencies,
+      ...snap.optionalDependencies,
+    })) {
+      // An alias (`npm:other@1`) is recorded as the full `other@1` key.
+      visitPackage(version.split("(")[0].includes("@") ? version : `${name}@${version}`);
+    }
+  };
+  const visitImporter = (dir) => {
+    if (seen.has(`link:${dir}`)) return;
+    seen.add(`link:${dir}`);
+    // Workspace packages are bundled too, so their dependencies count.
+    for (const [name, { version }] of Object.entries(lock.importers?.[dir]?.dependencies ?? {})) {
+      if (version.startsWith("link:")) visitImporter(posix.join(dir, version.slice(5)));
+      else visitPackage(`${name}@${version}`);
+    }
+  };
+  visitImporter(importer);
+  return [...names].sort();
+}
+
+export function checkRuntimeDependencies(lockYaml) {
+  return runtimeClosure(lockYaml)
+    .filter((name) => !REVIEWED_RUNTIME.includes(name))
+    .map(
+      (name) =>
+        `pnpm-lock.yaml: "${name}" is bundled into the Worker unreviewed; add it to ` +
+        "REVIEWED_RUNTIME with a Security Engineer review (ADR 0010 D4.1 #8)",
+    );
+}
 
 export function checkPnpmPolicy(workspaceYaml) {
   const ws = parse(workspaceYaml) ?? {};
@@ -79,6 +131,7 @@ if (isMain(import.meta.url)) {
   report("supply-chain", [
     ...checkPnpmPolicy(readText("pnpm-workspace.yaml") ?? ""),
     ...checkRenovatePolicy(readText("renovate.json")),
+    ...checkRuntimeDependencies(readText("pnpm-lock.yaml") ?? ""),
     ...workflows.flatMap((f) => checkWorkflow(`${dir}/${f}`, readText(`${dir}/${f}`) ?? "")),
     ...actions.flatMap((f) => checkPins(f.path, parse(f.text))),
   ]);
