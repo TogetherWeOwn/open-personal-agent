@@ -97,6 +97,15 @@ describe("scoped repository", () => {
     expect(await bob?.turns.save({ ...saved, turnId: "turn-bob" })).toBe(false);
     await bob?.turns.remove("turn-1");
     expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    // A turn_id Bob already owns is never overwritten by Alice's save: the scoped conflict
+    // update touches nothing, reports `false`, and both rows read back as before.
+    await bob?.createConversation("turns-c2", "Bob's turns");
+    await env.DB.prepare(
+      "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state, updated_at) VALUES ('turn-2', 'bob', 'turns-c2', 'reply-2', 'test', 'test-model', 'awaiting_approval', '{}', 0)",
+    ).run();
+    expect(await alice?.turns.save({ ...saved, turnId: "turn-2" })).toBe(false);
+    expect(await alice?.turns.load("turn-2")).toBeUndefined();
+    expect(await bob?.turns.load("turn-2")).toMatchObject({ conversationId: "turns-c2" });
     // A second stop replaces the first in place.
     expect(await alice?.turns.save({ ...saved, status: "limit_reached", state: "{}" })).toBe(true);
     expect((await alice?.turns.load("turn-1"))?.status).toBe("limit_reached");

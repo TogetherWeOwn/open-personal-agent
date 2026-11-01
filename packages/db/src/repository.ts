@@ -537,15 +537,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          * DO's hibernation, eviction and redeploy, and removing it is part of settling.
          */
         turns: {
-          /** Saves (or refreshes) a stopped turn; `false` if the conversation isn't the user's. */
+          /**
+           * Saves (or refreshes) a stopped turn; `false` if the conversation isn't the user's,
+           * or the row isn't (a `turnId` that ever collided, or came from the caller, can never
+           * overwrite another user's row — the scoped conflict update touches nothing).
+           */
           save: async (turn: SavedTurn) => {
             if (!(await getConversation(turn.conversationId))) return false;
             const set = { ...turn, updatedAt: Date.now() };
-            await db
+            const rows = await db
               .insert(turnStates)
               .values({ ...set, userId })
-              .onConflictDoUpdate({ target: turnStates.turnId, set });
-            return true;
+              .onConflictDoUpdate({
+                target: turnStates.turnId,
+                set,
+                setWhere: eq(turnStates.userId, userId),
+              })
+              .returning({ turnId: turnStates.turnId });
+            return rows.length > 0;
           },
           /** A stopped turn by ID, or `undefined` when it is missing or someone else's. */
           load: async (turnId: string) =>

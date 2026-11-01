@@ -602,6 +602,90 @@ describe("the DO host for the builtin loop (M3-03c)", () => {
     ]);
   });
 
+  it("runs one loop for two concurrent approves: one tool run, one more ledger row", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const provider = replying([{ calls: [["send", { q: "hi" }]] }, { text: "Sent" }]);
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-race", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    if (!asked) throw new Error("no approval.requested");
+    const { batchId, items } = asked.payload;
+    const approvalId = items[0]?.approvalId;
+    if (!approvalId) throw new Error("no approval item");
+    const { turnId } = asked;
+    const decisions = [{ approvalId, decision: "approve" as const, scope: "once" as const }];
+    // A double-clicked Approve, two tabs, a retried 07a request: both calls start without
+    // awaiting between them, so both would load the same `awaiting_approval` row if the claim
+    // weren't held before the first await (S1).
+    const [first, second] = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      Promise.all([
+        i.resumeWithDecisions({ turnId, batchId, decisions }),
+        i.resumeWithDecisions({ turnId, batchId, decisions }),
+      ]),
+    );
+    expect([first, second].sort()).toEqual([false, true]);
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([{ q: "hi" }]); // the approved tool ran once
+    expect(await count("usage", "conversation_id = 'conv-race'")).toBe(2); // one row per call
+  });
+
+  it("rejects a chat.send while a resume is still starting", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const provider = replying([{ calls: [["send", { q: "hi" }]] }, { text: "Sent" }]);
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-busy", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    if (!asked) throw new Error("no approval.requested");
+    const { batchId, items } = asked.payload;
+    const approvalId = items[0]?.approvalId;
+    if (!approvalId) throw new Error("no approval item");
+    const { turnId } = asked;
+    // The resume parks in its model pick; the claim is already held (S1), so a send arriving
+    // before the drive starts is rejected instead of starting a second loop. The releaser rides
+    // on the instance because only the DO can reach the gate.
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      (i as unknown as { releaseResume: () => void }).releaseResume = release;
+      i.resolveModel = (async () => {
+        await gate;
+        return { provider, model: "test-model", apiKey: null };
+      }) as Assistant["resolveModel"];
+      void i.resumeWithDecisions({
+        turnId,
+        batchId,
+        decisions: [{ approvalId, decision: "approve" as const, scope: "once" as const }],
+      });
+    });
+    tab.send?.("conv-busy", "Are you still there?");
+    await tab.until?.("turn.failed");
+    expect(tab.events.find((e) => e.type === "turn.failed")).toMatchObject({
+      payload: { message: "Another reply is still being written." },
+    });
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      (i as unknown as { releaseResume: () => void }).releaseResume(),
+    );
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([{ q: "hi" }]);
+    expect(await count("usage", "conversation_id = 'conv-busy'")).toBe(2);
+  });
+
   it("stops at the call limit in D1 and a Continue runs it to the end", async () => {
     const { browser, owner } = await claim();
     const lookup = loopTool("lookup", "read");

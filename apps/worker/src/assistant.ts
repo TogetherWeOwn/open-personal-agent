@@ -479,34 +479,63 @@ export class Assistant extends Agent<Bindings> {
     batchId: string;
     decisions: ApprovalDecision[];
   }): Promise<boolean> {
+    // Claimed before the first await: D1 and vault I/O don't hold the DO's input gate, so two
+    // decision calls for one turn (a double-clicked Approve, two tabs, a retried 07a request)
+    // would otherwise both load the same `awaiting_approval` row and run its approved tools
+    // twice. A `chat.send` arriving mid-resume is rejected the same way.
     if (this.#running) return false;
-    const saved = await this.#repo.turns.load(input.turnId);
-    if (saved?.status !== "awaiting_approval") return false;
-    const state = parseTurnState(saved.state);
-    if (!state) {
-      await this.#dropCorrupt(saved);
-      return false;
+    const running = new AbortController();
+    this.#running = running;
+    let started = false;
+    try {
+      const saved = await this.#repo.turns.load(input.turnId);
+      if (saved?.status !== "awaiting_approval") return false;
+      const state = parseTurnState(saved.state);
+      if (!state) {
+        await this.#dropCorrupt(saved);
+        return false;
+      }
+      resolveApprovals(state, input.batchId, input.decisions, Date.now());
+      started = await this.#resume(saved, state, running);
+      return started;
+    } finally {
+      // The fiber owns the claim once a drive starts; every other exit — `false`, an
+      // `ApprovalError`, a D1 failure — releases it here. (`#resume` releases the claim itself
+      // on its re-stop path, where it returns `true` without starting a fiber.)
+      if (!started && this.#running === running) this.#running = null;
     }
-    resolveApprovals(state, input.batchId, input.decisions, Date.now());
-    return this.#resume(saved, state);
   }
 
   /** Resumes a turn stopped at its call or tool limit, with a fresh allowance (its Continue). */
   async resumeAfterLimit(turnId: string): Promise<boolean> {
+    // Claimed before the first await, as above: a second Continue, or a `chat.send`, arriving
+    // mid-resume must not start a second loop for the turn.
     if (this.#running) return false;
-    const saved = await this.#repo.turns.load(turnId);
-    if (saved?.status !== "limit_reached") return false;
-    const state = parseTurnState(saved.state);
-    if (!state) {
-      await this.#dropCorrupt(saved);
-      return false;
+    const running = new AbortController();
+    this.#running = running;
+    let started = false;
+    try {
+      const saved = await this.#repo.turns.load(turnId);
+      if (saved?.status !== "limit_reached") return false;
+      const state = parseTurnState(saved.state);
+      if (!state) {
+        await this.#dropCorrupt(saved);
+        return false;
+      }
+      continueTurn(state);
+      started = await this.#resume(saved, state, running);
+      return started;
+    } finally {
+      if (!started && this.#running === running) this.#running = null;
     }
-    continueTurn(state);
-    return this.#resume(saved, state);
   }
 
-  /** Runs a saved turn again from its D1 state: a fresh model pick, history and first hold. */
-  async #resume(saved: SavedTurn, state: TurnState): Promise<boolean> {
+  /**
+   * Runs a saved turn again from its D1 state: a fresh model pick, history and first hold.
+   * `running` is the caller's claim, held since before the first await; the fiber owns it once a
+   * drive starts, and every path that starts no fiber releases it.
+   */
+  async #resume(saved: SavedTurn, state: TurnState, running: AbortController): Promise<boolean> {
     const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
     if ("error" in picked) return false; // the saved turn stays for a retry once a model is set
     const { provider, model } = picked;
@@ -533,23 +562,24 @@ export class Assistant extends Agent<Bindings> {
     const chars = [...history, ...state.messages].reduce((sum, m) => sum + m.content.length, 0);
     const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars);
     if (!reservation) {
-      // Stops again at today's limit. Decisions recorded on the state stay recorded.
-      await repo.turns.save({
+      // Stops again at today's limit. Decisions recorded on the state stay recorded. No fiber
+      // starts, so the caller's claim is released here.
+      const restopped = await repo.turns.save({
         ...saved,
         providerId: cp.providerId,
         model,
         status: "limit_reached",
         state: JSON.stringify(state),
       });
+      if (!restopped) throw new Error("the turn's conversation is gone");
       this.#emitter(saved.conversationId, saved.turnId)("limit.reached", {
         kind: "daily",
         detail: "Today's spending limit",
       });
+      if (this.#running === running) this.#running = null;
       return true;
     }
     cp.holds = [firstHold];
-    const running = new AbortController();
-    this.#running = running;
     void this.runFiber("chat-turn", async (fiber) => {
       fiber.stash(cp);
       await this.#sweepTabs();
