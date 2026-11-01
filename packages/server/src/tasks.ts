@@ -6,7 +6,7 @@
 // Continue and Stop on a task paused by a limit (M3-17 AC1, A-Co2; m3-ux Flow D). The route
 // changes D1 and the user's limits first and only then wakes the task's Workflow, whose run reads
 // what happened from D1 and never from the event (M3-12 AC3).
-import { createRepository, isId } from "@opa/db/repository";
+import { createRepository, isId, TASK_LIMIT_KINDS, type TaskLimitKind } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
 import type { AppEnv } from "./env";
 
@@ -127,8 +127,12 @@ taskRoutes.post("/:id/continue", async (c) => {
     return c.json({ error: "not_paused" }, 409);
   }
   if (!(await wake(c, task.workflowInstanceId))) {
-    // Nothing woke the run: put the row back as it was.
-    await user.tasks.finish(task.id, "budget_limited");
+    // Nothing woke the run: put the row back as it was, keeping the limit kind it paused
+    // with so the Tasks view keeps its "Paused" label.
+    const limitKind = (TASK_LIMIT_KINDS as readonly string[]).includes(kind ?? "")
+      ? (kind as TaskLimitKind)
+      : null;
+    await user.tasks.finish(task.id, "budget_limited", undefined, limitKind);
     await undo();
     return c.json({ error: "ended" }, 409);
   }

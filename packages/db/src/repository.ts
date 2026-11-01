@@ -1312,9 +1312,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 limitKind: tasks.limitKind,
                 error: tasks.error,
                 costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                // The left join's null usage row is not a call: without it a task with no
+                // usage would report one unpriced call alongside zero calls.
                 unpriced: sql<
                   number | null
-                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
+                >`sum(case when ${usage.id} is not null and ${usage.costMicroUsd} is null then 1 else 0 end)`.as(
+                  "unpriced",
+                ),
                 calls: count(usage.id).as("calls"),
                 createdAt: tasks.createdAt,
                 updatedAt: tasks.updatedAt,

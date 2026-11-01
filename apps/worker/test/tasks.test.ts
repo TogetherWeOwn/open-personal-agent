@@ -188,6 +188,8 @@ describe("task rows", () => {
       conversationTitle: "Alice's",
     });
     expect(details?.costMicroUsd).toBe(report?.costMicroUsd);
+    // A task with no usage reads as zero calls and zero unpriced, like the list.
+    expect(await alice.tasks.details("t12")).toMatchObject({ calls: 0, unpricedCalls: 0 });
     expect(await alice.tasks.details("missing")).toBeUndefined();
     expect(await bob.tasks.details("t11")).toBeUndefined(); // someone else's run
 
