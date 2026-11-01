@@ -304,4 +304,49 @@ describe("the daily sweep", () => {
     await runRetention({ DB: env.DB, FILES: env.FILES }, Date.now() + DAY_MS);
     expect(await count("conversations", "id = 'idle2'")).toBe(0);
   });
+
+  it("records what a user's sweep removed before a later step failed", async () => {
+    await user("u1");
+    await setRetention("u1", 30);
+    await chat("u1", "idle", OLD);
+    const list = () => Promise.reject(new Error("R2 is down"));
+    const broken = retentionStore({
+      DB: env.DB,
+      FILES: Object.assign(Object.create(env.FILES), { list }),
+    });
+    expect(await broken.sweep(NOW)).toMatchObject({ conversations: 1, failed: 1 });
+    expect(await sweepRows()).toEqual([
+      {
+        userId: "u1",
+        result: "error",
+        conversations: 1,
+        toolOutputs: 0,
+        proposals: 0,
+        stepOutputs: 0,
+      },
+      expect.objectContaining({ userId: null, result: "error", conversations: 1, failed: 1 }),
+    ]);
+  });
+
+  it("keeps an abandoned upload's row when its object can't be deleted, for the next tick", async () => {
+    const u1 = await user("u1");
+    await env.FILES.put("u/u1/attachments/a1", "x");
+    await u1.attachments.create({
+      id: "a1",
+      name: "a1",
+      mediaType: "text/plain",
+      kind: "text",
+      sizeBytes: 1,
+    });
+    const del = () => Promise.reject(new Error("R2 is down"));
+    const broken = retentionStore({
+      DB: env.DB,
+      FILES: Object.assign(Object.create(env.FILES), { delete: del }),
+    });
+    const later = Date.now() + 2 * DAY_MS;
+    expect(await broken.collectUploads(later)).toBe(0);
+    expect(await count("attachments", "id = 'a1'")).toBe(1);
+    expect(await store().collectUploads(later)).toBe(1);
+    expect(await env.FILES.head("u/u1/attachments/a1")).toBeNull();
+  });
 });

@@ -266,34 +266,45 @@ export function retentionStore({ DB, FILES }: Bindings) {
       for (const row of rows) {
         const { userId } = row;
         const settings = toSettings(row);
+        // Filled step by step, so a later step that throws still leaves the earlier deletions
+        // in the user's audit row and the totals.
+        const counts: SweepCounts = {
+          conversations: 0,
+          toolOutputs: 0,
+          proposals: 0,
+          stepOutputs: 0,
+        };
+        let result: "ok" | "error" = "ok";
         try {
-          const counts: SweepCounts = {
-            conversations: settings.messageDays
-              ? await sweepConversations(userId, now - settings.messageDays * DAY_MS)
-              : 0,
-            toolOutputs: settings.toolOutputDays
-              ? await sweepToolOutputs(
-                  userId,
-                  now - settings.toolOutputDays * DAY_MS,
-                  settings.toolOutputDays,
-                  now,
-                )
-              : 0,
-            proposals: await memoryService(db, userId).expire(now),
-            stepOutputs: await sweepStepOutputs(userId, now),
-          };
-          for (const k of Object.keys(totals) as (keyof SweepCounts)[]) totals[k] += counts[k];
-          if (Object.values(counts).some((n) => n > 0)) {
-            await db.insert(auditLog).values({
+          if (settings.messageDays) {
+            counts.conversations = await sweepConversations(
               userId,
-              action: sweepAction,
-              module: "retention",
-              result: "ok",
-              detail: JSON.stringify(counts),
-            });
+              now - settings.messageDays * DAY_MS,
+            );
           }
+          if (settings.toolOutputDays) {
+            counts.toolOutputs = await sweepToolOutputs(
+              userId,
+              now - settings.toolOutputDays * DAY_MS,
+              settings.toolOutputDays,
+              now,
+            );
+          }
+          counts.proposals = await memoryService(db, userId).expire(now);
+          counts.stepOutputs = await sweepStepOutputs(userId, now);
         } catch {
+          result = "error";
           failed++;
+        }
+        for (const k of Object.keys(totals) as (keyof SweepCounts)[]) totals[k] += counts[k];
+        if (result === "error" || Object.values(counts).some((n) => n > 0)) {
+          await db.insert(auditLog).values({
+            userId,
+            action: sweepAction,
+            module: "retention",
+            result,
+            detail: JSON.stringify(counts),
+          });
         }
       }
       await db.insert(auditLog).values({
@@ -309,7 +320,8 @@ export function retentionStore({ DB, FILES }: Bindings) {
     /**
      * The reconciler's R2 collection (AC2): uploads no message took within a day, including the
      * files of chats the sweep deleted. The row goes first, on the same condition, so a file sent
-     * meanwhile keeps its bytes. Returns how many were removed.
+     * meanwhile keeps its bytes; a row whose object can't be deleted is put back for the next
+     * tick. Returns how many were removed.
      */
     collectUploads: async (now: number) => {
       const stale = await db
@@ -326,9 +338,18 @@ export function retentionStore({ DB, FILES }: Bindings) {
               .limit(SWEEP_BATCH),
           ),
         )
-        .returning({ id: attachments.id, userId: attachments.userId });
-      for (const { id, userId } of stale) await FILES.delete(attachmentKey(userId, id));
-      return stale.length;
+        .returning();
+      let removed = 0;
+      for (const row of stale) {
+        try {
+          await FILES.delete(attachmentKey(row.userId, row.id));
+          removed++;
+        } catch {
+          // Put the row back, so the next tick finds the bytes again.
+          await db.insert(attachments).values(row).onConflictDoNothing();
+        }
+      }
+      return removed;
     },
   };
 }
