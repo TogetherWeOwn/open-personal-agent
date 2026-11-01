@@ -132,7 +132,12 @@ export class Assistant extends Agent<Bindings> {
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }));
     // Every tab gets the reply, so first close those whose session has ended since they opened.
-    await Promise.all([...this.getConnections()].map((tab) => this.#sessionLive(tab)));
+    // A check that fails closes its tab too, rather than sending to it or failing the turn.
+    await Promise.all(
+      [...this.getConnections()].map((tab) =>
+        this.#sessionLive(tab).catch(() => tab.close(4401, "unauthenticated")),
+      ),
+    );
     emit("turn.started", { messageId: turn.replyId });
     turn.called = true;
     stash(turn);
