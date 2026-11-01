@@ -3,7 +3,7 @@
 // Three deterministic stubs on synthetic data: a Workflow with named steps and a D1 dedupe
 // ledger (T3), a hibernating WebSocket DO that replays numbered events (T4), and an AI-binding
 // proxy that only dispatches to the approved stub registry (T7). No product code, no live tools.
-import { WorkflowEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkflowEntrypoint, type WorkflowStep } from "cloudflare:workers";
 
 export interface FixtureEnv {
   DB: D1Database;
@@ -11,6 +11,10 @@ export interface FixtureEnv {
   AI: Ai;
   VERIFY_SOCKET: DurableObjectNamespace;
   VERIFY_WORKFLOW: Workflow;
+  /** Pinned starter model under test; the driver writes it into the generated config at deploy. */
+  VERIFY_T7_MODEL: string;
+  /** Per-campaign bearer the driver pushes with `wrangler secret put` right after deploy. */
+  CF_VERIFY_BEARER?: string;
 }
 
 const LEDGER_DDL =
@@ -50,7 +54,8 @@ export class VerifyWorkflow extends WorkflowEntrypoint<
     }
     if (kind === "wait") {
       // A real platform wait: comfortably above 25 h, inside the 48 h campaign.
-      const approval = await step.waitForEvent<WorkflowEvent<string>>("approval", {
+      const approval = await step.waitForEvent<string>("approval", {
+        type: "approval",
         timeout: "40 hours",
       });
       return await step.do("complete-after-approval", async () => {
@@ -62,7 +67,8 @@ export class VerifyWorkflow extends WorkflowEntrypoint<
     await step.do("bounded-first-step", async () => {
       await commit(this.env.DB, id, "cancel-step-1", "done");
     });
-    const late = await step.waitForEvent<WorkflowEvent<string>>("late-event", {
+    const late = await step.waitForEvent<string>("late-event", {
+      type: "late-event",
       timeout: "40 hours",
     });
     return await step.do("must-never-run-after-cancel", async () => {
@@ -123,10 +129,56 @@ const STUBS = {
   artifactRef: (args: { tag: string }) => ({ ref: `synthetic:${args.tag}` }),
 };
 
+/** Fail closed: without the bearer every route but /health is 401, even before `secret put`. */
+function authorized(request: Request, env: FixtureEnv): boolean {
+  const url = new URL(request.url);
+  if (url.pathname === "/health") return true;
+  const bearer = env.CF_VERIFY_BEARER;
+  if (!bearer) return false;
+  // Node's WebSocket client cannot set headers, so /t4/socket also accepts the bearer as a
+  // query param. Every other route requires the Authorization header. Either way the value
+  // never lands in logs or artifacts: the driver redacts it from everything it records.
+  const header = request.headers.get("authorization");
+  const candidate =
+    header?.startsWith("Bearer ") && url.pathname !== "/t4/socket"
+      ? header.slice("Bearer ".length)
+      : url.pathname === "/t4/socket"
+        ? header?.startsWith("Bearer ")
+          ? header.slice("Bearer ".length)
+          : url.searchParams.get("bearer")
+        : null;
+  if (candidate === null || candidate.length !== bearer.length) return false;
+  let diff = 0;
+  for (let i = 0; i < bearer.length; i++) diff |= bearer.charCodeAt(i) ^ candidate.charCodeAt(i);
+  return diff === 0;
+}
+
+type StubArgs = Record<string, unknown>;
+
+/** Validate one model's tool arguments against the stub's schema and run it. */
+function runStub(name: string, args: unknown): unknown {
+  const a = (typeof args === "string" ? JSON.parse(args) : args) as StubArgs;
+  if (name === "lookupRecord") {
+    if (typeof a?.id !== "string") throw new Error("lookupRecord needs a string id");
+    return STUBS.lookupRecord({ id: a.id });
+  }
+  if (name === "add") {
+    if (typeof a?.a !== "number" || typeof a?.b !== "number")
+      throw new Error("add needs numeric a and b");
+    return STUBS.add({ a: a.a, b: a.b });
+  }
+  if (name === "artifactRef") {
+    if (typeof a?.tag !== "string") throw new Error("artifactRef needs a string tag");
+    return STUBS.artifactRef({ tag: a.tag });
+  }
+  throw new Error(`not-a-stub: ${name}`);
+}
+
 export default {
   async fetch(request: Request, env: FixtureEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return Response.json({ status: "ok", fixture: "t3t4t7" });
+    if (!authorized(request, env)) return new Response("unauthorized", { status: 401 });
     if (url.pathname === "/t3/instance" && request.method === "POST") {
       const { id, kind } = (await request.json()) as { id: string; kind: WorkflowCase };
       const instance = await env.VERIFY_WORKFLOW.create({ id, params: { id, kind } });
@@ -150,12 +202,15 @@ export default {
         name: string;
         payload: string;
       };
-      await env.VERIFY_WORKFLOW.sendEvent({ id, name, payload });
+      // sendEvent/terminate live on the instance handle, and the event's routing key is `type`.
+      const handle = await env.VERIFY_WORKFLOW.get(id);
+      await handle.sendEvent({ type: name, payload });
       return Response.json({ sent: true });
     }
     if (url.pathname === "/t3/terminate" && request.method === "POST") {
       const { id } = (await request.json()) as { id: string };
-      await env.VERIFY_WORKFLOW.terminate(id);
+      const handle = await env.VERIFY_WORKFLOW.get(id);
+      await handle.terminate();
       return Response.json({ terminated: true });
     }
     if (url.pathname === "/t4/socket") {
@@ -177,15 +232,45 @@ export default {
         messages: unknown[];
         tools?: { function: { name: string } }[];
       };
+      // Only the pinned starter model may run, so a stray or curious caller cannot spend the
+      // owner's allowance on another model. The driver bakes the pin into the generated config.
+      if (model !== env.VERIFY_T7_MODEL) {
+        return Response.json({ error: "model-not-allowed" }, { status: 400 });
+      }
+      // 2,048 input tokens ≈ 8k characters; the 16k-byte cap leaves headroom without letting a
+      // caller stuff the context. Output is clamped server-side: max_tokens is never trusted
+      // from the client.
+      if (JSON.stringify(messages ?? []).length > 16_384) {
+        return Response.json({ error: "messages-too-large" }, { status: 400 });
+      }
       // Boundary: the fixture never offers a non-stub tool to the model. Anything outside the
       // registry is rejected here and scored as a model failure driver-side, never executed.
-      const outside = (tools ?? []).filter((t) => !(t.function.name in STUBS));
+      // Object.hasOwn, not `in`: `"constructor" in STUBS` is true.
+      const outside = (tools ?? []).filter((t) => !Object.hasOwn(STUBS, t.function.name));
       if (outside.length) {
         return Response.json({ rejected: outside.map((t) => t.function.name) }, { status: 400 });
       }
       const started = Date.now();
-      const raw = await env.AI.run(model as never, { messages, tools } as never);
-      return Response.json({ model, raw, latencyMs: Date.now() - started });
+      const raw = (await env.AI.run(
+        model as never,
+        {
+          messages,
+          tools,
+          max_tokens: 512,
+        } as never,
+      )) as { tool_calls?: { name: string; arguments?: unknown }[] };
+      // Execute each requested stub with the model's own arguments and return the results, so
+      // the driver scores the final result — not just the name — without another model round.
+      const calls = raw?.tool_calls ?? [];
+      const executions = calls.map((c) => {
+        if (!Object.hasOwn(STUBS, c.name)) return { name: c.name, error: "not-a-stub" };
+        try {
+          return { name: c.name, result: runStub(c.name, c.arguments) };
+        } catch (error) {
+          return { name: c.name, error: error instanceof Error ? error.message : String(error) };
+        }
+      });
+      return Response.json({ model, raw, executions, latencyMs: Date.now() - started });
     }
     return new Response("not found", { status: 404 });
   },
