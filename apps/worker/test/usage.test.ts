@@ -4,6 +4,7 @@
 // prices say so; the seven cost categories, the projection and the breakdowns add up.
 import { runInDurableObject } from "cloudflare:test";
 import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
+import { breakdowns, calendar } from "@opa/server/usage";
 import { describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { workerApp } from "../src/worker-app";
@@ -232,6 +233,34 @@ describe("usage ledger", () => {
       { date: local(month + DAY), calls: 1, costMicroUsd: 20, unpricedCalls: 0 },
       { date: local(today), calls: 1, costMicroUsd: 0, unpricedCalls: 1 },
     ]);
+  });
+
+  it("puts each call on the client's calendar across a DST change, and at UTC+12", () => {
+    const at = (t: number) => ({
+      bucket: Math.floor(t / 900_000),
+      calls: 1,
+      costMicroUsd: 10,
+      unpricedCalls: 0,
+    });
+    const rows = (...times: number[]) => ({
+      byConversation: [],
+      byTask: [],
+      byBucket: times.map(at),
+    });
+    // New York: 1 November began at 04:00 UTC (EDT), 2 November at 05:00 UTC (EST).
+    const nov1 = Date.UTC(2026, 10, 1, 4);
+    const nov2 = Date.UTC(2026, 10, 2, 5);
+    const ny = calendar("America/New_York", nov2);
+    const calls = rows(nov1 + 30 * 60_000, nov2 - 30 * 60_000, nov2 + 30 * 60_000);
+    expect(breakdowns(calls, nov1, nov2, ny).day.map((d) => [d.date, d.calls])).toEqual([
+      ["2026-11-01", 2],
+      ["2026-11-02", 1],
+    ]);
+    // An old client sends no zone: its midnight's offset stands in, and +12 h is a day ahead.
+    const auckland = Date.UTC(2026, 10, 1, 12); // midnight on 2 November at UTC+12
+    const plus12 = calendar(undefined, auckland);
+    expect(plus12(auckland)).toBe("2026-11-02");
+    expect(calendar("Not/AZone", auckland)(auckland)).toBe("2026-11-02");
   });
 
   it("shows neurons past the free allowance as billed (A-Co3)", async () => {

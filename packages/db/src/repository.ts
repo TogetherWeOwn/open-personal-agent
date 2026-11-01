@@ -1459,9 +1459,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /**
            * The month's calls by conversation, by task and by day (M3-16 AC2). Titles come from
            * this user's own rows only; a deleted conversation or task, or a call outside one,
-           * groups under a null ID. `dayStart` is any local midnight: days are counted from it.
+           * groups under a null ID. Days come as quarter-hour buckets (`bucket` × 15 min since
+           * the epoch), so the caller can place them on any time zone's calendar, DST included.
            */
-          breakdowns: async (since: number, dayStart: number) => {
+          breakdowns: async (since: number) => {
             const mine = and(eq(usage.userId, userId), gte(usage.createdAt, since));
             const cost = {
               calls: count(),
@@ -1471,11 +1472,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   Number,
                 ),
             };
-            // Integer division from 400 days back, so it floors without SQLite's math functions.
-            // The difference is cast: the default `created_at` and a bound number can be REAL.
-            const base = dayStart - 400 * 86_400_000;
-            const day = sql<number>`cast((${usage.createdAt} - ${base}) as integer) / 86400000 - 400`;
-            const [byConversation, byTask, byDay] = await Promise.all([
+            // Quarter hours fit every UTC offset, including the :30 and :45 ones. The time is cast
+            // first: the default `created_at` and a bound number can be REAL.
+            const bucket = sql<number>`cast(${usage.createdAt} as integer) / 900000`;
+            const [byConversation, byTask, byBucket] = await Promise.all([
               db
                 .select({ id: conversations.id, title: conversations.title, ...cost })
                 .from(usage)
@@ -1494,13 +1494,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .groupBy(tasks.id)
                 .orderBy(desc(cost.costMicroUsd)),
               db
-                .select({ day: day.mapWith(Number), ...cost })
+                .select({ bucket: bucket.mapWith(Number), ...cost })
                 .from(usage)
                 .where(mine)
-                .groupBy(day)
-                .orderBy(day),
+                .groupBy(bucket)
+                .orderBy(bucket),
             ]);
-            return { byConversation, byTask, byDay };
+            return { byConversation, byTask, byBucket };
           },
           /**
            * One model call's ledger row (one row per call, PRD §17), written when the call

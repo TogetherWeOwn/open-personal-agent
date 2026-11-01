@@ -252,7 +252,7 @@ describe("task workflow", () => {
     const totals = await alice.usage.totals(0);
     expect(totals.reduce((s, t) => s + t.calls, 0)).toBeGreaterThan(0);
     // The ledger rows name the task and its conversation, for the Usage breakdowns.
-    const { byTask } = await alice.usage.breakdowns(0, 0);
+    const { byTask } = await alice.usage.breakdowns(0);
     expect(byTask.map((t) => t.id)).toContain(taskId);
   });
 

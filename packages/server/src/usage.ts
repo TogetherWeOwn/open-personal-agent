@@ -65,40 +65,61 @@ function period(rows: TotalsRow[], now: number) {
   };
 }
 
-/** Where a day's figures are kept: the client's midnight as an offset from UTC's, in ±12 h. */
-function midnightOffset(today: number) {
+/** The client's calendar date of an instant, `YYYY-MM-DD`, in its IANA time zone. */
+type DateOf = (t: number) => string;
+
+/**
+ * Dates on the client's calendar. With its time zone, DST and every offset are exact; without
+ * one (an old client), the offset of its midnight `today` stands in, in ±12 h.
+ */
+export function calendar(timeZone: string | undefined, today: number): DateOf {
+  if (timeZone) {
+    try {
+      const fmt = new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+      return (t) => fmt.format(t);
+    } catch {
+      // Not a zone this runtime knows: fall through to the offset.
+    }
+  }
   const off = ((today % DAY) + DAY) % DAY;
-  return off > DAY / 2 ? off - DAY : off;
+  const offset = off >= DAY / 2 ? off - DAY : off;
+  return (t) => new Date(t - offset).toISOString().slice(0, 10);
 }
 
-/** The local date `days` after the day starting at `today`; noon absorbs a DST hour. */
-const dateOf = (today: number, days: number) =>
-  new Date(today - midnightOffset(today) + days * DAY + DAY / 2).toISOString().slice(0, 10);
+/** A `YYYY-MM-DD` as UTC midnight, for counting calendar days. */
+const utcOf = (date: string) => Date.parse(`${date}T00:00:00Z`);
 
 /**
  * Month-end at the month's pace so far. Under a day in, it counts a whole day, so the first
  * message of the month doesn't project to a month of them.
  */
-function projectMonth(costMicroUsd: number, month: number, today: number, now: number) {
-  const [y, m] = dateOf(today, Math.round((month - today) / DAY))
-    .split("-")
-    .map(Number);
+function projectMonth(costMicroUsd: number, month: number, now: number, dateOf: DateOf) {
+  const [y, m] = dateOf(month).split("-").map(Number);
   const days = new Date(Date.UTC(y ?? 1970, m ?? 1, 0)).getUTCDate();
   return Math.round((costMicroUsd * days) / Math.max((now - month) / DAY, 1));
 }
 
 /** The month's breakdowns, with every day from the 1st to today, empty days included. */
-function breakdowns(rows: Breakdowns, month: number, today: number) {
-  const byDay = new Map(rows.byDay.map((r) => [r.day, r]));
-  const day = [];
-  for (let i = Math.round((month - today) / DAY); i <= 0; i++) {
-    const r = byDay.get(i);
-    day.push({
-      date: dateOf(today, i),
-      calls: r?.calls ?? 0,
-      costMicroUsd: r?.costMicroUsd ?? 0,
-      unpricedCalls: r?.unpricedCalls ?? 0,
+export function breakdowns(rows: Breakdowns, month: number, today: number, dateOf: DateOf) {
+  const byDate = new Map<string, { calls: number; costMicroUsd: number; unpricedCalls: number }>();
+  for (const r of rows.byBucket) {
+    const date = dateOf(r.bucket * 900_000);
+    const d = byDate.get(date) ?? { calls: 0, costMicroUsd: 0, unpricedCalls: 0 };
+    byDate.set(date, {
+      calls: d.calls + r.calls,
+      costMicroUsd: d.costMicroUsd + r.costMicroUsd,
+      unpricedCalls: d.unpricedCalls + r.unpricedCalls,
     });
+  }
+  const day = [];
+  for (let t = utcOf(dateOf(month)); t <= utcOf(dateOf(today)); t += DAY) {
+    const date = new Date(t).toISOString().slice(0, 10);
+    day.push({ date, ...(byDate.get(date) ?? { calls: 0, costMicroUsd: 0, unpricedCalls: 0 }) });
   }
   return { conversation: rows.byConversation, task: rows.byTask, day };
 }
@@ -142,12 +163,13 @@ usageRoutes.get("/", async (c) => {
   const [todayRows, monthRows, breakdownRows, profile] = await Promise.all([
     user.usage.totals(today),
     user.usage.totals(month),
-    user.usage.breakdowns(month, today),
+    user.usage.breakdowns(month),
     user.profile(),
   ]);
   const todayPeriod = period(todayRows, now);
   const monthPeriod = period(monthRows, now);
-  const projected = projectMonth(monthPeriod.costMicroUsd, month, today, now);
+  const dateOf = calendar(c.req.query("tz"), today);
+  const projected = projectMonth(monthPeriod.costMicroUsd, month, now, dateOf);
   // The allowance is the Cloudflare account's, so its total includes everyone's calls; only the
   // owner, who runs the account, sees it. A member's view would reveal others' activity. The
   // count is this deployment's calls only: other apps on the account use the allowance too.
@@ -176,7 +198,7 @@ usageRoutes.get("/", async (c) => {
       { today: todayPeriod.costMicroUsd, month: monthPeriod.costMicroUsd, projected },
       now,
     ),
-    breakdowns: breakdowns(breakdownRows, month, today),
+    breakdowns: breakdowns(breakdownRows, month, today, dateOf),
     allowance: allowanceView,
   });
 });
