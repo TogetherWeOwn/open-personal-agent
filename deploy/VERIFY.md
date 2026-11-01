@@ -16,8 +16,8 @@ tomorrow. Add exactly these permissions:
 
 Leave these out:
 
-- Workers AI Read: unverified: left out of the token until a verification run shows the deploy needs it
-- User Details Read, Memberships Read: unverified: expected to be unnecessary, because the script passes CLOUDFLARE_ACCOUNT_ID to wrangler
+- Workers AI Read: verified 2026-11-01 (M2-05 run): not needed; the deploy passed without it
+- User Details Read, Memberships Read: verified 2026-11-01 (M2-05 run): not needed, because the script passes CLOUDFLARE_ACCOUNT_ID to wrangler
 - Queues Edit: only when a queue binding is added
 - Containers Edit: only when configuration B (M4)
 
