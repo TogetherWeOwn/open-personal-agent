@@ -39,10 +39,16 @@ export interface TaskProgressEvent {
   payload: unknown;
 }
 
-/** A reservation against the user's daily cap, as the assistant's limits issue it. */
+/** A reservation against the user's limits, as the assistant's limits issue it. */
 export interface TaskReservation {
   maxOutputTokens: number;
   reservedMicroUsd: number;
+}
+
+/** A call the limits refused, and which one: the task's budget, the daily cap or the hard cap. */
+export interface TaskRefusal {
+  limit: "task_budget" | "daily" | "monthly_hard";
+  detail: string;
 }
 
 /**
@@ -50,15 +56,18 @@ export interface TaskReservation {
  * through the user's own assistant (M3-12 AC8), so the daily cap holds for background work the
  * same way it holds for chat. Keys are idempotency keys: reserving a key that already holds
  * first settles that hold at its full reservation, because a retried step may already have
- * spent it.
+ * spent it. The task's own budget (COST-3) is reserved by `start` and settled by `end`; every
+ * call draws on it, and a background task's calls also stop at the monthly hard cap.
  */
 export interface TaskBudget {
+  /** Reserves the task's budget; a replayed start keeps what the task has spent. */
+  start(budgetMicroUsd?: number): Promise<{ budgetMicroUsd: number }>;
   reserve(
     key: string,
     providerId: string,
     model: string,
     chars: number,
-  ): Promise<TaskReservation | null>;
+  ): Promise<TaskReservation | TaskRefusal>;
   settle(
     key: string,
     providerId: string,
@@ -67,6 +76,13 @@ export interface TaskBudget {
   ): Promise<void>;
   /** Drops a reservation without a charge: the call never happened. */
   release(key: string): Promise<void>;
+  /** Settles the task's budget at its end, returning what the task spent. */
+  end(): Promise<number>;
+  /**
+   * Counts a tool call against the user's 60 a minute (COST-2); `false`: the tool must not run.
+   * `key` is the call's idempotency key, so a retried step isn't counted twice.
+   */
+  allowToolCall(key: string): Promise<boolean>;
 }
 
 /**
