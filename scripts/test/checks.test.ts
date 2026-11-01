@@ -257,6 +257,7 @@ describe("docs-cost-lint", () => {
         "ASSETS",
         "ASSISTANT",
         "DB",
+        "EXPORT_WORKFLOW",
         "FILES",
         "PUBLIC_LIMIT",
         "TASK_WORKFLOW",
