@@ -31,6 +31,15 @@ async function spent(owner: string, microUsd: number) {
     .run();
 }
 
+const spendingRpc = (owner: string) =>
+  env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${owner}`)) as unknown as {
+    setSpending(
+      b: unknown,
+    ): Promise<{ before: Body["settings"]; after: Body["settings"]; write: number }>;
+    revertSpending(write: number, before: unknown): Promise<void>;
+    spending(): Promise<{ settings: Body["settings"] }>;
+  };
+
 describe("spending settings", () => {
   it("shows every limit with its default and the read-only execution limits", async () => {
     const { browser } = await claim();
@@ -96,11 +105,7 @@ describe("spending settings", () => {
 
   it("never puts back a field a later change has replaced since", async () => {
     const { owner } = await claim();
-    const assistant = env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${owner}`)) as unknown as {
-      setSpending(b: unknown): Promise<{ before: Body["settings"]; after: Body["settings"] }>;
-      revertSpending(before: unknown, after: unknown): Promise<void>;
-      spending(): Promise<{ settings: Body["settings"] }>;
-    };
+    const assistant = spendingRpc(owner);
     // A sets the daily cap to $10 and the task budget to $1; B then sets the daily cap to $15.
     const a = await assistant.setSpending({
       dailyCapMicroUsd: 10_000_000,
@@ -108,9 +113,22 @@ describe("spending settings", () => {
     });
     await assistant.setSpending({ dailyCapMicroUsd: 15_000_000 });
     // A's audit failed: only what is still A's goes back.
-    await assistant.revertSpending(a.before, a.after);
+    await assistant.revertSpending(a.write, a.before);
     const { settings } = await assistant.spending();
     expect(settings).toMatchObject({ dailyCapMicroUsd: 15_000_000, taskBudgetMicroUsd: 500_000 });
+  });
+
+  it("keeps a later change that set the same value back (A/B/C)", async () => {
+    const { owner } = await claim();
+    const assistant = spendingRpc(owner);
+    // A saves $5 → $10 and its audit stalls; B saves $15 and C $10, both audited.
+    const a = await assistant.setSpending({ dailyCapMicroUsd: 10_000_000 });
+    await assistant.setSpending({ dailyCapMicroUsd: 15_000_000 });
+    await assistant.setSpending({ dailyCapMicroUsd: 10_000_000 });
+    // A's audit then fails: the $10 is C's now, and the Activity log says so.
+    await assistant.revertSpending(a.write, a.before);
+    const { settings } = await assistant.spending();
+    expect(settings.dailyCapMicroUsd).toBe(10_000_000);
   });
 
   it("warns at 50, 80 and 100% of the monthly budget from the ledger", async () => {
