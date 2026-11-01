@@ -216,7 +216,11 @@ describe("chat transport", () => {
     const ctx = { name: "chat-turn", snapshot: { ...turn, reply: "", usage: null, called: false } };
     const day = Date.now() - (Date.now() % 86_400_000);
     const spend = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
-      state.storage.kv.put("spend", { day, spentMicroUsd: 0, held: { t: 500 } });
+      state.storage.kv.put("spend", {
+        day,
+        spentMicroUsd: 0,
+        held: { t: { microUsd: 500, at: Date.now() } },
+      });
       await i.onFiberRecovered(ctx as never);
       return state.storage.kv.get("spend");
     });
