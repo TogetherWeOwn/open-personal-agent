@@ -59,9 +59,14 @@ jobs:
       - name: Deploy the fixtures
         id: deploy
         run: |
+          # The driver prints the prefix before the first deploy call, so even a failed deploy
+          # records it: the failure pointer below never prints an empty prefix.
+          set +e
           out=$(pnpm cf-verify:t3t4t7 deploy --model "$T7_MODEL")
+          code=$?
           echo "$out"
           echo "prefix=$(echo "$out" | grep -o 'opa-v-q4-[0-9-]*-[0-9a-f]*' | head -1)" >> "$GITHUB_OUTPUT"
+          exit $code
       - name: T3 sync cases
         id: t3sync
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
@@ -161,11 +166,13 @@ jobs:
           code=$?
           echo "callback:$code" >> "$RUNNER_TEMP/$PREFIX/steps.txt"
           exit $code
-      - name: Collect evidence and tear down
+      # Two steps, both always(): a collect failure must never skip teardown.
+      - name: Collect evidence
         if: always()
-        run: |
-          pnpm cf-verify:t3t4t7 collect --prefix "$PREFIX"
-          pnpm cf-verify:t3t4t7 teardown --prefix "$PREFIX"
+        run: pnpm cf-verify:t3t4t7 collect --prefix "$PREFIX"
+      - name: Tear down
+        if: always()
+        run: pnpm cf-verify:t3t4t7 teardown --prefix "$PREFIX"
       - name: Upload evidence bundles
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

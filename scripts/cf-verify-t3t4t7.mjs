@@ -86,12 +86,35 @@ export const TOOL_SCHEMAS = {
 };
 export const STUB_TOOLS = Object.keys(TOOL_SCHEMAS);
 export const STUB_SCHEMA_LIST = STUB_TOOLS.map((name) => ({
+  // `type: "function"`: without it OpenAI-format models may not return tool calls at all.
+  type: "function",
   function: {
     name,
     description: TOOL_SCHEMAS[name].description,
     parameters: TOOL_SCHEMAS[name].parameters,
   },
 }));
+
+/**
+ * Both tool-call response shapes Workers AI models return, in one place. Mirror of
+ * normalizeToolCalls in cf-verify/t3t4t7/worker.ts (kept in sync by hand: the worker
+ * bundles independently, so it cannot import this file).
+ */
+export function normalizeToolCalls(raw) {
+  const nested = raw?.choices?.[0]?.message?.tool_calls;
+  const list = Array.isArray(nested) && nested.length ? nested : (raw?.tool_calls ?? []);
+  return list.map((c) => {
+    const fn = c?.function ?? c;
+    return { name: fn?.name ?? "", arguments: fn?.arguments };
+  });
+}
+
+/** A Workers AI cap/limit failure (daily neuron limit, 429, capacity): stop inconclusive. */
+export function isCapacityError(error) {
+  if (error?.status === 429) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /ai-capacity|429|rate.?limit|capacity|quota|neuron|daily.?limit/i.test(message);
+}
 
 /**
  * Mirror of the fixture's runStub: the expected result for expected args. Throws on
@@ -255,6 +278,14 @@ function authOf(env) {
   };
 }
 
+/**
+ * Whatever secrets exist for redaction. Teardown and collect must work without the bearer
+ * (teardown-only is the recovery path): they scrub what they have and never require it.
+ */
+function secretsOf(env) {
+  return [env.CLOUDFLARE_API_TOKEN, env.CF_VERIFY_BEARER].filter(Boolean);
+}
+
 function manifestOf(prefix) {
   return JSON.parse(fs.readFileSync(path.join(outDir(prefix), "manifest.json"), "utf8"));
 }
@@ -312,13 +343,14 @@ async function deploy(prefix, deps, { model }) {
   return manifest;
 }
 
-async function collect(prefix, deps) {
+export async function collect(prefix, deps) {
   const dir = outDir(prefix);
+  fs.mkdirSync(dir, { recursive: true });
   const manifestFile = path.join(dir, "manifest.json");
   const manifest = fs.existsSync(manifestFile)
     ? JSON.parse(fs.readFileSync(manifestFile, "utf8"))
     : { worker: `${prefix}-t3t4t7 (manifest missing: prefix fallback)` };
-  const { secrets } = authOf(deps.env);
+  const secrets = secretsOf(deps.env);
   for (const test of ["t3", "t4", "t7"]) {
     const obs = path.join(dir, `${test}.jsonl`);
     const lines = fs.existsSync(obs) ? fs.readFileSync(obs, "utf8") : "";
@@ -357,13 +389,13 @@ async function collect(prefix, deps) {
   return dir;
 }
 
-async function teardown(prefix, deps) {
+export async function teardown(prefix, deps) {
   const dir = outDir(prefix);
   const manifestFile = path.join(dir, "manifest.json");
   const manifest = fs.existsSync(manifestFile)
     ? JSON.parse(fs.readFileSync(manifestFile, "utf8"))
     : { workers: [], fallback: "no manifest: scoped-prefix delete, never account-wide" };
-  const { secrets } = authOf(deps.env);
+  const secrets = secretsOf(deps.env);
   await teardownCloudflare(["--name", prefix, "--confirm", prefix], {
     env: deps.env,
     fetch,
@@ -395,7 +427,12 @@ async function call(url, method, body, { secrets, bearer }) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${method} ${redact(url, secrets)}: HTTP ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(`${method} ${redact(url, secrets)}: HTTP ${res.status}`);
+    error.status = res.status;
+    error.body = data;
+    throw error;
+  }
   return data;
 }
 
@@ -502,14 +539,19 @@ async function callback(prefix, deps) {
   return { elapsedH: +elapsedH.toFixed(2) };
 }
 
-function openSocket(url, stream, since, bearer) {
+/**
+ * Open a T4 tab socket. Live events push into `received`: pass the tab's existing array on
+ * reconnect, so the merged history stays live. A fresh array would go stale — the new
+ * socket's listener owns the array it was given, and a copy made at reconnect time never
+ * sees another event.
+ */
+export function openSocket(url, stream, since, bearer, received = []) {
   return new Promise((resolve, reject) => {
     // Undici's WebSocket cannot set headers, so the bearer travels as a query param the
     // fixture accepts on this route only. It lives in memory here, never on disk or in logs.
     const ws = new WebSocket(
       `${url.replace(/^http/, "ws")}/t4/socket?stream=${stream}&since=${since}&bearer=${encodeURIComponent(bearer)}`,
     );
-    const received = [];
     const timer = setTimeout(() => reject(new Error("socket open timeout")), 15000);
     ws.addEventListener("message", (e) => {
       try {
@@ -544,9 +586,11 @@ async function t4run(prefix, deps) {
   const reconnect = async (tab, at) => {
     const started = Date.now();
     tab.ws.close();
-    const since = Math.max(-1, ...tab.received);
-    const fresh = await openSocket(url, `${prefix}-t4`, since, bearer);
-    tabs[at] = { ...fresh, received: [...tab.received, ...fresh.received] };
+    const since = tab.received.length ? Math.max(...tab.received) : -1;
+    // The replay (seqs after `since`) appends to the tab's own array, which stays the live
+    // target for the new socket's listener — and keeps `since` correct for later reconnects.
+    const fresh = await openSocket(url, `${prefix}-t4`, since, bearer, tab.received);
+    tabs[at] = fresh;
     const ms = Date.now() - started;
     note(prefix, "t4", { phase: "reconnect", tab: at, catchupMs: ms });
     if (ms > 10_000) throw new Error(`T4: tab ${at} catch-up took ${ms} ms (>10 s)`);
@@ -588,14 +632,23 @@ async function t7run(prefix, deps, { model }) {
       throw new OverBudget("T7: prompt over the per-turn budget");
     // A 400 here is a driver bug (wrong model, oversized prompt, non-stub tool): the fixture
     // only executes allowlisted stubs with the model's own arguments, so model misbehavior
-    // arrives as 200 with errored executions and scores a fail, never a crash.
-    const res = await call(
-      `${url}/t7/turn`,
-      "POST",
-      { model, messages: [{ role: "user", content: turn.prompt }], tools: STUB_SCHEMA_LIST },
-      auth,
-    );
-    const emitted = res.raw?.tool_calls ?? res.raw?.response?.tool_calls ?? [];
+    // arrives as 200 with errored executions and scores a fail, never a crash. A 429 or
+    // capacity error is a cap: the whole window stops inconclusive, per the plan.
+    let res;
+    try {
+      res = await call(
+        `${url}/t7/turn`,
+        "POST",
+        { model, messages: [{ role: "user", content: turn.prompt }], tools: STUB_SCHEMA_LIST },
+        auth,
+      );
+    } catch (error) {
+      if (isCapacityError(error))
+        throw new Inconclusive(`T7: Workers AI cap or limit (${error.message}): stopping inconclusive`);
+      throw error;
+    }
+    // Score the fixture's normalized list — the same calls it executed — not the raw shape.
+    const emitted = res.calls ?? normalizeToolCalls(res.raw ?? {});
     const verdict = scoreTurn(turn, emitted, res.executions ?? []);
     if (verdict === "pass") pass++;
     note(
@@ -644,11 +697,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     if (command in LIVE) {
       let prefix = values.prefix ?? "";
-      if (command === "deploy" && !prefix) prefix = newCampaignPrefix(new Date(), randomBytes);
+      if (command === "deploy" && !prefix) {
+        prefix = newCampaignPrefix(new Date(), randomBytes);
+        // The prefix is not secret (it names public artifacts); print it before the first
+        // deploy call so a failed `secret put` never leaves a Worker up under an unseen prefix.
+        deps.stdout(`prefix: ${prefix}\n`);
+      }
       if (!isCampaignPrefix(prefix)) throw new Error(`"${prefix}" is not a campaign prefix`);
       const out = await LIVE[command](prefix, deps, { model: values.model });
       // Actions logs are public: the workers.dev subdomain and the bearer never reach them.
-      const { secrets } = authOf(deps.env);
+      // Teardown and collect run bearer-less, so only scrub the secrets that exist.
+      const secrets = secretsOf(deps.env);
       deps.stdout(`${command}: ${redact(JSON.stringify(out ?? "ok"), secrets)}\n`);
     } else {
       deps.stdout(`${HELP}\n`);
