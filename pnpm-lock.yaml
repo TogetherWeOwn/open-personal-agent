@@ -173,6 +173,18 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/tools-builtin:
+    dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opa/harness-builtin':
+        specifier: workspace:*
+        version: link:../harness-builtin
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../policy
+
   packages/vault: {}
 
 packages:
