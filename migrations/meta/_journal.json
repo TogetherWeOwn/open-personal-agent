@@ -78,6 +78,62 @@
       "when": 1793529182768,
       "tag": "0010_task_journal",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1793532602079,
+      "tag": "0011_artifacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1793535864832,
+      "tag": "0012_exports",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1793535864833,
+      "tag": "0013_exports_running_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1793537530632,
+      "tag": "0014_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1793538083116,
+      "tag": "0015_user_bound_references",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1793538492678,
+      "tag": "0016_memory_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1793539475773,
+      "tag": "0017_turn_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1793539549215,
+      "tag": "0018_approvals",
+      "breakpoints": true
     }
   ]
 }

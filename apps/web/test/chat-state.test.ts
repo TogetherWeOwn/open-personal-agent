@@ -4,8 +4,12 @@ import { describe, expect, it } from "vitest";
 import { type ChatAction, type ChatState, chatReducer, initialState } from "../src/chat/state";
 import type { StoredMessage } from "../src/chat/transport";
 
+let nextSeq = 0; // the server's `seq` never restarts, and the reducer drops one it has applied
 const ev = (type: HarnessEvent["type"], payload = {}, turnId = "t1", sessionId = "c1") =>
-  ({ type: "event", event: { v: 1, seq: 1, sessionId, turnId, type, payload } }) as ChatAction;
+  ({
+    type: "event",
+    event: { v: 1, seq: ++nextSeq, sessionId, turnId, type, payload },
+  }) as ChatAction;
 const started = (turnId = "t1", sessionId = "c1") =>
   ev("turn.started", { messageId: `r-${turnId}` }, turnId, sessionId);
 const run = (...actions: ChatAction[]) => actions.reduce(chatReducer, initialState("c1"));
@@ -107,6 +111,8 @@ describe("chatReducer", () => {
     const streaming = run(
       list("c1"),
       load("c1", msg("u1", "Hi"), msg("r1", "", "streaming")),
+      // The tab streams the segment's whole text; `message.completed` names the same segment.
+      delta("Hel"),
       delta("lo"),
       ev("message.completed", { text: "Hello" }),
       ev("turn.completed"),
@@ -350,8 +356,74 @@ describe("chatReducer", () => {
       ev("step.started", { stepId: "s1", label: "Thinking" }),
       ev("tool.called", { toolCallId: "call-1", tool: "web_fetch", args: "{}", risk: "read" }),
       ev("context.tainted", { stepId: "s1", source: { kind: "web", label: "x.test" } }),
-      ev("limit.reached", { kind: "tools", detail: "20 tool calls" }),
     ];
-    for (const action of m3) expect(chatReducer(state, action)).toBe(state);
+    for (const action of m3) {
+      const next = chatReducer(state, action);
+      // Only the applied-`seq` marker moves; nothing on screen does.
+      expect(next.conversations).toBe(state.conversations);
+      expect(next.announcement).toBe(state.announcement);
+      expect(next.pending?.turnId).toBe("t1");
+    }
+  });
+
+  it("stops streaming at an approval or a limit, and a cancel ends the reply (M3-03c)", () => {
+    const state = run(send, started(), delta("Hel"));
+    const waiting = chatReducer(state, ev("approval.requested", { batchId: "b1", items: [] }));
+    expect(waiting.pending).toBe(null);
+    // The reply stays streaming: the resumed turn's deltas land in the same message.
+    expect(reply(waiting)).toMatchObject({ text: "Hel", status: "streaming" });
+    const limited = chatReducer(
+      state,
+      ev("limit.reached", { kind: "calls", detail: "8 model calls" }),
+    );
+    expect(limited.pending).toBe(null);
+    expect(reply(limited)?.status).toBe("streaming");
+    const cancelled = chatReducer(state, ev("turn.cancelled"));
+    expect(cancelled.pending).toBe(null);
+    expect(reply(cancelled)).toMatchObject({ text: "Hel", status: "interrupted" });
+  });
+
+  it("joins a turn's message segments as paragraphs (M3-03c)", () => {
+    const state = run(
+      send,
+      started(),
+      delta("One"),
+      ev("message.completed", { text: "One" }),
+      delta("Two"),
+      ev("message.completed", { text: "Two" }),
+      ev("turn.completed"),
+    );
+    expect(reply(state)?.text).toBe("One\n\nTwo");
+  });
+
+  it("completes an adopted reply with its whole segment, not a copy after the tail", () => {
+    // Reloaded mid-reply: D1 has the earlier segment, the tab adopts the turn at its next delta.
+    const reloaded = run(load("c1", msg("u1", "Hi"), msg("r-t1", "One", "streaming")));
+    const state = run(
+      load("c1", msg("u1", "Hi"), msg("r-t1", "One", "streaming")),
+      delta("lo"),
+      ev("message.completed", { text: "Hello" }),
+      delta("Next"),
+      ev("message.completed", { text: "Next" }),
+    );
+    expect(reply(reloaded)?.text).toBe("One");
+    expect(reply(state)?.text).toBe("One\n\nHello\n\nNext");
+  });
+
+  it("applies a resumed turn's replayed events only once (M3-03 AC11)", () => {
+    const at = (seq: number, type: HarnessEvent["type"], payload = {}): ChatAction =>
+      ({
+        type: "event",
+        event: { v: 1, seq, sessionId: "c1", turnId: "t1", type, payload },
+      }) as ChatAction;
+    const state = run(
+      send,
+      at(7, "turn.started", { messageId: "r-t1" }),
+      at(8, "message.delta", { text: "Hel" }),
+    );
+    // The socket dropped and resumed: the log replays the turn from its start.
+    expect(chatReducer(state, at(7, "turn.started", { messageId: "r-t1" }))).toBe(state);
+    expect(chatReducer(state, at(8, "message.delta", { text: "Hel" }))).toBe(state);
+    expect(reply(chatReducer(state, at(9, "message.delta", { text: "lo" })))?.text).toBe("Hello");
   });
 });

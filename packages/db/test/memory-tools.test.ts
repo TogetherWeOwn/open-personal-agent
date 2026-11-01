@@ -91,6 +91,14 @@ describe("the memory tool manifests (M3-08 AC5)", () => {
     registerMemoryTools({ register: (t) => registered.push(t) }, stubService(), () => untainted);
     expect(registered.map((t) => t.manifest.name)).toEqual([...MEMORY_TOOL_NAMES]);
   });
+
+  it("doesn't offer remember while Learn from our chats is off (M3-15 AC5)", () => {
+    const registered: MemoryTool[] = [];
+    registerMemoryTools({ register: (t) => registered.push(t) }, stubService(), () => untainted, {
+      learn: false,
+    });
+    expect(registered.map((t) => t.manifest.name)).toEqual(["recall", "forget"]);
+  });
 });
 
 describe("remember (M3-14 AC3, A-Me1–2)", () => {

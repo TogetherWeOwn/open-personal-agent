@@ -9,7 +9,7 @@ tomorrow. Add exactly these permissions:
 
 | Scope | Permission | Access | Needed for |
 |---|---|---|---|
-| Account | Workers Scripts | Edit | uploading the Worker with its Durable Object, Workflow, rate limit, cron and assets; setting secrets; the workers.dev URL |
+| Account | Workers Scripts | Edit | uploading the Worker with its Durable Object, Workflows, rate limit, cron and assets; setting secrets; the workers.dev URL |
 | Account | D1 | Edit | creating the DB database and applying migrations |
 | Account | Workers R2 Storage | Edit | creating the FILES bucket |
 | Account | Account Settings | Read | looking up the account |
