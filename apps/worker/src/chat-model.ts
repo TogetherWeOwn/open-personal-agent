@@ -14,7 +14,14 @@ import type { Env } from "./env";
 
 export const MODEL_KEY_PURPOSE = "model_api_key" as const;
 
-export type ChatModel = { provider: ModelProvider; model: string; apiKey: string | null };
+export interface ChatModel {
+  provider: ModelProvider;
+  model: string;
+  apiKey: string | null;
+  /** Records the saved key's use; callers run it just before the model call. */
+  used?: () => Promise<void>;
+}
+
 export type ChatModelError = "no_model" | "ai_unavailable" | "vault_unavailable" | "key_required";
 
 export async function resolveChatModel(
@@ -42,6 +49,5 @@ export async function resolveChatModel(
   // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
   const fetch = env.MODEL_FETCH ? { fetch: env.MODEL_FETCH } : {};
   const provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey, ...fetch });
-  await store.keyUsed(secretId);
-  return { provider, model: row.model, apiKey };
+  return { provider, model: row.model, apiKey, used: () => store.keyUsed(secretId) };
 }

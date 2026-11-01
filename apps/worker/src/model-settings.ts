@@ -134,6 +134,7 @@ settings.post("/model/test", async (c) => {
     return fail(c, error === "ai_unavailable" || error === "vault_unavailable" ? 503 : 409, error);
   }
   const { provider, model, apiKey } = resolved;
+  await resolved.used?.();
   const started = Date.now();
   let firstTokenMs: number | null = null;
   let reply = "";
