@@ -7,8 +7,21 @@ const SHELL = "opa-shell-v1";
 const PAGE = "/";
 const PASS_THROUGH = /^\/(api|agents|setup|hooks)(\/|$)/;
 
+// Shell updates run one at a time, in the order they were asked for. Two navigations across
+// a deploy can name different hashed files; if their updates interleaved, one could store its
+// page and the other then prune that page's files as unwanted, and the next offline launch
+// would open a page whose script is gone. Within one update the page and its files always
+// agree, so serial updates keep them agreeing.
+let shellUpdate = Promise.resolve();
+function keep(page) {
+  const run = shellUpdate.then(() => keepNow(page));
+  // A failed update must not jam the queue behind it.
+  shellUpdate = run.catch(() => {});
+  return run;
+}
+
 /** Caches the page and the files it names, and drops files an older page named. */
-async function keep(page) {
+async function keepNow(page) {
   const html = await page.clone().text();
   const files = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]);
   const cache = await caches.open(SHELL);

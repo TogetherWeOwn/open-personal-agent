@@ -59,7 +59,7 @@ test.describe("the offline shell", () => {
     await page.reload();
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("You're offline");
     await expect(page.getByRole("main")).toContainText(
-      "Your assistant keeps working on tasks in the cloud. I'll reconnect when you're back online.",
+      "Your assistant keeps working on tasks in the cloud. I'll keep trying to reconnect.",
     );
     await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
     await expect(page.getByRole("progressbar")).toHaveCount(0);
@@ -85,6 +85,38 @@ test.describe("the offline shell", () => {
     await expect(page.getByRole("heading", { name: "Chats" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "You're offline" })).toHaveCount(0);
   });
+});
+
+test("reconnects when the server comes back while the browser stays online", async ({ page }) => {
+  // The browser never goes offline here, so no `online` event will fire: only the offline
+  // screen's own retry can bring the app back.
+  let down = true;
+  await page.route("/api/health", (r) => r.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (r) =>
+    down ? r.abort("failed") : r.fulfill({ json: { id: "u", role: "owner" } }),
+  );
+  await page.route("/api/settings", (r) =>
+    r.fulfill({
+      json: {
+        onboarded: true,
+        providers: [],
+        roles: { chat: null, background: null, embedding: null },
+      },
+    }),
+  );
+  await page.route("/api/approvals?status=pending", (r) => r.fulfill({ json: { batches: [] } }));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "You're offline" })).toBeVisible();
+  await page.evaluate(() => {
+    (window as unknown as { beforeRecovery: boolean }).beforeRecovery = true;
+  });
+  down = false;
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "You're offline" })).toHaveCount(0);
+  // Still set: the app reconnected in place, without a reload.
+  expect(
+    await page.evaluate(() => (window as unknown as { beforeRecovery?: boolean }).beforeRecovery),
+  ).toBe(true);
 });
 
 test("the account menu offers Install as an app only while the browser can", async ({ page }) => {

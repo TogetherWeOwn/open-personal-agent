@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import "./styles.css";
-import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
+import { lazy, StrictMode, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { Setup } from "./auth/Setup";
@@ -76,13 +76,27 @@ function Root() {
   useEffect(() => {
     if (!view) route().then(setView);
   }, [view]);
+  // The offline screen's retry: re-route in place and only leave it once the server answers,
+  // so the screen doesn't flash blank between attempts. One attempt at a time, however many
+  // of the screen's triggers (timer, `online`, focus) fire together.
+  const retrying = useRef(false);
+  const retry = useCallback(async () => {
+    if (retrying.current) return;
+    retrying.current = true;
+    try {
+      const next = await route().catch(() => "offline" as View);
+      if (next && next !== "offline") setView(next);
+    } finally {
+      retrying.current = false;
+    }
+  }, []);
   if (view === "setup") return <Setup initialToken={setupToken} />;
   if (view === "sign-in") return <SignIn />;
   if (view === "onboarding") return <Onboarding />;
   if (view === "offline")
     return (
       <Router>
-        <Offline onOnline={() => setView(null)} />
+        <Offline onRetry={retry} />
       </Router>
     );
   if (view === "app")
