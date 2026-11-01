@@ -146,6 +146,13 @@ const PART_BYTES = 5 * 1024 * 1024;
 export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
 
+/**
+ * A batch ID: the assistant's are `batch_<uuid>`, a task's carry its Workflow instance ID, which
+ * can be longer than `isId` allows. Printable ASCII without a slash, so it stays one path segment.
+ */
+export const isBatchId = (id: unknown): id is string =>
+  typeof id === "string" && /^[\x21-\x2e\x30-\x7e]{1,200}$/.test(id);
+
 /** The bound `scopeForTask` accepts, so a row it could never resolve is never written. */
 const isInstanceId = (id: unknown): id is string =>
   typeof id === "string" && id.length >= 1 && id.length <= 128;
@@ -693,7 +700,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /** A batch's rows in their stored order; empty when it is missing or someone else's. */
           batch: (batchId: string): Promise<ApprovalRow[]> =>
-            isId(batchId)
+            isBatchId(batchId)
               ? db
                   .select()
                   .from(approvals)
