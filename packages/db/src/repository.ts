@@ -5,7 +5,7 @@ import { and, desc, eq } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
-import { conversations } from "./schema";
+import { conversations, users } from "./schema";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. Only `scopeFromSession` creates one. */
@@ -60,6 +60,15 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
       return {
+        /** The user's own `users` row; `undefined` if it was deleted. */
+        profile: async () =>
+          (
+            await db
+              .select({ id: users.id, displayName: users.displayName, role: users.role })
+              .from(users)
+              .where(eq(users.id, userId))
+              .limit(1)
+          )[0],
         /** The user's assistant (ADR 0002), named from the session, never from client input. */
         assistant: () => ASSISTANT.get(ASSISTANT.idFromName(`u:${userId}`)),
         listConversations: () =>

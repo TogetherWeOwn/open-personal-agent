@@ -4,21 +4,21 @@ import { exports, env as workerEnv } from "cloudflare:workers";
 import { SCHEMA_VERSION } from "@opa/db";
 import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
-import { appEnv, type WorkerEnv } from "../src/compose";
+import { compose, type WorkerEnv } from "../src/compose";
 import type { Health } from "../src/health";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 
 const SECRETS = {
-  OPA_MASTER_KEY: "test-master-key",
+  OPA_MASTER_KEY: btoa("k".repeat(32)),
   OPA_SESSION_SECRET: "test-session-secret",
   OPA_SETUP_TOKEN: "test-setup-token",
 };
 const TABLES = `audit_log conversations messages passkeys recovery_codes schema_version secrets
-  sessions setup_state usage user_keys users`.split(/\s+/);
+  sessions setup_state usage used_setup_tokens user_keys users webauthn_challenges`.split(/\s+/);
 
 async function health(bindings: WorkerEnv = env): Promise<[number, Health]> {
-  const res = await app.request("/api/health", {}, appEnv(bindings));
+  const res = await app.request("/api/health", {}, await compose(bindings));
   return [res.status, await res.json()];
 }
 
@@ -105,7 +105,7 @@ describe("after migrations", () => {
   it("reports ok when configured and every binding answers", async () => {
     const ai = { run: async () => ({}) } as unknown as Ai;
     const [status, body] = await health({ ...env, ...SECRETS, AI: ai });
-    expect(Object.values(body.checks)).toEqual([true, true, true, true, true]);
+    expect(Object.values(body.checks)).toEqual([true, true, true, true, true, true]);
     expect(body.status).toBe("ok");
     expect(status).toBe(200);
     // Presence only: no secret value appears in the response.
@@ -113,7 +113,11 @@ describe("after migrations", () => {
   });
 
   it("reports degraded, with no error detail, when a binding fails", async () => {
-    const res = await app.request("/api/health", {}, appEnv({ ...env, ...SECRETS, DB: broken }));
+    const res = await app.request(
+      "/api/health",
+      {},
+      await compose({ ...env, ...SECRETS, DB: broken }),
+    );
     const text = await res.text();
     expect(res.status).toBe(503);
     expect(JSON.parse(text)).toMatchObject({ status: "degraded", checks: { database: false } });
@@ -121,7 +125,7 @@ describe("after migrations", () => {
   });
 
   it("doesn't ask for migrations when the database is unreachable", async () => {
-    const res = await app.request("/setup", {}, appEnv({ ...env, DB: broken }));
+    const res = await app.request("/setup", {}, await compose({ ...env, DB: broken }));
     expect(res.status).toBe(503);
     const html = await res.text();
     expect(html).toContain("npx wrangler secret put OPA_SETUP_TOKEN");
