@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Claim (M2-09): the setup token and a new passkey make this browser's user the owner. With a
 // rotated token the same screen recovers the owner's account. The server hands out the recovery
-// codes once, in the final response, and this screen is the only place they are ever shown.
+// codes once, in the final response, and `RecoveryCodes` is the only place they are ever shown.
 import {
   type PublicKeyCredentialCreationOptionsJSON,
   startRegistration,
 } from "@simplewebauthn/browser";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Button, Checkbox, Input, Label, TextField } from "react-aria-components";
 import { Alert, cancelled, type Failure, input, post, primary, Screen, secondary } from "./ui";
 
@@ -107,7 +107,16 @@ export function Setup({ initialToken }: { initialToken: string }) {
   );
 }
 
-function RecoveryCodes({ codes, mode }: { codes: string[]; mode: Mode }) {
+/** Shows a new set of codes once. `notice` says what happened first, after a recovery code. */
+export function RecoveryCodes({
+  codes,
+  mode,
+  notice,
+}: {
+  codes: string[];
+  mode: Mode;
+  notice?: ReactNode;
+}) {
   const [saved, setSaved] = useState(false);
   const [status, setStatus] = useState("");
   const text = `${codes.join("\n")}\n`;
@@ -124,6 +133,7 @@ function RecoveryCodes({ codes, mode }: { codes: string[]; mode: Mode }) {
 
   return (
     <Screen title="Save your recovery codes">
+      {notice}
       <p>
         If you lose your passkey, a recovery code gets you back in. Each code works once.{" "}
         <strong>They won't be shown again.</strong>

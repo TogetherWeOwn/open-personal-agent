@@ -194,12 +194,15 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             .all<{ id: string; user_id: string; code_hash: string }>()
         ).results,
       /**
-       * Burns the code, adds the passkey, ends every other session and starts this one, in one
-       * batch. Throws if the code was already used, which rolls the whole batch back.
+       * Burns the code and replaces every credential the owner had, as a recovery with the setup
+       * token does: the new passkey and codes take the place of the old ones, and the new session
+       * ends every other one. One batch: throws if the code was already used or replaced, which
+       * rolls the whole batch back, so of two parallel redemptions only one wins.
        */
       redeem: async (r: {
         codeId: string;
         passkey: NewPasskey;
+        recoveryCodes: { id: string; hash: string }[];
         session: NewSession;
         now: number;
       }) => {
@@ -211,7 +214,14 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             )
             .bind(r.now, r.codeId, userId),
           requireChange(),
+          db.prepare("DELETE FROM passkeys WHERE user_id = ?").bind(userId),
           insertPasskey({ userId, passkey: r.passkey }),
+          db.prepare("DELETE FROM recovery_codes WHERE user_id = ?").bind(userId),
+          ...r.recoveryCodes.map((code) =>
+            db
+              .prepare("INSERT INTO recovery_codes (id, user_id, code_hash) VALUES (?, ?, ?)")
+              .bind(code.id, userId, code.hash),
+          ),
           db
             .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
             .bind(r.now, userId),
@@ -219,21 +229,6 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           audit(userId, "recovery.code", "auth", "redeemed"),
         ]);
       },
-      /** Every passkey that can sign in as `userId`, oldest first. */
-      passkeys: async (userId: string) =>
-        (
-          await db
-            .prepare(
-              "SELECT id, created_at, last_used_at, backed_up FROM passkeys WHERE user_id = ? ORDER BY created_at",
-            )
-            .bind(userId)
-            .all<{
-              id: string;
-              created_at: number;
-              last_used_at: number | null;
-              backed_up: number;
-            }>()
-        ).results,
     },
 
     challenges: {
