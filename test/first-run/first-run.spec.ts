@@ -56,12 +56,15 @@ test("claim, onboard and get a first answer", async ({ browser }) => {
   await page.getByLabel("What should your assistant call you?").fill("Sam");
   await page.getByRole("button", { name: "Continue" }).click();
   await chooseModel(page);
-  await page.getByRole("button", { name: "Save and continue" }).click();
-  await page.getByRole("button", { name: "Test" }).click();
+  await page.getByRole("button", { name: "Save and test" }).click();
   // A cold Workers AI model can take a while to load.
   await expect(page.getByText("ms to the first word")).toBeVisible({ timeout: 60_000 });
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: "Got it" }).click();
+  // Costs and limits, then Safety, each keeping its defaults.
+  await expect(page.getByRole("heading", { name: "Costs and limits" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "How I ask before acting" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
   // The chat lists conversations once its socket opens; a send before that is refused.
   const connected = page.waitForResponse(
     (res) => new URL(res.url()).pathname === "/api/conversations" && res.ok(),
