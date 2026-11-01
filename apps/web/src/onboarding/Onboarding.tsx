@@ -293,6 +293,10 @@ export function Onboarding() {
           Workers AI is metered. Cloudflare includes a free daily allowance, and your Cloudflare
           dashboard shows how much of it you've used.
         </li>
+        <li>
+          To keep a runaway bill from happening, chat pauses for the day once you've spent $5 at
+          published prices. It starts again at midnight UTC.
+        </li>
         <li>Providers also set their own rate limits; a busy model may ask you to wait.</li>
       </ul>
       <Button onPress={next} className={`${primary} self-start`}>

@@ -2,7 +2,7 @@
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
 // tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
-import type { HarnessEvent } from "@opa/core";
+import type { HarnessEvent, TurnLimit } from "@opa/core";
 import { createRepository, isId, scopeForAssistant, type TurnRecord } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import {
@@ -15,6 +15,7 @@ import {
 import { type ChatModelError, resolveChatModel } from "./chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
+import { Limits } from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
@@ -32,6 +33,8 @@ export class Assistant extends Agent<Bindings> {
   /** Picks each turn's model. Tests replace it with a scripted provider. */
   resolveModel = resolveChatModel;
   #running: AbortController | null = null;
+  /** Turn rate and daily spend, in this DO's storage (M2-22). */
+  readonly limits = new Limits(this.ctx.storage.kv);
   /** The env with the vault: `compose` stays the only reader of the master keys. */
   readonly #composed: Promise<Env>;
 
@@ -74,10 +77,14 @@ export class Assistant extends Agent<Bindings> {
       void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
     if (msg?.type !== "chat.send") return;
     const text = msg.text.trim();
+    // One turn at a time is the concurrency limit: a second send waits for the first.
     if (this.#running) {
       reject(connection, msg.conversationId, "Another reply is still being written.");
     } else if (!isId(msg.conversationId) || !text || text.length > MAX_TEXT) {
       reject(connection, "", "That message can't be sent.");
+    } else if (!this.limits.startTurn()) {
+      const message = "You're sending messages quickly. Wait a minute, then try again.";
+      reject(connection, msg.conversationId, message, "slow_down");
     } else {
       const running = new AbortController();
       this.#running = running;
@@ -107,11 +114,6 @@ export class Assistant extends Agent<Bindings> {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
       return reject(connection, conversationId, message);
     }
-    const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
-    if (!(await chat.open(conversationId, title))) {
-      return reject(connection, conversationId, "That conversation doesn't exist.");
-    }
-    await picked.used?.();
     const { provider, model } = picked;
     const turn: TurnRecord = {
       conversationId,
@@ -123,22 +125,47 @@ export class Assistant extends Agent<Bindings> {
       usage: null,
       called: false,
     };
-    // Checkpoint before the first write, so a recovery can always name the turn.
-    stash(turn);
-    const emit = this.#emitter(conversationId, turn.turnId);
-    await chat.startTurn(conversationId, text, turn.replyId);
-    // The model context comes from D1, never from memory, so it survives an eviction.
+    // The model context comes from D1, never from memory, so it survives an eviction. A new
+    // conversation has none yet.
     const messages = ((await chat.listMessages(conversationId)) ?? [])
       .filter((m) => m.content !== "")
-      .map(({ role, content }) => ({ role, content }));
+      .map(({ role, content }) => ({ role, content }))
+      .concat({ role: "user", content: text });
+    // Checkpoint before the reservation and the first write, so a recovery can always name the
+    // turn and release what it holds.
+    stash(turn);
+    // Reserved before anything is written, so a refused send leaves no trace, not even a
+    // conversation.
+    const chars = messages.reduce((sum, m) => sum + m.content.length, 0);
+    const reservation = this.limits.reserve(turn.turnId, turn.providerId, model, chars);
+    if (!reservation) {
+      const message = "You've reached today's spending limit. It resets at midnight UTC.";
+      return reject(connection, conversationId, message, "limit_reached");
+    }
+    const emit = this.#emitter(conversationId, turn.turnId);
+    const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
+    try {
+      if (!(await chat.open(conversationId, title))) {
+        this.limits.release(turn.turnId);
+        return reject(connection, conversationId, "That conversation doesn't exist.");
+      }
+      await picked.used?.();
+      await chat.startTurn(conversationId, text, turn.replyId);
+    } catch (err) {
+      this.limits.release(turn.turnId); // no call was made
+      throw err;
+    }
     emit("turn.started", { messageId: turn.replyId });
     turn.called = true;
     stash(turn);
 
     let failure: string | null = null;
     let stashedAt = 0;
+    const { maxOutputTokens } = reservation;
     try {
-      for await (const event of provider.stream({ model, messages, signal })) {
+      // A chat turn makes one call; the tool loop (M3) makes more under the same cap.
+      if (!this.limits.call(turn.turnId)) throw new RangeError("too many calls in one turn");
+      for await (const event of provider.stream({ model, messages, maxOutputTokens, signal })) {
         if (event.type === "text.delta") {
           turn.reply += event.text;
           emit("message.delta", { text: event.text });
@@ -157,6 +184,7 @@ export class Assistant extends Agent<Bindings> {
     } catch {
       failure = "The model call failed.";
     }
+    this.limits.settle(turn.turnId, turn.providerId, model, turn.usage);
     try {
       await chat.settle(turn, signal.aborted ? "interrupted" : failure ? "error" : "complete");
     } catch {
@@ -190,6 +218,9 @@ export class Assistant extends Agent<Bindings> {
     if (ctx.name !== "chat-turn") return;
     const turn = ctx.snapshot as TurnRecord | null;
     if (!turn) return;
+    // Settling twice charges once, so a recovery after the turn settled costs nothing more.
+    if (turn.called) this.limits.settle(turn.turnId, turn.providerId, turn.model, turn.usage);
+    else this.limits.release(turn.turnId);
     await this.#chat.settle(turn, "interrupted"); // the ledger keeps any usage already reported
     this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
   }
@@ -224,14 +255,14 @@ const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
  * Fails a send for the tab that made it only. No turn started, so it has no turn ID, and `seq` 0
  * keeps it outside the sequence of a turn the tab may be receiving.
  */
-function reject(connection: Connection, sessionId: string, message: string) {
+function reject(connection: Connection, sessionId: string, message: string, reason?: TurnLimit) {
   const event: HarnessEvent = {
     v: 1,
     seq: 0,
     sessionId,
     turnId: "",
     type: "turn.failed",
-    payload: { message },
+    payload: reason ? { message, reason } : { message },
   };
   connection.send(JSON.stringify(event));
 }
