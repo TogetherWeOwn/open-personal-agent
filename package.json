@@ -38,6 +38,7 @@
     "test:acceptance": "playwright test --project acceptance",
     "check": "pnpm deploy:dry-run && node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs && node scripts/generate-verify-guide.mjs --check",
     "notices": "node scripts/generate-notices.mjs",
+    "migrations:renumber": "node scripts/renumber-migrations.mjs",
     "dev:mock-model": "node scripts/mock-openai.mjs"
   },
   "devDependencies": {

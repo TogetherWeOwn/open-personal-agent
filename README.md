@@ -71,6 +71,34 @@ The schema lives in `packages/db/src/schema.ts` (Drizzle, SQLite dialect). After
 `SCHEMA_VERSION` in `packages/db/src/index.ts` to match. Migrations are forward-only, and an
 applied migration is never edited.
 
+Migration numbers are claimed in merge order, so a number that was free when you generated may be
+taken by the time you merge. Don't renumber by hand: at merge time (as the author, or as the
+reviewer merging the PR) run
+
+```sh
+pnpm migrations:renumber   # rebases your migration(s) onto origin/main's latest number
+git add -A migrations packages/db/src/index.ts && git commit -m "Renumber migration onto main"
+git merge origin/main      # or rebase; resolve any remaining conflicts
+pnpm migrations:renumber   # idempotent: rebuilds the journal and verifies the result
+pnpm test && git push
+```
+
+Commit before merging: the script restores main's migration files locally, and `git merge`
+refuses to overwrite untracked files. A local database that already applied your migration under
+its old filename will see the renumbered one as new and fail re-applying it, so reset local dev
+data (`.wrangler`, `.opa-data`) before the next `pnpm dev`.
+
+It renames the SQL and snapshot files, merges each snapshot onto main's latest (a plain rename
+would silently drop main's schema changes from the snapshot), rebuilds `meta/_journal.json`, and
+fixes the `INSERT INTO schema_version` and `SCHEMA_VERSION` to match. If a merge left conflicts in
+`migrations/` or `packages/db/src/index.ts`, keep your branch's side of those files and run it:
+it restores any of main's migration files the resolution dropped. `--dry-run` prints the plan,
+`--check` fails if a renumber is due, `--base <ref>` targets a branch other than `origin/main`
+(a local ref such as `--base feat/parent` works as-is), and `--no-fetch` skips refreshing the
+base from its remote. If both your migration and one that landed on main changed the same table or
+column, it stops and names the object instead of guessing: regenerate against merged main with
+`pnpm --filter @opa/db generate` for that one.
+
 ## Deploy to Cloudflare
 
 Requirements: a Cloudflare account on Workers Paid, with R2 enabled once in the dashboard.
