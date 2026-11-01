@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Heading } from "react-aria-components";
 import { Button, buttonClass, Card, CardHeader } from "../ui";
+import { DeleteAccount } from "./DeleteAccount";
 import { type DataExport, formatBytes, listExports, startExport } from "./export-api";
 
 const ERRORS: Record<string, string> = {
@@ -109,7 +110,7 @@ export function PrivacySettings() {
   };
 
   return (
-    <div data-testid="data-export">
+    <div data-testid="data-export" className="flex flex-col gap-6">
       <Card labelledBy="data-export-heading">
         <CardHeader id="data-export-heading" title="Download your data" />
         <p>
@@ -167,6 +168,7 @@ export function PrivacySettings() {
           </>
         )}
       </Card>
+      <DeleteAccount />
     </div>
   );
 }
