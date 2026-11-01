@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+// Fixture config for the T3/T4/T7 cf-verify window (TWO-669). Never deployed as committed:
+// the driver copies it under `.wrangler/` (gitignored) with `__PREFIX__` replaced by the
+// campaign prefix, so workflow/DO names stay account-unique per campaign. No account IDs here.
+{
+  "name": "__PREFIX__-t3t4t7",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-23",
+  "d1_databases": [{ "binding": "DB" }],
+  "r2_buckets": [{ "binding": "FILES" }],
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [{ "name": "VERIFY_SOCKET", "class_name": "VerifySocket" }]
+  },
+  "workflows": [
+    {
+      "name": "__PREFIX__-verify-workflow",
+      "binding": "VERIFY_WORKFLOW",
+      "class_name": "VerifyWorkflow"
+    }
+  ],
+  "exports": {
+    "VerifySocket": { "type": "durable-object", "storage": "sqlite" },
+    "VerifyWorkflow": { "type": "workflow", "name": "__PREFIX__-verify-workflow" }
+  },
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
+}

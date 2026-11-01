@@ -22,6 +22,7 @@
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "teardown:cloudflare": "node scripts/teardown-cloudflare.mjs",
     "verify:cloudflare": "node scripts/verify-cloudflare.mjs",
+    "cf-verify:t3t4t7": "node scripts/cf-verify-t3t4t7.mjs",
     "docs:verify": "node scripts/generate-verify-guide.mjs",
     "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker --metafile dist/worker-meta.json",
     "lint": "biome check . && node scripts/check-scoped-access.mjs",

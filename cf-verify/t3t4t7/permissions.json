@@ -1,0 +1,25 @@
+{
+  "$comment": "Fixture permission set for the owner-approved T3/T4/T7 cf-verify window (TWO-669). Same groups as deploy/permissions.json: Workers Scripts Edit covers the Worker, its VerifySocket DO, VerifyWorkflow and the workers.dev URL; D1/R2 cover the ledger and offload. T7 calls the AI binding at runtime, which needs no token permission (the product deploy passed without Workers AI Read).",
+  "permissions": [
+    {
+      "id": "workers-scripts",
+      "scope": "account",
+      "group": "Workers Scripts Edit",
+      "required": true
+    },
+    { "id": "d1", "scope": "account", "group": "D1 Edit", "required": true },
+    { "id": "r2", "scope": "account", "group": "Workers R2 Storage Edit", "required": true },
+    {
+      "id": "account-settings",
+      "scope": "account",
+      "group": "Account Settings Read",
+      "required": true
+    },
+    { "id": "workers-ai", "scope": "account", "group": "Workers AI Read", "required": false }
+  ],
+  "bounds": {
+    "t3": "10 instances, 100 steps, 10 MiB, 2,000 requests, 60,000 CPU-ms",
+    "t4": "1 DO, 3 sockets, 60 min, 500 app messages, 2,000 requests, 60,000 CPU-ms",
+    "t7": "1,000 turns total (20-turn pilot included), 8,000 neurons per quota day, 4 calls and 2,048+512 tokens per turn max, concurrency 1"
+  }
+}
