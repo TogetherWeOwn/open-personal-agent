@@ -530,10 +530,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
         steered: [...t.steered, { ...event.payload }],
       }));
     case "turn.dequeued":
-      return updateTurn(seen, event, (t) => ({
-        ...t,
-        queued: t.queued.filter((q) => q.messageId !== event.payload.messageId),
-      }));
+      return clearQueued(seen, event.sessionId, event.payload.messageId);
     case "task.promoted":
       return updateTurn(seen, event, (t) => ({
         ...t,
@@ -597,6 +594,23 @@ function ensureTurn(
 }
 
 /**
+ * Events only a progressing loop emits: a step, a tool call, taint, a steer joining, or the
+ * reply moving. A turn paused at an approval or a limit that receives one has resumed, so it
+ * runs again — even when the resume carried no explicit outcome event (M3-09 AC1). Usage and
+ * status can flush while paused, so they never resume a turn on their own.
+ */
+const PROGRESS: ReadonlySet<HarnessEvent["type"]> = new Set([
+  "step.started",
+  "step.completed",
+  "tool.called",
+  "tool.result",
+  "context.tainted",
+  "turn.steered",
+  "message.delta",
+  "message.completed",
+]);
+
+/**
  * Runs `mutate` on the event's turn and stamps it, so the "still working" timer restarts on
  * every visible change (M3-09 AC1). Events for untracked turns leave the thread as it is.
  */
@@ -608,9 +622,30 @@ function updateTurn(
   const ensured = ensureTurn(state, event);
   const at = ensured?.state.pending;
   if (!ensured || !at) return state;
-  const turn = { ...mutate(ensured.turn), updatedAt: Date.now() };
+  const mutated = mutate(ensured.turn);
+  const outcome =
+    (mutated.outcome === "waiting" || mutated.outcome === "limited") &&
+    PROGRESS.has(event.type)
+      ? ("running" as const)
+      : mutated.outcome;
+  const turn = { ...mutated, outcome, updatedAt: Date.now() };
   return update(ensured.state, at.conversationId, (c) => ({
     turns: c.turns.map((t) => (t.turnId === at.turnId ? turn : t)),
+  }));
+}
+
+/**
+ * Takes a queued send out of every turn of its conversation. Queue entries stay on the turn
+ * that was running when they were admitted, so a dequeue logged under a later turn still
+ * finds one parked on an earlier turn (M3-09 AC4).
+ */
+function clearQueued(state: ChatState, conversationId: string, messageId: string): ChatState {
+  return update(state, conversationId, (c) => ({
+    turns: c.turns.map((t) =>
+      t.queued.some((q) => q.messageId === messageId)
+        ? { ...t, queued: t.queued.filter((q) => q.messageId !== messageId), updatedAt: Date.now() }
+        : t,
+    ),
   }));
 }
 
@@ -703,8 +738,29 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     messages.splice(at + 1, 0, line);
   }
   const next = update(state, id, () => ({ messages, stale: 0 }));
-  // The turn ended while this tab was disconnected.
-  return reply && reply.status !== "streaming" ? { ...next, pending: null } : next;
+  // The turn ended while this tab was disconnected: the terminal event trimmed with the
+  // settled turn, so the load is the only word. A tracked turn still marked live settles
+  // with its reply — complete reads succeeded, error reads failed, and an interrupted
+  // reply reads interrupted, since D1 cannot tell a cancel from an interruption (M3-09 AC1).
+  // Turns the tab already settled keep their outcome.
+  if (!reply || reply.status === "streaming") return next;
+  const outcome =
+    reply.status === "complete"
+      ? ("succeeded" as const)
+      : reply.status === "error"
+        ? ("failed" as const)
+        : ("interrupted" as const);
+  return {
+    ...update(next, id, (c) => ({
+      turns: c.turns.map((t) =>
+        t.messageId === reply.id &&
+        (t.outcome === "running" || t.outcome === "waiting" || t.outcome === "limited")
+          ? { ...t, outcome, updatedAt: Date.now() }
+          : t,
+      ),
+    })),
+    pending: null,
+  };
 }
 
 function finish(
