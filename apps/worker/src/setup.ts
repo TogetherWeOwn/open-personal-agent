@@ -14,7 +14,7 @@ import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { Env } from "./env";
-import { checkHealth } from "./health";
+import { setupRequired } from "./health";
 
 type Mode = "claim" | "recovery" | "closed";
 interface SetupState {
@@ -87,7 +87,7 @@ async function authorize(
   if (c.req.header("Origin") !== new URL(c.req.url).origin) {
     return c.json({ error: "bad_origin" }, 403);
   }
-  if ((await checkHealth(c.env)).status === "setup_required") {
+  if (await setupRequired(c.env)) {
     return c.json({ error: "setup_required" }, 503);
   }
   const secret = c.env.OPA_SETUP_TOKEN ?? "";

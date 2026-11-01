@@ -16,6 +16,11 @@ export interface Bindings {
   TASK_WORKFLOW: Workflow;
   OPA_SESSION_SECRET?: string;
   OPA_SETUP_TOKEN?: string;
+  /**
+   * Set by a composition root whose runtime lacks these (the Node root, for now). Health reports
+   * them as false without degrading.
+   */
+  UNAVAILABLE?: readonly ("workflow" | "ai")[];
 }
 
 /** What the HTTP app sees. `VAULT` is `null` unless `VAULT_STATUS` is `ok`. */
