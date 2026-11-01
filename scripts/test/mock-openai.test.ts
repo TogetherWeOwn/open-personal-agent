@@ -25,6 +25,51 @@ describe("mock OpenAI-compatible server", () => {
     expect(events.at(-1)).toEqual({ type: "done", finishReason: "stop" });
   });
 
+  it("calls the first offered tool once, then echoes the follow-up", async () => {
+    const provider = createOpenAIChatProvider({ providerId: "mock", baseUrl: server.url });
+    const tools = [
+      {
+        name: "lookup",
+        description: "The smoke's tool.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      },
+    ];
+    const first = [];
+    for await (const event of provider.stream({
+      model: MOCK_MODEL,
+      messages: [{ role: "user", content: "hi there" }],
+      tools,
+    })) {
+      first.push(event);
+    }
+    const calls = first.filter((e) => e.type === "tool_call");
+    expect(calls).toEqual([
+      { type: "tool_call", toolCall: { id: "call_1", name: "lookup", arguments: "{}" } },
+    ]);
+    expect(first.at(-1)).toEqual({ type: "done", finishReason: "tool_calls" });
+
+    // With the tool result in the history, the mock echoes instead of calling again.
+    const second = [];
+    for await (const event of provider.stream({
+      model: MOCK_MODEL,
+      messages: [
+        { role: "user", content: "hi there" },
+        {
+          role: "assistant",
+          toolCalls: [{ id: "call_1", name: "lookup", arguments: "{}" }],
+          content: "",
+        },
+        { role: "tool", toolCallId: "call_1", content: "found it" },
+      ],
+      tools,
+    })) {
+      second.push(event);
+    }
+    expect(second.some((e) => e.type === "tool_call")).toBe(false);
+    const text = second.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+    expect(text).toBe("You said: hi there");
+  });
+
   it("answers a malformed request with 400 and keeps serving", async () => {
     for (const body of ["{bad", '{"messages":"nope"}']) {
       const res = await fetch(`${server.url}/chat/completions`, { method: "POST", body });
