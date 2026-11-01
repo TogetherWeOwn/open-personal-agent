@@ -20,7 +20,7 @@ import {
   TaskLimitError,
   type TaskStepper,
 } from "@opa/core";
-import { createRepository } from "@opa/db/repository";
+import { createRepository, type TaskLimitKind } from "@opa/db/repository";
 import {
   type LoopHost,
   type LoopTool,
@@ -141,7 +141,7 @@ export async function executeTask(
     });
     const outcome = await driveLoop(ctx, user, task.id, picked, deps.taskTools, now);
     await stepper.do("task:finish", {}, async () => {
-      await user.tasks.finish(task.id, outcome.status, outcome.error);
+      await user.tasks.finish(task.id, outcome.status, outcome.error, outcome.limit?.kind ?? null);
       return null;
     });
     if (outcome.limit) {
@@ -153,7 +153,15 @@ export async function executeTask(
     const message = redactSecrets(messageOf(err), secrets).slice(0, 500);
     await stepper
       .do("task:finish:error", {}, async () => {
-        await user.tasks.finish(task.id, limit ? "budget_limited" : "failed", message);
+        // The row keeps the precise execution-limit kind (`steps`/`duration`) for the Tasks
+        // view's "Paused: limit" label (M3-13 AC1); the progress event below stays in the
+        // `limit.reached` vocabulary (M3-03 AC8), which has no per-task kinds.
+        await user.tasks.finish(
+          task.id,
+          limit ? "budget_limited" : "failed",
+          message,
+          limit?.kind ?? null,
+        );
         return null;
       })
       .catch(() => {}); // a failed finish must not mask the task's own end
@@ -187,7 +195,7 @@ async function driveLoop(
 ): Promise<{
   status: "succeeded" | "failed" | "budget_limited";
   error?: string;
-  limit?: { kind: string; detail: string };
+  limit?: { kind: TaskLimitKind; detail: string };
 }> {
   const billingId = picked.billingId ?? picked.provider.id;
   let dailyLimited = false;
@@ -231,7 +239,7 @@ async function driveLoop(
             await ctx.budget.settle(key, billingId, req.model, usage).catch(() => {});
           }
           await user.usage
-            .record({ providerId: billingId, model: req.model, usage })
+            .record({ providerId: billingId, model: req.model, usage, taskId })
             .catch(() => {});
           return { limited: false, events: events as unknown as JsonValue };
         });
@@ -287,12 +295,15 @@ async function driveLoop(
     const turn = state.turn;
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
+    // The `limit.reached` kind the loop stopped on, for the row's "Paused: limit" label (AC1).
+    let seenLimit: { kind: TaskLimitKind; detail: string } | undefined;
     for (;;) {
       const next = await gen.next();
       if (next.done) {
         outcome = next.value;
         break;
       }
+      if (next.value.type === "limit.reached") seenLimit = next.value.payload;
       ctx.progress(next.value);
     }
     const saved = await ctx.step(`task:save:${cycle}`, async () => {
@@ -309,6 +320,10 @@ async function driveLoop(
       if (dailyLimited)
         return { status: "budget_limited", limit: { kind: "daily", detail: "daily spend cap" } };
       if (outcome === "completed") return { status: "succeeded" };
+      // The loop always yields its `limit.reached` before it returns, so the kind is known;
+      // without it the row still reads paused, with no kind to show.
+      if (outcome === "limit_reached" && seenLimit)
+        return { status: "budget_limited", limit: seenLimit };
       if (outcome === "limit_reached") return { status: "budget_limited" };
       if (outcome === "cancelled") throw new TaskCancelledError(taskId);
       return { status: "failed", error: "the model call failed" };

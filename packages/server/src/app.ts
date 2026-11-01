@@ -15,6 +15,7 @@ import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./sessi
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
 import { stepUpRoutes } from "./step-up";
+import { taskRoutes } from "./tasks";
 import { toolSettings } from "./tool-settings";
 import { usageRoutes } from "./usage";
 import { vaultRoutes } from "./vault-reset";
@@ -70,6 +71,7 @@ shared.route("/api/auth", authRoutes);
 shared.route("/api/sessions", sessionRoutes);
 shared.route("/api", chatRoutes);
 shared.route("/api/attachments", attachmentRoutes);
+shared.route("/api/tasks", taskRoutes);
 shared.route("/api/usage", usageRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */

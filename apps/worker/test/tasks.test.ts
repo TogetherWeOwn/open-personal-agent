@@ -107,4 +107,67 @@ describe("task rows", () => {
     expect(await bob.stepOutputs.get("out1")).toBeNull();
     expect(() => bob.stepOutputs.get("../../alice/task-outputs/out1")).toThrow(/invalid id/);
   });
+
+  it("records which limit stopped a budget-limited task, and clears it on success", async () => {
+    await alice.tasks.create(makeTask("t10", "ca"));
+    await alice.tasks.markRunning("t10", 1_000);
+    expect(await alice.tasks.finish("t10", "budget_limited", "too many tools", "tools")).toBe(true);
+    expect((await alice.tasks.get("t10"))?.limitKind).toBe("tools");
+    // A paused task resumes: succeeding clears the kind and stamps the end.
+    expect(await alice.tasks.finish("t10", "succeeded")).toBe(true);
+    const done = await alice.tasks.get("t10");
+    expect(done?.limitKind).toBeNull();
+    expect(done?.finishedAt).not.toBeNull();
+  });
+
+  it("lists runs with their conversation and spend, and filters them", async () => {
+    await alice.tasks.create({ ...makeTask("t11", "ca"), title: "Report" });
+    await alice.tasks.create(makeTask("t12", "ca"));
+    const call = {
+      providerId: "openai",
+      model: "gpt-4.1-mini",
+      usage: { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0, reasoningTokens: 0 },
+    };
+    await alice.usage.record({ ...call, taskId: "t11" });
+    await alice.usage.record({ ...call, taskId: "t11" });
+    await alice.usage.record(call); // a chat turn: no task, so no run may claim it
+    await bob.usage.record({ ...call, taskId: "t11" }); // another user's call: same
+    await expect(alice.usage.record({ ...call, taskId: "../x" })).rejects.toThrow(/invalid id/);
+
+    const listed = await alice.tasks.list();
+    const report = listed.find((t) => t.id === "t11");
+    expect(report).toMatchObject({
+      title: "Report",
+      conversationId: "ca",
+      conversationTitle: "Alice's",
+      kind: "turn",
+      mode: "background",
+      status: "queued",
+      limitKind: null,
+      calls: 2,
+    });
+    expect(typeof report?.costMicroUsd).toBe("number");
+    // No calls yet reads as zero calls and unknown cost, never as nulls.
+    expect(listed.find((t) => t.id === "t12")).toMatchObject({ calls: 0, costMicroUsd: null });
+    // Newest first.
+    expect(listed[0]?.createdAt).toBeGreaterThanOrEqual(listed.at(-1)?.createdAt ?? 0);
+
+    const details = await alice.tasks.details("t11");
+    expect(details).toMatchObject({ id: "t11", calls: 2, conversationTitle: "Alice's" });
+    expect(details?.costMicroUsd).toBe(report?.costMicroUsd);
+    expect(await alice.tasks.details("missing")).toBeUndefined();
+    expect(await bob.tasks.details("t11")).toBeUndefined(); // someone else's run
+
+    expect((await alice.tasks.list({ status: ["queued", "bogus"] })).map((t) => t.id)).toContain(
+      "t11",
+    ); // unknown statuses are ignored
+    expect((await alice.tasks.list({ status: ["running"] })).some((t) => t.id === "t11")).toBe(
+      false,
+    );
+    expect(await alice.tasks.list({ since: Date.now() + 3_600_000 })).toEqual([]);
+    expect(await alice.tasks.list({ until: 0 })).toEqual([]);
+    expect(await alice.tasks.list({ limit: 1 })).toHaveLength(1);
+    expect(await alice.tasks.list({ limit: 0 })).toHaveLength(1); // clamped to one
+    expect((await alice.tasks.list({ limit: 500 })).length).toBeGreaterThan(1); // clamped to 200
+  });
 });

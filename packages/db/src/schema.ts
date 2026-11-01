@@ -4,6 +4,7 @@
 // `pnpm --filter @opa/db generate`; never edit an applied migration.
 import { sql } from "drizzle-orm";
 import {
+  type AnySQLiteColumn,
   blob,
   check,
   foreignKey,
@@ -257,7 +258,9 @@ export const attachments = sqliteTable(
 /**
  * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
  * table had no price for the model; `cost_source` says whether it was estimated or reported.
- * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls.
+ * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls. `task_id`
+ * attributes a background task's calls to it (M3-13 AC2, "cost so far"); chat turns keep using
+ * `conversation_id`/`message_id`.
  */
 export const usage = sqliteTable(
   "usage",
@@ -268,6 +271,9 @@ export const usage = sqliteTable(
       onDelete: "set null",
     }),
     messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    taskId: text("task_id").references((): AnySQLiteColumn => tasks.id, {
+      onDelete: "set null",
+    }),
     providerId: text("provider_id").notNull(),
     model: text("model").notNull(),
     inputTokens: integer("input_tokens").notNull().default(0),
@@ -279,7 +285,10 @@ export const usage = sqliteTable(
     neurons: integer("neurons"),
     createdAt: createdAt(),
   },
-  (t) => [index("usage_user_idx").on(t.userId, t.createdAt)],
+  (t) => [
+    index("usage_user_idx").on(t.userId, t.createdAt),
+    index("usage_task_idx").on(t.userId, t.taskId),
+  ],
 );
 
 /**
@@ -348,6 +357,24 @@ export const tasks = sqliteTable(
     title: text("title"),
     state: text("state"),
     error: text("error"),
+    /**
+     * Which limit stopped a `budget_limited` task (M3-13 AC1): a money limit (`task_budget`,
+     * `daily`, `monthly_hard`) reads "Paused: budget", an execution limit (`calls`, `tools`,
+     * `tool_rate`, `steps`, `duration`) reads "Paused: limit". Null for every other status.
+     * The enum is type-level only, as with the sibling status column.
+     */
+    limitKind: text("limit_kind", {
+      enum: [
+        "task_budget",
+        "daily",
+        "monthly_hard",
+        "calls",
+        "tools",
+        "tool_rate",
+        "steps",
+        "duration",
+      ],
+    }),
     createdAt: createdAt(),
     updatedAt: integer("updated_at").notNull().default(now),
     startedAt: integer("started_at"),
