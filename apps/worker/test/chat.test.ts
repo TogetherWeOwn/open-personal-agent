@@ -61,14 +61,15 @@ function useModel(userId: string, provider: ModelProvider) {
 type Reply = { text?: string; calls?: [name: string, args: unknown][] };
 
 /** A model that answers each call with the next reply (the last one repeats), for loop tests. */
-function replying(replies: (Reply | (() => Reply))[]): ModelProvider {
+function replying(replies: (Reply | (() => Reply))[], seen: ModelMessage[][] = []): ModelProvider {
   let ids = 0;
   let at = 0;
   return {
     id: "scripted",
     listModels: async () => [],
     capabilities: () => ({ tools: true, usageInStream: true }),
-    async *stream(): AsyncGenerator<ModelEvent> {
+    async *stream(request): AsyncGenerator<ModelEvent> {
+      seen.push(request.messages);
       const next = replies[Math.min(at++, replies.length - 1)] ?? { text: "done" };
       const reply = typeof next === "function" ? next() : next;
       for (const word of (reply.text ?? "").split(/(?<= )/).filter(Boolean)) {
@@ -1129,6 +1130,384 @@ describe("run queue and steer (M3-09)", () => {
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
     await tab.until?.("turn.cancelled");
     expect(Date.now() - at).toBeLessThan(2000);
+  });
+
+  it("ignores queued sends and steers from a logged-out tab", async () => {
+    const { browser, owner, key } = await claim();
+    const other = new Browser();
+    expect((await other.login(key)).status).toBe(200);
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const seen: ModelMessage[][] = [];
+    await useModel(owner, scripted(seen, gate));
+    const [stale, live] = [await openTab(browser), await openTab(other)];
+    live.send?.("conv-r1", "first");
+    await live.until?.("message.delta");
+    // The first tab's session ends while the turn runs: its socket outlives it, but its queued
+    // sends and steers must not write rows or spend model turns.
+    expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    stale.send?.("conv-r1", "from a revoked session");
+    stale.steer?.("conv-r1", "steer from a revoked session");
+    expect(await stale.closed).toBe(4401);
+    release();
+    await live.until?.("turn.completed");
+    expect(seen).toEqual([[{ role: "user", content: "first" }]]);
+    expect(await stored(other, "conv-r1")).toMatchObject([
+      { content: "first", status: "complete" },
+      { content: "Hello there", status: "complete" },
+    ]);
+  });
+
+  it("settles a queued send that can never start as an error, not streaming", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const tab = await openTab(browser);
+    tab.send?.("conv-qf", "first");
+    await tab.until?.("message.delta");
+    // An attachment ID that is well-formed but nobody's: the queued send fails before starting.
+    tab.ws?.send(
+      JSON.stringify({
+        type: "chat.send",
+        conversationId: "conv-qf",
+        text: "with a ghost file",
+        attachmentIds: ["att_gone"],
+      }),
+    );
+    // The second send waits behind the first before the gate opens.
+    await tab.until?.("turn.queued");
+    release();
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.failed")).toHaveLength(1),
+      SOCKET_WAIT,
+    );
+    expect(tab.events.find((e) => e.type === "turn.failed")).toMatchObject({
+      payload: { message: "One of those files isn't available anymore." },
+    });
+    // The pair settles instead of reading `streaming` forever.
+    expect(await stored(browser, "conv-qf")).toMatchObject([
+      { content: "first", status: "complete" },
+      { content: "Hello there", status: "complete" },
+      { content: "with a ghost file", status: "complete" },
+      { content: "One of those files isn't available anymore.", status: "error" },
+    ]);
+    expect(await count("messages", "conversation_id = 'conv-qf' AND status = 'streaming'")).toBe(0);
+  });
+
+  it("waits out the rate limit in queue order instead of dropping or jumping ahead", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted(seen, gate));
+    // One slot left this minute: the running turn takes it, so the drain must wait out the rest.
+    const turns = (put: unknown) =>
+      runInDurableObject(assistantOf(owner), (_, state) => state.storage.kv.put("turns", put));
+    await turns(Array(TURNS_PER_MINUTE - 1).fill(Date.now()));
+    const tab = await openTab(browser);
+    tab.send?.("conv-rl", "first");
+    await tab.until?.("message.delta");
+    tab.send?.("conv-rl", "second");
+    tab.send?.("conv-rl", "third");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.queued")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    release();
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.completed")).toHaveLength(1),
+      SOCKET_WAIT,
+    );
+    // The head stays queued instead of failing, and the rest stays parked behind it.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(tab.events.some((e) => e.type === "turn.failed")).toBe(false);
+    expect(await stored(browser, "conv-rl")).toMatchObject([
+      { content: "first", status: "complete" },
+      { content: "Hello there", status: "complete" },
+      { content: "second", status: "complete" },
+      { content: "", status: "streaming" },
+      { content: "third", status: "complete" },
+      { content: "", status: "streaming" },
+    ]);
+    // A new send parks behind the waiting queue instead of jumping ahead of it...
+    await turns([]);
+    tab.send?.("conv-rl", "fourth");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.completed")).toHaveLength(4),
+      SOCKET_WAIT,
+    );
+    expect(tab.events.some((e) => e.type === "turn.failed")).toBe(false);
+    // ...and the drain still answers oldest first.
+    expect(seen.map((messages) => messages.at(-1))).toEqual([
+      { role: "user", content: "first" },
+      { role: "user", content: "second" },
+      { role: "user", content: "third" },
+      { role: "user", content: "fourth" },
+    ]);
+  });
+
+  it("retries the drain when the rate limit's minute passes", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted(seen, gate));
+    // Old enough to refuse now but free the drain in seconds, so the retry is observable.
+    await runInDurableObject(assistantOf(owner), (_, state) =>
+      state.storage.kv.put("turns", Array(TURNS_PER_MINUTE - 1).fill(Date.now() - 55_000)),
+    );
+    const tab = await openTab(browser);
+    tab.send?.("conv-rt", "first");
+    await tab.until?.("message.delta");
+    tab.send?.("conv-rt", "second");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.queued")).toHaveLength(1),
+      SOCKET_WAIT,
+    );
+    release();
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.completed")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    expect(tab.events.some((e) => e.type === "turn.failed")).toBe(false);
+    expect(seen.map((messages) => messages.at(-1))).toEqual([
+      { role: "user", content: "first" },
+      { role: "user", content: "second" },
+    ]);
+  });
+
+  it("settles queued sends interrupted when an eviction orphans them", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const tab = await openTab(browser);
+    tab.send?.("conv-orphan", "first");
+    await tab.until?.("message.delta");
+    tab.send?.("conv-orphan", "second");
+    await tab.until?.("turn.queued");
+    // The eviction: this DO's memory — the running turn and the queue — is gone.
+    await runInDurableObject(assistantOf(owner), (_, state) => state.abort()).catch(() => {});
+    await openTab(browser); // wakes the DO, which settles what the eviction orphaned
+    await vi.waitFor(async () => {
+      expect(await stored(browser, "conv-orphan")).toMatchObject([
+        { content: "first", status: "complete" },
+        { content: "Hello", status: "interrupted" },
+        { content: "second", status: "complete" },
+        { content: "", status: "interrupted" },
+      ]);
+    }, SOCKET_WAIT);
+    expect(
+      await count("messages", "conversation_id = 'conv-orphan' AND status = 'streaming'"),
+    ).toBe(0);
+  });
+
+  it("keeps a queued send waiting when its take-back fails", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const tab = await openTab(browser);
+    tab.send?.("conv-dq2", "first");
+    await tab.until?.("message.delta");
+    tab.send?.("conv-dq2", "second");
+    await tab.until?.("turn.queued");
+    const messageId = (
+      tab.events.find((e) => e.type === "turn.queued")?.payload as { messageId?: unknown }
+    )?.messageId;
+    expect(typeof messageId).toBe("string");
+    // Sabotage the pair: its reply reads settled, so D1 refuses the take-back.
+    const replyId = await db
+      .prepare(
+        "SELECT id FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY seq DESC LIMIT 1",
+      )
+      .bind("conv-dq2")
+      .first("id");
+    await db.prepare("UPDATE messages SET status = 'complete' WHERE id = ?").bind(replyId).run();
+    tab.dequeue?.("conv-dq2", messageId as string);
+    await new Promise((r) => setTimeout(r, 500)); // the take-back fails; nothing is taken back
+    expect(tab.events.some((e) => e.type === "turn.dequeued")).toBe(false);
+    // The send still waits: ending the first turn starts it instead of finding nothing.
+    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await tab.until?.("turn.cancelled");
+    release();
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.completed")).toHaveLength(1),
+      SOCKET_WAIT,
+    );
+    expect(await stored(browser, "conv-dq2")).toMatchObject([
+      { content: "first", status: "complete" },
+      { content: "Hello there", status: "interrupted" },
+      { content: "second", status: "complete" },
+      { content: "Hello there", status: "complete" },
+    ]);
+  });
+
+  it("never steers the next turn with a turn that failed before starting", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    const good = scripted(seen);
+    let releaseGate = () => {};
+    const gate = new Promise<void>((r) => (releaseGate = r));
+    let failNext = false;
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveModel = async () => {
+        if (failNext) {
+          await gate; // the steer lands while the turn still hasn't picked a model
+          failNext = false;
+          return { error: "no_model" as const };
+        }
+        return { provider: good, model: "test-model", apiKey: null };
+      };
+    });
+    const tab = await openTab(browser);
+    // A setup turn first: the conversation must exist before the failing turn, since a send
+    // that can't pick a model leaves no trace — not even the conversation.
+    tab.send?.("conv-fs", "setup");
+    await tab.until?.("turn.completed");
+    failNext = true;
+    tab.send?.("conv-fs", "first");
+    tab.steer?.("conv-fs", "nudge");
+    // The steer is stored while the turn still runs; the turn then fails before its drive.
+    await vi.waitFor(async () => {
+      expect(await count("messages", "conversation_id = 'conv-fs' AND content = 'nudge'")).toBe(1);
+    }, SOCKET_WAIT);
+    releaseGate();
+    await tab.until?.("turn.failed");
+    expect(tab.events.some((e) => e.type === "turn.steered")).toBe(false);
+    tab.send?.("conv-fs", "second");
+    // Two completions: the setup turn's, then this send's.
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "turn.completed")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    // The next turn reads the steer once, as history — never as a new steer.
+    expect(
+      seen
+        .at(-1)
+        ?.filter((m) => m.role === "user")
+        .map((m) => m.content)
+        .filter((c) => c === "nudge"),
+    ).toHaveLength(1);
+    expect(await stored(browser, "conv-fs")).toMatchObject([
+      { content: "setup", status: "complete" },
+      { content: "Hello there", status: "complete" },
+      { content: "nudge", status: "complete" },
+      { content: "second", status: "complete" },
+      { content: "Hello there", status: "complete" },
+    ]);
+  });
+
+  it("steers a consumed steer once across a limit stop and Continue", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    const lookup = loopTool("lookup", "read");
+    let releaseTool = () => {};
+    const toolGate = new Promise<void>((resolve) => (releaseTool = resolve));
+    const run = lookup.tool.execute;
+    lookup.tool.execute = async (input, signal) => {
+      await toolGate;
+      return run(input, signal);
+    };
+    let done = false;
+    const next = (): Reply => (done ? { text: "Finished" } : { calls: [["lookup", { q: "x" }]] });
+    await useModel(owner, replying([next], seen));
+    await useTools(owner, [lookup.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-sc", "Keep looking");
+    await tab.until?.("tool.called");
+    tab.steer?.("conv-sc", "be brief");
+    // The steer is stashed once its row lands; only then may the tool resolve.
+    await vi.waitFor(async () => {
+      expect(await count("messages", "conversation_id = 'conv-sc' AND content = 'be brief'")).toBe(
+        1,
+      );
+    }, SOCKET_WAIT);
+    releaseTool();
+    await tab.until?.("limit.reached");
+    const turnId = tab.events.find((e) => e.type === "limit.reached")?.turnId;
+    done = true;
+    expect(
+      await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+        i.resumeAfterLimit(turnId as string),
+      ),
+    ).toBe(true);
+    await tab.until?.("turn.completed");
+    // The resumed turn carries the steer in its state, not twice in its history too.
+    const users =
+      seen
+        .at(-1)
+        ?.filter((m) => m.role === "user")
+        .map((m) => m.content) ?? [];
+    expect(users.filter((c) => c === "be brief")).toHaveLength(1);
+    expect(await stored(browser, "conv-sc")).toMatchObject([
+      { content: "Keep looking", status: "complete" },
+      { content: "Finished", status: "complete" },
+      { content: "be brief", status: "complete" },
+    ]);
+  });
+
+  it("resumes an approval in place when only its steers sort after its reply", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    const lookup = loopTool("lookup", "read");
+    let releaseTool = () => {};
+    const toolGate = new Promise<void>((resolve) => (releaseTool = resolve));
+    const run = lookup.tool.execute;
+    lookup.tool.execute = async (input, signal) => {
+      await toolGate;
+      return run(input, signal);
+    };
+    const send = loopTool("send", "consequential");
+    await useModel(
+      owner,
+      replying(
+        [
+          { calls: [["lookup", { q: "x" }]] },
+          { calls: [["send", { q: "hi" }]] },
+          { text: "All done" },
+        ],
+        seen,
+      ),
+    );
+    await useTools(owner, [lookup.tool, send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-ap", "File it");
+    await tab.until?.("tool.called");
+    tab.steer?.("conv-ap", "be brief");
+    await vi.waitFor(async () => {
+      expect(await count("messages", "conversation_id = 'conv-ap' AND content = 'be brief'")).toBe(
+        1,
+      );
+    }, SOCKET_WAIT);
+    releaseTool();
+    await tab.until?.("approval.requested");
+    const requested = tab.events.find((e) => e.type === "approval.requested");
+    const batchId = (requested?.payload as { batchId?: unknown } | undefined)?.batchId;
+    const approvalId = (requested?.payload as { items?: { approvalId?: unknown }[] } | undefined)
+      ?.items?.[0]?.approvalId;
+    await decideInD1(batchId as string, approvalId as string, "approved");
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(batchId as string),
+    );
+    expect(resumed).toBe("resumed");
+    await tab.until?.("turn.completed");
+    // In place, not late: no "Approved later" line, and the steer read once.
+    expect(
+      await count("messages", "conversation_id = 'conv-ap' AND content LIKE 'Approved later%'"),
+    ).toBe(0);
+    expect(await stored(browser, "conv-ap")).toMatchObject([
+      { content: "File it", status: "complete" },
+      { content: "All done", status: "complete" },
+      { content: "be brief", status: "complete" },
+    ]);
+    const users =
+      seen
+        .at(-1)
+        ?.filter((m) => m.role === "user")
+        .map((m) => m.content) ?? [];
+    expect(users.filter((c) => c === "be brief")).toHaveLength(1);
   });
 });
 
