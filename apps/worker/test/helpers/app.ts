@@ -4,7 +4,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { beforeAll, beforeEach } from "vitest";
 import { app } from "../../src/app";
-import { SESSION_COOKIE, sha256 } from "../../src/auth";
+import { newSession, SESSION_COOKIE } from "../../src/auth";
 import type { Env } from "../../src/env";
 import { SoftPasskey } from "./softauthn";
 
@@ -13,6 +13,8 @@ export const TOKEN = "setup-token-0123456789abcdefghijklmn";
 const base = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
 export const env: Env = {
   ...base,
+  VAULT: null,
+  VAULT_STATUS: "ok",
   OPA_SESSION_SECRET: "test-session-secret",
   OPA_SETUP_TOKEN: TOKEN,
   ASSETS: { fetch: async () => new Response("spa") } as unknown as Fetcher,
@@ -97,10 +99,7 @@ export async function claim() {
 
 /** Signs `userId` in without a passkey: a live `sessions` row, and the headers that carry it. */
 export async function sessionHeaders(userId: string) {
-  const token = crypto.randomUUID();
-  await db
-    .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), userId, await sha256(token), Date.now() + 3_600_000)
-    .run();
-  return { cookie: `${SESSION_COOKIE}=${token}`, origin: ORIGIN };
+  const { cookie, insert } = await newSession(db, userId);
+  await insert.run();
+  return { cookie: `${SESSION_COOKIE}=${cookie}`, origin: ORIGIN };
 }

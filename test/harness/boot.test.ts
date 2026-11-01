@@ -5,12 +5,9 @@ import { createTestHarness, unstable_readConfig } from "wrangler";
 // Boots the bundle from `pnpm deploy:dry-run` (dist/worker), not the sources. Workers AI is
 // remote-only and needs an account, so the harness runs without it and health reports degraded.
 const { ai: _ai, ...config } = unstable_readConfig({ config: "wrangler.jsonc" });
-// The vault refuses a master key shorter than 256 bits (ADR 0010 D4.1 #7).
-const vars = {
-  OPA_MASTER_KEY: btoa("k".repeat(32)),
-  OPA_SESSION_SECRET: "t",
-  OPA_SETUP_TOKEN: "t",
-};
+// The vault only starts with a well-formed key: 32 bytes, base64.
+const masterKey = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+const vars = { OPA_MASTER_KEY: masterKey, OPA_SESSION_SECRET: "test", OPA_SETUP_TOKEN: "test" };
 const server = createTestHarness({
   workers: [{ config: { ...config, vars, main: "dist/worker/index.js", no_bundle: true } }],
 });
