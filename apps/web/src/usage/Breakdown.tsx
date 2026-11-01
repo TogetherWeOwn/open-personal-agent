@@ -265,8 +265,13 @@ function Shares({
 function Days({ days, currency }: { days: Day[]; currency: string }) {
   const [asTable, setAsTable] = useState(false);
   const top = Math.max(...days.map((d) => d.costMicroUsd), 0);
-  const busiest = days.find((d) => d.costMicroUsd === top);
+  // With no priced cost at all, no day is the highest: unknown costs aren't zero.
+  const busiest = top > 0 ? days.find((d) => d.costMicroUsd === top) : undefined;
   const used = days.some((d) => d.calls > 0);
+  const unpricedDays = days.filter((d) => d.unpricedCalls > 0).length;
+  const unpricedNote =
+    unpricedDays > 0 &&
+    `${num.format(unpricedDays)} ${unpricedDays === 1 ? "day has" : "days have"} messages with no price on file, left out of the bars.`;
   return (
     <div className="flex flex-col gap-3">
       <ToggleButton
@@ -294,9 +299,11 @@ function Days({ days, currency }: { days: Day[]; currency: string }) {
           {/* One image to a screen reader, named by its summary; Show as table has every day. */}
           <div
             role="img"
-            aria-label={`Cost by day this month. Highest: ${
-              busiest ? `${dateWords(busiest.date)}, about ${money(top, currency)}` : "none"
-            }. Show as table for every day.`}
+            aria-label={`Cost by day this month. ${
+              busiest
+                ? `Highest: ${dateWords(busiest.date)}, about ${money(top, currency)}.`
+                : "No priced cost yet."
+            }${unpricedNote ? ` ${unpricedNote}` : ""} Show as table for every day.`}
             className="flex h-40 items-end gap-px border-b border-border-strong"
           >
             {days.map((d) => (
@@ -311,11 +318,13 @@ function Days({ days, currency }: { days: Day[]; currency: string }) {
           <figcaption className="flex justify-between text-sm text-text-muted">
             <span>{dateWords(days[0]?.date ?? "", "short")}</span>
             <span>
-              Highest about {money(top, currency)}
-              {busiest && `, ${dateWords(busiest.date, "short")}`}
+              {busiest
+                ? `Highest about ${money(top, currency)}, ${dateWords(busiest.date, "short")}`
+                : "No priced cost yet"}
             </span>
             <span>{dateWords(days.at(-1)?.date ?? "", "short")}</span>
           </figcaption>
+          {unpricedNote && <p className="text-sm">{unpricedNote}</p>}
         </figure>
       )}
     </div>
@@ -328,6 +337,10 @@ const groupShare = (g: Group) => ({
   calls: g.lines.reduce((n, l) => n + l.calls, 0),
   unpricedCalls: g.lines.reduce((n, l) => n + (l.costMicroUsd === null ? l.calls : 0), 0),
 });
+
+/** A row's cost for the CSV: blank when every message in it is unpriced, never a made-up zero. */
+const csvCost = (s: { calls: number; unpricedCalls: number; costMicroUsd: number }) =>
+  s.calls > 0 && s.unpricedCalls === s.calls ? "" : csvUsd(s.costMicroUsd);
 
 type TabId = "model" | "provider" | "conversation" | "task" | "day";
 
@@ -352,19 +365,22 @@ function csvFor(tab: TabId, data: UsageData, key: "today" | "month") {
       ]);
     case "provider":
       return toCsv([
-        ["Billed by", "Messages", "Cost (USD)"],
-        ...lines.map((g) => [g.name, groupShare(g).calls, csvUsd(g.costMicroUsd)]),
+        ["Billed by", "Messages", "Unpriced messages", "Cost (USD)"],
+        ...lines.map((g) => {
+          const s = groupShare(g);
+          return [g.name, s.calls, s.unpricedCalls, csvCost(s)];
+        }),
       ]);
     case "conversation":
     case "task":
       return toCsv([
         [KIND[tab].first, "Messages", "Unpriced messages", "Cost (USD)"],
-        ...b[tab].map((s) => [shareName(s, tab), s.calls, s.unpricedCalls, csvUsd(s.costMicroUsd)]),
+        ...b[tab].map((s) => [shareName(s, tab), s.calls, s.unpricedCalls, csvCost(s)]),
       ]);
     case "day":
       return toCsv([
         ["Day", "Messages", "Unpriced messages", "Cost (USD)"],
-        ...b.day.map((d) => [d.date, d.calls, d.unpricedCalls, csvUsd(d.costMicroUsd)]),
+        ...b.day.map((d) => [d.date, d.calls, d.unpricedCalls, csvCost(d)]),
       ]);
   }
 }

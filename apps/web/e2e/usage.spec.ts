@@ -214,6 +214,28 @@ test("breaks the month down by conversation, task and day, and exports each as C
   await expect(byDay.getByRole("row", { name: /Nov 2, 2026/ })).toContainText("1about $0.04");
 });
 
+test("an unknown cost is never shown or exported as zero", async ({ page }) => {
+  const unpriced = { ...period, groups: period.groups.filter((g) => g.providerId === "my-llm") };
+  const json = body(unpriced, unpriced);
+  json.breakdowns = {
+    ...json.breakdowns,
+    day: days.map((d) => ({ ...d, costMicroUsd: 0, unpricedCalls: d.calls })),
+  };
+  await open(page, json);
+  await page.getByRole("tab", { name: "Provider" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const csv = await (await (await download).createReadStream()).toArray();
+  expect(Buffer.concat(csv).toString()).toBe(
+    "Billed by,Messages,Unpriced messages,Cost (USD)\r\nmy-llm,1,1,\r\n",
+  );
+  await page.getByRole("tab", { name: "Day" }).click();
+  await expect(
+    page.getByRole("img", { name: /^Cost by day this month\. No priced cost yet\. 6 days have/ }),
+  ).toBeVisible();
+  await expect(page.getByText("6 days have messages with no price on file")).toBeVisible();
+});
+
 test("nothing used yet still shows the plan; a member has no meter", async ({ page }) => {
   await open(page, body(empty, empty, null));
   await expect(page.getByRole("meter")).toHaveCount(0);
