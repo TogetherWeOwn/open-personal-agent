@@ -30,6 +30,10 @@ export interface Seeded {
   conversation: string;
   message: string;
   memory: string;
+  /** A second note, for the route that forgets one after another has edited the first. */
+  spareMemory: string;
+  /** A memory suggestion waiting for the user. */
+  proposal: string;
   task: string;
   attachment: string;
   artifact: string;
@@ -115,9 +119,10 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   if (uploaded.status !== 201) throw new Error(`attachment: ${uploaded.status}`);
   const attachment = (await uploaded.json<{ id: string }>()).id;
 
-  const [conversation, message, memory, task, grant, usage] = Array.from({ length: 6 }, () =>
-    crypto.randomUUID(),
-  ) as [string, string, string, string, string, string];
+  const [conversation, message, memory, spareMemory, proposal, task, grant, usage] = Array.from(
+    { length: 8 },
+    () => crypto.randomUUID(),
+  ) as [string, string, string, string, string, string, string, string];
   const run = (sql: string, ...values: unknown[]) => db.prepare(sql).bind(...values);
   await db.batch([
     run(
@@ -153,6 +158,21 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       id,
       `memory of ${tag}`,
       conversation,
+    ),
+    run(
+      `INSERT INTO memories (id, user_id, kind, text, trust, status, op, source)
+       VALUES (?, ?, 'fact', ?, 'user', 'active', 'create', 'memory_screen')`,
+      spareMemory,
+      id,
+      `spare memory of ${tag}`,
+    ),
+    run(
+      `INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, expires_at)
+       VALUES (?, ?, 'fact', ?, 'inferred', 'proposed', 'create', 'chat', ?)`,
+      proposal,
+      id,
+      `proposal of ${tag}`,
+      Date.now() + 86_400_000,
     ),
     run(
       `INSERT INTO tasks (id, user_id, conversation_id, workflow_instance_id, kind, mode, status, title, state)
@@ -224,7 +244,7 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     });
 
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
-  const ids = { ...items, spareSession, artifact, grant, usage };
+  const ids = { ...items, spareSession, spareMemory, proposal, artifact, grant, usage };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }
