@@ -418,7 +418,13 @@ async function test(c: Ctx, pick: ModelPick) {
     totalMs: first.totalMs,
     tools: called,
     // "rejected": the host refused a request with tools; "ignored": it answered without the call.
-    toolProbe: called ? "called" : probe.failure ? "rejected" : "ignored",
+    toolProbe: called
+      ? "called"
+      : probe.failure?.code === "timeout"
+        ? "timeout"
+        : probe.failure
+          ? "rejected"
+          : "ignored",
     price: priceHint(billingId, model),
     reply: first.reply.slice(0, 200),
   });
