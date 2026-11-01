@@ -21,10 +21,13 @@ export function Thread({
   after,
   afterCount = 0,
   onDequeue,
+  empty,
 }: {
   conversation: Conversation;
   showWork: ShowWork;
   prices: PriceTable;
+  /** Under the greeting of a chat with no messages yet: the setup checklist (M3-24a). */
+  empty?: ReactNode;
   /** Below the last message: the chat's approval cards and receipts (M3-07b). */
   after?: ReactNode;
   /** How many things `after` shows, so a new card scrolls into view as a message would. */
@@ -66,7 +69,10 @@ export function Thread({
     >
       <div className="mx-auto flex max-w-[720px] flex-col gap-6 px-4 py-6">
         {conversation.messages.length === 0 && (
-          <p className="text-text-muted">Hi. What can I help you with?</p>
+          <>
+            <p className="text-text-muted">Hi. What can I help you with?</p>
+            {empty}
+          </>
         )}
         {conversation.messages.map((m) => {
           // The assistant's reply streams under its turn's timeline; other cards (approvals,

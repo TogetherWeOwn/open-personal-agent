@@ -1,105 +1,93 @@
 // SPDX-License-Identifier: Apache-2.0
-// Settings › Assistant's "Show work" card (M3-09 AC3, m3-ux §3.1): how much of a turn's
-// timeline the thread shows. Saving is explicit, so a stray click never changes the thread.
-import { useEffect, useState } from "react";
-import { Label, Radio, RadioGroup } from "react-aria-components";
-import { SHOW_WORK_DEFAULT, SHOW_WORK_OPTIONS, type ShowWork } from "../chat/show-work";
+// Settings › Assistant (m3-ux §3.9, §3.12): what the assistant calls you and knows about you, the
+// same answers onboarding's About you takes, and the setup checklist, which stays here even after
+// the chat hides it, and Show work (M3-09). Saving the profile finishes a skipped About you.
+import { type FormEvent, useEffect, useState } from "react";
+import { Form, Input, Label, TextArea, TextField } from "react-aria-components";
+import { type ModelSettings, settingsApi } from "../models/settings-api";
+import { SetupChecklist } from "../onboarding/SetupChecklist";
 import { Button, Card, CardHeader, Skeleton } from "../ui";
-import { getShowWork, saveShowWork } from "./assistant-api";
+import { ShowWorkCard } from "./ShowWorkCard";
 
-const hint = "text-sm text-text-muted";
+const field = "flex flex-col gap-1";
+const input =
+  "min-h-11 rounded-lg border border-border-strong bg-surface-raised px-3 py-2 placeholder:text-text-muted";
 
 export function AssistantSettings() {
-  const [saved, setSaved] = useState<ShowWork | null>(null);
-  const [choice, setChoice] = useState<ShowWork>(SHOW_WORK_DEFAULT);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "failed" | "load_failed">(
-    "idle",
-  );
+  const [profile, setProfile] = useState<{ displayName: string; about: string } | null>(null);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Bumped after a save, so the checklist shows About you as Done.
+  const [saves, setSaves] = useState(0);
 
   useEffect(() => {
-    getShowWork().then(
-      (showWork) => {
-        setSaved(showWork);
-        setChoice(showWork);
-      },
-      () => setStatus("load_failed"),
+    settingsApi<ModelSettings>("").then(
+      ({ displayName, about }) => setProfile({ displayName, about }),
+      () => setError("I couldn't load this page. Reload to try again."),
     );
   }, []);
 
-  const submit = async (e: React.FormEvent) => {
+  const save = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (saved === null || choice === saved) return;
-    setStatus("saving");
+    if (!profile) return;
+    setBusy(true);
+    setStatus("");
+    setError(null);
     try {
-      const showWork = await saveShowWork(choice);
-      setSaved(showWork);
-      setChoice(showWork);
-      setStatus("saved");
+      await settingsApi("/profile", "PUT", profile);
+      setStatus("Saved");
+      setSaves((n) => n + 1);
     } catch {
-      setStatus("failed");
+      setError("That didn't save. Check your name and try again.");
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <Card labelledBy="assistant-show-work">
-      <CardHeader id="assistant-show-work" level={2} title="Show work" />
-      {status === "load_failed" ? (
-        <p role="alert" className="text-sm text-danger">
-          I couldn't load this setting. Reload to try again.
-        </p>
-      ) : saved === null ? (
-        <Skeleton label="Loading" lines={3} />
-      ) : (
-        <form onSubmit={submit} className="flex flex-col gap-5">
-          <RadioGroup
-            value={choice}
-            onChange={(v) => {
-              // A new pick is unsaved until the next Save: the old "Saved." must go, or the
-              // thread's choice reads saved when it isn't.
-              setChoice(v as ShowWork);
-              setStatus("idle");
-            }}
-            className="flex flex-col gap-2"
-          >
-            <Label className={hint}>How much of a run the thread shows.</Label>
-            {SHOW_WORK_OPTIONS.map(({ value, label, detail }) => (
-              <Radio
-                key={value}
-                value={value}
-                className="group flex min-h-11 cursor-pointer items-start gap-3 rounded-lg px-2 py-1 hover:bg-surface-raised"
+    <div className="flex flex-col gap-4">
+      <SetupChecklist place="settings" reload={saves} />
+      <Card labelledBy="about-you">
+        <CardHeader id="about-you" level={2} title="About you" />
+        {profile === null && !error ? (
+          <Skeleton label="Loading" lines={2} />
+        ) : (
+          profile && (
+            <Form className="flex flex-col gap-4" onSubmit={save}>
+              <TextField
+                isRequired
+                value={profile.displayName}
+                onChange={(displayName) => setProfile({ ...profile, displayName })}
+                className={field}
               >
-                <span
-                  aria-hidden="true"
-                  className="mt-1 flex size-5 shrink-0 items-center justify-center rounded-full border border-border-strong group-data-selected:border-accent"
-                >
-                  <span className="size-2 rounded-full group-data-selected:bg-accent" />
-                </span>
-                <span>
-                  <span className="font-medium">{label}</span>
-                  <span className={`block ${hint}`}>{detail}</span>
-                </span>
-              </Radio>
-            ))}
-          </RadioGroup>
-          <div className="flex items-center gap-3">
-            <Button
-              type="submit"
-              variant="primary"
-              isDisabled={choice === saved || status === "saving"}
-            >
-              Save
-            </Button>
-            <span role="status" className={hint}>
-              {status === "saved" ? "Saved." : ""}
-            </span>
-          </div>
-          {status === "failed" && (
-            <p role="alert" className="text-sm text-danger">
-              That didn't save. Try again.
-            </p>
-          )}
-        </form>
-      )}
-    </Card>
+                <Label>What should your assistant call you?</Label>
+                <Input className={input} maxLength={80} />
+              </TextField>
+              <TextField
+                value={profile.about}
+                onChange={(about) => setProfile({ ...profile, about })}
+                className={field}
+              >
+                <Label>Anything it should know about you? (optional)</Label>
+                <TextArea className={input} rows={3} maxLength={2000} />
+              </TextField>
+              <Button type="submit" variant="primary" isDisabled={busy} className="self-start">
+                Save
+              </Button>
+            </Form>
+          )
+        )}
+        <p role="status" className="text-sm">
+          {status}
+        </p>
+        {error && (
+          <p role="alert" className="text-sm text-danger">
+            {error}
+          </p>
+        )}
+      </Card>
+      <ShowWorkCard />
+    </div>
   );
 }
