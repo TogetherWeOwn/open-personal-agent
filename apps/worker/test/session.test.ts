@@ -173,6 +173,31 @@ describe("logout and session management", () => {
     expect((await laptop.req(`/api/sessions/${phoneId}`, { method: "DELETE" })).status).toBe(404);
   });
 
+  it("revokes a session and audits it in one transaction", async () => {
+    const { br } = await login();
+    const current = (await db
+      .prepare("SELECT id FROM sessions WHERE token_hash = ?")
+      .bind(await sha256(br.cookies.get(SESSION_COOKIE) as string))
+      .first<string>("id")) as string;
+    await db
+      .prepare(
+        "CREATE TRIGGER fail_revoke_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'auth.session_revoke' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+      )
+      .run();
+    try {
+      const failed = await br.req(`/api/sessions/${current}`, { method: "DELETE" });
+      expect(failed.status).toBe(500);
+      // The failed audit rolled the revocation back, so the session still works and can retry.
+      expect(await count("sessions", `id = '${current}' AND revoked_at IS NULL`)).toBe(1);
+    } finally {
+      await db.prepare("DROP TRIGGER fail_revoke_audit").run();
+    }
+    const retry = await br.req(`/api/sessions/${current}`, { method: "DELETE" });
+    expect(retry.status).toBe(200);
+    expect(br.setCookies.join()).toMatch(new RegExp(`${SESSION_COOKIE}=; Max-Age=0`));
+    expect(await count("audit_log", "action = 'auth.session_revoke' AND result = 'ok'")).toBe(1);
+  });
+
   it("can't revoke another user's session", async () => {
     const { br } = await login();
     await db.batch([

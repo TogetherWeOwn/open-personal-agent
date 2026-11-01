@@ -19,6 +19,12 @@ const rotated: Env = { ...env, OPA_SETUP_TOKEN: ROTATED };
 type Options = { options: { challenge: string } };
 type Result = { mode: string; recoveryCodes: string[] };
 
+/** The loser of a race gets 409 at the batch, or 403 if the winner committed before it got there. */
+const ONE_WINS = [
+  [200, 403],
+  [200, 409],
+];
+
 /** Two browsers both fetch options, then both finish at once. Returns the sorted statuses. */
 async function race(token: string, bindings: Env): Promise<number[]> {
   const browsers = [new Browser(bindings), new Browser(bindings)];
@@ -165,7 +171,7 @@ describe("the claim", () => {
   });
 
   it("lets exactly one of two concurrent claims win", async () => {
-    expect(await race(TOKEN, env)).toEqual([200, 409]);
+    expect(ONE_WINS).toContainEqual(await race(TOKEN, env));
     expect(await count("users")).toBe(1);
     expect(await count("passkeys")).toBe(1);
   });
@@ -262,7 +268,7 @@ describe("recovery after the token rotates", () => {
 
   it("lets exactly one of two concurrent recoveries win", async () => {
     expect((await new Browser().setup(TOKEN)).status).toBe(200);
-    expect(await race(ROTATED, rotated)).toEqual([200, 409]);
+    expect(ONE_WINS).toContainEqual(await race(ROTATED, rotated));
     expect(await count("passkeys")).toBe(1);
     expect(await count("recovery_codes")).toBe(10);
   });

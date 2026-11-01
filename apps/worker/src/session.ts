@@ -182,13 +182,17 @@ sessionRoutes.get("/", async (c) => {
 sessionRoutes.delete("/:id", async (c) => {
   const { id, userId } = c.var.session;
   const target = c.req.param("id");
-  const update = await c.env.DB.prepare(
-    "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
-  )
-    .bind(Date.now(), target, userId)
-    .run();
-  const revoked = update.meta.changes > 0;
-  await audit(c, userId, "auth.session_revoke", revoked ? "ok" : "denied").run();
+  // One transaction: if the audit fails, the revocation rolls back and the client can retry.
+  // `changes()` is the update's row count, so the audit records what the update did.
+  const [update] = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    ).bind(Date.now(), target, userId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_log (user_id, action, module, result) VALUES (?, 'auth.session_revoke', 'auth', CASE WHEN changes() > 0 THEN 'ok' ELSE 'denied' END)",
+    ).bind(userId),
+  ]);
+  const revoked = (update?.meta.changes ?? 0) > 0;
   if (!revoked) return c.json({ error: "not_found" }, 404);
   if (target === id) deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   return c.json({ ok: true });
