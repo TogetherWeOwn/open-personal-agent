@@ -55,9 +55,10 @@ afterAll(async () => {
 describe("apps/node", () => {
   it("answers /api/health from SQLite and local files with the migrated schema", async () => {
     const res = await fetch(`${base}/api/health`);
-    // No Workers AI or Workflows on Node yet, so the deployment reports degraded.
+    // No Workers AI or Workflows on Node yet: reported as unavailable, without degrading.
+    expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
-      status: "degraded",
+      status: "ok",
       schema: { current: true },
       checks: { database: true, storage: true, durableObject: true, workflow: false, ai: false },
       secrets: { OPA_MASTER_KEY: true, OPA_SESSION_SECRET: true, OPA_SETUP_TOKEN: true },

@@ -5,7 +5,7 @@ import { SCHEMA_VERSION } from "@opa/db";
 import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
-import type { Health } from "../src/health";
+import { type Health, setupRequired } from "../src/health";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 
@@ -45,8 +45,10 @@ describe("an unmigrated deployment with no secrets", () => {
     expect(html).toContain("npx wrangler d1 migrations apply DB --remote");
     expect(html).toContain("npx wrangler d1 migrations apply DB --local");
     for (const name of Object.keys(SECRETS)) {
-      expect(html).toContain(`npx wrangler secret put ${name}`);
+      expect(html).toContain(`<pre><code>npx wrangler secret put ${name}</code></pre>`);
     }
+    expect(html).toContain("crypto.getRandomValues(Buffer.alloc(32))");
+    expect(html).toContain("Run it again for each secret");
     expect(html).not.toMatch(/Error|\bat .+:\d+:\d+/);
   });
 });
@@ -111,6 +113,26 @@ describe("after migrations", () => {
     expect(status).toBe(200);
     // Presence only: no secret value appears in the response.
     for (const value of Object.values(SECRETS)) expect(JSON.stringify(body)).not.toContain(value);
+  });
+
+  it("degrades for a missing capability unless the runtime declares it unavailable", async () => {
+    const absent = { ...env, ...SECRETS, AI: undefined as unknown as Ai };
+    expect((await health(absent))[1].status).toBe("degraded");
+    // The Node root declares Workers AI and Workflows unavailable: reported, but not degrading.
+    const node = { ...absent, TASK_WORKFLOW: undefined as unknown as Workflow };
+    const [status, body] = await health({ ...node, UNAVAILABLE: ["workflow", "ai"] });
+    expect([status, body.status]).toEqual([200, "ok"]);
+    expect(body.checks).toMatchObject({ ai: false, workflow: false });
+  });
+
+  it("decides setup_required from the schema and secrets alone", async () => {
+    const unreachable = {
+      FILES: { head: () => Promise.reject(new Error("storage down")) } as unknown as R2Bucket,
+      ASSISTANT: {} as WorkerEnv["ASSISTANT"],
+    };
+    expect(await setupRequired(await compose({ ...env, ...SECRETS, ...unreachable }))).toBe(false);
+    expect(await setupRequired(await compose({ ...env, ...unreachable }))).toBe(true);
+    expect(await setupRequired(await compose({ ...env, ...SECRETS, DB: broken }))).toBe(false);
   });
 
   it("reports degraded, with no error detail, when a binding fails", async () => {

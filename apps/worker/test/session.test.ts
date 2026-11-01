@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Passkey login, session cookies, rotation, timeouts, logout, the session list and sign out
 // everywhere (ADR 0010 D2).
+import { systemStore } from "@opa/db/system";
 import { describe, expect, it } from "vitest";
 import { CHALLENGE_COOKIE, SESSION_COOKIE, sha256 } from "../src/auth";
-import { Browser, claim, count, db, freshDatabase, passkey } from "./helpers/app";
+import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();
 
@@ -110,6 +111,21 @@ describe("timeouts", () => {
       .prepare("UPDATE sessions SET last_seen_at = ?")
       .bind(Date.now() - 31 * DAY)
       .run();
+    expect((await br.req("/api/me")).status).toBe(401);
+  });
+
+  it("answers an open socket's recheck by the same rules", async () => {
+    const { br, owner } = await login();
+    const id = (await db.prepare("SELECT id FROM sessions").first<string>("id")) as string;
+    const live = () => systemStore(env).sessions.isLive(id, owner, Date.now());
+    expect([await live(), await systemStore(env).sessions.isLive(id, "other", Date.now())]).toEqual(
+      [true, false],
+    );
+    await db
+      .prepare("UPDATE sessions SET last_seen_at = ?")
+      .bind(Date.now() - 31 * DAY)
+      .run();
+    expect(await live()).toBe(false);
     expect((await br.req("/api/me")).status).toBe(401);
   });
 
