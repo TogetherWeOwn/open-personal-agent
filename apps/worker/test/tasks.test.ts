@@ -154,6 +154,14 @@ describe("task rows", () => {
     expect(resumed?.status).toBe("running");
     expect(resumed?.limitKind).toBeNull();
     expect(await alice.tasks.finish("t13", "budget_limited", "too slow", "duration")).toBe(true);
+    // Continuing (M3-17) moves back to running too, so its kind clears the same way; a
+    // task that isn't paused has nothing to continue.
+    expect(await alice.tasks.resume("t13")).toBe(true);
+    const continued = await alice.tasks.get("t13");
+    expect(continued?.status).toBe("running");
+    expect(continued?.limitKind).toBeNull();
+    expect(await alice.tasks.resume("t13")).toBe(false);
+    expect(await alice.tasks.finish("t13", "budget_limited", "too slow", "duration")).toBe(true);
     // Cancelling ends it, so the kind clears with the move to cancelled.
     expect(await alice.tasks.cancel("t13")).toBe(true);
     const cancelled = await alice.tasks.get("t13");
