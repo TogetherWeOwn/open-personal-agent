@@ -87,6 +87,9 @@ importers:
       '@opa/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0

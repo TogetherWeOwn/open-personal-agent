@@ -2,6 +2,8 @@
 // The model settings the server sends (M3-06): saved providers with their keys' last 4 and
 // dates, the Chat and Background roles, and Test results. A saved key never comes back from
 // the server, so nothing here can hold one beyond the form field it was typed into.
+
+import type { SetupState } from "@opa/core";
 import {
   type PublicKeyCredentialRequestOptionsJSON,
   startAuthentication,
@@ -46,6 +48,8 @@ export interface ModelSettings {
   displayName: string;
   about: string;
   onboarded: boolean;
+  /** The setup checklist (M3-24 AC1); absent from older test doubles. */
+  setup?: SetupState;
   /** The Chat role's model in the shape onboarding has always read; null before one is saved. */
   model: {
     kind: "openai-chat" | "workers-ai";
@@ -101,6 +105,12 @@ export async function setConversationModel(
   const { message } = (await res.json().catch(() => ({}))) as { message?: StoredMessage | null };
   return message ?? null;
 }
+
+/**
+ * What the keyless Workers AI starter can do, wherever it's offered (TWO-697 T7: it called one tool
+ * 7 of 8 times and two tools 0 of 8, so it's sold as chat only).
+ */
+export const STARTER_LABEL = "Starter — chat only, add a key for tools";
 
 const ERRORS: Record<string, string> = {
   key_required: "Enter the API key again: it belongs to a different provider or address.",

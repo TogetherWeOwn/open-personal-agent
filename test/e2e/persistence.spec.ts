@@ -95,11 +95,14 @@ test("claim with a passkey and onboard with the mock model", async () => {
   await page.getByLabel("Base URL").fill(stack.modelUrl);
   await page.getByLabel("Model", { exact: true }).fill("mock-echo");
   await page.getByLabel("API key", { exact: true }).fill("mock-key");
-  await page.getByRole("button", { name: "Save and continue" }).click();
-  await page.getByRole("button", { name: "Test" }).click();
+  await page.getByRole("button", { name: "Save and test" }).click();
   await expect(page.getByText("ms to the first word")).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: "Got it" }).click();
+  // Costs and limits, then Safety, each keeping its defaults.
+  await expect(page.getByRole("heading", { name: "Costs and limits" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "How I ask before acting" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
   const open = socketOpen();
   await page.getByRole("button", { name: "Start chatting" }).click();
   await page.waitForURL("/");

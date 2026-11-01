@@ -118,6 +118,14 @@ spendingRoutes.put("/", async (c) => {
     }
   }
   // Saving the limits finishes onboarding's "Costs and limits" if it was skipped (M3-24 AC1).
-  await user.settings.finishSetup("costs");
+  // That write is in D1 too, so it gets the audit row's recovery: a save that can't finish the
+  // step puts the change back (same conditional revert) and fails, rather than reporting
+  // failure with the new budgets already live. A revert that itself fails surfaces as a 500.
+  try {
+    await user.settings.finishSetup("costs");
+  } catch {
+    if (changed.length) await rpc.revertSpending(write, before);
+    return c.json({ error: "not_saved" }, 500);
+  }
   return c.json({ settings: after });
 });

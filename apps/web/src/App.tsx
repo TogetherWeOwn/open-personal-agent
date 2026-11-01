@@ -42,6 +42,7 @@ import {
   settingsApi,
 } from "./models/settings-api";
 import { NavShell } from "./NavShell";
+import { takePrefill } from "./onboarding/prefill";
 import { hasNavigated, match, navigate, resolveChatAddress, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { getShowWork } from "./settings/assistant-api";
@@ -107,6 +108,17 @@ export function App({ transport }: AppProps) {
   // `/c/:conversationId` address be judged unknown instead of merely not-yet-loaded.
   const [listed, setListed] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // A prompt picked in onboarding's First chat waits, unsent, in the first chat's composer.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, into the chat open at load
+  useEffect(() => {
+    const text = takePrefill();
+    if (text) {
+      setDrafts((d) => ({ ...d, [active.id]: text }));
+      // On phones the thread panel stays hidden until opened, so show the composer the
+      // prompt waits in — the same opening the `/c/:id` effect makes.
+      setThreadOpen(true);
+    }
+  }, []);
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
   const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);

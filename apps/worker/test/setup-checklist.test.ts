@@ -80,6 +80,25 @@ describe("setup checklist", () => {
     expect((await setup()).skipped).toEqual([]);
   });
 
+  it("puts a Spending change back when finishing Costs and limits fails", async () => {
+    const { browser, setup, post } = await signedIn();
+    await post({ skip: "costs" });
+    await db.exec(
+      "CREATE TRIGGER fail_finish BEFORE UPDATE OF setup_skipped ON user_settings BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    );
+    const body = { dailyCapMicroUsd: 10_000_000 };
+    const res = await browser.req("/api/settings/spending", { method: "PUT", body });
+    await db.exec("DROP TRIGGER fail_finish");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "not_saved" });
+    expect((await setup()).skipped).toEqual(["costs"]);
+    // The limits live in the assistant, so a failed save must not leave the new ones behind.
+    const { settings } = await (await browser.req("/api/settings/spending")).json<{
+      settings: Record<string, number | null>;
+    }>();
+    expect(settings.dailyCapMicroUsd).toBe(5_000_000);
+  });
+
   it("leaves a refused Spending save on the list", async () => {
     const { browser, setup, post } = await signedIn();
     await post({ skip: "costs" });
