@@ -11,6 +11,8 @@ export const MOCK_LIMITS = new Map<string, TurnLimit>([
   ["/mock slow down", "slow_down"],
   ["/mock limit reached", "limit_reached"],
 ]);
+/** Sending exactly this holds the turn's start for a second, as a slow server would. */
+export const MOCK_SLOW_START = "/mock slow start";
 const LIMIT_MESSAGES: Record<TurnLimit, string> = {
   slow_down: "You're sending messages quickly. Wait a minute, then try again.",
   limit_reached: "You've reached today's spending limit. It resets at midnight UTC.",
@@ -53,13 +55,24 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         emit("message.delta", { text });
         timer = setTimeout(tick, delayMs);
       };
+      let started = false;
+      const begin = () => {
+        started = true;
+        emit("turn.started", { messageId: `${turnId}-reply` });
+      };
       stop = () => {
         clearTimeout(timer);
         stop = null;
+        // A turn stopped before its start still starts, so the tab can match the interruption.
+        if (!started) begin();
         emit("turn.interrupted", { message: "Stopped." });
       };
-      emit("turn.started", { messageId: `${turnId}-reply` });
-      timer = setTimeout(tick, delayMs);
+      const start = () => {
+        begin();
+        timer = setTimeout(tick, delayMs);
+      };
+      if (text === MOCK_SLOW_START) timer = setTimeout(start, 1000);
+      else start();
     },
     cancel: () => stop?.(),
     conversations: async () => [],

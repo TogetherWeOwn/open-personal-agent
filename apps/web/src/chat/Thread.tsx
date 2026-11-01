@@ -44,6 +44,9 @@ export function Thread({ conversation }: { conversation: Conversation }) {
 }
 
 function MessageView({ message: m }: { message: Message }) {
+  if (m.role === "system") {
+    return <p className="self-center text-center text-sm text-text-muted">{m.text}</p>;
+  }
   if (m.role === "user") {
     return (
       <p className="max-w-[85%] self-end whitespace-pre-wrap break-words rounded-2xl bg-user-bubble px-4 py-2">

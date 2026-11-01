@@ -3,6 +3,7 @@ import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Button, Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
+import { ModelChip } from "./chat/ModelChip";
 import {
   type ChatAction,
   type ChatState,
@@ -12,6 +13,13 @@ import {
 } from "./chat/state";
 import { Thread } from "./chat/Thread";
 import type { ChatTransport } from "./chat/transport";
+import {
+  describePick,
+  type ModelSettings,
+  type RolePick,
+  setConversationModel,
+  settingsApi,
+} from "./models/settings-api";
 import { ThemeToggle } from "./ThemeToggle";
 
 const newId = () => crypto.randomUUID();
@@ -39,7 +47,15 @@ function useLoad(
   }, [transport, id, stale, dispatch]);
 }
 
-export function App({ transport }: { transport: ChatTransport }) {
+interface AppProps {
+  transport: ChatTransport;
+  /** Client-side navigation, from the shell; a full load when the app stands alone. */
+  onNavigate?: (href: string) => void;
+  /** False while another screen covers the chat; becoming visible reloads the model settings. */
+  visible?: boolean;
+}
+
+export function App({ transport, onNavigate, visible = true }: AppProps) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
@@ -48,6 +64,39 @@ export function App({ transport }: { transport: ChatTransport }) {
 
   const [healthy, setHealthy] = useState(true);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // The saved providers and roles behind the context chip; null until they load, and after a
+  // failed load the composer simply has no chip.
+  const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  useEffect(() => {
+    if (!visible) return;
+    let current = true;
+    settingsApi<ModelSettings>("").then(
+      (loaded) => {
+        if (current && Array.isArray(loaded.providers) && loaded.roles) setModelSettings(loaded);
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  }, [visible]);
+
+  // The chats the server has: listed, or one whose turn has started. A switch in any other chat
+  // waits in `pendingPins`, and the chat's first send carries it, so its first reply already uses
+  // it and the server saves it with the new chat. Between that send and its turn starting, the
+  // chip doesn't switch (`starting`), so nothing can change behind the send.
+  const onServer = useRef(new Set<string>());
+  const pendingPins = useRef(new Map<string, RolePick | null>());
+  // Each chat's saved switches go in order, and a send waits for them, so a reply always uses the
+  // latest switch.
+  const saves = useRef(new Map<string, Promise<void>>());
+  // Removing a provider in Settings clears the server's pins on it, so a pin naming one that is
+  // gone follows the Chat role here too.
+  const live = (pick: RolePick | null | undefined) =>
+    pick && (!modelSettings || modelSettings.providers.some((p) => p.id === pick.provider))
+      ? pick
+      : null;
+  const pinned = live(active.model);
 
   // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
   useEffect(() => {
@@ -69,14 +118,25 @@ export function App({ transport }: { transport: ChatTransport }) {
     const list = () =>
       transport
         .conversations()
-        .then((conversations) => dispatch({ type: "listed", conversations }))
+        .then((conversations) => {
+          for (const { id } of conversations) {
+            onServer.current.add(id);
+            pendingPins.current.delete(id);
+          }
+          dispatch({ type: "listed", conversations });
+        })
         .catch(() => {});
     const connected = () => {
       dispatch({ type: "connected" });
       void list();
     };
     return transport.connect((event) => {
-      if (event.type === "turn.started" && !known.current.has(event.sessionId)) void list();
+      if (event.type === "turn.started") {
+        if (!known.current.has(event.sessionId)) void list();
+        // The send that started it saved the chat's pick with the new chat.
+        onServer.current.add(event.sessionId);
+        pendingPins.current.delete(event.sessionId);
+      }
       dispatch({ type: "event", event });
     }, connected);
   }, [transport]);
@@ -103,9 +163,60 @@ export function App({ transport }: { transport: ChatTransport }) {
   const send = (text: string): boolean => {
     if (state.pending || !text.trim()) return false;
     dispatch({ type: "send", id: newId(), text });
-    transport.send(active.id, text);
+    const { id } = active;
+    const go = () => transport.send(id, text, live(pendingPins.current.get(id)) ?? undefined);
+    const saving = saves.current.get(id);
+    if (saving) void saving.then(go);
+    else go();
     return true;
   };
+
+  const goModels = () =>
+    onNavigate ? onNavigate("/settings/models") : window.location.assign("/settings/models");
+
+  // A new chat's first message is on its way, so the chat isn't on the server yet.
+  const starting =
+    state.pending?.conversationId === active.id &&
+    state.pending.turnId === null &&
+    !onServer.current.has(active.id);
+
+  /** Switches the open chat's model (M3-06 AC3); the thread records it, history is kept. */
+  const switchModel = (pick: RolePick | null) => {
+    if (!modelSettings || starting) return;
+    const effective = pick ?? modelSettings.roles.chat;
+    if (!effective) return;
+    const { modelName, providerName } = describePick(modelSettings, effective);
+    const { id } = active;
+    const previous = pinned;
+    const noticeId = newId();
+    dispatch({
+      type: "model",
+      id,
+      noticeId,
+      pick,
+      notice: `Switched to ${modelName} via ${providerName}`,
+    });
+    if (!onServer.current.has(id)) {
+      pendingPins.current.set(id, pick);
+      return;
+    }
+    const save = (saves.current.get(id) ?? Promise.resolve()).then(() =>
+      setConversationModel(id, pick).catch(() =>
+        // The failure line takes the place of the optimistic "Switched to" line.
+        dispatch({
+          type: "model",
+          id,
+          noticeId,
+          pick: previous,
+          notice: "Couldn't switch the model, so nothing changed.",
+        }),
+      ),
+    );
+    saves.current.set(id, save);
+    void save.then(() => saves.current.get(id) === save && saves.current.delete(id));
+  };
+
+  const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
 
   return (
     <div className="flex h-dvh">
@@ -130,6 +241,9 @@ export function App({ transport }: { transport: ChatTransport }) {
         </Button>
         <Link href="/usage" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
           Usage
+        </Link>
+        <Link href="/settings/models" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
+          Settings
         </Link>
         <ConversationList
           conversations={state.conversations}
@@ -159,6 +273,17 @@ export function App({ transport }: { transport: ChatTransport }) {
           busy={state.pending !== null}
           onSend={send}
           onStop={() => transport.cancel()}
+          onNoModel={noModel ? goModels : undefined}
+          chip={
+            modelSettings && (
+              <ModelChip
+                settings={modelSettings}
+                pinned={pinned}
+                onSwitch={switchModel}
+                starting={starting}
+              />
+            )
+          }
         />
       </main>
       <div role="status" className="sr-only">

@@ -164,8 +164,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             and(eq(secrets.id, modelProviders.keySecretId), eq(secrets.userId, userId)),
           )
           .where(and(eq(modelProviders.userId, userId), where));
-      const createConversation = async (id: string, title: string | null = null) => {
-        await db.insert(conversations).values({ id: checkId(id), userId, title });
+      const createConversation = async (
+        id: string,
+        title: string | null = null,
+        pin?: { provider: string; model: string },
+      ) => {
+        const model = { modelProvider: pin?.provider ?? null, model: pin?.model ?? null };
+        await db.insert(conversations).values({ id: checkId(id), userId, title, ...model });
       };
       return {
         /** The user's own `users` row; `undefined` if it was deleted. */
@@ -210,10 +215,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .orderBy(messages.seq)
               : null,
           /** Creates the conversation on its first message; `false` if the ID is someone else's. */
-          open: async (id: string, title: string) => {
+          /** Opens a conversation, creating it, with its own model if one is given, when it's new. */
+          open: async (id: string, title: string, pin?: { provider: string; model: string }) => {
             if (await getConversation(id)) return true;
             // A conflict is either another user's row or this user's from a concurrent open.
-            await createConversation(id, title).catch(() => {});
+            await createConversation(id, title, pin).catch(() => {});
             return (await getConversation(id)) !== undefined;
           },
           /** Pins the conversation to a model, or back to the Chat role with `null`. */
