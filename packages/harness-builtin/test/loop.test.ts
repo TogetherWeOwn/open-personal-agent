@@ -5,6 +5,7 @@ import {
   continueTurn,
   newTurn,
   resolveApprovals,
+  type ToolOutput,
   TURN_LIMITS,
   WAITING_FOR_APPROVAL,
 } from "../src/index";
@@ -181,6 +182,45 @@ describe("stop-and-resume approvals (M3-03 AC4)", () => {
     expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "Sent." });
   });
 
+  it("closes a batch whose undecided approvals expired as denied, and the model goes on", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    const approve = { approvalId: "appr_call_1", decision: "approve", scope: "once" } as const;
+    resolveApprovals(state, batchId, [approve], NOW);
+    const later = NOW + 24 * 3_600_000;
+    expect(() =>
+      resolveApprovals(state, batchId, [{ ...approve, approvalId: "appr_call_2" }], later),
+    ).toThrow("expired");
+    const { events, outcome } = await drain({ ...h, now: () => later }, state);
+    expect(outcome).toBe("completed");
+    expect(send.inputs).toEqual([{ q: "a" }]);
+    expect(ofType(events, "approval.resolved")[0]?.payload.decisions[1]?.decision).toBe("deny");
+    expect(ofType(events, "tool.result").map((e) => e.payload.preview)).toEqual([
+      "The approval expired, so the call didn't run.",
+      "send ok",
+    ]);
+  });
+
+  it("checks an approved call against the tool's current schema", async () => {
+    const { send, h, state } = await stop();
+    const decisions = ["appr_call_1", "appr_call_2"].map((approvalId) => ({
+      approvalId,
+      decision: "approve" as const,
+      scope: "once" as const,
+    }));
+    resolveApprovals(state, state.pending?.batchId as string, decisions, NOW);
+    const stricter = tool("send", "consequential");
+    stricter.manifest.inputSchema = {
+      type: "object",
+      properties: { q: { type: "string" }, to: { type: "string" } },
+      required: ["q", "to"],
+    };
+    const { events } = await drain({ ...h, tools: host(h.provider, [stricter]).tools }, state);
+    expect(send.inputs).toEqual([]);
+    expect(stricter.inputs).toEqual([]);
+    expect(ofType(events, "tool.result")[0]?.payload.error).toContain("input.to: is required");
+  });
+
   it("runs nothing it approved once the turn is cancelled", async () => {
     const { send, h, state } = await stop();
     const decisions = ["appr_call_1", "appr_call_2"].map((approvalId) => ({
@@ -219,6 +259,51 @@ describe("stop-and-resume approvals (M3-03 AC4)", () => {
       "Policy no longer allows this call.",
       "Policy no longer allows this call.",
     ]);
+  });
+
+  it("keeps the model's order across writes and decides each call on the taint when it starts", async () => {
+    const order: string[] = [];
+    const log =
+      (name: string, untrusted = false) =>
+      async (): Promise<ToolOutput> => {
+        order.push(`${name} start`);
+        await new Promise((r) => setTimeout(r, name === "slow" ? 20 : 1));
+        order.push(`${name} end`);
+        return { ok: true, content: name, ...(untrusted ? {} : { context: { kind: "system" } }) };
+      };
+    const save = tool("save", "write_reversible", log("save"));
+    const tools = [tool("slow", "read", log("slow")), tool("fast", "read", log("fast")), save];
+    tools.push(tool("fetch", "read", log("fetch", true)));
+    const { provider } = scripted([
+      {
+        calls: [
+          ["slow", { q: "1" }],
+          ["fast", { q: "2" }],
+          ["save", { q: "3" }],
+          ["fast", { q: "4" }],
+          ["fetch", { q: "5" }],
+          ["save", { q: "6" }],
+        ],
+      },
+    ]);
+    const { events } = await drain(host(provider, tools, { now: () => Date.now() }), newTurn());
+    expect(order).toEqual([
+      "slow start",
+      "fast start",
+      "fast end",
+      "slow end",
+      "save start",
+      "save end",
+      "fast start",
+      "fetch start",
+      "fast end",
+      "fetch end",
+      // The second save comes after an untrusted read, so it asks instead of running.
+    ]);
+    expect(save.inputs).toEqual([{ q: "3" }]);
+    // A fast read isn't charged for the slow one beside it.
+    const durations = ofType(events, "step.completed").map((e) => e.payload.durationMs);
+    expect(durations[2]).toBeLessThan(15);
   });
 });
 
@@ -352,6 +437,23 @@ describe("taint", () => {
 });
 
 describe("failures", () => {
+  it("doesn't call a reply cut off at the output limit completed", async () => {
+    const { provider } = scripted([{ text: "Half a sen" }]);
+    const cut = {
+      ...provider,
+      async *stream(req: Parameters<typeof provider.stream>[0]) {
+        for await (const e of provider.stream(req)) {
+          yield e.type === "done" ? { ...e, finishReason: "length" as const } : e;
+        }
+      },
+    };
+    const state = newTurn();
+    const { events, outcome } = await drain(host(cut, []), state);
+    expect(outcome).toBe("failed");
+    expect(ofType(events, "turn.failed")[0]?.payload.message).toContain("output limit");
+    expect(state.messages).toEqual([{ role: "assistant", content: "Half a sen" }]);
+  });
+
   it("turns a throwing tool into an error result and a failed stream into turn.failed", async () => {
     const boom = tool("boom", "read", () => {
       throw new Error("kaput");

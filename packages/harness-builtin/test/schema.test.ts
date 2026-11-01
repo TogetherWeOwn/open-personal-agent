@@ -37,6 +37,19 @@ describe("validate", () => {
     expect(validate({ type: "object", properties: { s: { anyOf: [] } } }, { s: 1 })).toHaveLength(
       1,
     );
+    // So does a keyword value it can't check: a tuple, a boolean schema, a bound that isn't a number.
+    for (const bad of [
+      { type: "array", items: [{ type: "integer" }] },
+      { type: "array", items: false },
+      { type: "object", properties: { x: false } },
+      { type: "string", maxLength: "5" },
+      { type: "number", maximum: null },
+      { type: "strnig" },
+      { enum: "a" },
+      { type: "object", required: [1] },
+    ]) {
+      expect(validate(bad, ["oops"])[0]).toMatch(/can't be checked/);
+    }
     // Annotations assert nothing, so they are allowed.
     expect(validate({ type: "string", description: "d", title: "t" }, "x")).toEqual([]);
   });

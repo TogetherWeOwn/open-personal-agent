@@ -3,11 +3,18 @@
 // It holds no storage: everything a turn needs to resume is plain data in `TurnState`, which the
 // host persists with the turn (M3-03c). Approvals are stop-and-resume: the run ends at the approval,
 // and the decision resumes it on a later request, possibly in another process.
-import type { ModelMessage, ModelProvider, ModelToolCall, ModelUsage } from "@opa/core";
+import type {
+  FinishReason,
+  ModelMessage,
+  ModelProvider,
+  ModelToolCall,
+  ModelUsage,
+} from "@opa/core";
 import {
   addContext,
   type ContextEvent,
   decide,
+  type PolicyDecision,
   type RegisteredTool,
   type RiskClass,
   type StandingGrant,
@@ -42,11 +49,7 @@ export interface LoopTool extends RegisteredTool {
   execute(input: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput>;
 }
 
-export type PendingItem = ApprovalItem & {
-  toolCallId: string;
-  input: Record<string, unknown>;
-  decision?: ApprovalDecision;
-};
+export type PendingItem = ApprovalItem & { toolCallId: string; decision?: ApprovalDecision };
 
 /** A turn's resumable state. Plain JSON, so the host can store it (in D1, M3-03c). */
 export type TurnState = {
@@ -135,8 +138,15 @@ export function continueTurn(state: TurnState): void {
   state.counts = { calls: 0, tools: 0 };
 }
 
-/** A checked call that may run now. */
-type Run = { call: ModelToolCall; tool: LoopTool; risk: RiskClass; input: Record<string, unknown> };
+/** A call whose input is valid, waiting for its policy decision. */
+type Run = {
+  call: ModelToolCall;
+  tool: LoopTool;
+  manifest: ToolManifest;
+  input: Record<string, unknown>;
+};
+
+type Asked = Run & { d: Extract<PolicyDecision, { outcome: "ask" }> };
 
 const ev = <T extends LoopEvent["type"]>(
   type: T,
@@ -211,43 +221,54 @@ export async function* runTurn(
     }
   }
 
-  /** Runs the calls policy allows: reads in parallel, then the rest one at a time, in order. */
-  async function* execute(runs: Run[]): AsyncGenerator<LoopEvent> {
-    const begin = (run: Run) => {
-      const step = { run, id: host.newId(), began: host.now() };
-      // Through an async function, so a tool that throws before its promise still yields an error.
-      const out = (async () => run.tool.execute(run.input, signal))().catch(failed);
-      return { ...step, out };
-    };
-    const started = (s: ReturnType<typeof begin>) =>
-      ev("step.started", { stepId: s.id, label: s.run.call.name, toolCallId: s.run.call.id });
-    async function* finish(s: ReturnType<typeof begin>): AsyncGenerator<LoopEvent> {
-      const out = await s.out;
-      stepId = s.id;
-      yield* result(s.run.call, out.ok, out.content);
-      const was = state.taint.taint;
-      state.taint = addContext(
-        state.taint,
-        out.context ?? { kind: "tool", label: s.run.call.name },
-      );
-      const source = state.taint.sources[0];
-      if (was === "trusted" && state.taint.taint === "untrusted" && source) {
-        // `context.tainted` names web, file or tool; an untrusted memory arrives through a tool.
-        const kind = source.kind === "memory" ? "tool" : source.kind;
-        yield ev("context.tainted", { stepId, source: { kind, label: source.label } });
+  /**
+   * Decides and runs calls in the model's order. Each call is decided against the taint when it
+   * starts, so a write after an untrusted read is decided as tainted. Consecutive reads start
+   * together; any other call starts after everything before it has finished. Returns the calls
+   * that ask; with `approved`, the user already said yes, so an `ask` runs.
+   */
+  async function* execute(runs: Run[], approved = false): AsyncGenerator<LoopEvent, Asked[]> {
+    const asks: Asked[] = [];
+    for (let i = 0; i < runs.length && !signal.aborted; ) {
+      let end = i + 1;
+      const isRead = (r: Run | undefined) => r?.manifest.riskClass === "read";
+      while (isRead(runs[i]) && isRead(runs[end])) end++;
+      const group = [];
+      for (const run of runs.slice(i, end)) {
+        const d = decision(run.tool, run.manifest, run.input);
+        if (!d || d.outcome === "deny") {
+          yield* skip(run.call, deniedText(d, approved), "denied");
+        } else if (d.outcome === "ask" && !approved) {
+          asks.push({ ...run, d });
+        } else {
+          const id = host.newId();
+          const began = host.now();
+          // Through an async function, so a tool that throws before its promise yields an error.
+          const out = (async () => run.tool.execute(run.input, signal))()
+            .catch(failed)
+            .then((o) => ({ ...o, ended: host.now() }));
+          group.push({ run, id, began, out });
+          yield ev("step.started", { stepId: id, label: run.call.name, toolCallId: run.call.id });
+        }
       }
-      const status = out.ok ? "ok" : "error";
-      yield ev("step.completed", { stepId: s.id, status, durationMs: host.now() - s.began });
+      for (const { run, id, began, out } of group) {
+        const o = await out;
+        stepId = id;
+        yield* result(run.call, o.ok, o.content);
+        const was = state.taint.taint;
+        state.taint = addContext(state.taint, o.context ?? { kind: "tool", label: run.call.name });
+        const source = state.taint.sources[0];
+        if (was === "trusted" && state.taint.taint === "untrusted" && source) {
+          // `context.tainted` names web, file or tool; an untrusted memory arrives through a tool.
+          const kind = source.kind === "memory" ? "tool" : source.kind;
+          yield ev("context.tainted", { stepId, source: { kind, label: source.label } });
+        }
+        const status = o.ok ? "ok" : "error";
+        yield ev("step.completed", { stepId: id, status, durationMs: o.ended - began });
+      }
+      i = end;
     }
-    const reads = runs.filter((r) => r.risk === "read").map(begin);
-    for (const s of reads) yield started(s);
-    for (const s of reads) yield* finish(s);
-    for (const run of runs.filter((r) => r.risk !== "read")) {
-      if (signal.aborted) return;
-      const s = begin(run);
-      yield started(s);
-      yield* finish(s);
-    }
+    return asks;
   }
 
   /** Closes every call of the last assistant message that has no result, or only a placeholder. */
@@ -272,29 +293,36 @@ export async function* runTurn(
   }
 
   if (signal.aborted) return yield* cancelled();
-  // Resume: run what the user approved, after checking it again against the current policy.
+  // Resume once every call in the batch is decided. An approval that expired undecided counts as
+  // denied. An approved call is checked again against the tool's current schema and policy.
   if (state.pending) {
     const { batchId, items } = state.pending;
-    const decisions = items.flatMap((i) => (i.decision ? [i.decision] : []));
-    if (decisions.length < items.length) return "awaiting_approval";
+    const now = host.now();
+    if (items.some((i) => !i.decision && now < i.expiresAt)) return "awaiting_approval";
+    const decisions = items.map(
+      (i): ApprovalDecision =>
+        i.decision ?? { approvalId: i.approvalId, decision: "deny", scope: "once" },
+    );
     yield ev("approval.resolved", { batchId, decisions });
     const runs: Run[] = [];
     for (const item of items) {
       const call = { id: item.toolCallId, name: item.tool, arguments: item.args };
       const entry = host.tools.get(item.tool);
-      if (item.decision?.decision === "deny") {
+      const parsed = entry && parseInput(entry.manifest.inputSchema, item.args);
+      if (!item.decision) {
+        yield* skip(call, "The approval expired, so the call didn't run.", "denied");
+      } else if (item.decision.decision === "deny") {
         yield* skip(call, "The user denied this call.", "denied");
-      } else if (
-        !entry ||
-        (decision(entry.tool, entry.manifest, item.input)?.outcome ?? "deny") === "deny"
-      ) {
-        yield* skip(call, "Policy no longer allows this call.", "denied");
+      } else if (!entry || !parsed) {
+        yield* skip(call, `There is no tool named "${item.tool}".`, "error");
+      } else if (!parsed.ok) {
+        yield* skip(call, parsed.error, "error");
       } else {
-        runs.push({ call, tool: entry.tool, risk: entry.manifest.riskClass, input: item.input });
+        runs.push({ call, tool: entry.tool, manifest: entry.manifest, input: parsed.input });
       }
     }
     state.pending = null;
-    yield* execute(runs);
+    yield* execute(runs, true);
   }
 
   for (;;) {
@@ -317,6 +345,7 @@ export async function* runTurn(
     const calls: ModelToolCall[] = [];
     let usage: ModelUsage | null = null;
     let failure: string | undefined;
+    let finish: FinishReason | undefined;
     try {
       for await (const event of host.provider.stream({
         model: host.model,
@@ -330,6 +359,7 @@ export async function* runTurn(
           yield ev("message.delta", { text: event.text });
         } else if (event.type === "tool_call") calls.push(event.toolCall);
         else if (event.type === "usage") usage = event.usage;
+        else if (event.type === "done") finish = event.finishReason;
         else if (event.type === "error") failure = event.message;
       }
     } catch (e) {
@@ -346,6 +376,10 @@ export async function* runTurn(
     );
     const repeated = calls.some((c) => ids.has(c.id) || !ids.add(c.id));
     if (!signal.aborted && !failure && repeated) failure = "The model repeated a tool call id.";
+    // A reply cut short with no calls is not an answer; the partial text is kept.
+    if (!failure && calls.length === 0 && finish !== undefined && finish in CUT_SHORT) {
+      failure = CUT_SHORT[finish as keyof typeof CUT_SHORT];
+    }
 
     // A cancel or failure keeps the partial text and drops the calls, which never ran.
     const ok = !signal.aborted && failure === undefined;
@@ -377,9 +411,8 @@ export async function* runTurn(
     }
     state.counts.tools += calls.length;
 
-    // Validate, then decide, every call against the taint the step started with (M3-03 AC2–3).
+    // Validate every call before policy sees it (M3-03 AC2).
     const runs: Run[] = [];
-    const asks: PendingItem[] = [];
     for (const call of calls) {
       const entry = host.tools.get(call.name);
       const parsed = entry && parseInput(entry.manifest.inputSchema, call.arguments);
@@ -388,50 +421,51 @@ export async function* runTurn(
       yield ev("tool.called", { toolCallId: call.id, tool: call.name, args, risk });
       if (!entry || !parsed) {
         yield* skip(call, `There is no tool named "${call.name}".`, "error");
-        continue;
-      }
-      if (!parsed.ok) {
+      } else if (!parsed.ok) {
         yield* skip(call, parsed.error, "error");
-        continue;
-      }
-      const d = decision(entry.tool, entry.manifest, parsed.input);
-      if (!d || d.outcome === "deny") {
-        const why = !d
-          ? "The policy couldn't be read"
-          : d.rule === "override_never"
-            ? "The user has turned this tool off"
-            : "Policy doesn't allow this call";
-        yield* skip(call, `${why}, so it didn't run.`, "denied");
-      } else if (d.outcome !== "ask") {
-        runs.push({ call, tool: entry.tool, risk, input: parsed.input });
       } else {
-        const target = entry.tool.target?.(parsed.input);
-        const source = state.taint.sources[0];
-        asks.push({
+        runs.push({ call, tool: entry.tool, manifest: entry.manifest, input: parsed.input });
+      }
+    }
+    const asks = yield* execute(runs);
+    if (signal.aborted) return yield* cancelled();
+    if (asks.length > 0) {
+      // One batch for the step; each gated call gets a placeholder result while it waits.
+      const source = state.taint.sources[0];
+      const items = asks.map(({ call, tool, input, d }): PendingItem => {
+        const target = tool.target?.(input);
+        messages.push({ role: "tool", toolCallId: call.id, content: WAITING_FOR_APPROVAL });
+        return {
           approvalId: `appr_${call.id}`,
           toolCallId: call.id,
           tool: call.name,
-          args,
-          input: parsed.input,
+          args: canonical(input),
           ...(target === undefined ? {} : { target }),
-          risk,
+          risk: d.risk,
           rule: d.rule,
           ...(d.taint === "untrusted" && source ? { taint: source } : {}),
           scopes: d.scopes,
           expiresAt: host.now() + APPROVAL_TTL_MS,
-        });
-      }
-    }
-    yield* execute(runs);
-    if (signal.aborted) return yield* cancelled();
-    if (asks.length > 0) {
-      for (const a of asks)
-        messages.push({ role: "tool", toolCallId: a.toolCallId, content: WAITING_FOR_APPROVAL });
+        };
+      });
       const batchId = `batch_${host.newId()}`;
-      state.pending = { batchId, items: asks };
-      const items = asks.map(({ toolCallId: _, input: __, decision: ___, ...card }) => card);
-      yield ev("approval.requested", { batchId, items });
+      state.pending = { batchId, items };
+      const card = items.map(({ toolCallId: _, decision: __, ...item }) => item);
+      yield ev("approval.requested", { batchId, items: card });
       return "awaiting_approval";
     }
   }
+}
+
+const CUT_SHORT = {
+  length: "The reply was cut off at the output limit.",
+  content_filter: "The provider's content filter stopped the reply.",
+};
+
+function deniedText(d: PolicyDecision | null, approved: boolean): string {
+  if (!d) return "The policy couldn't be read, so the call didn't run.";
+  if (approved) return "Policy no longer allows this call.";
+  return d.rule === "override_never"
+    ? "The user has turned this tool off."
+    : "Policy doesn't allow this call.";
 }
