@@ -233,6 +233,91 @@ test("bulk deletes after a confirmation that names the backup and the instructio
   await expect(page.getByRole("region", { name: "Selection" })).toContainText("1 selected");
 });
 
+test("a search keeps the selection to the notes it shows", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Sam lives in Leeds" }).click({ force: true });
+  const bar = page.getByRole("region", { name: "Selection" });
+  await expect(bar).toContainText("1 selected");
+  await page.getByLabel("Search notes").fill("tea");
+  await expect(page.getByText("Sam lives in Leeds")).toBeHidden();
+  await expect(bar).toContainText("0 selected");
+  await expect(bar.getByRole("button", { name: "Delete…" })).toBeDisabled();
+});
+
+test("Select all leaves out a note waiting behind Undo", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.clock.install();
+  await page.goto("/memory");
+  await expect(page.getByText("Likes green tea")).toBeVisible();
+  // The Undo window stays open for the whole test.
+  await page.clock.pauseAt(Date.now() + 1_000);
+  await page.getByRole("button", { name: "Delete: Likes green tea" }).click();
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 3" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect.poll(() => stub.deletes).toEqual([["n4"], ["n1", "n2", "n3"]]);
+});
+
+test("a failed bulk delete keeps the notes selected", async ({ page }) => {
+  await stubMemory(page);
+  await page.route("/api/memory/delete", (route) => route.fulfill({ status: 500, json: {} }));
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 4" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("I couldn't delete that.");
+  await expect(page.getByRole("region", { name: "Selection" })).toContainText("4 selected");
+});
+
+test("leaving the page sends a held delete and closes its toast", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Delete: Sam lives in Leeds" }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+  );
+  await expect.poll(() => stub.deletes).toEqual([["n1"]]);
+  await expect(page.getByRole("region", { name: "Notifications" })).toBeHidden();
+  await expect(page.getByText("Sam lives in Leeds", { exact: true })).toBeHidden();
+});
+
+test("Select all over 1,000 notes deletes them in batches", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes = Array.from({ length: 1001 }, (_, i) => note({ id: `m${i}`, text: `Note ${i}` }));
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 1001" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect.poll(() => stub.deletes.map((ids) => ids.length)).toEqual([1000, 1]);
+  await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("Esc on a note's checkbox leaves selection mode", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Sam lives in Leeds" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Selection" })).toBeHidden();
+});
+
 test("adds a note typed on the screen", async ({ page }) => {
   await stubMemory(page);
   await page.goto("/memory");

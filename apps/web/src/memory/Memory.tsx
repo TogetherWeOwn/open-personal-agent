@@ -28,16 +28,28 @@ const quote = (text: string) => `'${text.length > 60 ? `${text.slice(0, 57)}…`
 interface Held {
   ids: string[];
   message: string;
+  /** From the selection: a failure puts the notes back in it. */
+  bulk: boolean;
 }
 
-/** Sends a held delete even while the page unloads. */
-const send = (ids: string[]) =>
-  fetch("/api/memory/delete", {
-    method: "POST",
-    keepalive: true,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ids }),
-  });
+/** The most IDs one delete request takes (the server's limit). */
+const BATCH = 1000;
+
+/** Sends a delete in batches the server accepts; `keepalive` lets it finish as the page unloads. */
+async function send(ids: string[], keepalive = false) {
+  const missed: string[] = [];
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const res = await fetch("/api/memory/delete", {
+      method: "POST",
+      keepalive,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids: ids.slice(i, i + BATCH) }),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    missed.push(...((await res.json()) as { failed: string[] }).failed);
+  }
+  return missed;
+}
 
 export function Memory() {
   const [notes, setNotes] = useState<Note[] | null>(null);
@@ -74,12 +86,17 @@ export function Memory() {
   }, [query, load]);
 
   // The held delete goes out when the toast closes, and also if the screen or page goes away.
+  // The toast closes with it, so a page restored from the back/forward cache can't send it twice.
   const heldRef = useRef<Held | null>(null);
   heldRef.current = held;
   useEffect(() => {
     const flush = () => {
-      if (heldRef.current) send(heldRef.current.ids);
+      const h = heldRef.current;
+      if (!h) return;
       heldRef.current = null;
+      send(h.ids, true).catch(() => {});
+      setHeld(null);
+      setNotes((all) => all?.filter((n) => !h.ids.includes(n.id)) ?? null);
     };
     window.addEventListener("pagehide", flush);
     return () => {
@@ -92,9 +109,7 @@ export function Memory() {
     setHeld(null);
     heldRef.current = null;
     try {
-      const res = await send(h.ids);
-      if (!res.ok) throw new Error(String(res.status));
-      const { failed: missed } = (await res.json()) as { failed: string[] };
+      const missed = await send(h.ids);
       setNotes((all) => all?.filter((n) => !h.ids.includes(n.id) || missed.includes(n.id)) ?? null);
       if (missed.length > 0) {
         const names = (notes ?? []).filter((n) => missed.includes(n.id)).map((n) => quote(n.text));
@@ -106,14 +121,18 @@ export function Memory() {
       }
     } catch {
       setProblem("I couldn't delete that. Check your connection and try again.");
+      if (h.bulk) {
+        setSelected(new Set(h.ids));
+        setSelecting(true);
+      }
     }
   };
 
   /** Holds the delete behind an Undo toast; a delete already held goes out first. */
-  const hold = (ids: string[], message: string) => {
+  const hold = (ids: string[], message: string, bulk = false) => {
     if (heldRef.current) commit(heldRef.current);
     setProblem(null);
-    setHeld({ ids, message });
+    setHeld({ ids, message, bulk });
     setAnnouncement(message);
     setSelecting(false);
     setSelected(new Set());
@@ -132,6 +151,18 @@ export function Memory() {
       });
     }
   };
+
+  // Esc leaves selection mode wherever focus is, a note's checkbox included; the dialog has its own.
+  useEffect(() => {
+    if (!selecting || confirming) return;
+    const leave = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      setSelecting(false);
+      setSelected(new Set());
+    };
+    window.addEventListener("keydown", leave);
+    return () => window.removeEventListener("keydown", leave);
+  }, [selecting, confirming]);
 
   const stale = (message: string) => {
     setProblem(message);
@@ -164,7 +195,7 @@ export function Memory() {
         if (on) next.add(note.id);
         else next.delete(note.id);
         setSelected(next);
-        setAnnouncement(`${next.size} selected`);
+        setAnnouncement(`${selectable.filter((n) => next.has(n.id)).length} selected`);
       }}
       onSaved={(next) => saved(note, next)}
       onDelete={() => hold([note.id], `Deleted ${quote(note.text)}. ${BACKUP_LINE}`)}
@@ -178,7 +209,9 @@ export function Memory() {
   const recent = shown
     ? []
     : all.filter((n) => Date.now() - n.createdAt < WEEK && n.trust !== "system");
-  const picked = all.filter((n) => selected.has(n.id));
+  // Only notes on screen count: a search can hide selected ones, and held ones are on their way out.
+  const selectable = all.filter((n) => !deleting.has(n.id));
+  const picked = selectable.filter((n) => selected.has(n.id));
   const pickedInstructions = picked.filter((n) => n.kind === "instruction").length;
 
   return (
@@ -309,16 +342,15 @@ export function Memory() {
       {selecting && (
         <section
           aria-label="Selection"
-          onKeyDown={(e) => e.key === "Escape" && setSelecting(false)}
           className="sticky bottom-20 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-border-strong bg-surface-raised p-3 shadow-lg sm:bottom-4"
         >
-          <p className="flex-1">{selected.size} selected</p>
-          <Button onPress={() => setSelected(new Set(all.map((n) => n.id)))}>
-            Select all {all.length}
+          <p className="flex-1">{picked.length} selected</p>
+          <Button onPress={() => setSelected(new Set(selectable.map((n) => n.id)))}>
+            Select all {selectable.length}
           </Button>
           <Button
             variant="danger"
-            isDisabled={selected.size === 0}
+            isDisabled={picked.length === 0}
             onPress={() => setConfirming(true)}
           >
             Delete…
@@ -344,6 +376,7 @@ export function Memory() {
           hold(
             picked.map((n) => n.id),
             `Deleted ${picked.length} ${picked.length === 1 ? "note" : "notes"}. ${BACKUP_LINE}`,
+            true,
           )
         }
       >
