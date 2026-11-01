@@ -23,6 +23,25 @@ describe("createMockTransport", () => {
     expect(events[1]?.payload).toMatchObject({ reason: "slow_down" });
   });
 
+  it("takes a waiting send back on the running turn", async () => {
+    const events: HarnessEvent[] = [];
+    const transport = createMockTransport(60_000);
+    transport.connect(
+      (e) => events.push(e),
+      () => {},
+    );
+    transport.send("c1", "hello");
+    transport.dequeue("c1", "queued-1");
+    // A dequeue for another chat's turn is not this turn's to answer.
+    transport.dequeue("c2", "queued-2");
+    await Promise.resolve();
+    expect(events.map((e) => [e.type, e.payload])).toEqual([
+      ["turn.started", { messageId: "mock-1-reply" }],
+      ["turn.dequeued", { messageId: "queued-1" }],
+    ]);
+    expect(events[1]?.turnId).toBe("mock-1");
+  });
+
   it("starts a slow-start turn stopped before its start, then cancels it", () => {
     const events: HarnessEvent[] = [];
     const transport = createMockTransport(60_000);

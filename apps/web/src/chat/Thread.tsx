@@ -19,6 +19,7 @@ export function Thread({
   prices,
   after,
   afterCount = 0,
+  onDequeue,
 }: {
   conversation: Conversation;
   showWork: ShowWork;
@@ -27,6 +28,7 @@ export function Thread({
   after?: ReactNode;
   /** How many things `after` shows, so a new card scrolls into view as a message would. */
   afterCount?: number;
+  onDequeue: (conversationId: string, messageId: string) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -38,6 +40,10 @@ export function Thread({
     const el = scroller.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
   }, [conversation.messages.length, last, afterCount]);
+
+  // A queued send that the server stored also arrives as a user message on load; the turn's
+  // bubble hides for those, so the thread never shows one twice (M3-09 AC4).
+  const seenMessageIds = new Set(conversation.messages.map((m) => m.id));
 
   return (
     <div
@@ -63,7 +69,14 @@ export function Thread({
             const turn = conversation.turns.find((t) => t.messageId === m.id);
             if (turn) {
               return (
-                <TurnView key={m.id} turn={turn} showWork={showWork} prices={prices}>
+                <TurnView
+                  key={m.id}
+                  turn={turn}
+                  showWork={showWork}
+                  prices={prices}
+                  seenMessageIds={seenMessageIds}
+                  onDequeue={(messageId) => onDequeue(conversation.id, messageId)}
+                >
                   <MessageView message={m} />
                 </TurnView>
               );

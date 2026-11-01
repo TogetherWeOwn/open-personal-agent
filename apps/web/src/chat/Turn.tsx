@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// The turn timeline (M3-09 AC1-3, AC5, m3-ux §3.1): the running header with its ticking
+// The turn timeline (M3-09 AC1-5, m3-ux §3.1): the running header with its ticking
 // elapsed time and "still working" timer, the step list with tool cards, the collapsed "Worked
-// for …" summary and the taint marker. The reply streams below as `children`, so the thread
-// keeps one view per message. (Queued sends bubble up in the next part.)
+// for …" summary, the taint marker and the queued sends. The reply streams below as `children`,
+// so the thread keeps one view per message.
 
 import { CircleCheck, CircleX, FileText, Globe, Hand, Loader } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
-import { Disclosure, StatusChip } from "../ui";
+import { Button, Disclosure, StatusChip } from "../ui";
 import type { ShowWork } from "./show-work";
 import type { Turn, TurnStep, TurnTaint, TurnTool } from "./state";
 import { ToolCard } from "./ToolCard";
@@ -25,12 +25,17 @@ interface TurnProps {
   turn: Turn;
   showWork: ShowWork;
   prices: PriceTable;
+  /** Messages already in the thread, so a queued bubble never doubles one. */
+  seenMessageIds: ReadonlySet<string>;
+  onDequeue: (messageId: string) => void;
 }
 
 export function TurnView({
   turn,
   showWork,
   prices,
+  seenMessageIds,
+  onDequeue,
   children,
 }: TurnProps & { children: ReactNode }) {
   const [, setTick] = useState(0);
@@ -83,6 +88,23 @@ export function TurnView({
       ))}
     </ul>
   );
+  const queued = turn.queued
+    .filter((q) => !seenMessageIds.has(q.messageId))
+    .map((q) => (
+      <div key={q.messageId} className="rounded-2xl border border-border px-4 py-2">
+        {q.text && <p className="break-words whitespace-pre-wrap">{q.text}</p>}
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm text-text-muted">Sends when this task finishes</p>
+          <Button
+            variant="quiet"
+            aria-label={q.text ? `Cancel: ${q.text.slice(0, 80)}` : "Cancel queued message"}
+            onPress={() => onDequeue(q.messageId)}
+          >
+            Cancel
+          </Button>
+        </div>
+      </div>
+    ));
   if (live) {
     return (
       <div className="flex flex-col gap-2">
@@ -95,6 +117,7 @@ export function TurnView({
           </p>
         )}
         {list}
+        {queued}
         {children}
       </div>
     );
@@ -114,6 +137,7 @@ export function TurnView({
         </Disclosure>
       )}
       {failures}
+      {queued}
       {children}
     </div>
   );
