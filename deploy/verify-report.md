@@ -9,6 +9,15 @@
 |---|---|---|
 {{phases}}
 
+## Budgets
+
+Prompts are the ones wrangler answered by itself during the fresh deploy. The first answer comes
+from the starter model on Workers AI, after a claim with a virtual passkey and onboarding.
+
+| Measure | Budget | Measured | Result |
+|---|---|---|---|
+{{budgets}}
+
 ## Permission diff (token minted from `deploy/permissions.json`)
 
 | Entry | Permission | Outcome |

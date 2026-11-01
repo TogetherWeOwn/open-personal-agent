@@ -3,7 +3,13 @@ import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Button, Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
-import { type ChatAction, type Conversation, chatReducer, initialState } from "./chat/state";
+import {
+  type ChatAction,
+  type ChatState,
+  type Conversation,
+  chatReducer,
+  initialState,
+} from "./chat/state";
 import { Thread } from "./chat/Thread";
 import type { ChatTransport } from "./chat/transport";
 import { ThemeToggle } from "./ThemeToggle";
@@ -81,6 +87,14 @@ export function App({ transport }: { transport: ChatTransport }) {
   useLoad(transport, active, dispatch);
   useLoad(transport, running === active ? undefined : running, dispatch);
 
+  // A send a limit refused goes back to the composer, unless something new was typed meanwhile.
+  const { limit } = state;
+  useEffect(() => {
+    if (!limit) return;
+    const { conversationId: id, text } = limit;
+    setDrafts((d) => (d[id] ? d : { ...d, [id]: text }));
+  }, [limit]);
+
   const open = (action: ChatAction) => {
     dispatch(action);
     setThreadOpen(true);
@@ -138,6 +152,7 @@ export function App({ transport }: { transport: ChatTransport }) {
           </p>
         )}
         <Thread key={active.id} conversation={active} />
+        {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
         <Composer
           text={drafts[active.id] ?? ""}
           setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
@@ -148,6 +163,34 @@ export function App({ transport }: { transport: ChatTransport }) {
       </main>
       <div role="status" className="sr-only">
         {state.announcement}
+      </div>
+    </div>
+  );
+}
+
+/** The "slow down" and "limit reached" states (M2-22): why the send didn't go, and when it can. */
+function LimitNotice({ limit }: { limit: NonNullable<ChatState["limit"]> }) {
+  const reached = limit.reason === "limit_reached";
+  return (
+    <div
+      role="alert"
+      className="mx-auto w-full max-w-[720px] px-4 pb-2 text-sm"
+      data-limit={limit.reason}
+    >
+      <div className="rounded-xl border border-border-strong bg-surface-sunken px-3 py-2">
+        <p className="font-semibold">{reached ? "Daily limit reached" : "Slow down"}</p>
+        <p>
+          {limit.message}
+          {reached && (
+            <>
+              {" "}
+              <Link href="/usage" className="underline">
+                See today's usage
+              </Link>
+              .
+            </>
+          )}
+        </p>
       </div>
     </div>
   );

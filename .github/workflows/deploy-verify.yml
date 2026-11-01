@@ -19,9 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: cf-verify
     timeout-minutes: 30
+    # The Cloudflare secrets are step-level: install and its lifecycle scripts never see them.
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       TEARDOWN_PREFIX: ${{ inputs.teardown_prefix }}
       WRANGLER_SEND_METRICS: "false"
     steps:
@@ -29,11 +28,20 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: Verify (deploy, re-run, upgrade, health, teardown)
+      - name: Install Chromium for the first run in the browser
         if: env.TEARDOWN_PREFIX == ''
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify (deploy, first run, re-run, upgrade, health, teardown)
+        if: env.TEARDOWN_PREFIX == ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm verify:cloudflare --report "$RUNNER_TEMP/verify-report/report.md"
       - name: Teardown only
         if: env.TEARDOWN_PREFIX != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm teardown:cloudflare --name "$TEARDOWN_PREFIX" --confirm "$TEARDOWN_PREFIX"
       - name: Upload the report
         if: always() && env.TEARDOWN_PREFIX == ''

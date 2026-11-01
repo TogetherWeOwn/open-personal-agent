@@ -52,6 +52,26 @@ test("Stop ends a reply", async ({ page }) => {
   await expect(page.getByRole("log")).toContainText("Stopped before it finished.");
 });
 
+test("a refused send explains the limit and goes back to the composer", async ({ page }) => {
+  await page.goto("/");
+  const box = page.getByRole("textbox", { name: "Message" });
+  for (const [text, title] of [
+    ["/mock slow down", "Slow down"],
+    ["/mock limit reached", "Daily limit reached"],
+  ] as const) {
+    await box.fill(text);
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("alert")).toContainText(title);
+    await expect(box).toHaveValue(text);
+    await expect(page.getByRole("log")).toContainText("Hi. What can I help you with?");
+  }
+  await expect(
+    page.getByRole("alert").getByRole("link", { name: "See today's usage" }),
+  ).toBeVisible();
+  const { violations } = await new AxeBuilder({ page }).analyze();
+  expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+});
+
 for (const colorScheme of ["light", "dark"] as const) {
   for (const width of [375, 768, 1280]) {
     test(`chat, ${colorScheme}, ${width} px: axe clean, no sideways scroll, baseline`, async ({

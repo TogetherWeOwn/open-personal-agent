@@ -129,7 +129,11 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
     `see deploy/permissions.json entry "${p.id}"`;
 
   const childEnv = { ...deps.env, CI: "1" };
-  const exec = async (cmd, args, { input, quiet = false, step } = {}) => {
+  // The build runs dependencies' code, so it gets no Cloudflare variables: the token goes only to
+  // the wrangler calls that talk to Cloudflare.
+  const buildEnv = () =>
+    Object.fromEntries(Object.entries(childEnv).filter(([k]) => !k.startsWith("CLOUDFLARE_")));
+  const exec = async (cmd, args, { input, quiet = false, step, env = childEnv } = {}) => {
     // Scrub whole lines only, so a value split across output chunks is still caught.
     let pending = "";
     const print = (chunk) => {
@@ -139,7 +143,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
       pending = pending.slice(end);
     };
     const onOutput = quiet ? undefined : print;
-    const result = await deps.run(cmd, args, { cwd: deps.root, env: childEnv, input, onOutput });
+    const result = await deps.run(cmd, args, { cwd: deps.root, env, input, onOutput });
     if (pending) deps.stdout(scrub(pending));
     if (result.code !== 0 && step) {
       const text = result.output;
@@ -225,11 +229,14 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
   }
 
   // Step 4: build and bundle. The fingerprint becomes the version tag of the deploy.
-  await exec("pnpm", ["build"], { step: "build" });
+  await exec("pnpm", ["build"], { step: "build", env: buildEnv() });
   const config = writeDeployConfig(deps.root, name);
   const bundle = path.join(config.dir, "bundle");
   fs.rmSync(bundle, { recursive: true, force: true });
-  await wrangler(["deploy", "--dry-run", "--outdir", bundle, "-c", config.file], { step: "build" });
+  await wrangler(["deploy", "--dry-run", "--outdir", bundle, "-c", config.file], {
+    step: "build",
+    env: buildEnv(),
+  });
   const inputs = [config.file, bundle, "apps/web/dist", "migrations"];
   const tag = fingerprint(
     deps.root,
