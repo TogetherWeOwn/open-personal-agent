@@ -466,7 +466,9 @@ describe("credentials and tasks (AC4)", () => {
         expect([id, action, res.status]).toEqual([id, action, 404]);
       }
     }
-    expect((await user.tasks.list()).map((t) => t.id)).toEqual([b.task]);
+    expect((await user.tasks.list()).map((t) => t.id).sort()).toEqual(
+      [b.task, b.approvalTask].sort(),
+    );
     // No Workflow of A's was woken or created, and A's paused task is as it was.
     expect(leaked(a, JSON.stringify(touched.created))).toEqual([]);
     onlyOwn(touched, b);
