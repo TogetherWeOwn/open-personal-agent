@@ -19,6 +19,10 @@ const webFetch: ToolManifest = {
 
 const web = webFetch.destinations[0];
 const dests = (...destinations: unknown[]) => ({ ...webFetch, destinations });
+const schema = (keywords: object) => ({
+  ...webFetch,
+  inputSchema: { ...webFetch.inputSchema, ...keywords },
+});
 
 describe("manifestProblems", () => {
   it("accepts a complete manifest", () => {
@@ -37,6 +41,14 @@ describe("manifestProblems", () => {
     ["an unknown destination kind", dests({ ...web, kind: "mine" }), "kind must be"],
     ["undeclared egress", dests({ id: "x", kind: "control_plane" }), "must declare dataEgress"],
     ["a third party without egress", dests({ ...web, dataEgress: false }), "can't be false"],
+    [
+      "schema properties that aren't schemas",
+      schema({ properties: { url: "string" } }),
+      "properties",
+    ],
+    ["schema required that isn't a list", schema({ required: "url" }), "required must"],
+    ["schema required naming no property", schema({ required: ["uri"] }), "isn't declared"],
+    ["a bad additionalProperties", schema({ additionalProperties: "no" }), "additionalProperties"],
     ["no scopes list", { ...webFetch, scopes: "web:read" }, "scopes must be"],
     ["duplicate scopes", { ...webFetch, scopes: ["a", "a"] }, "duplicates"],
   ])("rejects %s", (_, manifest, problem) => {
@@ -81,5 +93,26 @@ describe("ToolRegistry", () => {
     expect(stored?.riskClass).toBe("read");
     expect(Object.isFrozen(stored)).toBe(true);
     expect(Object.isFrozen(stored?.destinations[0])).toBe(true);
+    expect(Object.isFrozen(stored?.inputSchema.properties)).toBe(true);
+  });
+
+  it("stores the manifest it validated, even when the tool's getter changes its answer", () => {
+    const registry = new ToolRegistry();
+    let reads = 0;
+    const shifty = {
+      get manifest(): ToolManifest {
+        reads += 1;
+        return reads === 1 ? webFetch : (dests({ ...web, dataEgress: false }) as ToolManifest);
+      },
+    };
+    registry.register(shifty);
+    expect(reads).toBe(1);
+    expect(registry.get("web_fetch")?.manifest.destinations).toEqual([web]);
+  });
+
+  it("refuses a manifest that isn't plain data", () => {
+    const registry = new ToolRegistry();
+    const tool = { manifest: { ...webFetch, inputSchema: { type: "object", check: () => true } } };
+    expect(() => registry.register(tool as { manifest: ToolManifest })).toThrow(/plain data/);
   });
 });

@@ -45,4 +45,15 @@ describe("addContext", () => {
     const task = addContext(JSON.parse(JSON.stringify(turn)), { kind: "user_message" });
     expect(task.taint).toBe("untrusted");
   });
+
+  it("fails closed on a malformed event replayed from storage", () => {
+    const replay = (json: string) => addContext(TRUSTED, JSON.parse(json) as ContextEvent);
+    expect(replay('{"kind":"web"}')).toEqual({
+      taint: "untrusted",
+      sources: [{ kind: "web", label: "web" }],
+    });
+    expect(replay('{"kind":"mcp"}').taint).toBe("untrusted");
+    expect(replay('{"kind":"memory","label":"m3"}').taint).toBe("untrusted");
+    expect(replay('{"kind":"tool","label":7}').sources).toEqual([{ kind: "tool", label: "tool" }]);
+  });
 });

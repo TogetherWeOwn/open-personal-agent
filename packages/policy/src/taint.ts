@@ -42,11 +42,16 @@ export function taintOf(event: ContextEvent): Taint {
   }
 }
 
-/** The state after `event` joins the context. It never goes back from untrusted to trusted. */
+/**
+ * The state after `event` joins the context. It never goes back from untrusted to trusted. Events
+ * are replayed from storage, so a malformed one fails closed: an unknown kind taints, and an event
+ * without a label is named by its kind.
+ */
 export function addContext(state: TaintState, event: ContextEvent): TaintState {
-  if (taintOf(event) === "trusted" || !("label" in event)) return state;
+  if (taintOf(event) === "trusted") return state;
+  const label = "label" in event && typeof event.label === "string" ? event.label : event.kind;
   return {
     taint: "untrusted",
-    sources: [...state.sources, { kind: event.kind, label: event.label }],
+    sources: [...state.sources, { kind: event.kind as TaintSourceKind | "memory", label }],
   };
 }

@@ -55,6 +55,8 @@ export function manifestProblems(manifest: unknown): string[] {
   }
   if (!isRecord(inputSchema) || inputSchema.type !== "object") {
     problems.push('inputSchema must be a JSON Schema with type "object"');
+  } else {
+    problems.push(...schemaProblems(inputSchema));
   }
   if (!RISK_CLASSES.includes(riskClass as RiskClass)) {
     problems.push(`riskClass must be one of ${RISK_CLASSES.join(", ")}`);
@@ -88,16 +90,45 @@ export function manifestProblems(manifest: unknown): string[] {
   return problems;
 }
 
+/**
+ * The structural keywords of an object schema that the M3-03 input validator relies on. The full
+ * check against the JSON Schema meta-schema comes with that validator.
+ */
+function schemaProblems(schema: Record<string, unknown>): string[] {
+  const { properties, required, additionalProperties } = schema;
+  const problems: string[] = [];
+  if (properties !== undefined) {
+    if (!isRecord(properties) || !Object.values(properties).every(isRecord)) {
+      problems.push("inputSchema.properties must map each property to a schema object");
+    }
+  }
+  if (required !== undefined) {
+    if (!Array.isArray(required) || required.some((r) => typeof r !== "string")) {
+      problems.push("inputSchema.required must be a list of property names");
+    } else if (isRecord(properties) && required.some((r) => !Object.hasOwn(properties, r))) {
+      problems.push("inputSchema.required names a property that isn't declared");
+    }
+  }
+  if (
+    additionalProperties !== undefined &&
+    typeof additionalProperties !== "boolean" &&
+    !isRecord(additionalProperties)
+  ) {
+    problems.push("inputSchema.additionalProperties must be a boolean or a schema object");
+  }
+  return problems;
+}
+
 /** Whether any destination of the tool can receive data. */
 export const hasEgress = (manifest: ToolManifest): boolean =>
   manifest.destinations.some((d) => d.dataEgress);
 
-function freezeManifest(manifest: ToolManifest): ToolManifest {
-  const copy = structuredClone(manifest);
-  for (const d of copy.destinations) Object.freeze(d);
-  Object.freeze(copy.destinations);
-  Object.freeze(copy.scopes);
-  return Object.freeze(copy);
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 export type RegisteredTool = { manifest: ToolManifest };
@@ -110,13 +141,20 @@ export class ToolRegistry<T extends RegisteredTool = RegisteredTool> {
   readonly #tools = new Map<string, ToolEntry<T>>();
 
   register(tool: T): void {
-    const manifest: unknown = (tool as { manifest?: unknown } | null)?.manifest;
+    // Read the manifest once and check a plain copy of it, so a getter can't hand the registry one
+    // manifest to validate and another to store. The copy is what the policy engine reads.
+    let manifest: unknown;
+    try {
+      manifest = structuredClone((tool as { manifest?: unknown } | null)?.manifest);
+    } catch {
+      throw new ManifestError("?", ["the manifest must be plain data"]);
+    }
     const label = isRecord(manifest) && typeof manifest.name === "string" ? manifest.name : "?";
     const problems = manifestProblems(manifest);
     if (problems.length > 0) throw new ManifestError(label, problems);
     if (this.#tools.has(label)) throw new ManifestError(label, ["a tool with this name exists"]);
     // The tool is kept as given (a class keeps its methods); only the manifest is copied.
-    this.#tools.set(label, Object.freeze({ tool, manifest: freezeManifest(tool.manifest) }));
+    this.#tools.set(label, Object.freeze({ tool, manifest: deepFreeze(manifest as ToolManifest) }));
   }
 
   get(name: string): ToolEntry<T> | undefined {
