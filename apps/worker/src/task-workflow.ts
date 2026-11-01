@@ -3,8 +3,8 @@
 // mints its scope from the D1 tasks row alone — instance params are data, never authority
 // (AC9) — then drives the builtin loop against the TaskContext port, where every LLM and tool
 // call is a step that reserves and settles through the user's assistant (AC8) and refuses to
-// run for a cancelled task (AC3). Promotion (creating instances from a live turn), progress
-// into the DO event log and recovery are M3-12b with M3-03c.
+// run for a cancelled task (AC3). A turn the assistant promoted (M3-12b) runs on here: the task
+// writes its reply into the conversation and settles it before the turn's end goes to the tabs.
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
@@ -18,6 +18,7 @@ import {
   TaskCancelledError,
   type TaskContext,
   TaskLimitError,
+  type TaskProgressEvent,
   type TaskStepper,
 } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
@@ -56,6 +57,8 @@ export interface TaskTurnState {
   history: ModelMessage[];
   turn: TurnState;
   turnId: string;
+  /** A promoted turn's reply in its conversation, which the task writes and settles (AC2). */
+  replyId?: string;
   /** The task's own budget (COST-3, A-Co2), when its creator set one; else the user's default. */
   budgetMicroUsd?: number;
   /**
@@ -129,19 +132,54 @@ export async function executeTask(
     const row = running ?? (await user.tasks.get(task.id));
     return { status: row?.status ?? "failed", startedAt: row?.startedAt ?? row?.createdAt ?? 0 };
   });
-  if (started.status !== "running") return; // cancelled or finished before it began
 
   const initial = parseState(task.state);
+  // A promoted turn's reply, which this run writes and settles (M3-12 AC2). The ID never changes
+  // across saves, so reading it from the minted row is replay-safe.
+  const replyId = initial?.replyId;
+  // The key must never reach durable state: every step output is redacted for it (AC4).
+  const secrets: string[] = [];
+  // Paused time, summed from the wake steps' records, so a replay stops the clock the same way.
+  const paused = { ms: 0 };
+  // Made before the model is picked, so a task that can't start still tells its conversation.
+  const ctx = createWorkflowTaskContext({
+    stepper,
+    taskId: task.id,
+    instanceId,
+    conversationId: task.conversationId,
+    turnId: initial?.turnId ?? task.id,
+    startedAt: started.startedAt,
+    pausedMs: () => paused.ms,
+    mode: task.mode,
+    readStatus: async () => (await user.tasks.get(task.id))?.status,
+    outputs: user.stepOutputs,
+    assistant: user.assistant() as unknown as AssistantTaskRpc,
+    secrets,
+    now,
+  });
+  // A promoted reply still streaming when its task is cancelled is cut where it is, and the tabs
+  // learn the turn ended. Outside `ctx.step`, whose guard stops every step of a cancelled task.
+  const cancelReply = async () => {
+    if (!replyId) return;
+    await stepper
+      .do("task:reply:cancelled", {}, async () => {
+        await user.chat.interrupt({ replyId, reply: await savedReply(user, task.id) });
+        return null;
+      })
+      .catch(() => {});
+    ctx.progress({ type: "turn.cancelled", payload: {} });
+  };
+  if (started.status !== "running") {
+    // Cancelled or finished before it began.
+    if (started.status === "cancelled") await cancelReply();
+    return;
+  }
   // Every way out of a started task settles its budget (COST-3); outside `ctx.step`, whose guard
   // would skip it for a task that has already ended.
   const endBudget = () =>
-    stepper
-      .do("task:budget:end", {}, async () => (ctx ? await ctx.budget.end() : 0))
-      .catch(() => 0);
-  let secrets: readonly string[] = [];
-  let ctx: TaskContext | null = null;
-  // Paused time, summed from the wake steps' records, so a replay stops the clock the same way.
-  const paused = { ms: 0 };
+    stepper.do("task:budget:end", {}, async () => await ctx.budget.end()).catch(() => 0);
+  // The loop's own end of the turn, held back until D1 holds it.
+  const end: { event: TaskProgressEvent | null } = { event: null };
   try {
     if (!initial) throw new NonRetryableError("the task has no readable turn state");
     // A turn keeps its conversation's model (the pin, else Chat); other work runs on Background.
@@ -149,64 +187,91 @@ export async function executeTask(
       task.kind === "turn" ? { conversationId: task.conversationId } : { role: "background" };
     const picked = await deps.resolveModel(composed, minted.scope, "task", pick);
     if ("error" in picked) throw new Error(modelErrorMessage(picked.error));
-    secrets = picked.apiKey ? [picked.apiKey] : [];
-    // The key must never reach durable state: every step output is redacted for it (AC4).
-    // The turn ID never changes across saves, so reading it from the minted row is replay-safe.
-    ctx = createWorkflowTaskContext({
-      stepper,
-      taskId: task.id,
-      instanceId,
-      conversationId: task.conversationId,
-      turnId: initial.turnId,
-      startedAt: started.startedAt,
-      pausedMs: () => paused.ms,
-      mode: task.mode,
-      readStatus: async () => (await user.tasks.get(task.id))?.status,
-      outputs: user.stepOutputs,
-      assistant: user.assistant() as unknown as AssistantTaskRpc,
-      secrets,
-      now,
-    });
+    if (picked.apiKey) secrets.push(picked.apiKey);
     const budgetMicroUsd = initial.budgetMicroUsd;
-    const reserved = ctx;
-    await ctx.step("task:budget", async () => await reserved.budget.start(budgetMicroUsd));
+    await ctx.step("task:budget", async () => await ctx.budget.start(budgetMicroUsd));
     const outcome = await driveLoop(
       ctx,
       user,
-      { taskId: task.id, userId: minted.scope.userId, conversationId: task.conversationId },
+      {
+        taskId: task.id,
+        userId: minted.scope.userId,
+        conversationId: task.conversationId,
+        ...(replyId ? { replyId } : {}),
+      },
       picked,
       deps.taskTools,
       now,
       paused,
+      end,
     );
     await stepper.do("task:finish", {}, async () => {
+      // The reply settles with the row, so the end the tabs are sent is already in D1.
       await user.tasks.finish(task.id, outcome.status, outcome.error);
+      if (replyId && (await user.tasks.get(task.id))?.status === outcome.status)
+        await settleReply(user, replyId, outcome.reply, outcome.status);
       return null;
     });
     await endBudget();
+    if (end.event) ctx.progress(end.event);
+    else if (replyId && outcome.status === "budget_limited") ctx.progress(INTERRUPTED);
   } catch (err) {
-    // The row already says cancelled; nothing overwrites it.
-    if (isTaskCancelled(err)) return void (await endBudget());
+    if (isTaskCancelled(err)) {
+      // The row already says cancelled; nothing overwrites it.
+      await cancelReply();
+      return void (await endBudget());
+    }
     const limit = isTaskLimit(err);
     const message = redactSecrets(messageOf(err), secrets).slice(0, 500);
     await stepper
       .do("task:finish:error", {}, async () => {
-        if (limit) {
+        const state = parseState((await user.tasks.get(task.id))?.state ?? null);
+        if (limit && state) {
           // The run ends here, so this stop can't be continued: say so where Continue looks.
-          const state = parseState((await user.tasks.get(task.id))?.state ?? null);
           const paused = { kind: limit.kind, detail: limit.detail, final: true };
-          if (state) await user.tasks.saveState(task.id, JSON.stringify({ ...state, paused }));
+          await user.tasks.saveState(task.id, JSON.stringify({ ...state, paused }));
         }
-        await user.tasks.finish(task.id, limit ? "budget_limited" : "failed", message);
+        const status = limit ? "budget_limited" : "failed";
+        await user.tasks.finish(task.id, status, message);
+        // Never over a cancel that landed meanwhile: that one cuts the reply itself.
+        if (replyId && (await user.tasks.get(task.id))?.status === status)
+          await settleReply(user, replyId, replyOf(state), status);
         return null;
       })
       .catch(() => {}); // a failed finish must not mask the task's own end
     await endBudget();
     // An execution limit, not money: "Paused: limit" (m3-ux §1.3).
     if (limit)
-      ctx?.progress({ type: "limit.reached", payload: { kind: limit.kind, detail: limit.detail } });
+      ctx.progress({ type: "limit.reached", payload: { kind: limit.kind, detail: limit.detail } });
+    if (replyId) ctx.progress(limit ? INTERRUPTED : { type: "turn.failed", payload: { message } });
     if (err instanceof NonRetryableError) throw err;
   }
+}
+
+/** The end of a promoted turn that stopped for good at a limit: its reply was cut short. */
+const INTERRUPTED: TaskProgressEvent = { type: "turn.interrupted", payload: { message: "Retry?" } };
+
+/** The loop events that end a turn: forwarded only once the task's finish step has run. */
+const ENDS = new Set<string>(["turn.completed", "turn.cancelled", "turn.failed"]);
+
+/** A turn's reply text: one segment per model call that spoke, joined as the DO joins them. */
+const replyOf = (state: TaskTurnState | null) =>
+  (state?.turn.messages ?? [])
+    .flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []))
+    .join("\n\n");
+
+const savedReply = async (user: ScopedUser, taskId: string) =>
+  replyOf(parseState((await user.tasks.get(taskId))?.state ?? null));
+
+/** Closes a promoted turn's reply in D1 as the task ended (D1 has no `cancelled`, as in the DO). */
+async function settleReply(
+  user: ScopedUser,
+  replyId: string,
+  reply: string,
+  status: "succeeded" | "failed" | "budget_limited",
+): Promise<void> {
+  const as = status === "succeeded" ? "complete" : status === "failed" ? "error" : "interrupted";
+  await user.chat.settle({ replyId, reply }, as);
 }
 
 /**
@@ -219,7 +284,7 @@ export async function executeTask(
 async function driveLoop(
   ctx: TaskContext,
   user: ScopedUser,
-  task: { taskId: string; userId: string; conversationId: string },
+  task: { taskId: string; userId: string; conversationId: string; replyId?: string },
   picked: {
     provider: ModelProvider;
     model: string;
@@ -229,7 +294,8 @@ async function driveLoop(
   taskTools: readonly LoopTool[],
   now: () => number,
   paused: { ms: number },
-): Promise<{ status: "succeeded" | "failed" | "budget_limited"; error?: string }> {
+  end: { event: TaskProgressEvent | null },
+): Promise<{ status: "succeeded" | "failed" | "budget_limited"; error?: string; reply: string }> {
   const { taskId } = task;
   const billingId = picked.billingId ?? picked.provider.id;
   let llmSeq = 0;
@@ -271,8 +337,12 @@ async function driveLoop(
             // reserve settles it so), which errs on the side of the cap.
             await ctx.budget.settle(key, billingId, req.model, usage).catch(() => {});
           }
+          // A promoted turn's calls stay on its reply, as the DO's calls before them are.
+          const on = task.replyId
+            ? { conversationId: task.conversationId, messageId: task.replyId }
+            : {};
           await user.usage
-            .record({ providerId: billingId, model: req.model, usage })
+            .record({ providerId: billingId, model: req.model, usage, ...on })
             .catch(() => {});
           return { refused: null, events: events as unknown as JsonValue };
         });
@@ -330,7 +400,7 @@ async function driveLoop(
     provider,
     model: picked.model,
     tools: registry,
-    policy: () => ({}), // stored overrides and grants join the read in M3-12b
+    policy: () => ({}), // stored overrides and grants join the read with the tools (M3-08)
     taskId,
     now,
     // A counter, so a replay names the same steps the same way; prefixed so ids stay unique
@@ -348,7 +418,9 @@ async function driveLoop(
       return row?.state ?? null;
     });
     const state = parseState(loaded);
-    if (!state) return { status: "failed", error: "the task's turn state could not be read" };
+    if (!state) {
+      return { status: "failed", error: "the task's turn state could not be read", reply: "" };
+    }
     const turn = state.turn;
     // A stopped batch resumes from its rows in D1, never from an event's payload (M3-07 AC10,
     // M3-12 AC3): the decisions, and the arguments bound in each row's envelope.
@@ -414,28 +486,32 @@ async function driveLoop(
       if (next.value.type === "limit.reached") limit = next.value.payload;
       // The card goes out once its rows exist, so a decision never finds no batch.
       if (next.value.type === "approval.requested") asked = next.value;
+      // The turn's end goes out once its finish step has settled it in D1.
+      else if (ENDS.has(next.value.type)) end.event = next.value;
       else ctx.progress(next.value);
     }
     const saved = await ctx.step(`task:save:${cycle}`, async () => {
       const paused = outcome === "limit_reached" ? limit : undefined;
-      const { budgetMicroUsd, turnId, history } = state;
-      const body = JSON.stringify({ history, turn, turnId, budgetMicroUsd, paused });
+      const { budgetMicroUsd, turnId, replyId, history } = state;
+      const body = JSON.stringify({ history, turn, turnId, replyId, budgetMicroUsd, paused });
       const ok = await user.tasks.saveState(
         taskId,
         body,
         outcome === "awaiting_approval" ? "waiting_for_approval" : "running",
       );
+      // A tab that loads the conversation meanwhile reads the reply so far (M3-03 AC5).
+      if (ok && replyId) await user.chat.checkpointReply(replyId, replyOf(state));
       return ok;
     });
     if (!saved) throw new TaskCancelledError(taskId); // cancelled while the segment ran
     if (outcome === "limit_reached" && limit) {
       if (await pause(ctx, user, taskId, cycle, limit.kind, now, paused)) continue;
-      return { status: "budget_limited" };
+      return { status: "budget_limited", reply: replyOf(state) };
     }
     if (outcome !== "awaiting_approval") {
-      if (outcome === "completed") return { status: "succeeded" };
+      if (outcome === "completed") return { status: "succeeded", reply: replyOf(state) };
       if (outcome === "cancelled") throw new TaskCancelledError(taskId);
-      return { status: "failed", error: "the model call failed" };
+      return { status: "failed", error: "the model call failed", reply: replyOf(state) };
     }
     const pending = turn.pending;
     if (asked && pending) {
@@ -587,11 +663,12 @@ function parseState(json: string | null): TaskTurnState | null {
     const parsed = JSON.parse(json) as TaskTurnState;
     if (!Array.isArray(parsed.history) || typeof parsed.turnId !== "string") return null;
     if (!parsed.turn || !Array.isArray(parsed.turn.messages)) return null;
-    const { history, turn, turnId, budgetMicroUsd, paused } = parsed;
+    const { history, turn, turnId, replyId, budgetMicroUsd, paused } = parsed;
     return {
       history,
       turn,
       turnId,
+      ...(typeof replyId === "string" ? { replyId } : {}),
       ...(Number.isSafeInteger(budgetMicroUsd) && (budgetMicroUsd as number) > 0
         ? { budgetMicroUsd }
         : {}),

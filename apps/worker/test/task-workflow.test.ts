@@ -490,6 +490,70 @@ describe("task workflow", () => {
   });
 });
 
+describe("a promoted turn's reply (M3-12b AC2)", () => {
+  /** A task holding a turn the DO began: its reply is in the conversation, still streaming. */
+  async function promotedTask(user = alice, conversationId = "ca") {
+    seq += 1;
+    const taskId = `task${seq}`;
+    const instanceId = `inst${seq}`;
+    const replyId = `reply${seq}`;
+    await user.chat.startTurn(conversationId, "Dig into it", replyId, []);
+    await user.chat.checkpointReply(replyId, "Started.");
+    const state = newTaskTurnState([{ role: "user", content: "Dig into it" }], `turn${seq}`);
+    state.turn.messages.push({ role: "assistant", content: "Started." });
+    await user.tasks.create({
+      id: taskId,
+      conversationId,
+      workflowInstanceId: instanceId,
+      kind: "turn",
+      mode: "interactive",
+      state: JSON.stringify({ ...state, replyId }),
+    });
+    return { taskId, instanceId, replyId };
+  }
+  const reply = async (replyId: string) =>
+    ((await alice.chat.listMessages("ca")) ?? []).find((m) => m.id === replyId);
+
+  it("writes the same reply on, settles it and puts its calls on it", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    await (await run([{ text: "Finished" }], instanceId, new FakeStepper())).promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nFinished",
+      status: "complete",
+    });
+    const calls = await env.DB.prepare("SELECT count(*) AS n FROM usage WHERE message_id = ?")
+      .bind(replyId)
+      .first("n");
+    expect(calls).toBe(1);
+    // The state it saved still names the reply, so a later segment writes the same one.
+    expect(JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}").replyId).toBe(replyId);
+  });
+
+  it("cuts the reply where it is when the task is cancelled before it runs", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    expect(await alice.tasks.cancel(taskId)).toBe(true);
+    const { promise, streams } = await run([{ text: "never" }], instanceId, new FakeStepper());
+    await promise;
+    expect(streams()).toBe(0);
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
+  });
+
+  it("settles the reply as an error when the run fails, never leaving it streaming", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const stepper = new FakeStepper();
+    await executeTask(
+      env,
+      await compose(env),
+      { resolveModel: async () => ({ error: "no_model" }), taskTools: [] },
+      instanceId,
+      stepper,
+    );
+    expect((await alice.tasks.get(taskId))?.status).toBe("failed");
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "error" });
+  });
+});
+
 describe("task limits (M3-17)", () => {
   const fetchTool = () => tool("fetch", "read", async () => ({ ok: true, content: "page" }));
   // Every reply calls a tool, so the loop keeps calling the model; each uses its whole max_tokens.
