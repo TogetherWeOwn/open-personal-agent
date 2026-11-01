@@ -162,6 +162,7 @@ test("Change what needs my OK finishes setup in Apps & tools, with the first cha
 }) => {
   const posts: string[] = [];
   const bodies: unknown[] = [];
+  let onboarded = false;
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings**", async (route) => {
@@ -170,13 +171,31 @@ test("Change what needs my OK finishes setup in Apps & tools, with the first cha
       posts.push(path);
       bodies.push(route.request().postDataJSON());
     }
+    if (path.endsWith("/onboarded")) onboarded = true;
     if (path.endsWith("/model/test")) {
       return route.fulfill({ json: { ok: true, latencyMs: 300, tools: false, reply: "ready" } });
     }
-    const settings = { displayName: "Owner", about: "", onboarded: false, model: null };
+    const settings = { displayName: "Owner", about: "", onboarded, model: null };
     const starter = { kind: "workers-ai", model: "@cf/meta/llama", key: null };
     if (path.endsWith("/model")) return route.fulfill({ json: { ...settings, model: starter } });
     if (path.endsWith("/setup")) return route.fulfill({ json: { skipped: [], hidden: false } });
+    if (path.endsWith("/tools")) {
+      return route.fulfill({
+        json: {
+          tools: [
+            {
+              name: "web_fetch",
+              description: "Fetches a web page and returns its text.",
+              riskClass: "read",
+              egress: true,
+              override: null,
+              default: "auto",
+              locked: false,
+            },
+          ],
+        },
+      });
+    }
     return route.fulfill(path.endsWith("/settings") ? { json: settings } : { status: 204 });
   });
 
@@ -188,6 +207,9 @@ test("Change what needs my OK finishes setup in Apps & tools, with the first cha
   await page.getByRole("button", { name: "Skip for now" }).click();
   await page.getByRole("button", { name: "Change what needs my OK" }).click();
   await page.waitForURL("/settings/apps");
+
+  // The destination renders its tools, not just the URL: a tool row is on the page.
+  await expect(page.getByRole("radiogroup", { name: "How web_fetch asks you" })).toBeVisible();
 
   expect(bodies).toContainEqual({ skip: "chat" });
   expect(bodies).not.toContainEqual({ skip: "safety" });
