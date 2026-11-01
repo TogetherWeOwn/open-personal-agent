@@ -48,7 +48,7 @@ export type WriteOutcome =
   | { status: "proposed"; proposal: Proposal }
   /** A target is missing, someone else's, no longer current, or the proposal has expired. */
   | { status: "not_found" }
-  /** The user can't edit a built-in memory. */
+  /** Nobody but the system replaces a built-in memory. */
   | { status: "forbidden" };
 
 /** Proposals expire to rejected after this; M3-18 makes it a setting. */
@@ -98,9 +98,16 @@ export function redactSecrets(text: string): string {
   return out.replace(CARD, (m) => (luhn(m.replace(/\D/g, "")) ? "[redacted]" : m));
 }
 
-/** FTS5 query syntax from free text: each word quoted and prefix-matched, all of them required. */
+/**
+ * FTS5 query syntax from free text: each word quoted and prefix-matched, all of them required. A
+ * word keeps its combining marks, as the tokenizer does, so "re\u0301sume\u0301" stays one word.
+ */
 export function ftsQuery(text: string): string | null {
-  const words = text.match(/[\p{L}\p{N}_]+/gu)?.slice(0, 16) ?? [];
+  const words =
+    text
+      .normalize("NFC")
+      .match(/[\p{L}\p{M}\p{N}_]+/gu)
+      ?.slice(0, 16) ?? [];
   return words.length > 0 ? words.map((w) => `"${w}"*`).join(" ") : null;
 }
 
@@ -191,11 +198,14 @@ export function memoryService(db: Db, userId: string) {
         db
           .update(memories)
           .set({ status: guard("active"), trust: change.trust, expiresAt: null, updatedAt: now })
-          .where(and(mine(change.id), eq(memories.status, "proposed"))),
+          .where(and(mine(change.id), eq(memories.status, "proposed")))
+          .returning({ id: memories.id }),
       );
     }
     try {
-      await db.batch(statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]]);
+      const results = await db.batch(statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]]);
+      // An accept whose proposal was accepted or rejected meanwhile activates nothing.
+      if (!("userId" in change) && (results.at(-1) as unknown[]).length === 0) return null;
     } catch (error) {
       if (supersede && /NOT NULL/i.test(String((error as Error)?.cause ?? error))) return null;
       throw error;
@@ -203,26 +213,42 @@ export function memoryService(db: Db, userId: string) {
     return (await db.select().from(memories).where(mine(change.id)).limit(1))[0] ?? null;
   };
 
-  /** Hard-deletes memories with their earlier versions and pending proposals about them. */
-  const forget = async (ids: string[]): Promise<string[]> => {
-    const chain = await db.all<{ id: string }>(sql`
-      WITH RECURSIVE chain(id) AS (
-        SELECT id FROM memories
-          WHERE user_id = ${userId} AND status != 'proposed'
-            AND ${inIds(memories.id, ids)}
-        UNION
-        SELECT l.target_id FROM memory_links l JOIN chain c ON l.memory_id = c.id
-          WHERE l.user_id = ${userId}
-      )
-      SELECT id FROM chain
-      UNION
-      SELECT l.memory_id FROM memory_links l JOIN memories p ON p.id = l.memory_id
-        WHERE l.user_id = ${userId} AND p.status = 'proposed' AND l.target_id IN chain`);
-    const doomed = chain.map((r) => r.id);
-    if (doomed.length === 0) return [];
-    await db.delete(memories).where(and(eq(memories.userId, userId), inIds(memories.id, doomed)));
-    return doomed;
+  /**
+   * Hard-deletes current memories with their earlier versions and pending proposals about them,
+   * in one statement: nothing if any of `ids` stopped being current meanwhile, or if `proposalId`
+   * (an accepted delete proposal) is no longer pending. Returns the deleted IDs, or `null`.
+   */
+  const forget = async (ids: string[], proposalId?: string): Promise<string[] | null> => {
+    const pending =
+      proposalId === undefined
+        ? sql`1`
+        : sql`EXISTS (SELECT 1 FROM memories p WHERE p.id = ${proposalId} AND p.user_id = ${userId}
+            AND p.status = 'proposed' AND p.expires_at > ${Date.now()})`;
+    const deleted = await db.all<{ id: string }>(sql`
+      WITH RECURSIVE
+        anchor(id) AS (
+          SELECT id FROM memories
+            WHERE user_id = ${userId} AND status = 'active' AND ${inIds(memories.id, ids)}
+        ),
+        chain(id) AS (
+          SELECT id FROM anchor WHERE (SELECT count(*) FROM anchor) = ${ids.length} AND ${pending}
+          UNION
+          SELECT l.target_id FROM memory_links l JOIN chain c ON l.memory_id = c.id
+            WHERE l.user_id = ${userId}
+        )
+      DELETE FROM memories
+        WHERE user_id = ${userId} AND (id IN chain OR (status = 'proposed' AND id IN (
+          SELECT memory_id FROM memory_links WHERE user_id = ${userId} AND target_id IN chain)))
+      RETURNING id`);
+    return deleted.length > 0 ? deleted.map((r) => r.id) : null;
   };
+
+  const deleted = (ids: string[] | null): WriteOutcome =>
+    ids ? { status: "deleted", ids } : { status: "not_found" };
+
+  /** Built-in memories can be forgotten, never replaced: not even through an accepted proposal. */
+  const builtIn = (op: Memory["op"], targets: Memory[]) =>
+    op !== "delete" && targets.some((t) => t.trust === "system");
 
   /** The gate. `targets` are the current rows the write replaces or deletes. */
   async function gated(
@@ -234,20 +260,21 @@ export function memoryService(db: Db, userId: string) {
     from: MemorySource,
   ): Promise<WriteOutcome> {
     const targetIds = [...new Set(ids)];
-    if (op === "merge" && targetIds.length < 2) return { status: "not_found" };
+    const least = { create: 0, update: 1, merge: 2, delete: 1 }[op];
+    if (targetIds.length < least) return { status: "not_found" };
     const targets = await active(targetIds);
     if (targets.length !== targetIds.length) return { status: "not_found" };
     const trust = trustOf(actor);
     const resultKind =
       kind ?? (targets.some((t) => t.kind === "instruction") ? "instruction" : "fact");
+    if (actor.via !== "system" && builtIn(op, targets)) return { status: "forbidden" };
     const downward = targets.some((t) => RANK[t.trust] > RANK[trust]);
-    if (actor.via === "user" && downward && op !== "delete") return { status: "forbidden" };
     const propose =
       actor.via === "assistant" &&
       (actor.tainted ||
         downward ||
         (op !== "delete" && resultKind === "instruction" && RANK[trust] < RANK.user));
-    if (!propose && op === "delete") return { status: "deleted", ids: await forget(targetIds) };
+    if (!propose && op === "delete") return deleted(await forget(targetIds));
     const status = propose ? "proposed" : "active";
     const values = row({ kind: resultKind, text, trust, status, op }, from);
     const saved = await write(values, targetIds);
@@ -308,8 +335,8 @@ export function memoryService(db: Db, userId: string) {
         SELECT m.id FROM memories_fts JOIN memories m ON m.n = memories_fts.rowid
         WHERE memories_fts MATCH ${query} AND m.user_id = ${userId} AND m.status = 'active'
         ORDER BY bm25(memories_fts), m.n DESC LIMIT ${limit}`);
-      const rows = await active(ids.map((r) => r.id));
-      return ids.flatMap(({ id }) => rows.filter((r) => r.id === id));
+      const rows = new Map((await active(ids.map((r) => r.id))).map((r) => [r.id, r]));
+      return ids.flatMap(({ id }) => rows.get(id) ?? []);
     },
     create: (actor: MemoryActor, text: string, kind: MemoryKind, from: MemorySource) =>
       gated(actor, "create", [], text, kind, from),
@@ -341,8 +368,14 @@ export function memoryService(db: Db, userId: string) {
           .from(memoryLinks)
           .where(and(eq(memoryLinks.userId, userId), eq(memoryLinks.memoryId, id)))
       ).map((l) => l.id);
-      if ((await active(targetIds)).length !== targetIds.length) return { status: "not_found" };
-      if (proposal.op === "delete") return { status: "deleted", ids: await forget(targetIds) };
+      const targets = await active(targetIds);
+      if (targets.length !== targetIds.length) return { status: "not_found" };
+      if (builtIn(proposal.op, targets)) return { status: "forbidden" };
+      if (proposal.op === "delete") {
+        return targetIds.length > 0
+          ? deleted(await forget(targetIds, id))
+          : { status: "not_found" };
+      }
       const trust = proposal.kind === "instruction" ? "user" : proposal.trust;
       const saved = await write({ id, trust, status: "active" }, targetIds);
       return saved ? { status: "saved", memory: saved } : { status: "not_found" };

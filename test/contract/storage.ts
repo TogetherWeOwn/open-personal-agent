@@ -223,9 +223,13 @@ export function memoryContract(name: string, migrated: () => Promise<D1Database>
       expect(await texts("VEGETARIAN")).toEqual(["I'm vegetarian and love the café on Main St"]);
       expect(await texts("veg cafe")).toHaveLength(1);
       expect(await texts("vegetarian lisbon")).toEqual([]);
+      expect(await texts("cafe\u0301")).toHaveLength(1); // a decomposed accent
+      const decomposed = await a.insert("Sent her re\u0301sume\u0301");
+      expect((await a.memory.search("résumé")).map((m) => m.id)).toEqual([decomposed]);
+      expect((await a.memory.search("re\u0301sume\u0301")).map((m) => m.id)).toEqual([decomposed]);
       expect(await texts('") OR * NEAR(')).toEqual([]); // FTS5 syntax is never passed through
       expect(await texts("")).toEqual([]);
-      expect((await a.memory.list()).map((m) => m.id)).toEqual([id]);
+      expect((await a.memory.list()).map((m) => m.id)).toEqual([decomposed, id]);
       expect(await a.memory.get(id)).toMatchObject({ id, trust: "user", source: "chat" });
       expect(await b.memory.get(id)).toBeUndefined();
     });
@@ -449,6 +453,49 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       // The removal named the version that was just superseded, so it no longer applies.
       expect(await memory.accept(removal.proposal.memoryId)).toEqual({ status: "not_found" });
       expect((await memory.list()).map((m) => m.text)).toEqual(["Sam lives in Paris"]);
+    });
+
+    it("lets a racing forget and edit both succeed only if nothing of the memory is left", async () => {
+      const { memory } = await user();
+      const id = saved(await memory.create(screen, "Sam lives in Leeds", "fact", said));
+      const [forgot, edited] = await Promise.all([
+        memory.forget(screen, [id], said),
+        memory.update(screen, id, "Sam lives in Paris", said),
+      ]);
+      const left = (await memory.list()).map((m) => m.text);
+      expect([forgot.status, edited.status, left]).toEqual(
+        forgot.status === "deleted"
+          ? ["deleted", "not_found", []]
+          : ["not_found", "saved", ["Sam lives in Paris"]],
+      );
+    });
+
+    it("accepts a proposal once, and a rejected delete proposal deletes nothing", async () => {
+      const { memory } = await user();
+      const proposed = await memory.create(tainted, "Likes jazz", "fact", web);
+      if (proposed.status !== "proposed") throw new Error("gate");
+      const twice = await Promise.all([1, 2].map(() => memory.accept(proposed.proposal.memoryId)));
+      expect(twice.map((o) => o.status).sort()).toEqual(["not_found", "saved"]);
+      const fact = (await memory.list())[0]?.id ?? "";
+      const removal = await memory.forget(tainted, [fact], web);
+      if (removal.status !== "proposed") throw new Error("gate");
+      const [accepted, rejected] = await Promise.all([
+        memory.accept(removal.proposal.memoryId),
+        memory.reject(removal.proposal.memoryId),
+      ]);
+      expect((await memory.list()).length).toBe(accepted.status === "deleted" ? 0 : 1);
+      expect(accepted.status === "deleted" && rejected).toBe(false);
+      expect(await memory.forget(tainted, [], web)).toEqual({ status: "not_found" });
+    });
+
+    it("never replaces a built-in memory, even through a proposal", async () => {
+      const { memory } = await user();
+      const rule = saved(await memory.create({ via: "system" }, "Be kind", "instruction", said));
+      for (const actor of [screen, chat, inferred, tainted]) {
+        expect(await memory.update(actor, rule, "Be terse", said)).toEqual({ status: "forbidden" });
+      }
+      expect(await memory.proposals()).toEqual([]);
+      expect((await memory.forget(tainted, [rule], web)).status).toBe("proposed");
     });
 
     it("redacts secrets before storage and ignores another user's conversation", async () => {
