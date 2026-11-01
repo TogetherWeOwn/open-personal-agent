@@ -1889,23 +1889,28 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          * run's next write simply matches no row and reports `false`.
          */
         tasks: {
-          /** `false` when the conversation isn't the user's. The row starts `queued`. */
+          /**
+           * `false` when the conversation isn't the user's. The row starts `queued`. A row the
+           * `task` tool files has no Workflow instance yet (promotion creates it in M3-12b),
+           * so the instance id is optional and stays null until then.
+           */
           create: async (input: {
             id: string;
             conversationId: string;
-            workflowInstanceId: string;
+            workflowInstanceId?: string | null;
             kind: string;
             mode: TaskRow["mode"];
             title?: string | null;
             state?: string | null;
           }): Promise<boolean> => {
-            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
+            if (input.workflowInstanceId != null && !isInstanceId(input.workflowInstanceId))
+              throw new Error("invalid instance id");
             if (!(await getConversation(input.conversationId))) return false;
             await db.insert(tasks).values({
               id: checkId(input.id),
               userId,
               conversationId: input.conversationId,
-              workflowInstanceId: input.workflowInstanceId,
+              workflowInstanceId: input.workflowInstanceId ?? null,
               kind: input.kind,
               mode: input.mode,
               title: input.title ?? null,
@@ -2016,9 +2021,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 limitKind: tasks.limitKind,
                 error: tasks.error,
                 costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                // The left join's null usage row is not a call: without it a task with no
+                // usage would report one unpriced call alongside zero calls.
                 unpriced: sql<
                   number | null
-                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
+                >`sum(case when ${usage.id} is not null and ${usage.costMicroUsd} is null then 1 else 0 end)`.as(
+                  "unpriced",
+                ),
                 calls: count(usage.id).as("calls"),
                 createdAt: tasks.createdAt,
                 updatedAt: tasks.updatedAt,

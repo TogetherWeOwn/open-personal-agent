@@ -73,7 +73,9 @@ describe("task Continue and Stop", () => {
     const { user, taskId, post } = await setup("daily");
     const ended = { ...env, TASK_WORKFLOW: { get: async () => Promise.reject(new Error("gone")) } };
     expect((await post("continue", ended as never)).status).toBe(409);
-    expect((await user.tasks.get(taskId))?.status).toBe("budget_limited");
+    // The row stays paused with the limit kind it paused with.
+    expect(await user.tasks.get(taskId)).toMatchObject({ status: "budget_limited" });
+    expect((await user.tasks.details(taskId))?.limitKind).toBe("daily");
     await user.tasks.resume(taskId);
     expect((await post("continue")).status).toBe(409);
   });
