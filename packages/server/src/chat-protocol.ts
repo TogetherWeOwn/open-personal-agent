@@ -3,13 +3,7 @@
 // runtimes emit, and the file budgets every turn accounts. Pure functions shared by the Worker's
 // Durable Object (`apps/worker/src/assistant.ts`) and the Node in-process assistant
 // (`apps/node/src/assistant.ts`), so the two runtimes stay one port by construction.
-import type {
-  HarnessEvent,
-  ModelMessage,
-  ModelUsage,
-  TurnFailure,
-  TurnLimit,
-} from "@opa/core";
+import type { HarnessEvent, ModelMessage, ModelUsage, TurnFailure, TurnLimit } from "@opa/core";
 import type { AttachmentRow } from "@opa/db/repository";
 import { isId } from "@opa/db/repository";
 import type { TurnState } from "@opa/harness-builtin";

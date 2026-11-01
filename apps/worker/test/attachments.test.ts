@@ -11,8 +11,8 @@ import type {
   ModelMessage,
   ModelProvider,
 } from "@opa/core";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { TURN_FILE_BYTES } from "@opa/server/chat-protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import type { Env } from "../src/env";
 import { workerApp } from "../src/worker-app";

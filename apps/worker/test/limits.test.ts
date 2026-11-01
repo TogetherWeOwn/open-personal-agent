@@ -2,7 +2,6 @@
 // Turn and spend limits (M2-22, M3-17): COST-1 per-turn, COST-2 turns and tool calls, COST-3
 // task budgets, COST-4 the monthly hard cap, A-Co2 and A-Co5.
 import { findPrice } from "@opa/pricing";
-import { describe, expect, it } from "vitest";
 import {
   checkSpending,
   DAILY_SPEND_CAP_MICRO_USD,
@@ -14,6 +13,7 @@ import {
   TOOL_CALLS_PER_MINUTE,
   TURNS_PER_MINUTE,
 } from "@opa/server/limits";
+import { describe, expect, it } from "vitest";
 
 const DAY = 86_400_000;
 // $2 in and $8 out per million tokens: 2 and 8 micro-USD a token.

@@ -44,23 +44,32 @@ import {
   LABEL_CHARS,
   MAX_ATTACHMENT_TEXT,
   MAX_TEXT,
+  MODEL_ERRORS,
   messageChars,
   messageFileTokens,
-  MODEL_ERRORS,
   modelBytes,
   parse,
   parseTurnState,
   pickUsage,
   QUEUE_KEY,
+  type ResumeResult,
   readPrefix,
   reject,
   replySegments,
-  type ResumeResult,
   type TaskProgress,
   TEXT_READ_BYTES,
   TURN_FILE_BYTES,
   UNREAD,
 } from "@opa/server/chat-protocol";
+import {
+  type CallScope,
+  checkSpending,
+  Limits,
+  type Refusal,
+  type Reservation,
+  SPENDING_DEFAULTS,
+  type SpendingSettings,
+} from "@opa/server/limits";
 import {
   Agent,
   type Connection,
@@ -71,15 +80,6 @@ import {
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import { EventLog } from "./event-log";
-import {
-  type CallScope,
-  checkSpending,
-  Limits,
-  type Refusal,
-  type Reservation,
-  SPENDING_DEFAULTS,
-  type SpendingSettings,
-} from "@opa/server/limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
