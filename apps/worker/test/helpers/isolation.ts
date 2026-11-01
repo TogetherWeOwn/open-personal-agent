@@ -37,6 +37,7 @@ export interface Seeded {
   task: string;
   attachment: string;
   artifact: string;
+  export: string;
   provider: string;
   secret: string;
   grant: string;
@@ -74,8 +75,9 @@ export async function wipe() {
 }
 
 /**
- * Seeds `name` with a conversation and its messages, a memory, a paused task, an attachment and
- * an artifact in R2, a model provider with an encrypted key, a grant, a usage row and two sessions. The provider
+ * Seeds `name` with a conversation and its messages, two memories and a proposal, a paused
+ * task, an attachment and an artifact in R2, a ready export with its ZIP, a model provider with
+ * an encrypted key, a grant, a usage row and two sessions. The provider
  * and the attachment go through their routes, so the vault and R2 paths are the real ones.
  */
 export async function seed(name: string, role: "owner" | "member"): Promise<Seeded> {
@@ -123,10 +125,18 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   if (uploaded.status !== 201) throw new Error(`attachment: ${uploaded.status}`);
   const attachment = (await uploaded.json<{ id: string }>()).id;
 
-  const [conversation, message, memory, spareMemory, proposal, task, grant, usage] = Array.from(
-    { length: 8 },
-    () => crypto.randomUUID(),
-  ) as [string, string, string, string, string, string, string, string];
+  const [conversation, message, memory, spareMemory, proposal, task, grant, usage, exportId] =
+    Array.from({ length: 9 }, () => crypto.randomUUID()) as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
   const run = (sql: string, ...values: unknown[]) => db.prepare(sql).bind(...values);
   await db.batch([
     run(
@@ -257,6 +267,14 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       source: { conversationId: conversation, taskId: task },
     });
 
+  await db
+    .prepare(
+      "INSERT INTO exports (id, user_id, workflow_instance_id, status, size_bytes, ready_at, expires_at) VALUES (?, ?, ?, 'ready', ?, ?, ?)",
+    )
+    .bind(exportId, id, `wf-${exportId}`, 3, Date.now(), Date.now() + 3_600_000)
+    .run();
+  await FILES.put(`u/${id}/exports/${exportId}.zip`, `export of ${tag}`);
+
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
   const ids = {
     ...items,
@@ -266,6 +284,7 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     artifact,
     grant,
     usage,
+    export: exportId,
     batch: `batch-${tag}`,
     approvalTask: `approval-task-${tag}`,
   };

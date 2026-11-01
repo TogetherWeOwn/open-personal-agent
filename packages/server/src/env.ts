@@ -33,8 +33,11 @@ export interface AppPorts extends DataPorts {
     create(...args: never[]): Promise<unknown>;
     get(id: string): Promise<{ terminate(): Promise<void> }>;
   };
-  /** Data export runs (M3-20 AC1). Like the task runs, reported by presence, never created. */
-  EXPORT_WORKFLOW?: { create(...args: never[]): Promise<unknown> };
+  /**
+   * Data export runs (M3-20 AC1). The export route creates instances; health reports the
+   * binding by presence only, so it never creates one.
+   */
+  EXPORT_WORKFLOW?: { create(instance: { id: string; params?: unknown }): Promise<unknown> };
   OPA_SESSION_SECRET?: string | undefined;
   OPA_SETUP_TOKEN?: string | undefined;
   /** The per-file attachment cap in bytes (M3-10 AC1); unset means the 10 MB default. */
