@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Redeeming a recovery code (M2-10b): single use, no oracle, rate limits, lockout, audit.
+// Redeeming a recovery code (M2-10b): single use, no oracle, rate limit, no lockout, audit.
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
-import { ADDRESS_LIMIT, DEPLOYMENT_LIMIT } from "../src/recover";
+import { ADDRESS_LIMIT } from "../src/recover";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();
@@ -51,7 +51,8 @@ describe("a recovery code", () => {
     expect(await count("recovery_codes", "used_at IS NOT NULL")).toBe(1);
     // The old passkey still signs in: the owner removes it if they don't recognise it.
     expect((await new Browser().login(key)).status).toBe(200);
-    expect(await audits("allowed")).toBe(1);
+    // One for each step; the matched attempts don't count as denied.
+    expect([await audits("allowed"), await audits("denied")]).toEqual([2, 0]);
     expect(await audits("redeemed")).toBe(1);
 
     expect((await recover(new Browser(), codes[0])).status).toBe(403);
@@ -136,14 +137,38 @@ describe("the rate limits", () => {
     expect((await recover(new Browser(env, "192.0.2.1"), codes[0])).status).toBe(200);
   });
 
-  it(`lock code recovery for everyone after ${DEPLOYMENT_LIMIT} wrong codes`, async () => {
+  it("hold under parallel requests from one address", async () => {
+    await claim();
+    const br = () => new Browser(env, "192.0.2.3");
+    const body = { code: "wrong" };
+    const results = await Promise.all(
+      Array.from({ length: 40 }, () => br().req("/api/auth/recover/options", { body })),
+    );
+    const statuses = results.map((r) => r.status);
+    expect([
+      statuses.filter((s) => s === 403).length,
+      statuses.filter((s) => s === 429).length,
+    ]).toEqual([ADDRESS_LIMIT, 40 - ADDRESS_LIMIT]);
+    expect(await audits("denied")).toBe(ADDRESS_LIMIT);
+  });
+
+  it("never lock the owner out: a valid code redeems after any number of wrong ones", async () => {
     const { codes } = await claim();
-    for (let i = 0; i < DEPLOYMENT_LIMIT; i++) {
-      expect((await recover(new Browser(env, `203.0.113.${i}`), "wrong")).status).toBe(403);
+    // 60 wrong codes, 5 from each of 12 addresses: each one is at its limit, none is over it.
+    for (let i = 0; i < 60; i++) {
+      const ip = `203.0.113.${i % 12}`;
+      expect((await recover(new Browser(env, ip), "wrong")).status).toBe(403);
     }
-    expect((await recover(new Browser(env, "192.0.2.9"), codes[0])).status).toBe(429);
-    expect(await count("recovery_codes", "used_at IS NOT NULL")).toBe(0);
-    await db.prepare("UPDATE audit_log SET created_at = created_at - 61 * 60000").run();
     expect((await recover(new Browser(env, "192.0.2.9"), codes[0])).status).toBe(200);
+  });
+
+  it("key the address on OPA_CLIENT_IP_HEADER when it is set", async () => {
+    const { codes } = await claim();
+    const proxied = { ...env, OPA_CLIENT_IP_HEADER: "X-Real-IP" };
+    // Without X-Real-IP these share one bucket, whatever CF-Connecting-IP they send.
+    for (let i = 0; i < ADDRESS_LIMIT; i++) {
+      expect((await recover(new Browser(proxied, `203.0.113.${i}`), "wrong")).status).toBe(403);
+    }
+    expect((await recover(new Browser(proxied, "203.0.113.99"), codes[0])).status).toBe(429);
   });
 });
