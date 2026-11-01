@@ -38,6 +38,7 @@ import {
 const raw = workerEnv as unknown as WorkerEnv & {
   TEST_MIGRATIONS: D1Migration[];
   TASK_WORKFLOW: Workflow;
+  EXPORT_WORKFLOW: Workflow;
 };
 const repo = createRepository(env);
 const scopeOf = (user: Seeded) => scopeFromSession({ userId: user.id });
@@ -48,11 +49,13 @@ interface Touched {
   keys: string[];
   names: string[];
   instances: string[];
+  /** Workflow instances created, with the params they were given. */
+  created: { id: string | undefined; params: unknown }[];
 }
 
 /** Records every name that reaches the R2, DO and Workflow bindings, and still calls them. */
 function record(): Touched {
-  const touched: Touched = { keys: [], names: [], instances: [] };
+  const touched: Touched = { keys: [], names: [], instances: [], created: [] };
   const files = raw.FILES as unknown as Record<string, (...args: unknown[]) => unknown>;
   for (const method of ["get", "head", "put", "delete", "list", "createMultipartUpload"]) {
     const original = files[method]?.bind(raw.FILES);
@@ -68,21 +71,35 @@ function record(): Touched {
     touched.names.push(name);
     return names(name);
   });
-  const instances = raw.TASK_WORKFLOW.get.bind(raw.TASK_WORKFLOW);
-  vi.spyOn(raw.TASK_WORKFLOW, "get").mockImplementation((id: string) => {
-    touched.instances.push(id);
-    return instances(id);
-  });
+  for (const workflow of [raw.TASK_WORKFLOW, raw.EXPORT_WORKFLOW]) {
+    const get = workflow.get.bind(workflow);
+    vi.spyOn(workflow, "get").mockImplementation((id: string) => {
+      touched.instances.push(id);
+      return get(id);
+    });
+    const create = workflow.create.bind(workflow);
+    vi.spyOn(workflow, "create").mockImplementation((options) => {
+      touched.created.push({ id: options?.id, params: options?.params });
+      return create(options);
+    });
+    const createBatch = workflow.createBatch.bind(workflow);
+    vi.spyOn(workflow, "createBatch").mockImplementation((batch) => {
+      touched.created.push(...batch.map((o) => ({ id: o.id, params: o.params })));
+      return createBatch(batch);
+    });
+  }
   return touched;
 }
 
-/** Every key `touched` names is inside `user`'s prefix, and every DO is theirs. */
+/** Every key `touched` names is inside `user`'s prefix, every DO is theirs, no Workflow is woken. */
 function onlyOwn(touched: Touched, user: Seeded, own: { instances?: string[] } = {}) {
   // The deployment-wide reads (`fileBytes` lists the whole bucket; the health probe) name no user.
   const keys = touched.keys.filter((k) => k !== "" && k !== "health/probe");
   expect(keys.filter((k) => !k.startsWith(`u/${user.id}/`))).toEqual([]);
   expect(touched.names.filter((n) => n !== `u:${user.id}`)).toEqual([]);
   expect(touched.instances.filter((i) => !own.instances?.includes(i))).toEqual([]);
+  // No route here starts a run: any instance created, whatever it names, is a finding.
+  expect(touched.created).toEqual([]);
 }
 
 /** Whether `call` refused, by throwing or by rejecting. */
@@ -175,6 +192,7 @@ describe("R2 keys, DO names and Workflow ids (AC2)", () => {
         }
       }
     }
+    expect(leaked(a, JSON.stringify(touched.created))).toEqual([]);
     onlyOwn(touched, b);
     expect(await snapshot(a)).toEqual(before);
   });
@@ -361,11 +379,35 @@ describe("recall (AC3)", () => {
     // B does find their own near-duplicate, past A's hundreds of better matches.
     const own = await memory.b.recall("dentist appointment Tuesday");
     expect(own.memories.map((m) => m.text)).toContain("My dentist appointment is on Tuesday (B)");
-    // And B's forget can't reach one of A's.
-    const forget = await tools
-      .get("forget")
-      ?.execute({ id: a.memory }, new AbortController().signal);
-    expect(forget?.ok).toBe(false);
+    // And B's forget can't reach one of A's, as an inferred ask (a proposal) or the user's own
+    // (a delete). The service ran and found nothing: not the tool's empty-ids refusal.
+    const signal = new AbortController().signal;
+    const forgetAs = (userAsserted: boolean) =>
+      memoryTools(memory.b, () => ({
+        tainted: false,
+        userAsserted,
+        source: { source: "chat" },
+      })).find((t) => t.manifest.name === "forget");
+    for (const userAsserted of [false, true]) {
+      for (const ids of [[a.memory], [b.memory, a.memory]]) {
+        const out = await forgetAs(userAsserted)?.execute({ ids }, signal);
+        expect([userAsserted, ids, out?.ok, out?.content]).toEqual([
+          userAsserted,
+          ids,
+          false,
+          "I can't find that memory — it may already be gone.",
+        ]);
+      }
+      expect(await forUser(a).memory.get(a.memory)).toBeTruthy();
+      expect(await forUser(b).memory.get(b.memory)).toBeTruthy();
+    }
+    // The same call reaches B's own memory: the refusal above is the user filter, not the call.
+    const mine = await forgetAs(true)?.execute({ ids: [b.memory] }, signal);
+    expect([mine?.ok, mine?.content]).toEqual([
+      true,
+      "Forgotten — that memory and its earlier versions are gone.",
+    ]);
+    expect(await forUser(b).memory.get(b.memory)).toBeFalsy();
     expect(await forUser(a).memory.get(a.memory)).toBeTruthy();
   });
 });
@@ -425,7 +467,8 @@ describe("credentials and tasks (AC4)", () => {
       }
     }
     expect((await user.tasks.list()).map((t) => t.id)).toEqual([b.task]);
-    // No Workflow of A's was woken, and A's paused task is as it was.
+    // No Workflow of A's was woken or created, and A's paused task is as it was.
+    expect(leaked(a, JSON.stringify(touched.created))).toEqual([]);
     onlyOwn(touched, b);
     expect(await snapshot(a)).toEqual(before);
   });
@@ -499,7 +542,10 @@ describe("credentials and tasks (AC4)", () => {
     });
     const before = await snapshot(b);
     const params = { taskId: b.task, userId: b.id, conversationId: b.conversation };
+    const touched = record();
     await raw.TASK_WORKFLOW.create({ id: instanceId, params });
+    // The recorder sees a creation: an empty `created` elsewhere is real silence.
+    expect(touched.created).toEqual([{ id: instanceId, params }]);
     await vi.waitFor(async () => expect((await owner.tasks.get(taskId))?.status).toBe("failed"), {
       timeout: 10_000,
       interval: 100,
