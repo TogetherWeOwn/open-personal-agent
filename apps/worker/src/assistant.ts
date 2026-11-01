@@ -3,7 +3,13 @@
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
 // tab, so two tabs show the same stream. D1 holds the messages; the DO holds the running turn
 // and the event log a reconnected tab replays from (M3-03 AC10).
-import type { HarnessEvent, ModelAttachment, TurnFailure, TurnLimit } from "@opa/core";
+import {
+  type HarnessEvent,
+  type ModelAttachment,
+  TASK_LIMITS,
+  type TurnFailure,
+  type TurnLimit,
+} from "@opa/core";
 import {
   type AttachmentRow,
   createRepository,
@@ -12,6 +18,7 @@ import {
   type TurnRecord,
 } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
+import { TURN_LIMITS } from "@opa/harness-builtin";
 import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import {
   Agent,
@@ -23,7 +30,15 @@ import {
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import { EventLog } from "./event-log";
-import { Limits, type Reservation } from "./limits";
+import {
+  type CallScope,
+  checkSpending,
+  Limits,
+  type Refusal,
+  type Reservation,
+  SPENDING_DEFAULTS,
+  type SpendingSettings,
+} from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
@@ -89,16 +104,18 @@ export class Assistant extends Agent<Bindings> {
    * reach them. The key is the call's idempotency key (`instanceId:stepName`): a retried step
    * may already hold a reservation under it and may already have spent it, so that hold settles
    * at its full reservation before a new one is taken. Settling a key with no hold charges
-   * nothing, so the first reserve is unaffected.
+   * nothing, so the first reserve is unaffected. The scope names the task, whose budget the call
+   * draws on, and whether it runs in the background, where the monthly hard cap applies.
    */
   reserveTaskCall(
     key: string,
     providerId: string,
     model: string,
     chars: number,
-  ): Reservation | null {
+    scope: CallScope = {},
+  ): Reservation | Refusal {
     this.limits.settle(key, providerId, model, null);
-    return this.limits.reserve(key, providerId, model, chars);
+    return this.limits.reserveFor(key, providerId, model, chars, 0, scope);
   }
 
   /** Settles a task's model call to what it used; settling twice charges once. */
@@ -114,6 +131,78 @@ export class Assistant extends Agent<Bindings> {
   /** Drops a task call's reservation without a charge: the call never happened. */
   releaseTaskCall(key: string): void {
     this.limits.release(key);
+  }
+
+  /** Reserves a task's budget as it starts (COST-3); a replayed start keeps what it spent. */
+  startTask(taskId: string, budgetMicroUsd?: number): { budgetMicroUsd: number } {
+    return this.limits.startTask(taskId, budgetMicroUsd);
+  }
+
+  /** Continue after a task-budget stop: `false` once the budget was already raised (A-Co2). */
+  raiseTask(taskId: string): boolean {
+    return this.limits.raiseTask(taskId);
+  }
+
+  /** Undoes a Continue's raise when the task couldn't be woken, so Continue can try again. */
+  unraiseTask(taskId: string): void {
+    this.limits.unraiseTask(taskId);
+  }
+
+  /** Settles a task's budget at its end: what the task spent. */
+  endTask(taskId: string): number {
+    return this.limits.endTask(taskId);
+  }
+
+  /** A task's budget and spend so far, for its card; `null` once it has ended. */
+  taskBudget(taskId: string) {
+    return this.limits.task(taskId);
+  }
+
+  /**
+   * Counts a tool call against 60 a minute (COST-2); `false` means the tool must not run. The
+   * key (the step's idempotency key) keeps a retried step from counting the same call twice.
+   */
+  allowToolCall(callKey?: string): boolean {
+    return this.limits.toolCall(callKey);
+  }
+
+  /** The Spending settings and what they limit so far, for Settings › Spending (M3-17 AC5). */
+  spending() {
+    return {
+      settings: this.limits.settings(),
+      defaults: SPENDING_DEFAULTS,
+      // Read-only in M3 (§4.2): shown with the editable limits so every limit is in one place.
+      executionLimits: {
+        callsPerMessage: TURN_LIMITS.calls,
+        toolCallsPerMessage: TURN_LIMITS.tools,
+        stepsPerTask: TASK_LIMITS.steps,
+      },
+      ...this.limits.totals(),
+    };
+  }
+
+  /**
+   * Saves a Spending change if every field is valid (`checkSpending`); `null` if not. Returns
+   * the settings before and after together, so an audit of the change can't pair this write
+   * with another request's "before", and the write's number for `revertSpending`.
+   */
+  setSpending(
+    body: unknown,
+  ): { before: SpendingSettings; after: SpendingSettings; write: number } | null {
+    const changes = checkSpending(body);
+    if (!changes) return null;
+    const before = this.limits.settings();
+    const { settings: after, write } = this.limits.saveSettings(changes);
+    return { before, after, write };
+  }
+
+  /**
+   * Undoes a `setSpending` whose audit row couldn't be written. A field goes back only while
+   * this write is still the last to have changed it, so a later change that saved meanwhile is
+   * never overwritten, even one that set the same value.
+   */
+  revertSpending(write: number, before: SpendingSettings): void {
+    this.limits.revertSettings(write, before);
   }
 
   /**
