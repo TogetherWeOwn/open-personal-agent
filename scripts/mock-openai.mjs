@@ -24,8 +24,15 @@ export function startMockOpenAI({ port = 8788, host = "127.0.0.1" } = {}) {
     }
     let raw = "";
     for await (const part of req) raw += part;
-    const body = JSON.parse(raw || "{}");
-    const last = (body.messages ?? []).findLast((m) => m.role === "user")?.content ?? "";
+    let body;
+    try {
+      body = JSON.parse(raw);
+      if (!Array.isArray(body.messages)) throw new Error("messages must be an array");
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Invalid request body" } }));
+    }
+    const last = body.messages.findLast((m) => m?.role === "user")?.content ?? "";
     const words = `You said: ${last}`.split(/(?<= )/);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
     res.write(

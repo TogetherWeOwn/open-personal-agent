@@ -24,4 +24,12 @@ describe("mock OpenAI-compatible server", () => {
     expect(text).toBe("You said: hi there");
     expect(events.at(-1)).toEqual({ type: "done", finishReason: "stop" });
   });
+
+  it("answers a malformed request with 400 and keeps serving", async () => {
+    for (const body of ["{bad", '{"messages":"nope"}']) {
+      const res = await fetch(`${server.url}/chat/completions`, { method: "POST", body });
+      expect(res.status).toBe(400);
+    }
+    expect((await fetch(`${server.url}/models`)).status).toBe(200);
+  });
 });

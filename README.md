@@ -20,7 +20,8 @@ reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxyi
 
 `pnpm dev` also starts a mock OpenAI-compatible model server at `http://127.0.0.1:8788/v1`
 (`pnpm dev:mock-model` starts it alone). It answers `GET /models` and streams an echo of your last
-message from `POST /chat/completions`, so chat works with no API key and no cost: choose the
+message from `POST /chat/completions`, so model calls need no API key and cost nothing. The web
+chat still uses canned replies; once onboarding and the chat transport land, choose the
 OpenAI-compatible option with that base URL.
 
 | Command                           | What it does                                                              |
