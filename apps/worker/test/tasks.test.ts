@@ -139,6 +139,9 @@ describe("task rows", () => {
     // A pause under a different kind still moves the row.
     expect(await alice.tasks.finish("t14", "budget_limited", undefined, "duration")).toBe(true);
     expect((await alice.tasks.get("t14"))?.limitKind).toBe("duration");
+    // A repeated terminal ending still reports "already ended", never success.
+    expect(await alice.tasks.finish("t14", "succeeded")).toBe(true);
+    expect(await alice.tasks.finish("t14", "succeeded")).toBe(false);
   });
 
   it("clears the limit kind when a paused task resumes or is cancelled", async () => {
