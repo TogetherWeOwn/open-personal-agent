@@ -52,8 +52,13 @@ export function Settings({ page }: { page: SettingsPage }) {
   }, []);
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-8">
-      <Link href="/" className={`${link} self-start`}>
+      {/* Phones have Chat in the tab bar, and the page list wraps to three rows there, so a
+        page links back to the list instead (m3-ux §4.9). */}
+      <Link href="/" className={`${link} self-start max-sm:hidden`}>
         <span aria-hidden="true">← </span>Chats
+      </Link>
+      <Link href="/settings" className={`${link} self-start sm:hidden`}>
+        <span aria-hidden="true">← </span>All settings
       </Link>
       <Heading
         ref={heading}
@@ -63,7 +68,7 @@ export function Settings({ page }: { page: SettingsPage }) {
       >
         Settings
       </Heading>
-      <nav aria-label="Settings pages" className="flex flex-wrap gap-2">
+      <nav aria-label="Settings pages" className="flex flex-wrap gap-2 max-sm:hidden">
         {PAGES.map(({ id, label, href }) => (
           <Link
             key={id}

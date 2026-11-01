@@ -3,6 +3,7 @@
 // chat, and a preview page per file with Download, its source run and Delete with Undo. HTML
 // shows in an iframe with an empty `sandbox` (no scripts, no `allow-same-origin`), and the server
 // serves it under CSP `sandbox` too, so nothing in it can reach the account.
+
 import {
   FileCode,
   FileImage,
@@ -14,6 +15,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { Link } from "react-aria-components";
+import { ActivityNav } from "../activity/ActivityNav";
 import { input } from "../auth/ui";
 import { Markdown } from "../chat/Markdown";
 import type { ConversationSummary } from "../chat/transport";
@@ -156,6 +158,7 @@ export function Outputs() {
   const known = chats.some((c) => c.id === chat);
   return (
     <Page title="Outputs">
+      <ActivityNav current="outputs" />
       <div className="flex flex-col gap-1 sm:max-w-xs">
         <label htmlFor={filterId} className="font-medium">
           Chat

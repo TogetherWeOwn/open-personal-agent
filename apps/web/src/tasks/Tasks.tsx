@@ -5,8 +5,10 @@
 // stop by an execution limit reads "Paused: limit", never "budget"), and shows the spend and
 // elapsed time so far. A tab shows a page at a time; "Show older tasks" fetches the next one
 // with the same statuses (TWO-713).
+
 import { useEffect, useRef, useState } from "react";
 import { Link, ToggleButton, ToggleButtonGroup } from "react-aria-components";
+import { ActivityNav } from "../activity/ActivityNav";
 import { Button, EmptyState, Page, Skeleton, StatusChip } from "../ui";
 import {
   addPage,
@@ -106,6 +108,7 @@ export function Tasks() {
 
   return (
     <Page title="Tasks">
+      <ActivityNav current="tasks" />
       {/* The toggle stays mounted while a tab loads or fails, so the other tab is one press
         away and focus survives the switch. */}
       <ToggleButtonGroup

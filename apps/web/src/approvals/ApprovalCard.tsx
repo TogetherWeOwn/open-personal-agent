@@ -186,7 +186,8 @@ export function ApprovalCard({
     <Card
       tone="approval"
       labelledBy={where ? `${headingId} ${headingId}-in` : headingId}
-      className={expired ? "opacity-60" : ""}
+      // Tighter on phones, so a single card fits one 375 × 667 screen (m3-ux §4.9).
+      className={`max-sm:gap-2 max-sm:p-3 ${expired ? "opacity-60" : ""}`}
     >
       <CardHeader id={headingId} level={level} title={title} />
       {multi && <p>{items.map((i) => actionOf(i.tool)).join(" · ")}</p>}
@@ -304,7 +305,8 @@ export function ApprovalCard({
         </p>
       )}
       {!expired && (
-        <div className="flex flex-wrap gap-2">
+        // On phones the buttons stack full-width, 8 px apart (m3-ux §4.9).
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
           {canAllow && (
             <span className="contents" onKeyDownCapture={noEnter} onKeyUpCapture={noEnter}>
               <Button
