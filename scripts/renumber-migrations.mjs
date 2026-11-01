@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Rebases this branch's own D1 migrations onto the base branch's latest number, so authors stop
-// chasing main by hand (TWO-916). Run at merge time: fetch main, run this, then merge or rebase
+// chasing main by hand. Run at merge time: fetch main, run this, then merge or rebase
 // and run it once more. It renumbers the branch's SQL and snapshot files, three-way-merges each
 // snapshot onto main's latest snapshot (never just renames it, which would silently drop main's
 // schema changes from the snapshot), rebuilds `meta/_journal.json` as base entries plus the
