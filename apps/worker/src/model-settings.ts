@@ -178,6 +178,7 @@ settings.post("/model/test", async (c) => {
   if (!row?.model_kind || !row.model) return fail(c, 409, "no_model");
   let provider: ModelProvider;
   if (row.model_kind === "workers-ai") {
+    if (!c.env.AI) return fail(c, 503, "ai_unavailable");
     provider = createWorkersAIProvider(c.env.AI as unknown as WorkersAIBinding);
   } else {
     if (!c.env.VAULT) return fail(c, 503, "vault_unavailable");

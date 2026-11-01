@@ -13,4 +13,4 @@ CREATE TABLE `user_settings` (
 );
 --> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (1);
+INSERT INTO `schema_version` (`version`) VALUES (3);

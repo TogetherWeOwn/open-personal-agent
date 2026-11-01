@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "1b27a8fd-2c18-4c37-9c73-f0014571c53b",
+  "id": "4ec5263a-575d-4fde-8377-1d33622f712d",
   "prevId": "60506b0f-db61-4307-904e-5dd772882e8e",
   "tables": {
     "audit_log": {
@@ -879,99 +879,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "user_settings": {
-      "name": "user_settings",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "about": {
-          "name": "about",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "model_kind": {
-          "name": "model_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "provider_id": {
-          "name": "provider_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "base_url": {
-          "name": "base_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "model_key_secret_id": {
-          "name": "model_key_secret_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "onboarded_at": {
-          "name": "onboarded_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "user_settings_user_id_users_id_fk": {
-          "name": "user_settings_user_id_users_id_fk",
-          "tableFrom": "user_settings",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "user_settings_model_key_secret_id_secrets_id_fk": {
-          "name": "user_settings_model_key_secret_id_secrets_id_fk",
-          "tableFrom": "user_settings",
-          "tableTo": "secrets",
-          "columnsFrom": ["model_key_secret_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "users": {
       "name": "users",
       "columns": {
@@ -1014,6 +921,57 @@
         }
       },
       "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "webauthn_challenges": {
+      "name": "webauthn_challenges",
+      "columns": {
+        "id_hash": {
+          "name": "id_hash",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "challenge": {
+          "name": "challenge",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "webauthn_challenges_expires_idx": {
+          "name": "webauthn_challenges_expires_idx",
+          "columns": ["expires_at"],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},

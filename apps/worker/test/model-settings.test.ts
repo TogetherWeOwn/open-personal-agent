@@ -44,9 +44,10 @@ const sse = (...lines: string[]) =>
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  await env.DB.prepare(
-    "INSERT INTO users (id, display_name, role) VALUES ('u1', 'Owner', 'owner')",
-  ).run();
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO users (id, display_name, role) VALUES ('u1', 'Owner', 'owner')"),
+    env.DB.prepare("INSERT INTO setup_state (id, claimed_by_user_id) VALUES (1, 'u1')"),
+  ]);
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -114,6 +115,12 @@ describe("model settings", () => {
   it("starts on Workers AI without a key, then finishes onboarding", async () => {
     const saved = JSON.parse((await put("/model", { kind: "workers-ai" })).text);
     expect(saved.model).toMatchObject({ kind: "workers-ai", model: STARTER_MODEL });
+    const missing = await call(
+      "/model/test",
+      { method: "POST" },
+      { AI: undefined as unknown as Ai },
+    );
+    expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const AI = { run: async () => sse('{"response":"ready"}', "[DONE]") } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
     expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
