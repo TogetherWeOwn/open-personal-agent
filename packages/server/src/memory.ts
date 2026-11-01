@@ -8,7 +8,7 @@ import type { Memory, WriteOutcome } from "@opa/db/memory";
 import { createRepository, isId } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
 import type { AppEnv } from "./env";
-import { hasStepUp } from "./session";
+import { hasAccountStepUp } from "./session";
 
 type Ctx = Context<AppEnv>;
 const userOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope);
@@ -136,7 +136,7 @@ memoryRoutes.post("/proposals/:id/:decision", async (c) => {
  * 5-minute passkey step-up on top of the session: a stolen cookie alone can't take everything.
  */
 memoryRoutes.get("/export", async (c) => {
-  if (!hasStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
+  if (!hasAccountStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
   const { rows, links } = await userOf(c).memory.dump();
   const exportedAt = new Date().toISOString();
   c.header(
