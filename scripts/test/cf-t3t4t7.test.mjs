@@ -19,6 +19,8 @@ import {
   renderDeployConfig,
   scoreTurn,
   stubResult,
+  summarizeDedupeAttempts,
+  t7Budget,
   teardown,
   waitReady,
 } from "../cf-verify-t3t4t7.mjs";
@@ -239,12 +241,33 @@ describe("t4 reconnect bookkeeping", () => {
       }
     }
     vi.stubGlobal("WebSocket", FakeWebSocket);
+    const ticketPosts = [];
+    vi.stubGlobal("fetch", async (url, init) => {
+      ticketPosts.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ ticket: "single-use", expiresAt: 1 }) };
+    });
     try {
       // Tab holds seqs 0-8, reconnects with since=8, replays 9-10, then lives on.
       const received = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-      const opened = openSocket("https://w.example.workers.dev", "s", 8, "bearer", received);
+      const opened = openSocket(
+        "https://w.example.workers.dev",
+        "s",
+        8,
+        {
+          secrets: [],
+          bearer: "campaign-bearer",
+        },
+        received,
+      );
+      for (let i = 0; i < 10 && instances.length === 0; i++) await Promise.resolve();
+      const minted = ticketPosts.at(0);
+      expect(minted.url).toContain("/t4/ticket?stream=s");
+      expect(minted.init.headers.authorization).toBe("Bearer campaign-bearer");
       const sock = instances.at(-1);
       expect(sock.url).toContain("since=8");
+      expect(sock.url).toContain("ticket=single-use");
+      expect(sock.url).not.toContain("bearer=");
+      expect(sock.url).not.toContain("campaign-bearer");
       sock.emit("message", { data: JSON.stringify({ seq: 9, chat: "a" }) });
       sock.emit("message", { data: JSON.stringify({ seq: 10, chat: "b" }) });
       sock.emit("message", { data: JSON.stringify({ hello: true, lastSeq: 10 }) });
@@ -257,6 +280,89 @@ describe("t4 reconnect bookkeeping", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+  it("refuses to connect when the ticket mint carries no ticket", async () => {
+    vi.stubGlobal("WebSocket", class {});
+    vi.stubGlobal("fetch", async () => ({ ok: true, status: 200, json: async () => ({}) }));
+    try {
+      await expect(
+        openSocket("https://w.example.workers.dev", "s", -1, { secrets: [], bearer: "b" }),
+      ).rejects.toThrow(/ticket mint failed/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("t3 duplicate-ID verdict", () => {
+  const dup = (n, status = 500) =>
+    [...Array(n)].map((_, i) =>
+      i === 0
+        ? { ok: true, id: "w1" }
+        : { ok: false, status, error: `HTTP ${status} duplicate ${i}` },
+    );
+  it("needs exactly one effective create with every rejection documented", () => {
+    expect(summarizeDedupeAttempts(dup(4))).toEqual({
+      okCreates: 1,
+      failuresDocumented: true,
+      uniformRejection: true,
+      errors: ["HTTP 500 duplicate 1", "HTTP 500 duplicate 2", "HTTP 500 duplicate 3"],
+      statuses: [500],
+    });
+  });
+  it("fails silent duplicates, missing reasons and all-success", () => {
+    // Four successes: duplicate-ID rejection was never observed.
+    expect(summarizeDedupeAttempts(dup(4).map((a) => ({ ...a, ok: true }))).okCreates).toBe(4);
+    // A rejection without a recorded reason is not documented semantics.
+    expect(
+      summarizeDedupeAttempts([
+        { ok: true, id: "w1" },
+        { ok: false, status: 500 },
+      ]).failuresDocumented,
+    ).toBe(false);
+    // Empty errors collapse: no rejection observed at all.
+    expect(summarizeDedupeAttempts([{ ok: true, id: "w1" }]).failuresDocumented).toBe(false);
+  });
+  it("fails a stray failure hiding among duplicate-ID rejections", () => {
+    // Mixed rejection statuses: the verdict must not pass without observing
+    // duplicate-ID handling on every rejected attempt.
+    const mixed = [
+      { ok: true, id: "w1" },
+      { ok: false, status: 409, error: "HTTP 409 duplicate" },
+      { ok: false, status: 409, error: "HTTP 409 duplicate" },
+      { ok: false, status: 500, error: "HTTP 500 boom" },
+    ];
+    const summary = summarizeDedupeAttempts(mixed);
+    expect(summary.okCreates).toBe(1);
+    expect(summary.failuresDocumented).toBe(true);
+    expect(summary.uniformRejection).toBe(false);
+    expect(summary.statuses).toEqual([409, 500]);
+  });
+});
+
+describe("t7 server-side budget", () => {
+  it("caps past the corpus with headroom for retried turns", () => {
+    expect(t7Budget()).toBe(BOUNDS.t7.turns + 50);
+  });
+  it("reserves atomically: one conditional write admits only below budget", async () => {
+    // Mirror of T7_RESERVE_SQL in cf-verify/t3t4t7/worker.ts, executed against real
+    // SQLite: the reservation and the budget check are one statement, so overlapping
+    // requests cannot both spend the last turn.
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(":memory:");
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS t7_turns (id INTEGER PRIMARY KEY CHECK (id = 1), used INTEGER NOT NULL DEFAULT 0)",
+    );
+    const reserve = db.prepare(
+      "INSERT INTO t7_turns (id, used) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET used = used + 1 WHERE used < ?",
+    );
+    const budget = 2;
+    expect(reserve.run(budget).changes).toBe(1);
+    expect(reserve.run(budget).changes).toBe(1);
+    expect(reserve.run(budget).changes).toBe(0);
+    expect(reserve.run(budget).changes).toBe(0);
+    expect(db.prepare("SELECT used FROM t7_turns WHERE id = 1").get()).toEqual({ used: 2 });
+    db.close();
   });
 });
 

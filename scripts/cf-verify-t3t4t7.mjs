@@ -54,6 +54,12 @@ export const BOUNDS = {
     outTokens: 512,
   },
 };
+/** Headroom past the 1,000-turn corpus for retried turns; baked into the fixture at deploy. */
+export const T7_BUDGET_MARGIN = 50;
+/** Campaign cap the fixture enforces on /t7/turn (TWO-687 finding 2). */
+export function t7Budget() {
+  return BOUNDS.t7.turns + T7_BUDGET_MARGIN;
+}
 /** Real JSON schemas with descriptions, so the model knows which stub fits each turn. */
 export const TOOL_SCHEMAS = {
   lookupRecord: {
@@ -219,6 +225,31 @@ export function scoreTurn(turn, emitted, executions = []) {
   return ok ? "pass" : "fail";
 }
 
+/**
+ * T3 duplicate-ID verdict (TWO-687 finding 3, PR #103 review): exactly one create may take
+ * effect, every rejection must carry a recorded reason, and all rejections must share one
+ * response semantic (same HTTP status) — a stray 500 among duplicate-ID rejections fails,
+ * since the verdict would otherwise pass without observing duplicate-ID handling. The
+ * summary lands in t3.jsonl so the report states the response semantics, not just the
+ * committed-effect count.
+ */
+export function summarizeDedupeAttempts(attempts) {
+  const okCreates = attempts.filter((a) => a.ok).length;
+  const rejected = attempts.filter((a) => !a.ok);
+  const errors = rejected.map((a) => a.error);
+  const failuresDocumented =
+    rejected.length > 0 && rejected.every((a) => typeof a.error === "string" && a.error.length > 0);
+  const statuses = [...new Set(rejected.map((a) => a.status ?? null))];
+  const uniformRejection = rejected.length > 0 && statuses.length === 1;
+  return {
+    okCreates,
+    failuresDocumented,
+    uniformRejection,
+    errors: [...new Set(errors)],
+    statuses,
+  };
+}
+
 /** Per-tab seq coverage: duplicate delivery on replay is the bug T4 must catch. */
 export function checkTabCoverage(total, received) {
   const counts = new Map();
@@ -315,6 +346,7 @@ export function renderDeployConfig(prefix, model) {
     .readFileSync(TEMPLATE, "utf8")
     .replaceAll("__PREFIX__", prefix)
     .replaceAll("__T7_MODEL__", model)
+    .replaceAll("__T7_BUDGET__", String(t7Budget()))
     .replace(
       '"main": "worker.ts"',
       `"main": ${JSON.stringify(path.join(ROOT, "cf-verify", "t3t4t7", "worker.ts"))}`,
@@ -460,7 +492,9 @@ async function t3sync(prefix, deps) {
   const mk = () =>
     call(`${url}/t3/instance`, "POST", { id, kind: "briefing" }, auth).then(
       (r) => ({ ok: true, id: r.id }),
-      (e) => ({ ok: false, error: redact(e.message, secrets) }),
+      // The HTTP status is the duplicate-ID response semantic: the verdict requires every
+      // rejection to share it, so a stray failure cannot masquerade as duplicate handling.
+      (e) => ({ ok: false, status: e.status ?? null, error: redact(e.message, secrets) }),
     );
   const attempts = [await mk(), await mk(), ...(await Promise.all([mk(), mk()]))];
   note(prefix, "t3", { case: "dedupe", at: new Date().toISOString(), attempts });
@@ -472,7 +506,13 @@ async function t3sync(prefix, deps) {
   }
   const ledger = await call(`${url}/t3/ledger?instance=${id}`, "GET", undefined, auth);
   const briefing = ledger.effects.filter((e) => e.step === "briefing");
-  note(prefix, "t3", { case: "briefing-done", status, effects: ledger.effects.length });
+  const dedupe = summarizeDedupeAttempts(attempts);
+  note(prefix, "t3", {
+    case: "briefing-done",
+    status,
+    effects: ledger.effects.length,
+    dedupe,
+  });
   const cid = `${prefix}-t3-cancel`;
   await call(`${url}/t3/instance`, "POST", { id: cid, kind: "cancel" }, auth);
   await sleep(15000);
@@ -492,9 +532,14 @@ async function t3sync(prefix, deps) {
   const ok =
     briefing.length === 1 &&
     status.output?.ref?.endsWith("/large.bin") &&
-    !steps.includes("cancel-step-2");
+    !steps.includes("cancel-step-2") &&
+    dedupe.okCreates === 1 &&
+    dedupe.failuresDocumented &&
+    dedupe.uniformRejection;
   if (!ok)
-    throw new Error("T3 sync: dedupe, offload-ref or cancel assumption failed (see t3.jsonl)");
+    throw new Error(
+      `T3 sync: dedupe (1 ok in ${attempts.length}, statuses: ${dedupe.statuses.join(", ") || "none"}, rejected: ${dedupe.errors.join(" | ") || "none recorded"}), offload-ref or cancel assumption failed (see t3.jsonl)`,
+    );
   return { attempts: attempts.length, effects: ledger.effects.length };
 }
 
@@ -559,13 +604,22 @@ async function callback(prefix, deps) {
  * reconnect, so the merged history stays live. A fresh array would go stale — the new
  * socket's listener owns the array it was given, and a copy made at reconnect time never
  * sees another event.
+ *
+ * Auth is a single-use ticket minted over authenticated POST (TWO-687 finding 1): Undici's
+ * WebSocket cannot set headers and the bearer never travels in a URL. The ticket lives in
+ * memory here, never on disk or in logs, and the fixture consumes it on first use.
  */
-export function openSocket(url, stream, since, bearer, received = []) {
+export async function openSocket(url, stream, since, auth, received = []) {
+  const { ticket } = await call(
+    `${url}/t4/ticket?stream=${encodeURIComponent(stream)}`,
+    "POST",
+    {},
+    auth,
+  );
+  if (typeof ticket !== "string" || !ticket) throw new Error("t4 ticket mint failed");
   return new Promise((resolve, reject) => {
-    // Undici's WebSocket cannot set headers, so the bearer travels as a query param the
-    // fixture accepts on this route only. It lives in memory here, never on disk or in logs.
     const ws = new WebSocket(
-      `${url.replace(/^http/, "ws")}/t4/socket?stream=${stream}&since=${since}&bearer=${encodeURIComponent(bearer)}`,
+      `${url.replace(/^http/, "ws")}/t4/socket?stream=${encodeURIComponent(stream)}&since=${encodeURIComponent(String(since))}&ticket=${encodeURIComponent(ticket)}`,
     );
     const timer = setTimeout(() => reject(new Error("socket open timeout")), 15000);
     ws.addEventListener("message", (e) => {
@@ -595,7 +649,7 @@ async function t4run(prefix, deps) {
   };
   const tabs = [];
   for (let t = 0; t < BOUNDS.t4.sockets; t++)
-    tabs.push(await openSocket(url, `${prefix}-t4`, -1, bearer));
+    tabs.push(await openSocket(url, `${prefix}-t4`, -1, auth));
   note(prefix, "t4", { phase: "connected", at: new Date().toISOString() });
   await sleep(10 * 60_000);
   const reconnect = async (tab, at) => {
@@ -604,7 +658,7 @@ async function t4run(prefix, deps) {
     const since = tab.received.length ? Math.max(...tab.received) : -1;
     // The replay (seqs after `since`) appends to the tab's own array, which stays the live
     // target for the new socket's listener — and keeps `since` correct for later reconnects.
-    const fresh = await openSocket(url, `${prefix}-t4`, since, bearer, tab.received);
+    const fresh = await openSocket(url, `${prefix}-t4`, since, auth, tab.received);
     tabs[at] = fresh;
     const ms = Date.now() - started;
     note(prefix, "t4", { phase: "reconnect", tab: at, catchupMs: ms });

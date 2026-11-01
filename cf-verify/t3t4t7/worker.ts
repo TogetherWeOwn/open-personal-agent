@@ -13,6 +13,8 @@ export interface FixtureEnv {
   VERIFY_WORKFLOW: Workflow;
   /** Pinned starter model under test; the driver writes it into the generated config at deploy. */
   VERIFY_T7_MODEL: string;
+  /** Campaign cap on executed /t7/turn calls; the driver bakes in turns + headroom at deploy. */
+  VERIFY_T7_BUDGET?: string;
   /** Per-campaign bearer the driver pushes with `wrangler secret put` right after deploy. */
   CF_VERIFY_BEARER?: string;
 }
@@ -77,11 +79,95 @@ export class VerifyWorkflow extends WorkflowEntrypoint<
   }
 }
 
+/** Constant-time bearer comparison: lengths and every byte both feed the verdict. */
+function timingSafeEqual(candidate: string, bearer: string): boolean {
+  if (candidate.length !== bearer.length) return false;
+  let diff = 0;
+  for (let i = 0; i < bearer.length; i++) diff |= bearer.charCodeAt(i) ^ candidate.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Single-use WebSocket tickets, minted over authenticated POST and consumed on upgrade. */
+const TICKET_TTL_MS = 60_000;
+
+async function mintTicket(
+  storage: DurableObjectStorage,
+): Promise<{ ticket: string; expiresAt: number }> {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const ticket = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const now = Date.now();
+  const tickets = ((await storage.get<Record<string, number>>("tickets")) ?? {}) as Record<
+    string,
+    number
+  >;
+  for (const [t, exp] of Object.entries(tickets)) if (exp <= now) delete tickets[t];
+  tickets[ticket] = now + TICKET_TTL_MS;
+  await storage.put("tickets", tickets);
+  return { ticket, expiresAt: tickets[ticket] };
+}
+
+async function consumeTicket(
+  storage: DurableObjectStorage,
+  ticket: string | null,
+): Promise<boolean> {
+  if (!ticket) return false;
+  const tickets = ((await storage.get<Record<string, number>>("tickets")) ?? {}) as Record<
+    string,
+    number
+  >;
+  // Object.hasOwn, not `in`: an inherited name such as "constructor" must never consult
+  // the prototype — only a minted own ticket authenticates.
+  if (!Object.hasOwn(tickets, ticket)) return false;
+  const exp = tickets[ticket];
+  if (typeof exp !== "number" || exp <= Date.now()) return false;
+  delete tickets[ticket];
+  await storage.put("tickets", tickets);
+  return true;
+}
+
+const T7_USAGE_DDL =
+  "CREATE TABLE IF NOT EXISTS t7_turns (id INTEGER PRIMARY KEY CHECK (id = 1), used INTEGER NOT NULL DEFAULT 0)";
+
+/**
+ * Atomic campaign reservation for /t7/turn (TWO-687 finding 2, PR #103 review): the
+ * conditional write admits a turn only while `used < budget`, so overlapping requests
+ * cannot both spend the last turn. `changes === 0` means the budget is exhausted.
+ */
+const T7_RESERVE_SQL =
+  "INSERT INTO t7_turns (id, used) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET used = used + 1 WHERE used < ?";
+
+async function reserveT7Turn(
+  db: D1Database,
+  budget: number,
+): Promise<{ admitted: boolean; used: number }> {
+  await db.exec(T7_USAGE_DDL);
+  const outcome = await db.prepare(T7_RESERVE_SQL).bind(budget).run();
+  const row = await db.prepare("SELECT used FROM t7_turns WHERE id = 1").first<{ used: number }>();
+  const used = typeof row?.used === "number" ? row.used : 0;
+  return { admitted: outcome.meta.changes > 0, used };
+}
+
 /** Hibernating socket for T4: numbered broadcast log with replay from a sequence number. */
 export class VerifySocket extends DurableObject<FixtureEnv> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/ticket" && request.method === "POST") {
+      return Response.json(await mintTicket(this.ctx.storage));
+    }
     if (request.headers.get("Upgrade") === "websocket") {
+      // Node's WebSocket client cannot set headers, so upgrades authenticate with a
+      // single-use ticket minted by POST /t4/ticket — never the bearer in the URL.
+      // Header bearers still work for clients that can set them.
+      const header = request.headers.get("authorization");
+      const bearer = this.env.CF_VERIFY_BEARER;
+      const byHeader =
+        !!bearer &&
+        !!header?.startsWith("Bearer ") &&
+        timingSafeEqual(header.slice("Bearer ".length), bearer);
+      if (!byHeader && !(await consumeTicket(this.ctx.storage, url.searchParams.get("ticket")))) {
+        return new Response("unauthorized", { status: 401 });
+      }
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       this.ctx.acceptWebSocket(server);
@@ -135,22 +221,20 @@ function authorized(request: Request, env: FixtureEnv): boolean {
   if (url.pathname === "/health") return true;
   const bearer = env.CF_VERIFY_BEARER;
   if (!bearer) return false;
-  // Node's WebSocket client cannot set headers, so /t4/socket also accepts the bearer as a
-  // query param. Every other route requires the Authorization header. Either way the value
-  // never lands in logs or artifacts: the driver redacts it from everything it records.
+  // The bearer never travels in a URL: every route requires the Authorization header, except
+  // /t4/socket upgrades, which Node's WebSocket client cannot send headers on. Those carry
+  // a single-use ticket minted by POST /t4/ticket instead; the ticket is opaque here and
+  // the DO consumes it, so any value passes this gate and invalid ones still 401 below.
+  if (url.pathname === "/t4/socket" && request.headers.get("Upgrade") === "websocket") {
+    const header = request.headers.get("authorization");
+    if (header?.startsWith("Bearer ") && timingSafeEqual(header.slice("Bearer ".length), bearer))
+      return true;
+    return url.searchParams.has("ticket");
+  }
   const header = request.headers.get("authorization");
-  const candidate =
-    header?.startsWith("Bearer ") && url.pathname !== "/t4/socket"
-      ? header.slice("Bearer ".length)
-      : url.pathname === "/t4/socket"
-        ? header?.startsWith("Bearer ")
-          ? header.slice("Bearer ".length)
-          : url.searchParams.get("bearer")
-        : null;
-  if (candidate === null || candidate.length !== bearer.length) return false;
-  let diff = 0;
-  for (let i = 0; i < bearer.length; i++) diff |= bearer.charCodeAt(i) ^ candidate.charCodeAt(i);
-  return diff === 0;
+  const candidate = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : null;
+  if (candidate === null) return false;
+  return timingSafeEqual(candidate, bearer);
 }
 
 type StubArgs = Record<string, unknown>;
@@ -256,11 +340,17 @@ export default {
       await handle.terminate();
       return Response.json({ terminated: true });
     }
+    if (url.pathname === "/t4/ticket" && request.method === "POST") {
+      const stream = url.searchParams.get("stream") ?? "default";
+      const stub = env.VERIFY_SOCKET.get(env.VERIFY_SOCKET.idFromName(stream));
+      return stub.fetch(new Request("https://socket/ticket", { method: "POST" }));
+    }
     if (url.pathname === "/t4/socket") {
       const stream = url.searchParams.get("stream") ?? "default";
       const since = url.searchParams.get("since") ?? "-1";
+      const ticket = url.searchParams.get("ticket") ?? "";
       const stub = env.VERIFY_SOCKET.get(env.VERIFY_SOCKET.idFromName(stream));
-      const inner = `https://socket/socket?since=${encodeURIComponent(since)}`;
+      const inner = `https://socket/socket?since=${encodeURIComponent(since)}&ticket=${encodeURIComponent(ticket)}`;
       return stub.fetch(new Request(inner, request));
     }
     if (url.pathname === "/t4/log" && request.method === "GET") {
@@ -293,6 +383,17 @@ export default {
       if (outside.length) {
         return Response.json({ rejected: outside.map((t) => t?.function?.name) }, { status: 400 });
       }
+      // Server-side campaign cap (TWO-687 finding 2): the driver bounds its own turns, but
+      // the fixture itself refuses past the budget so a stray or curious caller cannot spend
+      // the owner's allowance. Past budget reads exactly like an AI cap: the driver stops
+      // inconclusive on `ai-capacity`, never failed. Attempts (not 400s) burn budget, and
+      // the reservation is one conditional write so overlapping requests cannot overspend.
+      const parsed = Number.parseInt(env.VERIFY_T7_BUDGET ?? "", 10);
+      const budget = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1050;
+      const reservation = await reserveT7Turn(env.DB, budget);
+      if (!reservation.admitted) {
+        return Response.json({ error: "ai-capacity" }, { status: 429 });
+      }
       const started = Date.now();
       let raw: Parameters<typeof normalizeToolCalls>[0];
       try {
@@ -322,7 +423,14 @@ export default {
           return { name: c.name, error: error instanceof Error ? error.message : String(error) };
         }
       });
-      return Response.json({ model, raw, calls, executions, latencyMs: Date.now() - started });
+      return Response.json({
+        model,
+        raw,
+        calls,
+        executions,
+        latencyMs: Date.now() - started,
+        quota: { used: reservation.used, budget },
+      });
     }
     return new Response("not found", { status: 404 });
   },
