@@ -117,6 +117,27 @@ describe("deploy:cloudflare", () => {
     );
   });
 
+  it("passes Cloudflare credentials to the wrangler calls that need them, never to the build", async () => {
+    const t = setup();
+    t.deps.env = {
+      ...t.deps.env,
+      CLOUDFLARE_API_TOKEN: TOKEN,
+      CLOUDFLARE_API_BASE_URL: "https://api.cloudflare.com/client/v4",
+    };
+    await deployCloudflare(["--name", "opa-v-20261031-abc123"], t.deps);
+    const env = (sub) => t.calls.find((c) => c.sub.startsWith(sub)).env;
+    for (const sub of ["build", "deploy --dry-run"]) {
+      expect(Object.keys(env(sub)).filter((k) => k.startsWith("CLOUDFLARE_"))).toEqual([]);
+      expect(env(sub).PATH).toBe(process.env.PATH);
+    }
+    for (const sub of ["auth", "deploy -c", "d1 migrations", "secret list", "secret bulk"]) {
+      expect(env(sub)).toMatchObject({
+        CLOUDFLARE_API_TOKEN: TOKEN,
+        CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+      });
+    }
+  });
+
   it("re-run with nothing changed is a no-op that reports up to date", async () => {
     const first = setup();
     const { tag } = await deployCloudflare(["--dry-run"], first.deps);

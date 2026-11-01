@@ -142,7 +142,12 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, report.replace("{{migration}}", migration?.name ?? "(not reached)"));
   deps.stdout(`\n${fs.readFileSync(file, "utf8")}\nReport: ${file}\n`);
-  if (failure) throw failure;
+  if (failure) {
+    // The caller prints the error to the same public log.
+    failure.message = hide(failure.message);
+    if (failure.stack) failure.stack = hide(failure.stack);
+    throw failure;
+  }
   return { prefix, report: file };
 }
 
