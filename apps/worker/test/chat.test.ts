@@ -36,7 +36,7 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
 const assistantOf = (userId: string) => env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${userId}`));
 function useModel(userId: string, provider: ModelProvider) {
   return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
-    instance.resolveModel = async () => ({ provider, model: "test-model" });
+    instance.resolveModel = async () => ({ provider, model: "test-model", apiKey: null });
   });
 }
 
@@ -174,7 +174,6 @@ describe("chat transport", () => {
     const { browser, owner } = await claim();
     await db.exec(`INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member');
       INSERT INTO conversations (id, user_id) VALUES ('theirs', 'other');`);
-    await useModel(owner, scripted([], never));
     const tab = await openTab(browser);
     tab.send?.("theirs", "hi");
     tab.send?.("../x", "hi");
@@ -187,6 +186,11 @@ describe("chat transport", () => {
     expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
     expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
 
+    // Before onboarding picks a model, the real resolver finds none.
+    tab.send?.("mine", "first");
+    const noModel = { message: "Pick a model in Settings first." };
+    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ seq: 0, payload: noModel }));
+    await useModel(owner, scripted([], never));
     tab.send?.("mine", "first");
     await tab.until?.("message.delta");
     tab.send?.("mine", "second");

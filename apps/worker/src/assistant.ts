@@ -12,7 +12,7 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
-import { resolveChatModel } from "./chat-model";
+import { type ChatModelError, resolveChatModel } from "./chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 
@@ -105,7 +105,12 @@ export class Assistant extends Agent<Bindings> {
     if (!(await chat.open(conversationId, title))) {
       return reject(connection, conversationId, "That conversation doesn't exist.");
     }
-    const { provider, model } = await this.resolveModel(await this.#composed, this.#scope);
+    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
+    if ("error" in picked) {
+      const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
+      return reject(connection, conversationId, message);
+    }
+    const { provider, model } = picked;
     const turn: TurnRecord = {
       conversationId,
       turnId: crypto.randomUUID(),
@@ -207,6 +212,11 @@ function parse(message: WSMessage) {
   } catch {}
   return null;
 }
+
+const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
+  no_model: "Pick a model in Settings first.",
+  key_required: "Enter your model key again in Settings.",
+};
 
 /**
  * Fails a send for the tab that made it only. No turn started, so it has no turn ID, and `seq` 0
