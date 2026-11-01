@@ -57,12 +57,16 @@ function Value({ value }: { value: unknown }) {
   return <Visible text={JSON.stringify(value)} />;
 }
 
-const keyLabel = (key: string) => {
+export const keyLabel = (key: string) => {
   const words = key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
   return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
 };
 
-/** An object's fields, each under its own label, so a nested recipient reads like a top one. */
+/**
+ * An object's fields, each under its own label, so a nested recipient reads like a top one. Two
+ * keys that read the same (`to` and `To`, `user_id` and `userId`) also show the literal key, so
+ * the user can tell which one the tool reads.
+ */
 function Fields({
   fields,
   className = "",
@@ -70,12 +74,20 @@ function Fields({
   fields: Record<string, unknown>;
   className?: string;
 }) {
+  const entries = Object.entries(fields);
+  const seen = new Map<string, number>();
+  for (const [k] of entries) seen.set(keyLabel(k), (seen.get(keyLabel(k)) ?? 0) + 1);
   return (
     <dl className={`grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 ${className}`}>
-      {Object.entries(fields).map(([k, v]) => (
+      {entries.map(([k, v]) => (
         <div key={k} className="contents">
           <dt className="font-medium text-text-muted">
             <Visible text={keyLabel(k)} />
+            {(seen.get(keyLabel(k)) ?? 0) > 1 && (
+              <span className="ml-1 font-mono font-normal text-sm">
+                (<Visible text={k} />)
+              </span>
+            )}
           </dt>
           <dd className="min-w-0">
             <Value value={v} />

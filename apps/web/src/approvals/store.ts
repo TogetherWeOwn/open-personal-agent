@@ -87,6 +87,10 @@ export function receiptText(
   const [only] = scopes;
   const scope = scopes.size === 1 && only ? scopeLabel(only).toLowerCase() : "";
   const when = time(at);
+  // Decided before this answer counted: which answer won isn't known here, so it isn't claimed.
+  if (result?.kind === "handled") {
+    return `Already answered: ${batch.items.map((i) => actionOf(i.tool)).join(", ")} · ${when}.`;
+  }
   let text: string;
   if (decisions.length <= 1) {
     const [d] = decisions;
@@ -117,12 +121,15 @@ export function receiptText(
 let generation = 0;
 const decidedHere = new Set<string>();
 
-/** Reads the list again; the newest read wins, and a failed read keeps what was shown. */
-export async function refreshApprovals(): Promise<void> {
+/**
+ * Reads the list again; the newest read wins, and a failed read keeps what was shown. True when
+ * this read is the one now shown.
+ */
+export async function refreshApprovals(): Promise<boolean> {
   const mine = ++generation;
   try {
     const batches = await listPending();
-    if (mine !== generation) return;
+    if (mine !== generation) return false;
     const known = new Set(state.batches.map((b) => b.batchId));
     const fresh = batches.filter((b) => !known.has(b.batchId));
     const first = fresh[0]?.items[0];
@@ -133,12 +140,14 @@ export async function refreshApprovals(): Promise<void> {
         ? { announcement: `Needs your approval: ${actionOf(first.tool)}.` }
         : {}),
     });
+    return true;
   } catch {
-    if (mine !== generation) return;
+    if (mine !== generation) return false;
     // Nothing new to set, so arm the timer again here: a batch this clock calls expired is
     // asked about once more after the same pause, not left on screen until focus or reconnect.
     watchExpiry();
     if (state.status !== "ready") set({ status: "error" });
+    return false;
   }
 }
 
@@ -161,14 +170,21 @@ export function decided(
 /**
  * Sends this tab's answer. The batch counts as decided here before the request goes out: the run
  * it wakes can send `approval.resolved` before the response arrives, and that isn't "elsewhere".
+ * The server records a decision before it wakes the run, so a lost response may still have
+ * decided it: the list is read again, and a batch it no longer holds is already handled, not an
+ * error to retry into `already_decided`.
  */
 export async function submitDecision(
   batch: PendingBatch,
   decisions: ApprovalDecision[],
 ): Promise<DecideResult> {
   decidedHere.add(batch.batchId);
-  const result = await decide(batch.batchId, batch.items, decisions);
-  if (result.kind === "done") decided(batch, decisions, result);
+  let result = await decide(batch.batchId, batch.items, decisions);
+  if (result.kind === "offline" && (await refreshApprovals())) {
+    const listed = state.batches.some((b) => b.batchId === batch.batchId);
+    if (!listed) result = batch.expiresAt > Date.now() ? { kind: "handled" } : { kind: "expired" };
+  }
+  if (result.kind === "done" || result.kind === "handled") decided(batch, decisions, result);
   else decidedHere.delete(batch.batchId);
   return result;
 }

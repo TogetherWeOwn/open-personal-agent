@@ -33,12 +33,12 @@ export async function listPending(): Promise<PendingBatch[]> {
 export type DecideResult =
   | { kind: "done"; status: "resumed" | "waiting" | "queued" | "gone" }
   | { kind: "not_confirmed" } // the passkey prompt was dismissed or failed: nothing was done
-  | { kind: "changed" } // decided elsewhere, or the request changed: reload and look again
+  | { kind: "changed" } // the request changed: reload and look again
+  | { kind: "handled" } // already decided: by an earlier try whose answer was lost, or elsewhere
   | { kind: "expired" }
   | { kind: "cancelled" } // the task was stopped, or the batch is gone
   | { kind: "offline" }; // it never reached the server, or the server failed
 
-const STALE = new Set(["stale", "already_decided"]);
 const STEP_UP = new Set([
   "assertion_required",
   "no_challenge",
@@ -73,7 +73,8 @@ async function assert(batchId: string, decisions: ApprovalDecision[]) {
 function outcome(status: number, error: string): DecideResult {
   if (status === 404 || error === "task_cancelled") return { kind: "cancelled" };
   if (error === "expired") return { kind: "expired" };
-  if (STALE.has(error) || status === 400) return { kind: "changed" };
+  if (error === "already_decided") return { kind: "handled" };
+  if (error === "stale" || status === 400) return { kind: "changed" };
   if (STEP_UP.has(error)) return { kind: "not_confirmed" };
   return { kind: "offline" };
 }

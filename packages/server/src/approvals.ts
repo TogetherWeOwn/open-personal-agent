@@ -180,19 +180,23 @@ function taintOf(taint: string): NonNullable<ApprovalItem["taint"]> {
 }
 
 /**
- * One row as its card shows it: the arguments exactly as bound (the canonical envelope's), so the
- * user judges what would run. Never the nonce, the binding hash or the step-up columns.
+ * One row as its card shows it: the arguments and target exactly as bound (the canonical
+ * envelope's, which execution checks again), so the user judges what would run. Never the nonce,
+ * the binding hash or the step-up columns.
  */
 function itemOf(row: ApprovalRow): ApprovalItem {
   let args = "{}";
+  let target = row.target;
   try {
-    args = JSON.stringify((JSON.parse(row.canonical) as { args?: unknown }).args ?? {});
+    const envelope = JSON.parse(row.canonical) as { args?: unknown; target?: unknown };
+    args = JSON.stringify(envelope.args ?? {});
+    if (typeof envelope.target === "string" || envelope.target === null) target = envelope.target;
   } catch {}
   return {
     approvalId: row.approvalId,
     tool: row.tool,
     args,
-    ...(row.target ? { target: row.target } : {}),
+    ...(target ? { target } : {}),
     risk: row.risk as ApprovalItem["risk"],
     rule: row.rule as ApprovalItem["rule"],
     ...(row.taint ? { taint: taintOf(row.taint) } : {}),

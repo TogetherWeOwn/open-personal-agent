@@ -87,3 +87,54 @@ describe("the expiry timer", () => {
     expect(store.approvalsSnapshot().batches).toEqual([]);
   });
 });
+
+describe("a decision whose answer was lost", () => {
+  const decisions = [{ approvalId: "a1", decision: "approve" as const, scope: "once" as const }];
+
+  it("reads the list again, and a batch it no longer holds is already handled", async () => {
+    const listed = batch(Date.now() + 60_000);
+    let decidedOnServer = false;
+    vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        // The server records the decision, then the response never arrives.
+        decidedOnServer = true;
+        throw new TypeError("network");
+      }
+      return Response.json({ batches: decidedOnServer ? [] : [listed] });
+    });
+    vi.resetModules();
+    const store = await import("../src/approvals/store");
+    await store.refreshApprovals();
+    expect(await store.submitDecision(listed, decisions)).toEqual({ kind: "handled" });
+    const { batches, receipts } = store.approvalsSnapshot();
+    expect(batches).toEqual([]);
+    expect(receipts[0]?.text).toMatch(/^Already answered: /);
+  });
+
+  it("keeps the card to try again when the batch is still waiting", async () => {
+    const listed = batch(Date.now() + 60_000);
+    vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+      if (init?.method === "POST") throw new TypeError("network");
+      return Response.json({ batches: [listed] });
+    });
+    vi.resetModules();
+    const store = await import("../src/approvals/store");
+    await store.refreshApprovals();
+    expect(await store.submitDecision(listed, decisions)).toEqual({ kind: "offline" });
+    expect(store.approvalsSnapshot().batches).toEqual([listed]);
+  });
+
+  it("takes already_decided on a retry as handled, not as an error", async () => {
+    const listed = batch(Date.now() + 60_000);
+    vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+      if (init?.method === "POST")
+        return Response.json({ error: "already_decided" }, { status: 409 });
+      return Response.json({ batches: [listed] });
+    });
+    vi.resetModules();
+    const store = await import("../src/approvals/store");
+    await store.refreshApprovals();
+    expect(await store.submitDecision(listed, decisions)).toEqual({ kind: "handled" });
+    expect(store.approvalsSnapshot().receipts[0]?.text).toMatch(/^Already answered: /);
+  });
+});
