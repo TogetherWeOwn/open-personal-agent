@@ -157,6 +157,43 @@ test("every step but the model can be skipped; a skip is marked, not failed", as
   expect(bodies).not.toContainEqual(expect.objectContaining({ decision: expect.anything() }));
 });
 
+test("Change what needs my OK finishes setup in Apps & tools, with the first chat left to do", async ({
+  page,
+}) => {
+  const posts: string[] = [];
+  const bodies: unknown[] = [];
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== "GET") {
+      posts.push(path);
+      bodies.push(route.request().postDataJSON());
+    }
+    if (path.endsWith("/model/test")) {
+      return route.fulfill({ json: { ok: true, latencyMs: 300, tools: false, reply: "ready" } });
+    }
+    const settings = { displayName: "Owner", about: "", onboarded: false, model: null };
+    const starter = { kind: "workers-ai", model: "@cf/meta/llama", key: null };
+    if (path.endsWith("/model")) return route.fulfill({ json: { ...settings, model: starter } });
+    if (path.endsWith("/setup")) return route.fulfill({ json: { skipped: [], hidden: false } });
+    return route.fulfill(path.endsWith("/settings") ? { json: settings } : { status: 204 });
+  });
+
+  await page.goto("/onboarding");
+  await page.getByRole("button", { name: "Skip for now" }).click();
+  await page.getByText("Try without a key", { exact: true }).click();
+  await page.getByRole("button", { name: "Save and test" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Skip for now" }).click();
+  await page.getByRole("button", { name: "Change what needs my OK" }).click();
+  await page.waitForURL("/settings/apps");
+
+  expect(bodies).toContainEqual({ skip: "chat" });
+  expect(bodies).not.toContainEqual({ skip: "safety" });
+  expect(posts.some((p) => p.endsWith("/onboarded"))).toBe(true);
+});
+
 test("budgets that don't load offer Try again, never a guess to change", async ({ page }) => {
   let failing = true;
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
