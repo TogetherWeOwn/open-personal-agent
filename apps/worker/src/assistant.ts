@@ -76,6 +76,15 @@ export const TURN_FILE_BYTES = 16 * 1024 * 1024;
 const IMAGE_TOKENS = 2_500;
 const PDF_MAX_TOKENS = 100_000; // about 100 pages, the providers' usual page limit
 const TAB_RECHECK_MS = 30_000; // how often task progress rechecks the tabs' sessions
+/** A live frame held back from a replaying tab, with what its replay may already have sent. */
+interface HeldFrame {
+  conversationId: string;
+  seq: number;
+  frame: string;
+}
+
+/** Live frames held back from one replaying tab, at most: far beyond a turn's, as REPLAY_LIMIT. */
+const MAX_HELD_FRAMES = 100_000;
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
 /** Decided batches waiting for the running turn to end (M3-07 AC14, M3-09 AC4's FIFO). */
 const QUEUE_KEY = "approvals:queue";
@@ -100,6 +109,12 @@ export interface TaskProgress {
   payload: unknown;
 }
 
+/** A stored message as `listMessages` returns it, with its attachments. */
+type StoredMessage = NonNullable<
+  Awaited<
+    ReturnType<ReturnType<ReturnType<typeof createRepository>["forUser"]>["chat"]["listMessages"]>
+  >
+>[number];
 type CallUsage = { inputTokens: number; outputTokens: number; cachedInputTokens: number };
 
 /**
@@ -125,7 +140,23 @@ interface TurnCheckpoint {
   /** This call's ledger row is written. */
   callRecorded: boolean;
   callUsage: CallUsage | null;
+  /** This call's ledger row ID, fixed when it starts, so a recovery's write can't add a second. */
+  callId?: string;
+  /**
+   * It runs again from a saved stop, so its `turn_states` row predates this run: the row alone
+   * no longer shows that the turn stopped cleanly.
+   */
+  resumed?: boolean;
+  /**
+   * When it began saving a stop (approval, limit): a row saved since then is that stop's. A
+   * resumed turn's older row is the stop it resumed from.
+   */
+  stopping?: number;
 }
+
+/** A turn's reply text in its saved state: one segment per model call that spoke. */
+const replySegments = (state: TurnState) =>
+  state.messages.flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []));
 
 /** A resumed batch, for the loop's approval hooks. */
 type ApprovalRun = {
@@ -162,6 +193,8 @@ export class Assistant extends Agent<Bindings> {
   readonly limits = new Limits(this.ctx.storage.kv);
   /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
   readonly #events = new EventLog(this.ctx.storage.sql);
+  /** Live frames each replaying tab hasn't been sent yet, by connection ID (see `#endReplay`). */
+  readonly #held = new Map<string, HeldFrame[]>();
   /** The env with the vault: `compose` stays the only reader of the master keys. */
   readonly #composed: Promise<Env>;
 
@@ -238,10 +271,11 @@ export class Assistant extends Agent<Bindings> {
 
   /**
    * Counts a tool call against 60 a minute (COST-2); `false` means the tool must not run. The
-   * key (the step's idempotency key) keeps a retried step from counting the same call twice.
+   * key (the step's idempotency key) keeps a retried step from counting the same call twice. An
+   * approved call is counted but always allowed.
    */
-  allowToolCall(callKey?: string): boolean {
-    return this.limits.toolCall(callKey);
+  allowToolCall(callKey?: string, approved = false): boolean {
+    return this.limits.toolCall(callKey, { approved });
   }
 
   /** The Spending settings and what they limit so far, for Settings › Spending (M3-17 AC5). */
@@ -354,11 +388,41 @@ export class Assistant extends Agent<Bindings> {
   }
 
   override onConnect(connection: Connection, ctx: ConnectionContext): void {
-    connection.setState({ sessionId: ctx.request.headers.get(SESSION_HEADER) });
+    // A reconnecting tab (`?resume`) gets no live frames until its `resume` has replayed the log:
+    // a live frame arriving first would raise its applied seq past the frames it missed, which
+    // its dedupe would then drop. The log holds every frame sent meanwhile, so none is lost.
+    const replaying = new URL(ctx.request.url).searchParams.has("resume");
+    connection.setState({ sessionId: ctx.request.headers.get(SESSION_HEADER), replaying });
+  }
+
+  /**
+   * Lets live frames reach a tab again once its replay is sent, or it isn't resuming after all.
+   * The frames held back meanwhile go first: a turn that settled during the replay has left the
+   * log, so they are its only copy. `upTo` is how far the tab now has the replayed conversation
+   * (`seq` never restarts there), so those frames aren't sent twice.
+   */
+  #endReplay(connection: Connection, upTo?: { conversationId: string; seq: number }): void {
+    const state = (connection.state ?? {}) as { sessionId?: string | null; replaying?: boolean };
+    if (state.replaying) connection.setState({ ...state, replaying: false });
+    const held = this.#held.get(connection.id) ?? [];
+    this.#held.delete(connection.id);
+    try {
+      for (const h of held) {
+        if (h.conversationId === upTo?.conversationId && h.seq <= upTo.seq) continue;
+        connection.send(h.frame);
+      }
+    } catch {
+      // The tab went away; it will resume again on its next connect.
+    }
+  }
+
+  override onClose(connection: Connection): void {
+    this.#held.delete(connection.id);
   }
 
   override onMessage(connection: Connection, message: WSMessage): void {
     const msg = parse(message);
+    if (msg?.type !== "resume") this.#endReplay(connection);
     // A tab whose session is still live may stop the running turn.
     if (msg?.type === "turn.cancel")
       void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
@@ -366,16 +430,24 @@ export class Assistant extends Agent<Bindings> {
     // session recheck, and only from this user's own log — the DO is named from the session, so
     // a conversation ID from the client can't reach another user's events.
     if (msg?.type === "resume") {
-      void this.#sessionLive(connection).then((ok) => {
-        if (!ok) return;
-        try {
-          for (const frame of this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq)) {
-            connection.send(frame);
+      void this.#sessionLive(connection)
+        .then((ok) => {
+          if (!ok) return;
+          const frames = this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq);
+          try {
+            for (const frame of frames) connection.send(frame);
+          } catch {
+            // The tab went away mid-replay; it will resume again on its next connect.
           }
-        } catch {
-          // The tab went away mid-replay; it will resume again on its next connect.
-        }
-      });
+          // Synchronous since the replay read the log, so no live frame can fall in between.
+          const last = frames.at(-1);
+          const seq = last ? (JSON.parse(last) as { seq: number }).seq : 0;
+          this.#endReplay(connection, {
+            conversationId: msg.conversationId,
+            seq: Math.max(seq, msg.afterSeq),
+          });
+        })
+        .catch(() => connection.close(1011, "session check failed"));
     }
     if (msg?.type !== "chat.send") return;
     const text = msg.text.trim();
@@ -455,7 +527,7 @@ export class Assistant extends Agent<Bindings> {
     // share a byte budget: this send's files first, whole or not at all, then earlier turns'
     // newest first while they fit. An earlier file left out was read on its own turn.
     const sending = attached.filter(readable);
-    let budget = TURN_FILE_BYTES - sending.reduce((n, row) => n + modelBytes(row), 0);
+    const budget = TURN_FILE_BYTES - sending.reduce((n, row) => n + modelBytes(row), 0);
     if (budget < 0) {
       const message =
         "Those files are too large to send in one message. Try fewer, or smaller, files.";
@@ -474,58 +546,17 @@ export class Assistant extends Agent<Bindings> {
       callRecorded: false,
       callUsage: null,
     };
-    const past = history ?? [];
-    const replayed = new Set<string>();
-    for (const m of past.toReversed()) {
-      if (m.role !== "user") continue;
-      for (const row of m.attachments.filter(readable)) {
-        if (modelBytes(row) > budget) continue;
-        budget -= modelBytes(row);
-        replayed.add(row.id);
-      }
-    }
-    const messages: ModelMessage[] = [];
-    let fileTokens = 0;
-    const read = async (rows: readonly AttachmentRow[]) => {
-      const files: ModelAttachment[] = [];
-      const ids = new Set<string>();
-      for (const row of rows) {
-        const file = await this.#modelFile(row);
-        if (!file) continue;
-        files.push(file);
-        ids.add(row.id);
-        fileTokens += fileTokenEstimate(row);
-      }
-      return { files, ids };
-    };
-    for (const m of past) {
-      if (m.role === "user" && m.attachments.length) {
-        const { files } = await read(m.attachments.filter((row) => replayed.has(row.id)));
-        // A file-only message whose files aren't replayed leaves nothing to say: skip it, as an
-        // empty message always was.
-        if (!m.content && !files.length) continue;
-        messages.push({
-          role: "user",
-          content: m.content,
-          ...(files.length ? { attachments: files } : {}),
-        });
-      } else if (m.content !== "") {
-        messages.push({ role: m.role, content: m.content });
-      }
-    }
-    const { files: sent, ids: sentIds } = await read(sending);
+    const { messages, fileTokens: pastTokens } = await this.#modelHistory(
+      history ?? [],
+      readable,
+      budget,
+    );
+    const { files: sent, ids: sentIds, tokens: sentTokens } = await this.#readFiles(sending);
+    const fileTokens = pastTokens + sentTokens;
     messages.push({ role: "user", content: text, ...(sent.length ? { attachments: sent } : {}) });
     // Reserved before anything is written, so a refused send leaves no trace, not even a
     // conversation.
-    const chars = messages.reduce(
-      (sum, m) =>
-        sum +
-        m.content.length +
-        (m.role === "user"
-          ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
-          : 0),
-      0,
-    );
+    const chars = messageChars(messages);
     // Checkpoint before the reservation and the first write, so a recovery can always name the
     // turn and release what it holds.
     stash(cp);
@@ -766,21 +797,32 @@ export class Assistant extends Agent<Bindings> {
     running: AbortController,
     approvals?: ApprovalRun,
   ): Promise<boolean> {
-    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
+    // The conversation's own model, its pin if it has one, as the turn's start picked it.
+    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat", {
+      conversationId: stopped.conversationId,
+    });
     if ("error" in picked) return false; // the saved turn stays for a retry once a model is set
     const { provider, model } = picked;
     const repo = this.#repo;
-    // History is D1's, as at the turn's start, minus the still-streaming reply: its text so
-    // far is inside `state`, where the loop left it.
-    const historyOf = async (replyId: string): Promise<ModelMessage[]> =>
-      ((await repo.chat.listMessages(stopped.conversationId)) ?? [])
-        .filter((m) => m.id !== replyId && m.content !== "")
-        .map(({ role, content }) => ({ role, content }));
-    let history = await historyOf(stopped.replyId);
+    const caps = provider.capabilities(model);
+    const readable = (row: AttachmentRow) =>
+      row.kind === "text" || (row.kind === "image" ? caps.imageInput : caps.pdfInput) === true;
+    // History is D1's, as at the turn's start, files included, minus the still-streaming reply:
+    // its text so far is inside `state`, where the loop left it.
+    const historyOf = async (replyId: string) =>
+      this.#modelHistory(
+        ((await repo.chat.listMessages(stopped.conversationId)) ?? []).filter(
+          (m) => m.id !== replyId,
+        ),
+        readable,
+        TURN_FILE_BYTES,
+      );
+    const first = await historyOf(stopped.replyId);
+    let history = first.messages;
     const providerId = picked.billingId ?? provider.id;
     const firstHold = `${stopped.turnId}:0`;
-    const chars = [...history, ...state.messages].reduce((sum, m) => sum + m.content.length, 0);
-    const reservation = this.limits.reserve(firstHold, providerId, model, chars);
+    const chars = messageChars([...history, ...state.messages]);
+    const reservation = this.limits.reserve(firstHold, providerId, model, chars, first.fileTokens);
     if (!reservation) {
       // Stops again at today's limit. No fiber starts, so the caller's claim is released here.
       // A batch's decisions stay in its rows, so it stays waiting on them: resuming it again
@@ -808,7 +850,7 @@ export class Assistant extends Agent<Bindings> {
         const late = await this.#late(stopped, state);
         if (late) {
           saved = late;
-          history = await historyOf(late.replyId);
+          ({ messages: history } = await historyOf(late.replyId));
         }
       } catch (err) {
         this.limits.release(firstHold); // no call was made
@@ -821,12 +863,14 @@ export class Assistant extends Agent<Bindings> {
       replyId: saved.replyId,
       providerId,
       model,
-      reply: "",
+      // The text so far, as D1 holds it, so a recovery before the drive starts keeps it.
+      reply: replySegments(state).join("\n\n"),
       wrote: true,
       holds: [firstHold],
       callStarted: false,
       callRecorded: false,
       callUsage: null,
+      resumed: true,
     };
     void this.runFiber("chat-turn", async (fiber) => {
       fiber.stash(cp);
@@ -853,10 +897,13 @@ export class Assistant extends Agent<Bindings> {
     const repo = this.#repo;
     const stored = (await repo.chat.listMessages(saved.conversationId).catch(() => null)) ?? [];
     const reply = stored.find((m) => m.id === saved.replyId)?.content ?? "";
-    await repo.chat.settle({ replyId: saved.replyId, reply }, "interrupted").catch(() => {});
+    const settled = await repo.chat.settle({ replyId: saved.replyId, reply }, "interrupted").then(
+      () => true,
+      () => false,
+    );
     await repo.turns.remove(saved.turnId).catch(() => {});
     this.#emitter(saved.conversationId, saved.turnId)("turn.interrupted", { message: "Retry?" });
-    this.#events.trim(saved.conversationId, saved.turnId);
+    if (settled) this.#events.trim(saved.conversationId, saved.turnId);
   }
 
   /**
@@ -931,9 +978,7 @@ export class Assistant extends Agent<Bindings> {
 
     // The reply's text: one segment per model call that spoke, joined as paragraphs. A resumed
     // turn's earlier segments come back from its saved state.
-    const segments = state.messages.flatMap((m) =>
-      m.role === "assistant" && m.content ? [m.content] : [],
-    );
+    const segments = replySegments(state);
     let current = "";
     const syncReply = () => {
       cp.reply = [...segments, current].filter((s) => s !== "").join("\n\n");
@@ -942,6 +987,7 @@ export class Assistant extends Agent<Bindings> {
 
     const recordCall = async () => {
       await repo.usage.record({
+        ...(cp.callId ? { id: cp.callId } : {}),
         providerId: cp.providerId,
         model: cp.model,
         usage: cp.callUsage,
@@ -959,6 +1005,8 @@ export class Assistant extends Agent<Bindings> {
 
     let persisted = false;
     const persistStop = async (status: TurnStatus) => {
+      cp.stopping = Date.now();
+      stash(cp);
       const saved = await repo.turns.save({
         turnId,
         conversationId,
@@ -973,115 +1021,135 @@ export class Assistant extends Agent<Bindings> {
       persisted = true;
     };
     const failSave = async () => {
-      await chat.settle({ replyId, reply: cp.reply }, "error").catch(() => {});
+      const settled = await chat.settle({ replyId, reply: cp.reply }, "error").then(
+        () => true,
+        () => false,
+      );
       this.#send(conversationId, turnId, "turn.failed", {
         message: "The reply couldn't be saved.",
       });
-      this.#events.trim(conversationId, turnId);
+      // Only a turn D1 holds leaves the log; otherwise its frames, this failure included, are
+      // all a reconnecting tab can learn it from.
+      if (settled) this.#events.trim(conversationId, turnId);
     };
 
     const gen = runTurn(host, run.history, state, signal);
     let thinking = "";
     let stashedAt = 0;
-    for (;;) {
-      const next = await gen.next();
-      if (next.done) {
-        // A resume still waiting on undecided approvals names no stop event; save it anyway,
-        // with the decisions recorded so far.
-        if (!persisted && (next.value === "awaiting_approval" || next.value === "limit_reached")) {
-          await persistStop(next.value).catch(failSave);
-        }
-        return;
-      }
-      const event = next.value;
-      if (
-        event.type === "turn.completed" ||
-        event.type === "turn.cancelled" ||
-        event.type === "turn.failed"
-      ) {
-        const status =
-          event.type === "turn.completed"
-            ? "complete"
-            : event.type === "turn.cancelled"
-              ? "interrupted" // D1 has no "cancelled": a stopped reply is an interrupted one
-              : "error";
-        try {
-          if (cp.callStarted && !cp.callRecorded) await recordCall();
-          await chat.settle({ replyId, reply: cp.reply }, status);
-          await repo.turns.remove(turnId);
-        } catch {
-          await failSave();
-          await gen.return("failed");
+    try {
+      for (;;) {
+        const next = await gen.next();
+        if (next.done) {
+          // A resume still waiting on undecided approvals names no stop event; save it anyway,
+          // with the decisions recorded so far.
+          if (
+            !persisted &&
+            (next.value === "awaiting_approval" || next.value === "limit_reached")
+          ) {
+            await persistStop(next.value).catch(failSave);
+          }
           return;
         }
-        emit(event);
-        // The turn is in D1 now, so its events leave the log; a later tab reloads from D1.
-        this.#events.trim(conversationId, turnId);
-        continue;
-      }
-      if (event.type === "approval.requested" || event.type === "limit.reached") {
-        // The state is complete at these events; save it before any tab can act on them. An
-        // approval's rows go first: the route reads its decisions from them (M3-07 AC9).
-        try {
-          if (event.type === "approval.requested" && state.pending) {
-            const rows = await bindBatch({
-              userId: this.#scope.userId,
-              tools,
-              pending: state.pending,
-              context: { kind: "turn", id: turnId, conversationId },
-            });
-            if (!(await repo.approvals.create(rows))) throw new Error("the conversation is gone");
+        const event = next.value;
+        if (
+          event.type === "turn.completed" ||
+          event.type === "turn.cancelled" ||
+          event.type === "turn.failed"
+        ) {
+          const status =
+            event.type === "turn.completed"
+              ? "complete"
+              : event.type === "turn.cancelled"
+                ? "interrupted" // D1 has no "cancelled": a stopped reply is an interrupted one
+                : "error";
+          try {
+            if (cp.callStarted && !cp.callRecorded) await recordCall();
+            await chat.settle({ replyId, reply: cp.reply }, status);
+            await repo.turns.remove(turnId);
+          } catch {
+            await failSave();
+            await gen.return("failed");
+            return;
           }
-          await persistStop(
-            event.type === "approval.requested" ? "awaiting_approval" : "limit_reached",
-          );
-        } catch {
-          await failSave();
-          await gen.return("failed");
-          return;
+          emit(event);
+          // The turn is in D1 now, so its events leave the log; a later tab reloads from D1.
+          this.#events.trim(conversationId, turnId);
+          continue;
+        }
+        if (event.type === "approval.requested" || event.type === "limit.reached") {
+          // The state is complete at these events; save it before any tab can act on them. An
+          // approval's rows go first: the route reads its decisions from them (M3-07 AC9).
+          try {
+            if (event.type === "approval.requested" && state.pending) {
+              const rows = await bindBatch({
+                userId: this.#scope.userId,
+                tools,
+                pending: state.pending,
+                context: { kind: "turn", id: turnId, conversationId },
+              });
+              if (!(await repo.approvals.create(rows))) throw new Error("the conversation is gone");
+            }
+            await persistStop(
+              event.type === "approval.requested" ? "awaiting_approval" : "limit_reached",
+            );
+          } catch {
+            await failSave();
+            await gen.return("failed");
+            return;
+          }
+          emit(event);
+          continue;
+        }
+        switch (event.type) {
+          case "step.started":
+            if (!event.payload.toolCallId) {
+              thinking = event.payload.stepId;
+              cp.callStarted = true;
+              cp.callRecorded = false;
+              cp.callUsage = null;
+              cp.callId = crypto.randomUUID();
+              stash(cp);
+            }
+            break;
+          case "message.delta":
+            current += event.payload.text;
+            syncReply();
+            if (Date.now() - stashedAt > STASH_MS) {
+              stash(cp);
+              stashedAt = Date.now();
+            }
+            break;
+          case "message.completed":
+            if (event.payload.text) segments.push(event.payload.text);
+            current = "";
+            syncReply();
+            stash(cp);
+            break;
+          case "usage.updated":
+            cp.callUsage = pickUsage(event.payload.usage);
+            await tryRecord();
+            stash(cp);
+            break;
+          case "step.completed":
+            if (event.payload.stepId === thinking) {
+              await tryRecord(); // a call that reported no usage still gets its row
+              stash(cp);
+            }
+            break;
+          default:
+            break;
         }
         emit(event);
-        continue;
       }
-      switch (event.type) {
-        case "step.started":
-          if (!event.payload.toolCallId) {
-            thinking = event.payload.stepId;
-            cp.callStarted = true;
-            cp.callRecorded = false;
-            cp.callUsage = null;
-            stash(cp);
-          }
-          break;
-        case "message.delta":
-          current += event.payload.text;
-          syncReply();
-          if (Date.now() - stashedAt > STASH_MS) {
-            stash(cp);
-            stashedAt = Date.now();
-          }
-          break;
-        case "message.completed":
-          if (event.payload.text) segments.push(event.payload.text);
-          current = "";
-          syncReply();
-          stash(cp);
-          break;
-        case "usage.updated":
-          cp.callUsage = pickUsage(event.payload.usage);
-          await tryRecord();
-          stash(cp);
-          break;
-        case "step.completed":
-          if (event.payload.stepId === thinking) {
-            await tryRecord(); // a call that reported no usage still gets its row
-            stash(cp);
-          }
-          break;
-        default:
-          break;
+    } finally {
+      // The first call's hold was taken before the loop ran; if the loop never spent it (a Stop
+      // before its first call, a resume that stopped again first), it goes back uncharged.
+      if (first && pendingHold) {
+        this.limits.release(pendingHold);
+        pendingHold = null;
+        cp.holds = [];
+        stash(cp);
       }
-      emit(event);
     }
   }
 
@@ -1098,10 +1166,14 @@ export class Assistant extends Agent<Bindings> {
       claim: async (toolCallId) => {
         const refused = run.refused.get(toolCallId);
         if (refused) {
-          await approvals.finish(run.batchId, id(toolCallId), {
-            status: "denied",
-            reason: refused,
-          });
+          // A row an earlier run claimed (left `executing` by a restart) may have acted: it
+          // ends failed with an unknown outcome, as on the Workflow path. Any other refusal
+          // ends an `approved` row denied.
+          const outcome =
+            refused === "already_claimed"
+              ? ({ status: "failed", reason: "outcome_unknown" } as const)
+              : ({ status: "denied", reason: refused } as const);
+          await approvals.finish(run.batchId, id(toolCallId), outcome);
           return REFUSED[refused] ?? (REFUSED.binding_mismatch as string);
         }
         // The row's envelope was opened and checked when the batch was read; `canonical` is
@@ -1125,6 +1197,62 @@ export class Assistant extends Agent<Bindings> {
         this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
       ),
     );
+  }
+
+  /**
+   * The model context from a conversation's stored messages, with the files of earlier turns:
+   * newest first while they fit in `budget` bytes and the model can read them. A file left out
+   * was read on its own turn; a file-only message with none of its files left says nothing.
+   */
+  async #modelHistory(
+    past: readonly StoredMessage[],
+    readable: (row: AttachmentRow) => boolean,
+    budget: number,
+  ): Promise<{ messages: ModelMessage[]; fileTokens: number }> {
+    const replayed = new Set<string>();
+    let left = budget;
+    for (const m of past.toReversed()) {
+      if (m.role !== "user") continue;
+      for (const row of m.attachments.filter(readable)) {
+        if (modelBytes(row) > left) continue;
+        left -= modelBytes(row);
+        replayed.add(row.id);
+      }
+    }
+    const messages: ModelMessage[] = [];
+    let fileTokens = 0;
+    for (const m of past) {
+      if (m.role === "user" && m.attachments.length) {
+        const { files, tokens } = await this.#readFiles(
+          m.attachments.filter((row) => replayed.has(row.id)),
+        );
+        fileTokens += tokens;
+        if (!m.content && !files.length) continue;
+        messages.push({
+          role: "user",
+          content: m.content,
+          ...(files.length ? { attachments: files } : {}),
+        });
+      } else if (m.content !== "") {
+        messages.push({ role: m.role, content: m.content });
+      }
+    }
+    return { messages, fileTokens };
+  }
+
+  /** Reads files for the model; one whose object is gone is left out. */
+  async #readFiles(rows: readonly AttachmentRow[]) {
+    const files: ModelAttachment[] = [];
+    const ids = new Set<string>();
+    let tokens = 0;
+    for (const row of rows) {
+      const file = await this.#modelFile(row);
+      if (!file) continue;
+      files.push(file);
+      ids.add(row.id);
+      tokens += fileTokenEstimate(row);
+    }
+    return { files, ids, tokens };
   }
 
   /**
@@ -1169,10 +1297,16 @@ export class Assistant extends Agent<Bindings> {
     if (!cp) return;
     const repo = this.#repo;
     // A turn that stopped cleanly saved its state to D1 before its fiber ended; if the process
-    // died between that save and the fiber's end, the turn is waiting, not interrupted.
-    if (await repo.turns.load(cp.turnId)) {
-      for (const hold of cp.holds) this.limits.release(hold);
-      return;
+    // died between that save and the fiber's end, the turn is waiting, not interrupted. A resumed
+    // turn's row is the stop it resumed from until a new stop saves over it (the save stamps
+    // `updatedAt` after `stopping`): otherwise it is interrupted like any other, and its stale
+    // row goes, so the stop can't be resumed again.
+    if (!cp.resumed || cp.stopping !== undefined) {
+      const row = await repo.turns.load(cp.turnId);
+      if (row && (!cp.resumed || row.updatedAt >= (cp.stopping ?? 0))) {
+        for (const hold of cp.holds) this.limits.release(hold);
+        return;
+      }
     }
     if (!cp.wrote) {
       // Evicted before its first write: no messages exist, and no call was made.
@@ -1183,6 +1317,7 @@ export class Assistant extends Agent<Bindings> {
     for (const hold of cp.holds) this.limits.settle(hold, cp.providerId, cp.model, cp.callUsage);
     if (cp.callStarted && !cp.callRecorded) {
       await repo.usage.record({
+        ...(cp.callId ? { id: cp.callId } : {}),
         providerId: cp.providerId,
         model: cp.model,
         usage: cp.callUsage,
@@ -1190,23 +1325,59 @@ export class Assistant extends Agent<Bindings> {
         messageId: cp.replyId,
       });
     }
-    await repo.chat.settle({ replyId: cp.replyId, reply: cp.reply }, "interrupted");
+    // Only a reply still streaming is cut: the turn may have settled before the process died,
+    // its row and its end frame not yet done, and then that end stands and is sent now.
+    const status = await repo.chat.interrupt({ replyId: cp.replyId, reply: cp.reply });
     await repo.turns.remove(cp.turnId);
-    this.#emitter(cp.conversationId, cp.turnId)("turn.interrupted", { message: "Retry?" });
+    const emit = this.#emitter(cp.conversationId, cp.turnId);
+    if (status === "complete") emit("turn.completed", {});
+    else if (status === "error") emit("turn.failed", { message: "The reply couldn't be saved." });
+    else emit("turn.interrupted", { message: "Retry?" });
     this.#events.trim(cp.conversationId, cp.turnId);
   }
 
   #send(sessionId: string, turnId: string, type: HarnessEvent["type"], payload: unknown): void {
-    const frame = this.#events.append(sessionId, turnId, (seq) =>
-      JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
+    let seq = 0;
+    const frame = this.#events.append(sessionId, turnId, (n) => {
+      seq = n;
+      return JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload });
+    });
+    const replaying = [...this.getConnections()].flatMap((tab) =>
+      (tab.state as { replaying?: boolean } | null)?.replaying ? [tab] : [],
     );
-    this.broadcast(frame);
+    for (const tab of replaying) {
+      const held = this.#held.get(tab.id) ?? [];
+      this.#held.set(tab.id, held);
+      // A tab that never sends its `resume` can't hold frames forever: it reconnects instead.
+      if (held.length >= MAX_HELD_FRAMES) {
+        this.#held.delete(tab.id);
+        tab.close(1011, "replay backlog");
+        continue;
+      }
+      held.push({ conversationId: sessionId, seq, frame });
+    }
+    this.broadcast(
+      frame,
+      replaying.map((tab) => tab.id),
+    );
   }
 
   #emitter(sessionId: string, turnId: string): Emit {
     return (type, payload) => this.#send(sessionId, turnId, type, payload);
   }
 }
+
+/** The characters a request's messages carry, a text file's included, for its reservation. */
+const messageChars = (messages: readonly ModelMessage[]) =>
+  messages.reduce(
+    (sum, m) =>
+      sum +
+      m.content.length +
+      (m.role === "user"
+        ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
+        : 0),
+    0,
+  );
 
 const pickUsage = (usage: ModelUsage): CallUsage => ({
   inputTokens: usage.inputTokens,

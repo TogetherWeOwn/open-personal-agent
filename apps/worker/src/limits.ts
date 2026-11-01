@@ -167,13 +167,14 @@ export class Limits {
   /**
    * Counts a tool call, or returns `false` past 60 in the last minute: the tool must not run.
    * `callKey` names the call, so a retried step asking again for the same call isn't counted
-   * twice while it is still in the window.
+   * twice while it is still in the window. An `approved` call is counted but never refused: the
+   * user's approval gates it, and it still takes a slot from the calls after it.
    */
-  toolCall(callKey?: string): boolean {
-    return this.#rate("tools", TOOL_CALLS_PER_MINUTE, callKey);
+  toolCall(callKey?: string, { approved = false } = {}): boolean {
+    return this.#rate("tools", TOOL_CALLS_PER_MINUTE, callKey, approved);
   }
 
-  #rate(key: string, perMinute: number, callKey?: string): boolean {
+  #rate(key: string, perMinute: number, callKey?: string, force = false): boolean {
     const now = this.now();
     // Entries are times, or `[time, callKey]` for a call that names itself.
     const recent = (this.kv.get<(number | [number, string])[]>(key) ?? []).filter(
@@ -181,7 +182,7 @@ export class Limits {
     );
     if (callKey !== undefined && recent.some((e) => typeof e !== "number" && e[1] === callKey))
       return true;
-    if (recent.length >= perMinute) return false;
+    if (recent.length >= perMinute && !force) return false;
     this.kv.put(key, [...recent, callKey === undefined ? now : [now, callKey]]);
     return true;
   }

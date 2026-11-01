@@ -301,23 +301,26 @@ async function driveLoop(
         // The per-minute tool limit is counted in the same step, first, so a replay never counts
         // twice; a refused call doesn't run, and the loop stops with `tool_rate` (COST-2).
         const read = tool.manifest.riskClass === "read";
-        const out = (await ctx.step(
+        const { unknownOutcome, ...out } = (await ctx.step(
           `tool:${toolSeq}`,
-          async (key): Promise<ToolOutput> => {
-            if (!(await ctx.budget.allowToolCall(key))) {
+          async (key): Promise<ToolOutput & { unknownOutcome?: true }> => {
+            // An approved call counts towards the minute but isn't refused by it: the user's
+            // approval already gates it, and its row is claimed by now, so a refusal here would
+            // end the approved call without running it.
+            if (!(await ctx.budget.allowToolCall(key, under !== null))) {
               return { ok: false, content: SLOW_DOWN, slowDown: true };
             }
             if (
               under &&
               !(await user.approvals.dispatch(under.batchId, `appr_${under.id}`, read))
             ) {
-              return { ok: false, content: OUTCOME_UNKNOWN };
+              return { ok: false, content: OUTCOME_UNKNOWN, unknownOutcome: true };
             }
             return tool.execute(input, new AbortController().signal);
           },
           read ? undefined : { retries: { limit: 0, delayMs: 0 } },
-        )) as ToolOutput;
-        if (under && !out.ok && out.content === OUTCOME_UNKNOWN) unknown.add(under.id);
+        )) as ToolOutput & { unknownOutcome?: true };
+        if (under && unknownOutcome) unknown.add(under.id);
         return out;
       },
     });
@@ -352,10 +355,13 @@ async function driveLoop(
     if (turn.pending) {
       const { batchId } = turn.pending;
       batch = batchId;
-      const rows = await ctx.step(`task:decisions:${cycle}`, async () =>
-        (await user.approvals.batch(batchId)).map(storedApproval),
-      );
-      const applied = await applyStoredDecisions(turn, rows, expect, now());
+      // The rows and the time they were read, recorded together: a replay past the expiry must
+      // take the branch the first run took (waiting, if they were pending then), not expire them.
+      const decided = await ctx.step(`task:decisions:${cycle}`, async () => ({
+        rows: (await user.approvals.batch(batchId)).map(storedApproval),
+        at: now(),
+      }));
+      const applied = await applyStoredDecisions(turn, decided.rows, expect, decided.at);
       if (applied.waiting) {
         // Woken before the decision: the load marked the task running, so it says waiting
         // again, where a compromise signal (AC13) and the UI look for it.

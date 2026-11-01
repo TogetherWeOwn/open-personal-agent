@@ -4,7 +4,12 @@
 // every pending approval.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { createRepository, type NewApproval, scopeFromSession } from "@opa/db/repository";
+import {
+  createRepository,
+  isBatchId,
+  type NewApproval,
+  scopeFromSession,
+} from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { WorkerEnv } from "../src/compose";
@@ -117,6 +122,14 @@ describe("the approvals store", () => {
     await alice.turns.supersede({ ...late, conversationId: "c1" });
     expect(await alice.turns.load("turn-s")).toBeUndefined();
     expect(await count("messages")).toBe(2);
+  });
+
+  it("accepts batch IDs that stay one plain path segment", () => {
+    expect(isBatchId("batch_4f0c")).toBe(true);
+    expect(isBatchId("batch_inst-engine-1_s3")).toBe(true);
+    for (const id of ["..", ".", "batch_a%2Fb", "a/b", "", "x".repeat(201)]) {
+      expect(isBatchId(id)).toBe(false);
+    }
   });
 
   it("needs exactly one context: a turn or a task", async () => {

@@ -70,10 +70,14 @@ export function jcs(value: unknown, maxBytes: number = CANONICAL_LIMITS.bytes): 
   return text;
 }
 
-/** Whether an approval can bind these arguments and target (C3): within `CANONICAL_LIMITS.bytes`. */
+/**
+ * Whether an approval can bind these arguments and target (C3): within `CANONICAL_LIMITS.bytes`.
+ * The target counts as the envelope writes it, JSON-escaped, without its quotes.
+ */
 export function fitsApproval(args: Record<string, unknown>, target: string | null): boolean {
   const bytes = utf8.encode(jcs(args, Number.POSITIVE_INFINITY)).length;
-  return bytes + utf8.encode(target ?? "").length <= CANONICAL_LIMITS.bytes;
+  const escaped = utf8.encode(jcs(target ?? "", Number.POSITIVE_INFINITY)).length - 2;
+  return bytes + escaped <= CANONICAL_LIMITS.bytes;
 }
 
 const utf8 = new TextEncoder();

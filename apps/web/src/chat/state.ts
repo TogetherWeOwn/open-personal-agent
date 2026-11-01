@@ -35,7 +35,17 @@ export interface ChatState {
    * at a time. `turnId` is `null` until `turn.started` names the turn this tab sent. `seq` is
    * the last event applied for it, so a replay after a reconnect can't apply one twice.
    */
-  pending: { conversationId: string; turnId: string | null; messageId: string; seq: number } | null;
+  pending: {
+    conversationId: string;
+    turnId: string | null;
+    messageId: string;
+    seq: number;
+    /**
+     * Set when this tab adopted a turn mid-reply: the reply's length then. Its first deltas came
+     * before, so the first `message.completed` replaces the text from here with the whole segment.
+     */
+    base?: number;
+  } | null;
   /** Text for the polite live region: start, finish and failure, never each token. */
   announcement: string;
   /**
@@ -258,6 +268,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
         turnId: event.turnId,
         messageId: last.id,
         seq: 0,
+        base: last.text.length,
       };
       return onEvent({ ...state, pending: adopted }, event);
     }
@@ -279,11 +290,19 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return { ...seen, announcement: event.payload.text };
     case "message.delta":
       return updateMessage(seen, pending, (m) => ({ text: m.text + event.payload.text }));
-    case "message.completed":
+    case "message.completed": {
+      // An adopted reply's text from `base` is only the segment's tail: the whole segment
+      // replaces it, once; later segments streamed whole here.
+      const { base, ...unbased } = seen.pending ?? pending;
+      const next = base === undefined ? seen : { ...seen, pending: unbased };
+      const from = (text: string) => (base === undefined ? text : text.slice(0, base));
       return {
-        ...updateMessage(seen, pending, (m) => ({ text: withSegment(m.text, event.payload.text) })),
+        ...updateMessage(next, pending, (m) => ({
+          text: withSegment(from(m.text), event.payload.text),
+        })),
         announcement: `Assistant replied: ${event.payload.text}`,
       };
+    }
     case "turn.completed":
       return finish(seen, "complete", seen.announcement);
     // `turn.cancelled` is the user's Stop; `turn.interrupted` is the server going away

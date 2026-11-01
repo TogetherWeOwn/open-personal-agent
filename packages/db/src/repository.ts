@@ -244,10 +244,11 @@ export const isId = (id: unknown): id is string =>
 
 /**
  * A batch ID: the assistant's are `batch_<uuid>`, a task's carry its Workflow instance ID, which
- * can be longer than `isId` allows. Printable ASCII without a slash, so it stays one path segment.
+ * can be longer than `isId` allows. Letters, digits, `_` and `-` (a Workflow instance ID's
+ * alphabet), so it stays one path segment: no `.`, `..` or percent-escape.
  */
 export const isBatchId = (id: unknown): id is string =>
-  typeof id === "string" && /^[\x21-\x2e\x30-\x7e]{1,200}$/.test(id);
+  typeof id === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(id);
 
 /**
  * Whether `error` is a uniqueness refusal from the store. D1 reports the violated constraint
@@ -889,6 +890,22 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .set({ status, content: reply.reply })
               .where(and(eq(messages.id, reply.replyId), eq(messages.userId, userId)));
           },
+          /**
+           * Settles a reply `interrupted` only while it is still `streaming`, for a recovery that
+           * can't tell whether its turn settled first. Returns the reply's status afterwards:
+           * `interrupted` if it cut the reply, else the end the turn already gave it.
+           */
+          interrupt: async (reply: { replyId: string; reply: string }) => {
+            const mine = and(eq(messages.id, reply.replyId), eq(messages.userId, userId));
+            const [, rows] = await db.batch([
+              db
+                .update(messages)
+                .set({ status: "interrupted", content: reply.reply })
+                .where(and(mine, eq(messages.status, "streaming"))),
+              db.select({ status: messages.status }).from(messages).where(mine).limit(1),
+            ]);
+            return rows[0]?.status;
+          },
         },
         /**
          * Stopped turns' resumable state (M3-03 AC5). A row exists only while its turn waits
@@ -927,6 +944,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   model: turnStates.model,
                   status: turnStates.status,
                   state: turnStates.state,
+                  updatedAt: turnStates.updatedAt,
                 })
                 .from(turnStates)
                 .where(and(eq(turnStates.turnId, turnId), eq(turnStates.userId, userId)))
@@ -1386,13 +1404,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
            * such as the settings Test button, names neither.
            */
-          record: async (call: LedgerCall & { conversationId?: string; messageId?: string }) => {
-            await db.insert(usage).values({
-              ...ledgerValues(call),
-              userId,
-              conversationId: call.conversationId ?? null,
-              messageId: call.messageId ?? null,
-            });
+          /**
+           * Writes a call's ledger row. With `id`, writing the same call again (a recovery that
+           * can't tell whether the first write landed) changes nothing.
+           */
+          record: async (
+            call: LedgerCall & { id?: string; conversationId?: string; messageId?: string },
+          ) => {
+            await db
+              .insert(usage)
+              .values({
+                ...ledgerValues(call),
+                ...(call.id ? { id: call.id } : {}),
+                userId,
+                conversationId: call.conversationId ?? null,
+                messageId: call.messageId ?? null,
+              })
+              .onConflictDoNothing({ target: usage.id });
           },
           /** Every ledger row, oldest first, for the data export (M3-20 AC1). */
           list: () =>
