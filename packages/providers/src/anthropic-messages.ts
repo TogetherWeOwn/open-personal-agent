@@ -55,9 +55,12 @@ const STREAM_ERRORS: Record<string, ModelErrorCode> = {
 };
 
 export function createAnthropicMessagesProvider(options: AnthropicMessagesOptions): ModelProvider {
-  // The Messages API takes the key as a bearer token as well as in `x-api-key`.
   const base = endpoint(options);
-  const http = { ...base, headers: { ...base.headers, "anthropic-version": API_VERSION } };
+  // `x-api-key`, not the shared bearer header: the API takes both, but `x-api-key` is the one
+  // every version and every Anthropic-compatible gateway documents.
+  const { authorization: _, ...headers } = base.headers;
+  if (options.apiKey) headers["x-api-key"] = options.apiKey;
+  const http = { ...base, headers: { ...headers, "anthropic-version": API_VERSION } };
   const origin = (model: string) => ({
     providerId: options.providerId,
     api: ANTHROPIC_MESSAGES_API,

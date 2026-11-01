@@ -73,8 +73,9 @@ describe("anthropic-messages", () => {
     const [call] = calls;
     expect(call?.url).toBe("https://api.anthropic.com/v1/messages");
     expect(call?.init.redirect).toBe("manual");
+    expect(call?.init.headers).not.toHaveProperty("authorization");
     expect(call?.init.headers).toMatchObject({
-      authorization: "Bearer sk-ant-test",
+      "x-api-key": "sk-ant-test",
       "anthropic-version": "2026-10-21",
     });
     expect(call?.body).toEqual(messagesBody({ model: MODEL, messages: ask }, "anthropic"));
