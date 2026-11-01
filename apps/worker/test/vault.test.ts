@@ -7,7 +7,7 @@ import {
   waitOnExecutionContext,
 } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { decrypt, encrypt, rewrap, type Vault } from "@opa/vault";
+import { decrypt, encrypt, rewrap, type UserScope, type Vault } from "@opa/vault";
 import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
@@ -109,7 +109,9 @@ describe("V8: fail closed at startup", () => {
 });
 
 describe("the D1 vault store", () => {
-  const scope = { userId: "u1" };
+  // Stands in for the repository layer (M2-11), the only code that mints a UserScope.
+  const scopeOf = (userId: string) => ({ userId }) as UserScope;
+  const scope = scopeOf("u1");
   const input = {
     secretId: "s1",
     purpose: "model_api_key",
@@ -162,7 +164,7 @@ describe("the D1 vault store", () => {
     ).run();
     const vault = (await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}` })).VAULT as Vault;
     await expect(
-      encrypt(vault, { userId: "u2" }, { ...input, plaintext: "sk-other", caller: "test" }),
+      encrypt(vault, scopeOf("u2"), { ...input, plaintext: "sk-other", caller: "test" }),
     ).rejects.toThrow("encrypt_failed");
     const row = await env.DB.prepare("SELECT user_id FROM secrets WHERE id = 's1'").first();
     expect(row).toEqual({ user_id: "u1" });
@@ -174,7 +176,7 @@ describe("the D1 vault store", () => {
     ).run();
     const old = (await compose({ ...env, OPA_MASTER_KEY: PREV })).VAULT as Vault;
     await expect(
-      encrypt(old, { userId: "u3" }, { ...input, plaintext: "sk-old", caller: "test" }),
+      encrypt(old, scopeOf("u3"), { ...input, plaintext: "sk-old", caller: "test" }),
     ).rejects.toThrow("encrypt_failed");
     const u3 = await env.DB.prepare(
       "SELECT count(*) AS n FROM user_keys WHERE user_id = 'u3'",

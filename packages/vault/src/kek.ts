@@ -30,7 +30,10 @@ export async function importKek(raw: unknown): Promise<Kek> {
   } catch {
     throw vaultError("unavailable");
   }
-  if (bytes.length !== 32) throw vaultError("unavailable");
+  // Strict: one encoding per key, so `…B=` (which decodes like `…A=`) is refused.
+  if (bytes.length !== 32 || btoa(String.fromCharCode(...bytes)) !== match[2]) {
+    throw vaultError("unavailable");
+  }
   try {
     const key = await crypto.subtle.importKey("raw", bytes, "AES-GCM", false, [
       "wrapKey",
