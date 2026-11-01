@@ -161,10 +161,17 @@ describe("model roles", () => {
     expect(await fresh.providers.get(id)).toBeUndefined();
     expect(await fresh.providers.remove(id)).toBe(false);
     await fresh.providers.update(id, { model: "changed" });
-    // A foreign key proves only that the row exists, so point the roles at it directly.
-    await fresh.settings.save({ chatProvider: id, chatModel: "gpt-4.1", backgroundProvider: id });
+    // Pointing the roles or a chat at it directly is refused by the database (TWO-427 L-4).
+    const roles = { chatProvider: id, chatModel: "gpt-4.1", backgroundProvider: id };
+    const refused = (write: Promise<unknown>) =>
+      write.then(
+        () => "written",
+        (e: Error) => String((e.cause as Error | undefined)?.message ?? e.message),
+      );
+    expect(await refused(fresh.settings.save(roles))).toContain("cross_user_reference");
     await fresh.createConversation("c-fresh");
-    await fresh.chat.setModel("c-fresh", { provider: id, model: "gpt-4.1" });
+    const pin = { provider: id, model: "gpt-4.1" };
+    expect(await refused(fresh.chat.setModel("c-fresh", pin))).toContain("cross_user_reference");
     for (const pick of [{ role: "chat" }, { role: "background" }, { conversationId: "c-fresh" }]) {
       expect(await pickModel(env, scope("fresh"), pick as never)).toBeNull();
     }
