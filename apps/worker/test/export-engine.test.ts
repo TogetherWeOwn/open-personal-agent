@@ -38,7 +38,7 @@ const stepper = (): TaskStepper => new FakeStepper() as unknown as TaskStepper;
 
 let seq = 0;
 /** A running export row named by its own Workflow instance id. */
-async function makeExport(expiresAt = 3600000) {
+async function makeExport(expiresAt = Date.now() + 3600000) {
   seq += 1;
   const id = `x${seq}`;
   const instanceId = `exp-engine-${seq}`;
@@ -213,6 +213,76 @@ describe("executeExport", () => {
     expect(row?.status).toBe("failed");
     expect(row?.error).toContain("R2 is down");
   });
+
+  it("aborts the ZIP upload when streaming it fails, leaving no half-written archive", async () => {
+    const { id, instanceId } = await makeExport(Date.now() + 3_600_000);
+    let aborted = false;
+    const failingParts = {
+      ...env,
+      // R2 methods reject a detached call, so untrapped methods stay bound to the target.
+      FILES: new Proxy(env.FILES, {
+        get: (target, prop, receiver) => {
+          if (prop === "createMultipartUpload")
+            return async (...args: unknown[]) => {
+              const create = Reflect.get(target, prop, receiver) as (
+                ...a: unknown[]
+              ) => Promise<object>;
+              const upload = await create.apply(target, args);
+              return new Proxy(upload, {
+                get: (t, p, r) => {
+                  if (p === "abort")
+                    return async () => {
+                      aborted = true;
+                    };
+                  if (p === "uploadPart")
+                    return async () => {
+                      throw new Error("part failed");
+                    };
+                  const value = Reflect.get(t, p, r);
+                  return typeof value === "function" ? value.bind(t) : value;
+                },
+              });
+            };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    } as unknown as WorkerEnv;
+    await expect(executeExport(failingParts, instanceId, stepper())).rejects.toThrow(/part failed/);
+    expect(aborted).toBe(true);
+    expect((await alice.exports.get(id))?.status).toBe("failed");
+  });
+
+  it("expires the row instead of readying it when the expiry passes mid-run", async () => {
+    const { id, instanceId } = await makeExport(Date.now() - 1);
+    await executeExport(env, instanceId, stepper());
+    // The finish found a past-expiry row: expired, with neither a ZIP nor staged files left.
+    expect((await alice.exports.get(id))?.status).toBe("expired");
+    expect(await env.FILES.get(`u/alice/exports/${id}.zip`)).toBeNull();
+    expect(await alice.exports.listPrefix(alice.exports.stagedPrefix(id))).toEqual([]);
+  });
+
+  it("carries every memory row and proposal in the ZIP, whatever the status", async () => {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source) VALUES ('me-old', 'alice', 'fact', 'old', 'user', 'superseded', 'create', 'chat')",
+      ),
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source) VALUES ('me-new', 'alice', 'fact', 'new', 'user', 'active', 'update', 'chat')",
+      ),
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, expires_at) VALUES ('me-stale', 'alice', 'fact', 'stale', 'user', 'proposed', 'create', 'chat', 1)",
+      ),
+    ]);
+    const { id, instanceId } = await makeExport(Date.now() + 3_600_000);
+    await executeExport(env, instanceId, stepper());
+    expect((await alice.exports.get(id))?.status).toBe("ready");
+    const text = new TextDecoder().decode(await zipBytes(id));
+    expect(text).toContain("me-old");
+    expect(text).toContain("me-new");
+    expect(text).toContain("me-stale");
+    expect(text).toContain("superseded");
+  });
 });
 
 describe("sweepExports", () => {
@@ -244,6 +314,34 @@ describe("sweepExports", () => {
     expect((await alice.exports.get(live.id))?.status).toBe("ready");
     expect(await env.FILES.get(`u/alice/exports/${live.id}.zip`)).not.toBeNull();
     expect(await sweepExports(env, () => now)).toEqual({ expired: 0 });
+  });
+
+  it("leaves a row for the next tick when its objects fail to delete", async () => {
+    const now = 10_000;
+    const { id } = await makeExport(now - 1);
+    await alice.exports.finishReady(id, 7, now - 2);
+    await env.FILES.put(`u/alice/exports/${id}.zip`, "zip");
+    const failingDeletes = {
+      ...env,
+      // R2 methods reject a detached call, so untrapped methods stay bound to the target.
+      FILES: new Proxy(env.FILES, {
+        get: (target, prop, receiver) => {
+          if (prop === "delete")
+            return async () => {
+              throw new Error("R2 is down");
+            };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    } as unknown as WorkerEnv;
+    // Nothing moved: a moved row never comes back, so its files would be orphaned.
+    expect(await sweepExports(failingDeletes, () => now)).toEqual({ expired: 0 });
+    expect((await alice.exports.get(id))?.status).toBe("ready");
+    // The next tick cleans it up once deletes work again.
+    expect(await sweepExports(env, () => now)).toEqual({ expired: 1 });
+    expect((await alice.exports.get(id))?.status).toBe("expired");
+    expect(await env.FILES.get(`u/alice/exports/${id}.zip`)).toBeNull();
   });
 });
 

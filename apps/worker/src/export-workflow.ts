@@ -61,6 +61,16 @@ export async function executeExport(
     const finished = await stepper.do("export:finish", STEP, async () => {
       if (!(await running())) return { status: "skipped", bytes: 0 };
       const { bytes, entries } = await buildExportZip(user, id, now);
+      // The row may have passed its expiry while the ZIP was built: a past-expiry row must
+      // never turn ready. Drop the just-written ZIP and the staged files, expire the row,
+      // and leave nothing orphaned for the sweep to miss.
+      const row = await user.exports.get(id);
+      if (!row || row.status !== "running" || row.expiresAt <= now()) {
+        await user.exports.removeZip(id).catch(() => {});
+        await user.exports.removeStaged(id).catch(() => {});
+        await user.exports.finishExpired(id);
+        return { status: "expired", bytes: 0 };
+      }
       await user.exports.finishReady(id, bytes, now());
       return { status: "ready", bytes, entries };
     });
