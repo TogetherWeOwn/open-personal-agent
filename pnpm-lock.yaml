@@ -95,6 +95,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@opa/vault':
+        specifier: workspace:*
+        version: link:../vault
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@cloudflare/workers-types@5.20261031.1)
