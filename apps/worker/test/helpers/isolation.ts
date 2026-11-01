@@ -3,6 +3,7 @@
 // snapshot of everything one of them owns, for the state diff. A card that adds an item type
 // seeds it here and adds its routes' cases to isolation.test.ts (M3-21 AC7).
 import { env as workerEnv } from "cloudflare:workers";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { compose, type WorkerEnv } from "../../src/compose";
 import type { Env } from "../../src/env";
 import { workerApp as app } from "../../src/worker-app";
@@ -31,6 +32,7 @@ export interface Seeded {
   memory: string;
   task: string;
   attachment: string;
+  artifact: string;
   provider: string;
   secret: string;
   grant: string;
@@ -64,8 +66,8 @@ export async function wipe() {
 }
 
 /**
- * Seeds `name` with a conversation and its messages, a memory, a paused task, an attachment in
- * R2, a model provider with an encrypted key, a grant, a usage row and two sessions. The provider
+ * Seeds `name` with a conversation and its messages, a memory, a paused task, an attachment and
+ * an artifact in R2, a model provider with an encrypted key, a grant, a usage row and two sessions. The provider
  * and the attachment go through their routes, so the vault and R2 paths are the real ones.
  */
 export async function seed(name: string, role: "owner" | "member"): Promise<Seeded> {
@@ -179,9 +181,19 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       message,
     ),
   ]);
+  const artifact = crypto.randomUUID();
+  await createRepository(env)
+    .forUser(scopeFromSession({ userId: id }))
+    .artifacts.save({
+      id: artifact,
+      name: `${tag}.md`,
+      mediaType: "text/markdown",
+      content: `artifact of ${tag}`,
+      source: { conversationId: conversation, taskId: task },
+    });
 
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
-  const ids = { ...items, spareSession, grant, usage };
+  const ids = { ...items, spareSession, artifact, grant, usage };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }

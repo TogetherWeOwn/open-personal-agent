@@ -36,6 +36,9 @@ const CASES: Record<string, Case> = {
     body: (_v, a) => ({ provider: a.provider, model: "gpt-4o" }),
     own: 200,
   },
+  "GET /api/artifacts/:id": { params: (v) => ({ id: v.artifact }), own: 200 },
+  "GET /api/artifacts/:id/content": { params: (v) => ({ id: v.artifact }), own: 200 },
+  "DELETE /api/artifacts/:id": { params: (v) => ({ id: v.artifact }), own: 204 },
   "GET /api/attachments/:id": { params: (v) => ({ id: v.attachment }), own: 200 },
   "DELETE /api/attachments/:id": { params: (v) => ({ id: v.attachment }), own: 204 },
   // The spare session: revoking the one the owner signs in with would 401 every later route.
@@ -160,6 +163,7 @@ describe.each([
     // The same lists do carry the user's own items.
     const own = async (path: string) => (await as(victim, "GET", path)).text();
     expect(await own("/api/conversations")).toContain(victim.conversation);
+    expect(await own("/api/artifacts")).toContain(victim.artifact);
     expect(await own("/api/sessions")).toContain(victim.session);
     expect(await own("/api/settings")).toContain(victim.provider);
     expect(await own("/api/settings/grants")).toContain(victim.grant);
