@@ -43,7 +43,7 @@ import { NavShell } from "./NavShell";
 import { hasNavigated, match, navigate, resolveChatAddress, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { SpendingBanners } from "./settings/SpendingBanners";
-import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet } from "./ui";
+import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet, setInboxCount } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -239,6 +239,9 @@ export function App({ transport }: AppProps) {
       window.removeEventListener("focus", back);
     };
   }, []);
+  // A multi-action card counts as one item (m3-ux §3.4).
+  const inboxCount = approvals.batches.length;
+  useEffect(() => setInboxCount(inboxCount), [inboxCount]);
 
   // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
   // whose last events were missed while disconnected.
@@ -500,7 +503,13 @@ export function App({ transport }: AppProps) {
   );
 
   return (
-    <NavShell current={matched?.route.nav} sidebar={chats} hideTabs={composing} fit={chat}>
+    <NavShell
+      current={matched?.route.nav}
+      inboxCount={inboxCount}
+      sidebar={chats}
+      hideTabs={composing}
+      fit={chat}
+    >
       {/* Above every screen, and on a phone above both the Chats list and a thread. */}
       <SpendingBanners />
       {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}

@@ -6,7 +6,19 @@ import { hasNavigated } from "../router";
 
 export const APP_NAME = "Open Personal Agent";
 
-export const pageTitle = (title: string) => `${title} · ${APP_NAME}`;
+/** What waits in the Inbox: the tab title starts with "(N) " while it isn't 0 (m3-ux §1.2). */
+let waiting = 0;
+const prefix = () => (waiting ? `(${waiting}) ` : "");
+
+export const pageTitle = (title: string) => `${prefix()}${title} · ${APP_NAME}`;
+
+/** Updates the count, and the current title with it. */
+export function setInboxCount(count: number) {
+  if (count === waiting) return;
+  const bare = document.title.replace(/^\(\d+\) /, "");
+  waiting = count;
+  document.title = prefix() + bare;
+}
 
 export function Page({ title, children }: { title: string; children: ReactNode }) {
   const heading = useRef<HTMLHeadingElement>(null);

@@ -9,7 +9,7 @@ import { Button, Card, CardHeader } from "../ui";
 import type { PendingBatch } from "./api";
 import { actionOf, expiresIn, needsPasskey, STANDING_NOTE, scopeLabel } from "./copy";
 import { ItemBody, TargetLine, Visible } from "./ItemBody";
-import { refreshApprovals, submitDecision } from "./store";
+import { claimFocus, refreshApprovals, submitDecision, useApprovals } from "./store";
 
 type Scope = ApprovalItem["scopes"][number];
 
@@ -97,6 +97,7 @@ export function ApprovalCard({
   level = 3,
   context,
   idPrefix = "approval",
+  where,
 }: {
   batch: PendingBatch;
   level?: number;
@@ -104,6 +105,8 @@ export function ApprovalCard({
   context?: ReactNode;
   /** Its ids' prefix: the Inbox's own, so its card and the hidden chat's never share one. */
   idPrefix?: string;
+  /** Its chat's title, in the card's name, so two alike cards in the Inbox stay apart. */
+  where?: string;
 }) {
   const headingId = `${idPrefix}-${batch.batchId}`;
   const now = useExpiryClock(batch.expiresAt);
@@ -124,6 +127,15 @@ export function ApprovalCard({
     document.getElementById(toggleId(moved))?.focus();
     setMoved(null);
   });
+
+  // Opened by its deep link: once the chat shows it, the card takes focus. After this commit's
+  // effects, so the chat's own focus on its heading doesn't take it back.
+  const { focus } = useApprovals();
+  useEffect(() => {
+    if (focus !== batch.batchId) return;
+    const timer = setTimeout(() => claimFocus(batch.batchId) && focusApproval(headingId));
+    return () => clearTimeout(timer);
+  }, [focus, batch.batchId, headingId]);
 
   const { items } = batch;
   const multi = items.length > 1;
@@ -171,9 +183,18 @@ export function ApprovalCard({
     : `${actionOf(items[0]?.tool ?? "")} · Needs your OK`;
 
   return (
-    <Card tone="approval" labelledBy={headingId} className={expired ? "opacity-60" : ""}>
+    <Card
+      tone="approval"
+      labelledBy={where ? `${headingId} ${headingId}-in` : headingId}
+      className={expired ? "opacity-60" : ""}
+    >
       <CardHeader id={headingId} level={level} title={title} />
       {multi && <p>{items.map((i) => actionOf(i.tool)).join(" · ")}</p>}
+      {where && (
+        <span id={`${headingId}-in`} className="sr-only">
+          in {where}
+        </span>
+      )}
       {context}
       <p className="text-sm text-text-muted">
         {expired ? "Expired. I stopped this." : expiresIn(batch.expiresAt, now)}
