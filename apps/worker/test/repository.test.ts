@@ -3,7 +3,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { createRepository, scopeFromSession, type UserScope } from "@opa/db/repository";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { WorkerEnv } from "../src/index";
+import type { WorkerEnv } from "../src/compose";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const repo = createRepository(env);

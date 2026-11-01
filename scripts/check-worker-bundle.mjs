@@ -9,10 +9,10 @@ import { pathToFileURL } from "node:url";
 export const ALLOWLIST = [];
 
 const CHECKS = [
-  ["master-key", /^(?:packages\/vault\/|apps\/worker\/src\/index\.ts$)/, /OPA_MASTER_KEY/],
+  ["master-key", /^(?:packages\/vault\/|apps\/worker\/src\/compose\.ts$)/, /OPA_MASTER_KEY/],
   [
     "cloudflare-env",
-    /^apps\/worker\/src\/index\.ts$/,
+    /^apps\/worker\/src\/compose\.ts$/,
     /import\s*(?:\{[^}]*\benv\b[^}]*\}|\*\s*as\s+\w+)\s*from\s*["']cloudflare:workers["']|import\s*\(\s*["']cloudflare:workers["']/,
   ],
 ];
