@@ -3,30 +3,24 @@
 // and tool support.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { Hono } from "hono";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
-import type { AppEnv, Env } from "../src/env";
+import type { Env } from "../src/env";
 import { STARTER_MODEL } from "../src/model-settings";
+import { ORIGIN, sessionHeaders } from "./helpers/app";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const KEY = btoa("k".repeat(32));
 const CANARY = "sk-canary-0123456789abcdefWXYZ";
 const OPENAI = { kind: "openai-chat", providerId: "openai", baseUrl: "https://api.example.com/v1" };
 
-// Stands in for the M2-10 session guard.
-const signedIn = new Hono<AppEnv>();
-signedIn.use(async (c, next) => {
-  c.set("session", { id: "s1", userId: "u1" });
-  await next();
-});
-signedIn.route("/", app);
+let signedIn: Record<string, string> = {};
 
 async function call(path: string, init: RequestInit = {}, extra: Partial<Env> = {}) {
   const bindings = { ...(await compose({ ...env, OPA_MASTER_KEY: KEY })), ...extra };
-  const headers = { "content-type": "application/json" };
-  const res = await signedIn.request(`/api/settings${path}`, { headers, ...init }, bindings);
+  const headers = { "content-type": "application/json", ...signedIn };
+  const res = await app.request(`${ORIGIN}/api/settings${path}`, { headers, ...init }, bindings);
   return { status: res.status, text: await res.text() };
 }
 const put = (path: string, body: unknown, extra?: Partial<Env>) =>
@@ -48,13 +42,14 @@ beforeAll(async () => {
     env.DB.prepare("INSERT INTO users (id, display_name, role) VALUES ('u1', 'Owner', 'owner')"),
     env.DB.prepare("INSERT INTO setup_state (id, claimed_by_user_id) VALUES (1, 'u1')"),
   ]);
+  signedIn = await sessionHeaders("u1");
 });
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("model settings", () => {
   it("needs a session", async () => {
-    const res = await app.request("/api/settings", {}, await compose(env));
+    const res = await app.request(`${ORIGIN}/api/settings`, {}, await compose(env));
     expect(res.status).toBe(401);
   });
 

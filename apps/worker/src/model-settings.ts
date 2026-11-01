@@ -85,15 +85,13 @@ function view(row: SettingsRow) {
 }
 
 type Ctx = Context<AppEnv>;
-const fail = (c: Ctx, status: 400 | 401 | 404 | 409 | 503, error: string) =>
-  c.json({ error }, status);
+const fail = (c: Ctx, status: 400 | 404 | 409 | 503, error: string) => c.json({ error }, status);
 
 export const settings = new Hono<AppEnv>();
 
-// The M2-10 session guard sets `session` on every non-public route; without one, nothing here runs.
+// The session guard (M2-10) has already resolved `c.var.session` for every route here.
 settings.use(async (c, next) => {
   c.header("Cache-Control", "no-store");
-  if (!(c.var.session as Session | undefined)) return fail(c, 401, "unauthenticated");
   return next();
 });
 

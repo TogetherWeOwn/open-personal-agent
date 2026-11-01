@@ -13,6 +13,7 @@ import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import worker from "../src/index";
 import { d1VaultStore } from "../src/vault-store";
+import { sessionHeaders } from "./helpers/app";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
@@ -25,7 +26,8 @@ app.get("/api/test/env-keys", (c) => c.json(Object.keys(c.env)));
 
 async function fetchWorker(path: string, bindings: WorkerEnv, init?: RequestInit) {
   const ctx = createExecutionContext();
-  const request = new Request(`https://opa.test${path}`, init) as Parameters<
+  const headers = { ...signedIn, ...init?.headers };
+  const request = new Request(`https://opa.test${path}`, { ...init, headers }) as Parameters<
     typeof worker.fetch
   >[0];
   const res = await worker.fetch(request, bindings, ctx);
@@ -33,16 +35,19 @@ async function fetchWorker(path: string, bindings: WorkerEnv, init?: RequestInit
   return res;
 }
 
+let signedIn: Record<string, string> = {};
+
 const countSecrets = async () =>
   (await env.DB.prepare("SELECT count(*) AS n FROM secrets").first<{ n: number }>())?.n;
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  // A claimed deployment, so the claim guard lets `/api/*` through.
+  // A claimed deployment and a signed-in owner, so the guards let `/api/*` through.
   await env.DB.batch([
     env.DB.prepare("INSERT INTO users (id, display_name, role) VALUES ('u1', 'A', 'owner')"),
     env.DB.prepare("INSERT INTO setup_state (id, claimed_by_user_id) VALUES (1, 'u1')"),
   ]);
+  signedIn = await sessionHeaders("u1");
 });
 
 describe("V4: the env filter", () => {
