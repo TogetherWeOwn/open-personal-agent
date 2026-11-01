@@ -280,6 +280,14 @@ describe("htmlToText", () => {
     expect(text).toContain("<title");
   });
 
+  it("finishes fast on a page of nothing but unterminated comments", () => {
+    const soup = "<!--".repeat(262144); // 1 MiB, the maxBytes cap
+    const started = Date.now();
+    const { text } = htmlToText(soup);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain("-->");
+  });
+
   it("finishes fast on thousands of malformed script closers", () => {
     const soup = `<script>${"</script'".repeat(40000)}>`;
     const started = Date.now();

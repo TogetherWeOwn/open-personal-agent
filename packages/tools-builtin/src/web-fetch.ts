@@ -356,6 +356,9 @@ function isNameEnd(html: string, at: number): boolean {
 function stripMarkup(html: string, lower: string): string {
   let out = "";
   let headGone = false;
+  // Once `indexOf("-->")` fails, no later opener can find one either (its search range is a
+  // subset), so later openers skip the search instead of rescanning the whole tail each time.
+  let commentDead = false;
   let i = 0;
   while (i < html.length) {
     const lt = html.indexOf("<", i);
@@ -365,9 +368,10 @@ function stripMarkup(html: string, lower: string): string {
     }
     out += html.slice(i, lt);
     if (html.startsWith("<!--", lt)) {
-      const end = html.indexOf("-->", lt + 4);
+      const end = commentDead ? -1 : html.indexOf("-->", lt + 4);
       if (end === -1) {
         // No end to this comment: drop the opener and keep stripping what follows.
+        commentDead = true;
         out += " ";
         i = lt + 4;
         continue;
