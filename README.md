@@ -36,6 +36,10 @@ expose it, and set `OPA_PUBLIC_ORIGIN` to the address browsers use (`https://age
 setup and login fail with `bad_origin`. Workers AI and background tasks are Cloudflare-only for
 now: `/api/health` on Node reports them as `false`, and its status stays `ok`.
 
+On Node, model providers can't reach private, loopback, link-local or cloud-metadata addresses, so
+a base URL can't be used to read your network. To use a model server on the same machine or LAN
+(Ollama, the mock server), set `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`.
+
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
 | `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
