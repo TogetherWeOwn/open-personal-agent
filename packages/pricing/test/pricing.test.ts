@@ -40,6 +40,17 @@ describe("price table", () => {
     expect(estimate(price, one).costMicroUsd).toBe(1);
   });
 
+  it("prices Anthropic cache writes above input and cache reads below it", () => {
+    const price = findPrice("anthropic", "claude-opus-5-5");
+    if (!price) throw new Error("no claude-opus-5-5 price");
+    // 300 × $4/M + 400 × $0.20/M + 300 × $5/M + 500 × $20/M = $0.01278.
+    const counts = { ...usage, cachedInputTokens: 400, cacheWriteInputTokens: 300 };
+    expect(estimate(price, counts)).toEqual({ costMicroUsd: 12780, neurons: null });
+    // Writes never count past the uncached input.
+    const over = { ...usage, cachedInputTokens: 900, cacheWriteInputTokens: 300 };
+    expect(estimate(price, over).costMicroUsd).toBe(900 * 0.2 + 100 * 5 + 500 * 20);
+  });
+
   it("knows no price for an unlisted model, and still names its provider", () => {
     expect(findPrice("openai", "gpt-unknown")).toBeUndefined();
     expect(providerInfo("my-llm")).toEqual({
@@ -53,6 +64,7 @@ describe("price table", () => {
   it("names the biller from the endpoint, not from the provider ID", () => {
     expect(billingProviderId("https://api.openai.com/v1")).toBe("openai");
     expect(billingProviderId("https://openrouter.ai/api/v1")).toBe("openrouter");
+    expect(billingProviderId("https://api.anthropic.com/v1")).toBe("anthropic");
     expect(billingProviderId("http://127.0.0.1:8788/v1")).toBe("127.0.0.1:8788");
   });
 
