@@ -6,6 +6,7 @@ import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
+import { memoryService } from "./memory";
 import { conversations, messages, secrets, usage, userSettings, users } from "./schema";
 
 declare const brand: unique symbol;
@@ -243,6 +244,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             await db.insert(usage).values({ ...ledgerValues(call), userId });
           },
         },
+        /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
+        memory: memoryService(db, userId),
         /** Onboarding answers and the chat model (M2-15). The key itself is in `secrets`. */
         settings: {
           get: async () =>

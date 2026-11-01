@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Lint for ADR 0010 D3 and D4.1 #2 over app and package sources (tests are exempt), and D4.1 #4
+// Lint for ADR 0010 D3 and D4.1 #2 and ADR 0008 #4 over app and package sources (tests are exempt), and D4.1 #4
 // over packages/vault/package.json. Runs in `pnpm lint`.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -33,6 +33,13 @@ export const RULES = [
     /^(?:packages\/db\/|apps\/worker\/src\/assistant\.ts$)/,
     /\bscopeForAssistant\b/g,
     "only the assistant scopes itself, by the name the session gave it (ADR 0010 D3)",
+  ],
+  [
+    "memory-tables",
+    /^packages\/db\/src\/(?:memory|schema)\.ts$/,
+    // The Drizzle tables by import or namespace, and the SQL table names in a query.
+    /\b(?:memoryLinks|memory_links|memories_fts)\b|\bschema\.memories\b|\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+[`"']?memories\b|\bimport\b[^;]*\bmemories\b[^;]*\bfrom\s*["'][^"']*(?:@opa\/db|schema)["']/gi,
+    "MemoryService is the only way to memory (ADR 0008 #4): use forUser(scope).memory",
   ],
   [
     "master-key",
