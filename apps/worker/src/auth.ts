@@ -8,6 +8,7 @@ import {
   type RegistrationResponseJSON,
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
+import { decodeAttestationObject, isoBase64URL } from "@simplewebauthn/server/helpers";
 
 export const SESSION_COOKIE = "__Host-opa_session";
 export const CHALLENGE_COOKIE = "__Host-opa_webauthn";
@@ -131,13 +132,32 @@ export function registrationOptions(url: string, userId: string) {
   });
 }
 
-/** Verifies a registration response with user verification. `null` if it doesn't verify. */
+/**
+ * True only for an attestation object whose `fmt` is "none". `attestationType: "none"` above is a
+ * preference the client may ignore, and we never use an attestation statement, so any other
+ * format is refused before the verifier parses it (TWO-427 L-5).
+ */
+function noneAttestation(response: unknown): boolean {
+  const encoded = (response as RegistrationResponseJSON | null)?.response?.attestationObject;
+  if (typeof encoded !== "string") return false;
+  try {
+    return decodeAttestationObject(isoBase64URL.toBuffer(encoded)).get("fmt") === "none";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verifies a registration response with user verification and "none" attestation, on every
+ * registration path. `null` if it doesn't verify.
+ */
 export async function verifyPasskey(
   requestUrl: string,
   response: unknown,
   challenge: string,
   userId: string,
 ): Promise<NewPasskey | null> {
+  if (!noneAttestation(response)) return null;
   const url = new URL(requestUrl);
   const verification = await verifyRegistrationResponse({
     response: response as RegistrationResponseJSON,
