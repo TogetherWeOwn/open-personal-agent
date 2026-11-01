@@ -23,12 +23,13 @@ function since(value: string | undefined, fallback: number, now: number, maxAge:
 function period(rows: TotalsRow[], now: number) {
   const groups = new Map<
     string,
-    { label: string; billingUrl: string | null; costMicroUsd: number }
+    { name: string; label: string; billingUrl: string | null; costMicroUsd: number }
   >();
   const lines = rows.map((row) => {
     const info = providerInfo(row.providerId);
     const cost = row.costSource ? (row.costMicroUsd ?? 0) : null;
     const group = groups.get(row.providerId) ?? {
+      name: info.name,
       label:
         info.billedBy === "included-workers-paid"
           ? "Included in Workers Paid"
