@@ -13,7 +13,7 @@ const B = "(?:DB|FILES|ASSISTANT)";
 export const RULES = [
   [
     "raw-binding",
-    /^packages\/db\//,
+    /^(?:packages\/db\/|apps\/node\/src\/compose\.ts$)/, // the Node root builds the bindings
     // env.DB, c.env?.FILES, env["DB"], const { DB } = env, ({ DB }: Env), ({ FILES }) => and
     // Durable Object names
     new RegExp(
@@ -30,7 +30,7 @@ export const RULES = [
   ],
   [
     "master-key",
-    /^(?:packages\/vault\/|apps\/worker\/src\/compose\.ts$)/,
+    /^(?:packages\/vault\/|apps\/(?:worker|node)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,
     "only packages/vault and the composition root may name it (ADR 0010 D4.1 #2)",
   ],
