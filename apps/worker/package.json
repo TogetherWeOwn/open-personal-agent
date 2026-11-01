@@ -8,7 +8,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@opa/core": "workspace:*",
     "@opa/db": "workspace:*",
+    "@opa/providers": "workspace:*",
     "@opa/vault": "workspace:*",
     "hono": "4.13.14"
   }

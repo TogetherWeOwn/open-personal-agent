@@ -22,3 +22,15 @@ export interface Env extends Bindings {
   VAULT: Vault | null;
   VAULT_STATUS: "ok" | "key_invalid" | "previous_key_invalid";
 }
+
+export interface Session {
+  /** The `sessions` row ID, never the cookie value. */
+  id: string;
+  userId: string;
+}
+
+/** Hono's environment for the app: bindings, plus the session the guard resolved. */
+export interface AppEnv {
+  Bindings: Env;
+  Variables: { session: Session };
+}

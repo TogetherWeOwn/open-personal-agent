@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Hono } from "hono";
-import type { Env } from "./env";
+import type { AppEnv } from "./env";
 import { checkHealth } from "./health";
+import { settings } from "./model-settings";
 import { finishSetupPage } from "./setup-page";
 
-export const app = new Hono<{ Bindings: Env }>();
+export const app = new Hono<AppEnv>();
 
 app.get("/api/health", async (c) => {
   const health = await checkHealth(c.env);
@@ -19,6 +20,8 @@ app.use("/api/secrets/*", async (c, next) => {
   c.header("Cache-Control", "no-store");
   return c.json({ error: "vault_unavailable" }, 503);
 });
+
+app.route("/api/settings", settings);
 
 // The claim flow (M2-09) takes over `/setup` once the deployment is ready; until then the SPA
 // serves it.

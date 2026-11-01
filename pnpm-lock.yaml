@@ -72,9 +72,15 @@ importers:
 
   apps/worker:
     dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@opa/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@opa/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@opa/vault':
         specifier: workspace:*
         version: link:../../packages/vault
