@@ -11,6 +11,7 @@ import { checkHealth, setupRequired } from "./health";
 import { settings } from "./model-settings";
 import { publicRateLimit } from "./rate-limit";
 import { recover } from "./recover";
+import { retentionSettings } from "./retention";
 import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
@@ -51,6 +52,7 @@ shared.route("/api/settings/vault", vaultRoutes);
 shared.route("/api/settings/spending", spendingRoutes);
 shared.route("/api/settings", settings);
 shared.route("/api/settings", toolSettings);
+shared.route("/api/settings", retentionSettings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 shared.get("/setup", async (c) => {

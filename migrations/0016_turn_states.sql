@@ -14,5 +14,16 @@ CREATE TABLE `turn_states` (
 );
 --> statement-breakpoint
 CREATE INDEX `turn_states_user_conversation_idx` ON `turn_states` (`user_id`,`conversation_id`);--> statement-breakpoint
+-- Hand-added (TWO-427 L-4, as in 0015): a stopped turn's conversation must be the same user's.
+CREATE TRIGGER `turn_states_conversation_id_owner_insert` BEFORE INSERT ON `turn_states`
+WHEN NOT EXISTS (SELECT 1 FROM `conversations` WHERE `id` = NEW.`conversation_id` AND `user_id` = NEW.`user_id`)
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
+CREATE TRIGGER `turn_states_conversation_id_owner_update` BEFORE UPDATE OF `conversation_id`, `user_id` ON `turn_states`
+WHEN NOT EXISTS (SELECT 1 FROM `conversations` WHERE `id` = NEW.`conversation_id` AND `user_id` = NEW.`user_id`)
+BEGIN
+	SELECT RAISE(ABORT, 'cross_user_reference');
+END;--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (14);
+INSERT INTO `schema_version` (`version`) VALUES (16);
