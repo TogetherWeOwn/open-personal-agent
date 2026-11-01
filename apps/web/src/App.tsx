@@ -37,7 +37,7 @@ import {
   settingsApi,
 } from "./models/settings-api";
 import { NavShell } from "./NavShell";
-import { hasNavigated, match, navigate, usePath } from "./router";
+import { hasNavigated, match, navigate, resolveChatAddress, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { SpendingBanners } from "./settings/SpendingBanners";
 import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet } from "./ui";
@@ -97,6 +97,9 @@ export function App({ transport }: AppProps) {
   if (!active) throw new Error("no conversation");
 
   const [healthy, setHealthy] = useState(true);
+  // True once the conversation list has loaded (or failed and stayed down): only then can a
+  // `/c/:conversationId` address be judged unknown instead of merely not-yet-loaded.
+  const [listed, setListed] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
@@ -168,7 +171,10 @@ export function App({ transport }: AppProps) {
             pendingPins.current.delete(id);
           }
           dispatch({ type: "listed", conversations });
+          setListed(true);
         })
+        // A failed load leaves `listed` false: a `/c/:conversationId` address then waits
+        // instead of misjudging its chat unknown.
         .catch(() => {});
     const connected = () => {
       dispatch({ type: "connected" });
@@ -184,6 +190,36 @@ export function App({ transport }: AppProps) {
       dispatch({ type: "event", event });
     }, connected);
   }, [transport]);
+
+  // A task's conversation link names its chat in the address bar; adopt it once the list
+  // holding it loads. Each address is adopted once, so switching chats in place (which leaves
+  // the address behind) never yanks the open chat back. Adopting opens the thread the way a
+  // tap would: on phones the thread panel stays hidden until `threadOpen` is set, so selecting
+  // alone would leave the Chats list showing. An unknown chat after the load can't open
+  // anything, so the address falls back to chat.
+  const handledChatAddress = useRef<string | null>(null);
+  const chatConversationId =
+    matched?.route.path === "/c/:conversationId" ? matched.params.conversationId : undefined;
+  useEffect(() => {
+    if (!chatConversationId) {
+      handledChatAddress.current = null;
+      return;
+    }
+    if (chatConversationId === handledChatAddress.current) return;
+    const resolution = resolveChatAddress(
+      chatConversationId,
+      state.conversations,
+      state.activeId,
+      listed,
+    );
+    if (resolution.action === "wait") return;
+    handledChatAddress.current = chatConversationId;
+    if (resolution.action === "select") {
+      dispatch({ type: "select", id: resolution.id });
+      setThreadOpen(true);
+    } else if (resolution.action === "none") setThreadOpen(true);
+    else if (resolution.action === "redirect") navigate("/", true);
+  }, [chatConversationId, state.conversations, state.activeId, listed]);
 
   // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
   // whose last events were missed while disconnected.

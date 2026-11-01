@@ -9,6 +9,8 @@ import { Waiting } from "./memory/Waiting";
 import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
+import { TaskDetails } from "./tasks/TaskDetails";
+import { Tasks } from "./tasks/Tasks";
 import { EmptyState, Page } from "./ui";
 import { Usage } from "./usage/Usage";
 
@@ -127,25 +129,8 @@ export const routes: Route[] = [
   },
   { path: "/approvals/:approvalId", nav: "inbox", screen: () => <Redirect to="/inbox" /> },
   { path: "/activity", nav: "activity", screen: () => <Redirect to="/activity/tasks" /> },
-  {
-    path: "/activity/tasks",
-    nav: "activity",
-    screen: placeholder(
-      "Tasks",
-      "No tasks yet.",
-      "When I work on something for you, it shows up here.",
-    ),
-  },
-  {
-    path: "/activity/tasks/:taskId",
-    nav: "activity",
-    screen: placeholder(
-      "Task",
-      "This task doesn't exist or was deleted.",
-      undefined,
-      go("/activity/tasks", "See all tasks"),
-    ),
-  },
+  { path: "/activity/tasks", nav: "activity", screen: Tasks },
+  { path: "/activity/tasks/:taskId", nav: "activity", screen: TaskDetails },
   { path: "/activity/outputs", nav: "activity", screen: Outputs },
   { path: "/activity/outputs/:outputId", nav: "activity", screen: Output },
   {
