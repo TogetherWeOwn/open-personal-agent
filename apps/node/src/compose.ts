@@ -61,6 +61,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   const { dataDir, migrationsDir, assetsDir, vars, publicOrigin } = options;
   const origin = publicOrigin && new URL(publicOrigin).origin; // throws if invalid
   const allowPrivate = vars.OPA_ALLOW_PRIVATE_MODEL_HOSTS === "1";
+  const proxyHeader = vars.OPA_CLIENT_IP_HEADER;
   const db = openSqlite(join(dataDir, "opa.sqlite"));
   migrate(db, migrationsDir);
   // Static files, with the SPA's index.html for any other path, as Workers assets do.
@@ -82,7 +83,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     OPA_SETUP_TOKEN: vars.OPA_SETUP_TOKEN,
     // No proxy header named: key per-address limits on the socket, never on a header the client
     // sends, such as CF-Connecting-IP, which only Cloudflare sets.
-    OPA_CLIENT_IP_HEADER: vars.OPA_CLIENT_IP_HEADER || SOCKET_ADDRESS_HEADER,
+    OPA_CLIENT_IP_HEADER: proxyHeader || SOCKET_ADDRESS_HEADER,
     PUBLIC_LIMIT: memoryRateLimit(30, 60_000), // the Worker's `ratelimits` in wrangler.jsonc
   } as unknown as WorkerEnv;
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
@@ -94,10 +95,12 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       // Not from X-Forwarded-* headers: any client could set those.
       const external = origin ? new URL(url.pathname + url.search, origin) : url;
       const forwarded = new Request(external, request);
-      // Always overwritten, so a client can't pick its own address.
-      forwarded.headers.delete(SOCKET_ADDRESS_HEADER);
-      const address = bindings?.incoming?.socket?.remoteAddress;
-      if (address) forwarded.headers.set(SOCKET_ADDRESS_HEADER, address);
+      if (!proxyHeader) {
+        // Always overwritten, so a client can't pick its own address.
+        forwarded.headers.delete(SOCKET_ADDRESS_HEADER);
+        const address = bindings?.incoming?.socket?.remoteAddress;
+        if (address) forwarded.headers.set(SOCKET_ADDRESS_HEADER, address);
+      }
       return app.fetch(forwarded, await env);
     },
     db,
