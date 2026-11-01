@@ -207,7 +207,10 @@ async function driveLoop(
             JSON.stringify(req.tools ?? []).length;
           const reservation = await ctx.budget.reserve(key, billingId, req.model, chars);
           if (!reservation) return { limited: true, events: [] as JsonValue };
-          await picked.used?.();
+          // Once the hold is taken, only the model call itself may fail the step, so a retry
+          // never pays for a second answer to a call that already succeeded. The key's
+          // last-used stamp and the display ledger are bookkeeping: they fail quietly.
+          await picked.used?.().catch(() => {});
           let usage: ModelUsage | null = null;
           const events: ModelEvent[] = [];
           try {
@@ -219,11 +222,13 @@ async function driveLoop(
               if (e.type === "usage") usage = e.usage;
             }
           } finally {
-            await ctx.budget.settle(key, billingId, req.model, usage);
+            // A settle that fails leaves the hold charged at its full reservation (the retry's
+            // reserve settles it so), which errs on the side of the cap.
+            await ctx.budget.settle(key, billingId, req.model, usage).catch(() => {});
           }
-          // One ledger row per call, like a chat turn. A step retry can double-write this
-          // display row; the cap itself lives in the assistant and stays exact.
-          await user.usage.record({ providerId: billingId, model: req.model, usage });
+          await user.usage
+            .record({ providerId: billingId, model: req.model, usage })
+            .catch(() => {});
           return { limited: false, events: events as unknown as JsonValue };
         });
         if (result.limited) {
@@ -242,8 +247,12 @@ async function driveLoop(
       ...(tool.target ? { target: tool.target } : {}),
       execute: async (input) => {
         toolSeq += 1;
-        const out = await ctx.step(`tool:${toolSeq}`, async () =>
-          tool.execute(input, new AbortController().signal),
+        // Only a read retries: a write that acted and then failed must not act again. (Steps
+        // are still at-least-once: an engine crash mid-step reruns it.)
+        const out = await ctx.step(
+          `tool:${toolSeq}`,
+          async () => tool.execute(input, new AbortController().signal),
+          tool.manifest.riskClass === "read" ? undefined : { retries: { limit: 0, delayMs: 0 } },
         );
         return out as ToolOutput;
       },
@@ -264,6 +273,8 @@ async function driveLoop(
 
   for (let cycle = 0; ; cycle += 1) {
     const loaded = await ctx.step(`task:load:${cycle}`, async () => {
+      // After an approval wait the task is running again; markRunning never revives an ending.
+      if (cycle > 0) await user.tasks.markRunning(taskId, now());
       const row = await user.tasks.get(taskId);
       return row?.state ?? null;
     });
@@ -285,7 +296,7 @@ async function driveLoop(
       const ok = await user.tasks.saveState(
         taskId,
         body,
-        outcome === "awaiting_approval" ? "waiting_for_approval" : undefined,
+        outcome === "awaiting_approval" ? "waiting_for_approval" : "running",
       );
       return ok;
     });

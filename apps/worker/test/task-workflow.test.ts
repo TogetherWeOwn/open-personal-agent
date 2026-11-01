@@ -86,9 +86,11 @@ const tool = (
 /** A stepper that persists step outputs, and runs scripted side effects on each wait. */
 class FakeStepper implements TaskStepper {
   readonly persisted = new Map<string, JsonValue>();
+  readonly configs = new Map<string, unknown>();
   waits = 0;
   constructor(private readonly onWait: ((n: number) => Promise<JsonValue>)[] = []) {}
-  async do<T extends JsonValue>(name: string, _c: unknown, fn: () => Promise<T>): Promise<T> {
+  async do<T extends JsonValue>(name: string, config: unknown, fn: () => Promise<T>): Promise<T> {
+    this.configs.set(name, config);
     const hit = this.persisted.get(name);
     if (hit !== undefined) return hit as T;
     const value = await fn();
@@ -129,15 +131,23 @@ async function run(
   instanceId: string,
   stepper: FakeStepper,
   tools: LoopTool[] = [],
+  over: { used?: () => Promise<void>; now?: () => number } = {},
 ) {
   const { provider, streams } = scripted(replies);
-  const resolved = { provider, model: "gpt-4.1", apiKey: canary, billingId: "openai" };
+  const resolved = {
+    provider,
+    model: "gpt-4.1",
+    apiKey: canary,
+    billingId: "openai",
+    ...(over.used ? { used: over.used } : {}),
+  };
   const promise = executeTask(
     env,
     await compose(env),
     { resolveModel: async () => resolved, taskTools: tools },
     instanceId,
     stepper,
+    over.now,
   );
   return { promise, streams };
 }
@@ -211,7 +221,11 @@ describe("task workflow", () => {
 
   it("waits for approval, ignores the event payload and re-reads the decision from D1", async () => {
     const { taskId, instanceId } = await makeTask();
-    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    let statusWhenSent: string | undefined;
+    const send = tool("send", "consequential", async () => {
+      statusWhenSent = (await alice.tasks.get(taskId))?.status;
+      return { ok: true, content: "sent" };
+    });
     const stepper = new FakeStepper([
       // A payload that claims approval while D1 still says pending: nothing may run from it.
       async () => ({ decision: "approve", scope: "once" }) as JsonValue,
@@ -240,8 +254,43 @@ describe("task workflow", () => {
     await promise;
     expect(stepper.waits).toBe(2); // the lying payload sent it back to waiting
     expect(send.calls).toBe(1); // the gated tool ran once, after the D1 decision
+    expect(statusWhenSent).toBe("running"); // back from waiting_for_approval once it resumed
+    // A write that acted must not act again on a retry; only reads retry.
+    const toolStep = [...stepper.configs.entries()].find(([n]) => n.startsWith("tool:"));
+    expect(toolStep?.[1]).toMatchObject({ retries: { limit: 0 } });
     expect(streams()).toBe(2);
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+  });
+
+  it("bookkeeping that fails after the hold never repeats the model call", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const { promise, streams } = await run([{ text: "hi" }], instanceId, new FakeStepper(), [], {
+      used: async () => {
+        throw new Error("D1 hiccup");
+      },
+    });
+    await promise;
+    expect(streams()).toBe(1);
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+  });
+
+  it("a task that runs out of time mid-turn ends budget-limited, not failed", async () => {
+    const { taskId, instanceId } = await makeTask();
+    let skew = 0;
+    const slow = tool("fetch", "read", async () => {
+      skew = 7 * 3_600_000; // the background limit is 6 h
+      return { ok: true, content: "page" };
+    });
+    const { promise, streams } = await run(
+      [{ calls: [["fetch", { q: "x" }]] }, { text: "more" }],
+      instanceId,
+      new FakeStepper(),
+      [slow],
+      { now: () => Date.now() + skew },
+    );
+    await promise;
+    expect(streams()).toBe(1); // the next model step's guard stopped it
+    expect((await alice.tasks.get(taskId))?.status).toBe("budget_limited");
   });
 
   it("runs through the real Workflow binding", async () => {
