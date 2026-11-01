@@ -136,12 +136,16 @@ test("the context chip names the model and switches this chat to another (M3-06 
   await expect(
     page.getByRole("button", { name: /some\/model · OpenRouter, model for this chat/ }),
   ).toBeVisible();
-  expect(pins).toEqual([{ provider: "p2", model: "some/model" }]);
+  // A chat the server doesn't have yet saves nothing: its first message carries the pick.
+  expect(pins).toEqual([]);
+  await sendByKeyboard(page, "Plan my week");
   // Back to the chat model clears the pin instead of naming a provider.
   await page.getByRole("button", { name: /model for this chat/ }).click();
   await page.getByRole("menuitem", { name: /Use my chat model/ }).click();
   await expect(page.getByRole("log")).toContainText("Switched to GPT-4.1 mini via OpenAI");
-  expect(pins).toEqual([{ provider: "p2", model: "some/model" }, null]);
+  await page.getByRole("button", { name: /model for this chat/ }).click();
+  await page.getByRole("menuitem", { name: /some\/model · OpenRouter/ }).click();
+  await expect.poll(() => pins).toEqual([null, { provider: "p2", model: "some/model" }]);
 });
 
 test("a send right after a switch waits for the switch to save, so the reply uses it", async ({
@@ -156,18 +160,19 @@ test("a send right after a switch waits for the switch to save, so the reply use
     await route.fulfill({ status: 204 });
   });
   await page.goto("/");
+  await sendByKeyboard(page, "Plan my week");
   await page.getByRole("button", { name: /model for this chat/ }).click();
   await page.getByRole("menuitem", { name: /some\/model · OpenRouter/ }).click();
-  await page.getByRole("textbox", { name: "Message" }).fill("Plan my week");
+  await page.getByRole("textbox", { name: "Message" }).fill("And next week?");
   await page.keyboard.press("Enter");
   const log = page.getByRole("log", { name: "Messages" });
-  await expect(log).toContainText("Plan my week");
+  await expect(log).toContainText("And next week?");
   // The send hasn't gone, so no turn has started, while the switch is still saving.
   await page.waitForTimeout(300);
   await expect(page.getByRole("status")).toHaveText("Switched to some/model via OpenRouter");
   release();
   await expect(page.getByRole("status")).toContainText("Assistant is working.");
-  await expect(log).toContainText("a word at a time.");
+  await expect(page.getByRole("status")).toContainText("Assistant replied");
 });
 
 test("with no model set up, the chip says so and Send opens Settings › Models", async ({

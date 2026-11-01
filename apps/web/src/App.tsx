@@ -81,15 +81,20 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     };
   }, [visible]);
 
-  // Each chat's switches save in order, and a send waits for them, so a reply always uses the
-  // latest switch. A chat the server hasn't seen yet (nothing sent) can't save one: it waits in
-  // `pendingPins` and the chat's first send carries it. `sentPins` is what that send carried, so a
-  // switch made after it is still saved once the chat exists.
-  const saves = useRef(new Map<string, Promise<void>>());
+  // The chats the server has: listed, or one whose turn has started. A switch in any other chat
+  // waits in `pendingPins`, and the chat's sends carry it, so its first reply already uses it and
+  // the server saves it with the new chat. `sentPins` is what the last send carried: a switch made
+  // after it is saved once the chat's turn starts.
+  const onServer = useRef(new Set<string>());
   const pendingPins = useRef(new Map<string, RolePick | null>());
   const sentPins = useRef(new Map<string, RolePick | null | undefined>());
-  const savePin = useCallback((id: string, save: () => Promise<void>) => {
-    const chain = (saves.current.get(id) ?? Promise.resolve()).then(save);
+  // Each chat's saved switches go in order, and a send waits for them, so a reply always uses the
+  // latest switch.
+  const saves = useRef(new Map<string, Promise<void>>());
+  const savePin = useCallback((id: string, pick: RolePick | null, failed: () => void) => {
+    const chain = (saves.current.get(id) ?? Promise.resolve()).then(() =>
+      setConversationModel(id, pick).catch(failed),
+    );
     saves.current.set(id, chain);
     void chain.then(() => saves.current.get(id) === chain && saves.current.delete(id));
   }, []);
@@ -121,7 +126,15 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     const list = () =>
       transport
         .conversations()
-        .then((conversations) => dispatch({ type: "listed", conversations }))
+        .then((conversations) => {
+          // The server's pin wins from here, as it does in the chip.
+          for (const { id } of conversations) {
+            onServer.current.add(id);
+            pendingPins.current.delete(id);
+            sentPins.current.delete(id);
+          }
+          dispatch({ type: "listed", conversations });
+        })
         .catch(() => {});
     const connected = () => {
       dispatch({ type: "connected" });
@@ -131,13 +144,23 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       if (event.type === "turn.started") {
         if (!known.current.has(event.sessionId)) void list();
         const id = event.sessionId;
+        onServer.current.add(id);
         const pick = pendingPins.current.get(id);
-        const sent = sentPins.current.get(id);
+        const sent = sentPins.current.get(id) ?? null;
         pendingPins.current.delete(id);
         sentPins.current.delete(id);
         // The send saved its pick with the new chat; a later switch is saved now the chat exists.
-        if (pick !== undefined && pick !== sent)
-          savePin(id, () => setConversationModel(id, pick).catch(() => {}));
+        if (pick !== undefined && pick !== sent) {
+          savePin(id, pick, () =>
+            dispatch({
+              type: "model",
+              id,
+              noticeId: newId(),
+              pick: sent,
+              notice: "Couldn't switch the model, so nothing changed.",
+            }),
+          );
+        }
       }
       dispatch({ type: "event", event });
     }, connected);
@@ -168,7 +191,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     const { id } = active;
     const go = () => {
       const pick = pendingPins.current.get(id);
-      sentPins.current.set(id, pick);
+      if (pick !== undefined) sentPins.current.set(id, pick);
       transport.send(id, text, live(pick) ?? undefined);
     };
     const saving = saves.current.get(id);
@@ -196,26 +219,20 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       pick,
       notice: `Switched to ${modelName} via ${providerName}`,
     });
-    savePin(id, async () => {
-      try {
-        await setConversationModel(id, pick);
-        pendingPins.current.delete(id);
-      } catch (e) {
-        // A brand-new chat isn't on the server yet; its first send carries the pick.
-        if ((e as Error).message === "not_found") {
-          pendingPins.current.set(id, pick);
-          return;
-        }
-        // The failure line takes the place of the optimistic "Switched to" line.
-        dispatch({
-          type: "model",
-          id,
-          noticeId,
-          pick: previous,
-          notice: "Couldn't switch the model, so nothing changed.",
-        });
-      }
-    });
+    if (!onServer.current.has(id)) {
+      pendingPins.current.set(id, pick);
+      return;
+    }
+    // The failure line takes the place of the optimistic "Switched to" line.
+    savePin(id, pick, () =>
+      dispatch({
+        type: "model",
+        id,
+        noticeId,
+        pick: previous,
+        notice: "Couldn't switch the model, so nothing changed.",
+      }),
+    );
   };
 
   const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
