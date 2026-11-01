@@ -2,14 +2,16 @@
 // The streaming ZIP writer for the data export (M3-20 AC1). Entries are stored, never
 // compressed: no compression pass, no dependency, and entry bytes stream from R2 to the R2
 // multipart upload in chunks, so the archive is never in Worker memory or a step output. Only
-// the central directory (names, sizes, checksums) is held. Capped at 4 GiB per archive — no
-// ZIP64: an export that large is a bug, and the writer throws rather than emit a corrupt file.
-// Runtime-agnostic (ADR 0011 #4): `Uint8Array` and `TextEncoder` only.
+// the central directory (names, sizes, checksums) is held. Capped at 4 GiB per archive and
+// 65,535 entries — no ZIP64: an export that large is a bug, and the writer throws rather than
+// emit a corrupt file. Runtime-agnostic (ADR 0011 #4): `Uint8Array` and `TextEncoder` only.
 
 /** R2's smallest multipart part, except the last: the writer flushes full parts this size. */
 const PART_BYTES = 5 * 1024 * 1024;
 /** The largest archive (and entry) this writer emits: 4 GiB minus one, the ZIP32 bound. */
 const MAX_BYTES = 0xffffffff;
+/** The most entries the end record can count: its two count fields are 16 bits each. */
+const MAX_ENTRIES = 0xffff;
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -41,6 +43,7 @@ export interface ZipEntry {
 export interface ZipUpload {
   uploadPart(partNumber: number, value: Uint8Array): Promise<{ etag: string }>;
   complete(parts: { partNumber: number; etag: string }[]): Promise<unknown>;
+  abort(): Promise<unknown>;
 }
 
 /** Full 5 MiB parts out, the remainder held: R2 refuses uneven non-last parts. */
@@ -117,7 +120,8 @@ async function* bodies(
 /**
  * Writes `entries` to `upload` as one stored archive and completes it, in entry order. Returns
  * the archive's byte size and entry count. On any failure the upload is left uncompleted for
- * the caller to abort: a half-written ZIP must never complete.
+ * the caller to abort: a half-written ZIP must never complete. Throws past the ZIP32 bounds
+ * (4 GiB, 65,535 entries) rather than emit an archive whose end record cannot count it.
  */
 export async function writeZip(
   entries: Iterable<ZipEntry> | AsyncIterable<ZipEntry>,
@@ -197,6 +201,7 @@ export async function writeZip(
     centralBytes += record.length;
     count += 1;
   }
+  if (count > MAX_ENTRIES) throw new Error("export exceeds the 65,535 entry bound");
 
   const directoryOffset = offset;
   await emit(concat(central));

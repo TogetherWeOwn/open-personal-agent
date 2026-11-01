@@ -21,6 +21,11 @@ class MemoryUpload implements ZipUpload {
     this.completed = parts;
     return null;
   }
+  aborted = false;
+  async abort(): Promise<unknown> {
+    this.aborted = true;
+    return null;
+  }
   bytes(): Uint8Array {
     const total = this.parts.reduce((sum, p) => sum + p.length, 0);
     const out = new Uint8Array(total);
@@ -168,4 +173,15 @@ describe("writeZip", () => {
     const upload = new MemoryUpload();
     await expect(writeZip([chunked("", "x", 1)], upload)).rejects.toThrow(/entry name/);
   });
+
+  // 65,536 tiny entries stay in memory-cheap streaming; only the central directory grows.
+  it("refuses past 65,535 entries rather than wrap the end record's counts", async () => {
+    const upload = new MemoryUpload();
+    const entries = (function* () {
+      for (let i = 0; i < 65_536; i++) yield chunked(`f${i}.json`, "{}", 9);
+    })();
+    await expect(writeZip(entries, upload)).rejects.toThrow(/65,535/);
+    // The archive never completed: the caller aborts it, as the export's finish does.
+    expect(upload.completed).toBeNull();
+  }, 30_000);
 });

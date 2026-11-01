@@ -65,9 +65,12 @@ export async function stageExportItem(
       return;
     }
     case "memories":
+      // Every row and proposal, whatever the status: superseded versions and expired
+      // proposals are still the user's retained data, and revoked or expired grants are
+      // likewise answered by the grant and revoke rows in audit.json, not hidden.
       await put("memories.json", {
-        memories: await user.memory.list(),
-        proposals: await user.memory.proposals(),
+        memories: await user.memory.all(),
+        proposals: await user.memory.allProposals(),
       });
       return;
     case "tasks":
@@ -133,8 +136,8 @@ export async function stageExportItem(
 
 /**
  * Streams every staged object into the final ZIP through one multipart upload, then completes
- * it. Returns the archive's byte size for the ready row. A failure leaves the upload
- * uncompleted for the caller to abort: a half-written ZIP must never complete.
+ * it. Returns the archive's byte size for the ready row. A failure aborts the upload: a
+ * half-written ZIP must never complete, and its parts must not linger as an orphan.
  */
 export async function buildExportZip(
   user: ScopedUser,
@@ -144,16 +147,21 @@ export async function buildExportZip(
   const prefix = user.exports.stagedPrefix(exportId);
   const staged = await user.exports.listPrefix(prefix);
   const upload = await user.exports.createZipUpload(exportId);
-  return writeZip(
-    (async function* () {
-      for (const object of staged) {
-        const stored = await user.exports.getObject(object.key);
-        yield { name: object.key.slice(prefix.length), body: stored?.body ?? emptyBody() };
-      }
-    })(),
-    upload,
-    now(),
-  );
+  try {
+    return await writeZip(
+      (async function* () {
+        for (const object of staged) {
+          const stored = await user.exports.getObject(object.key);
+          yield { name: object.key.slice(prefix.length), body: stored?.body ?? emptyBody() };
+        }
+      })(),
+      upload,
+      now(),
+    );
+  } catch (error) {
+    await upload.abort().catch(() => {});
+    throw error;
+  }
 }
 
 /** Rows reconciled per sweep tick: a few deletes and one batch each, well inside a cron's CPU. */
@@ -164,7 +172,8 @@ export const SWEEP_BATCH = 100;
  * ready ones, failed ones, and runs that never finished — lose their R2 objects and move to
  * `expired`. R2 deletes are idempotent (a failed run's ZIP was never built; staged files may
  * already be gone), and the row moves only while still unexpired-state, so a row that finished
- * in the same window is never clobbered. The row stays as the user's history. Returns how many
+ * in the same window is never clobbered. A row whose objects fail to delete stays for the next
+ * tick rather than move and orphan them. The row stays as the user's history. Returns how many
  * rows moved; a tick that fails midway leaves the rest for the next one.
  */
 export async function sweepExports(
@@ -182,7 +191,12 @@ export async function sweepExports(
     // Keys are built only from checked ids; a row that fails the check is skipped, never thrown.
     if (!isId(row.id) || !isId(row.userId)) continue;
     const dir = `u/${row.userId}/exports/${row.id}`;
-    await bindings.FILES.delete(`${dir}.zip`).catch(() => {});
+    let cleaned = true;
+    const remove = (key: string) =>
+      bindings.FILES.delete(key).catch(() => {
+        cleaned = false;
+      });
+    await remove(`${dir}.zip`);
     if (bindings.FILES.list) {
       let cursor: string | undefined;
       for (;;) {
@@ -191,12 +205,18 @@ export async function sweepExports(
           limit: 1000,
           ...(cursor === undefined ? {} : { cursor }),
         }).catch(() => null);
-        if (!page) break;
-        for (const object of page.objects) await bindings.FILES.delete(object.key).catch(() => {});
+        if (!page) {
+          cleaned = false;
+          break;
+        }
+        for (const object of page.objects) await remove(object.key);
         if (!page.truncated) break;
         cursor = page.cursor;
       }
     }
+    // A failed delete leaves the row for the next tick: moved rows never come back, and
+    // their files would be orphaned with nothing left to sweep them.
+    if (!cleaned) continue;
     const moved = await db
       .update(dataExports)
       .set({ status: "expired" })
