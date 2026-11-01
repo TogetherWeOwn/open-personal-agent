@@ -8,9 +8,7 @@ import { openD1, readSchemaVersion } from "./index";
 import { conversations, users } from "./schema";
 
 declare const brand: unique symbol;
-/**
- * A user's authority over their own rows. Only `scopeFromSession` and `scopeForAssistant` mint
- * one. */
+/** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
 export type UserScope = { readonly userId: string; readonly [brand]: true };
 
 const issued = new WeakSet<object>();
