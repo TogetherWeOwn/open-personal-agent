@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings (m3-ux §3.9): one screen, a page per axis. M3-06b ships Models and the read-only
-// Agent engine page; the other axes arrive with their own cards.
+// Agent engine page, M3-17 Spending; the other axes arrive with their own cards.
 import { useEffect, useRef } from "react";
 import { Heading, Link } from "react-aria-components";
 import { hasNavigated } from "../router";
 import { pageTitle } from "../ui";
 import { AgentEngine } from "./AgentEngine";
 import { ModelsSettings } from "./ModelsSettings";
+import { SpendingSettings } from "./Spending";
 
-export type SettingsPage = "models" | "agent-engine";
+export type SettingsPage = "models" | "agent-engine" | "spending";
 
 const PAGES: { id: SettingsPage; label: string; href: string }[] = [
   { id: "models", label: "Models", href: "/settings/models" },
   { id: "agent-engine", label: "Agent engine", href: "/settings/agent-engine" },
+  { id: "spending", label: "Spending", href: "/settings/spending" },
 ];
 
 const link = "font-medium text-accent underline underline-offset-2";
@@ -52,7 +54,13 @@ export function Settings({ page }: { page: SettingsPage }) {
           </Link>
         ))}
       </nav>
-      {page === "models" ? <ModelsSettings /> : <AgentEngine />}
+      {page === "models" ? (
+        <ModelsSettings />
+      ) : page === "spending" ? (
+        <SpendingSettings />
+      ) : (
+        <AgentEngine />
+      )}
     </main>
   );
 }
