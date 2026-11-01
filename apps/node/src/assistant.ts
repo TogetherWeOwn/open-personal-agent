@@ -420,13 +420,15 @@ export class NodeAssistant {
   }
 
   /**
-   * Settles what a restart left behind, at most once per process: a failure retries on the next
-   * call. Safe to call any time; it resolves once the sweep has run.
+   * Settles what a restart left behind, at most once per process: a failure resets, so the next
+   * turn retries it, and the caller sees the rejection to report like any other turn failure.
+   * Safe to call any time; it resolves once the sweep has run.
    */
   recover(): Promise<void> {
     if (!this.#recovery) {
-      this.#recovery = this.#recover().catch(() => {
+      this.#recovery = this.#recover().catch((err) => {
         this.#recovery = null;
+        throw err;
       });
     }
     return this.#recovery;
@@ -436,9 +438,12 @@ export class NodeAssistant {
    * The restart sweep (M3-23a review): in-memory checkpoints don't survive a restart, so any
    * streaming reply still in D1 belongs to a turn that will never settle it, and any hold with
    * no saved stop belongs to a turn that will never spend it. Streaming replies become
-   * `interrupted` (keeping their text, as `interrupt` does), and those holds go back
-   * uncharged. Stopped turns (approval, limit) keep both for their resume, as the worker's
-   * `onFiberRecovered` keeps them: their `turn_states` row names the reply to spare.
+   * `interrupted` (keeping their text, as `interrupt` does). Those holds settle at their full
+   * reservation: with no checkpoint, the model may already have been called and billed, as the
+   * worker's `onFiberRecovered` settles a written turn whose `callUsage` is null. Settling
+   * twice charges once, so this costs nothing more if the turn already settled. Stopped turns
+   * (approval, limit) keep both for their resume, as the worker's `onFiberRecovered` keeps
+   * them: their `turn_states` row names the reply to spare.
    */
   async #recover(): Promise<void> {
     const repo = await this.#repo;
@@ -454,7 +459,10 @@ export class NodeAssistant {
         stopped.add(row.replyId);
         continue;
       }
-      for (const hold of holds) this.limits.release(hold);
+      // No checkpoint says whether the model was called, so charge the reservation rather
+      // than forget a call the provider may have billed. An unknown provider prices at the
+      // reservation, and a hold that already settled charges nothing more.
+      for (const hold of holds) this.limits.settle(hold, "", "", null);
     }
     for (const conv of await repo.listConversations()) {
       for (const m of (await repo.chat.listMessages(conv.id)) ?? []) {

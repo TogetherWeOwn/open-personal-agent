@@ -167,16 +167,31 @@ describe("NodeAssistant recovery", () => {
     return { userId, replyId, assistant };
   }
 
-  it("interrupts a dead turn's reply and releases its hold on startup", async () => {
+  it("interrupts a dead turn's reply and settles its hold at the reservation", async () => {
     const { replyId, assistant } = seedDeadTurn();
     await assistant.recover();
 
+    // No checkpoint says whether the model was called, so the hold is charged, not released.
     expect(assistant.limits.totals().heldMicroUsd).toBe(0);
+    expect(assistant.limits.totals().todayMicroUsd).toBeGreaterThan(0);
     expect(
       (app.db as DatabaseSync)
         .prepare("SELECT status, content FROM messages WHERE id = ?")
         .get(replyId),
     ).toEqual({ status: "interrupted", content: "half-written" });
+  });
+
+  it("reports a failed sweep to the caller and retries on the next turn", async () => {
+    const { assistant } = setup();
+    // The factory's fire-and-forget sweep hasn't run past its first await yet, so the spy lands
+    // before it reads the holds.
+    const failure = new Error("sweep failed");
+    const spy = vi.spyOn(assistant.limits, "heldIds").mockImplementation(() => {
+      throw failure;
+    });
+    await expect(assistant.recover()).rejects.toBe(failure);
+    spy.mockRestore();
+    await expect(assistant.recover()).resolves.toBeUndefined();
   });
 
   it("keeps a stopped turn's reply and hold for its resume", async () => {
@@ -231,6 +246,33 @@ describe("NodeAssistant shutdown", () => {
     expect(ofType(tab, "turn.failed").at(-1)?.payload).toMatchObject({
       message: "The server is shutting down.",
     });
+  });
+
+  it("refuses turns for assistants created after shutdown starts", async () => {
+    // An isolated app: shutting down the shared one would refuse every later send in this file.
+    const gatedDir = mkdtempSync(join(tmpdir(), "opa-shutdown-gate-"));
+    try {
+      const gated = createNodeApp({
+        dataDir: gatedDir,
+        migrationsDir: join(import.meta.dirname, "../../../migrations"),
+        assetsDir: gatedDir,
+        vars,
+      });
+      try {
+        await gated.shutdown();
+        const assistant = gated.assistantFor("shutdown-gate-user");
+        const tab = socket();
+        const conn = assistant.open(tab, "session-shutdown-gate", false);
+        assistant.message(conn, send("conv-gate", "Hello"));
+        expect(ofType(tab, "turn.failed").at(-1)?.payload).toMatchObject({
+          message: "The server is shutting down.",
+        });
+      } finally {
+        gated.db.close();
+      }
+    } finally {
+      rmSync(gatedDir, { recursive: true, force: true });
+    }
   });
 
   it("settles the running turn instead of hanging", async () => {

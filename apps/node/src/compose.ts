@@ -62,7 +62,8 @@ export interface NodeApp {
   /**
    * Refuses new turns, closes every chat tab and interrupts running turns, resolving once they
    * have settled. Shutdown awaits it before closing the database, since upgraded sockets are
-   * not tracked by `server.close`.
+   * not tracked by `server.close`. Assistants created after shutdown starts are born closing,
+   * so their turns can't outlive the database close.
    */
   shutdown(): Promise<void>;
 }
@@ -85,15 +86,24 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   // The user's in-process assistant, one per user like the Worker's Durable Object. The
   // database outlives them; a restart drops only the sockets, which reconnect and resume.
   const assistants = new Map<string, NodeAssistant>();
+  // Set before the shutdown snapshot: an assistant created while the drain runs starts already
+  // closing, so no new turn can outlive the database close.
+  let closing = false;
   const { assistantFor } = {
     assistantFor(userId: string): NodeAssistant {
       let assistant = assistants.get(userId);
       if (!assistant) {
         assistant = new NodeAssistant(userId, { db, getEnv: () => env });
         assistants.set(userId, assistant);
-        // Settle what a restart left behind (streaming replies, dead budget holds) before the
-        // first turn needs to; the sweep runs once per process and never rejects.
-        void assistant.recover();
+        if (closing) {
+          // Born mid-drain, after the shutdown snapshot: refuse new turns at once. It holds no
+          // tabs and no running turn, so there is nothing to await.
+          void assistant.shutdown().catch(() => {});
+        } else {
+          // Settle what a restart left behind (streaming replies, dead budget holds) before the
+          // first turn needs to; the sweep runs once per process and never raises unhandled.
+          void assistant.recover().catch(() => {});
+        }
       }
       return assistant;
     },
@@ -149,6 +159,9 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     db,
     assistantFor,
     shutdown: async () => {
+      // Gate first: the listener still accepts upgrades during the drain, and any assistant
+      // created after this point starts already closing (see `assistantFor`).
+      closing = true;
       await Promise.all([...assistants.values()].map((assistant) => assistant.shutdown()));
     },
   };
