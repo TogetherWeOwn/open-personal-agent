@@ -351,6 +351,20 @@ describe("chat transport", () => {
       { id: "mine", title: "first", updatedAt: expect.any(Number), model: null },
     ]);
   });
+
+  it("names a vault that needs a reset, so the tab can link to it (TWO-650)", async () => {
+    const { browser, owner } = await claim();
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveModel = async () => ({ error: "vault_reset_required" });
+    });
+    const tab = await openTab(browser);
+    tab.send?.("locked", "hi");
+    await tab.until?.("turn.failed");
+    expect(tab.events).toMatchObject([
+      { seq: 0, type: "turn.failed", payload: { code: "vault_reset_required" } },
+    ]);
+    expect(await count("conversations", "id = 'locked'")).toBe(0);
+  });
 });
 
 describe("turn and spend limits (M2-22)", () => {

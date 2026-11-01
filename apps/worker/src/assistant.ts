@@ -2,7 +2,7 @@
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
 // tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
-import type { HarnessEvent, TurnLimit } from "@opa/core";
+import type { HarnessEvent, TurnFailure, TurnLimit } from "@opa/core";
 import { createRepository, isId, scopeForAssistant, type TurnRecord } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
@@ -120,7 +120,8 @@ export class Assistant extends Agent<Bindings> {
     const picked = await this.resolveModel(await this.#composed, this.#scope, "chat", pick);
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
-      return reject(connection, conversationId, message);
+      const code = picked.error === "vault_reset_required" ? picked.error : undefined;
+      return reject(connection, conversationId, message, undefined, code);
     }
     const { provider, model } = picked;
     const turn: TurnRecord = {
@@ -279,14 +280,20 @@ const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
  * Fails a send for the tab that made it only. No turn started, so it has no turn ID, and `seq` 0
  * keeps it outside the sequence of a turn the tab may be receiving.
  */
-function reject(connection: Connection, sessionId: string, message: string, reason?: TurnLimit) {
+function reject(
+  connection: Connection,
+  sessionId: string,
+  message: string,
+  reason?: TurnLimit,
+  code?: TurnFailure,
+) {
   const event: HarnessEvent = {
     v: 1,
     seq: 0,
     sessionId,
     turnId: "",
     type: "turn.failed",
-    payload: reason ? { message, reason } : { message },
+    payload: { message, ...(reason && { reason }), ...(code && { code }) },
   };
   connection.send(JSON.stringify(event));
 }

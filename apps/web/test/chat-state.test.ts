@@ -62,6 +62,15 @@ describe("chatReducer", () => {
     const rejected = run(send, ev("turn.failed", { message: "busy" }, ""));
     expect(rejected.pending).toBe(null);
     expect(reply(rejected)?.status).toBe("error");
+    expect(reply(rejected)).not.toHaveProperty("failure");
+  });
+
+  it("keeps a vault reset refusal's code on the failed reply, so it can link there (TWO-650)", () => {
+    const locked = ev("turn.failed", { message: "Reset.", code: "vault_reset_required" }, "");
+    const state = run(send, locked);
+    expect(state.pending).toBe(null);
+    expect(reply(state)).toMatchObject({ status: "error", failure: "vault_reset_required" });
+    expect(state.limit).toBe(null);
   });
 
   it("renders a turn another tab started, with its user message from the next load", () => {

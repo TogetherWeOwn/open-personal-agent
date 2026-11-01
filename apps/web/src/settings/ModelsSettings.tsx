@@ -2,7 +2,8 @@
 // Settings › Models (M3-06b; m3-ux §3.9): several providers, each shown with its key's last 4
 // characters and its dates — a saved key is never shown again (SEC-7). The Chat and Background
 // roles pick from the saved providers; adding a key uses onboarding's form, so there is one way.
-import { useCallback, useEffect, useState } from "react";
+// When the saved keys can't be opened any more, the vault reset panel comes first (TWO-650).
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
   Heading,
@@ -24,14 +25,18 @@ import {
   dayOf,
   describePick,
   type ModelSettings,
+  needsVaultReset,
   per100Messages,
   priceChecked,
   type SavedProvider,
   settingsApi,
   settingsError,
   type TestResult,
+  type VaultState,
+  vaultState,
 } from "../models/settings-api";
 import { TestResultView } from "../models/TestResult";
+import { VaultReset } from "./VaultReset";
 
 const button =
   "min-h-11 rounded-lg px-4 font-medium data-disabled:opacity-50 data-pressed:opacity-90";
@@ -67,15 +72,25 @@ interface CardProps {
   badges: string[];
   isChat: boolean;
   onChanged: (announcement: string) => Promise<void>;
+  /** A call came back `vault_reset_required`: the page shows the reset panel. */
+  onVaultLocked: () => void;
 }
 
 /** One saved provider: what it is, its key's dates, and Test / Edit / Remove. */
-function ProviderCard({ row, badges, isChat, onChanged }: CardProps) {
+function ProviderCard({ row, badges, isChat, onChanged, onVaultLocked }: CardProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [test, setTest] = useState<TestResult | null>(null);
   const [editing, setEditing] = useState<ProviderFormValue | null>(null);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  // A provider that needs a key and has none, as after a vault reset, opens its form to take one.
+  const needsKey = row.kind !== "workers-ai" && row.key === null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: opens once each time the key goes
+  useEffect(() => {
+    if (!needsKey) return;
+    setEditing(formForProvider(row));
+    setError("");
+  }, [needsKey]);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -83,6 +98,7 @@ function ProviderCard({ row, badges, isChat, onChanged }: CardProps) {
     try {
       await fn();
     } catch (e) {
+      if (needsVaultReset(e)) onVaultLocked();
       setError(settingsError(e));
     } finally {
       setBusy(false);
@@ -90,6 +106,16 @@ function ProviderCard({ row, badges, isChat, onChanged }: CardProps) {
   };
 
   const name = `${row.modelName ?? row.model} · ${row.providerName}`;
+  const askRemove = () => {
+    if (isChat) {
+      setError(
+        "This provider is your chat model. Choose a different chat model first, then remove it.",
+      );
+      return;
+    }
+    setEditing(null);
+    setConfirmingRemove(true);
+  };
   return (
     <li className={cardClass}>
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -103,6 +129,8 @@ function ProviderCard({ row, badges, isChat, onChanged }: CardProps) {
           Key ending in {row.key.last4 ?? "····"} · added {dayOf(row.key.createdAt)} ·{" "}
           {row.key.lastUsedAt ? `last used ${dayOf(row.key.lastUsedAt)}` : "never used yet"}
         </p>
+      ) : needsKey ? (
+        <p className="text-sm">No key saved. Enter its API key again to use it.</p>
       ) : (
         <p className="text-sm">No key needed — it runs on your Cloudflare account.</p>
       )}
@@ -134,9 +162,21 @@ function ProviderCard({ row, badges, isChat, onChanged }: CardProps) {
             >
               Save
             </Button>
-            <Button className={secondary} isDisabled={busy} onPress={() => setEditing(null)}>
-              Cancel
-            </Button>
+            {needsKey ? (
+              // Without a key the form has no Cancel, so it offers the way out a card normally has.
+              <Button
+                className={secondary}
+                isDisabled={busy}
+                aria-label={`Remove ${name}`}
+                onPress={askRemove}
+              >
+                Remove
+              </Button>
+            ) : (
+              <Button className={secondary} isDisabled={busy} onPress={() => setEditing(null)}>
+                Cancel
+              </Button>
+            )}
           </div>
         </div>
       ) : confirmingRemove ? (
@@ -192,13 +232,7 @@ function ProviderCard({ row, badges, isChat, onChanged }: CardProps) {
             className={secondary}
             isDisabled={busy}
             aria-label={`Remove ${name}`}
-            onPress={() =>
-              isChat
-                ? setError(
-                    "This provider is your chat model. Choose a different chat model first, then remove it.",
-                  )
-                : setConfirmingRemove(true)
-            }
+            onPress={askRemove}
           >
             Remove
           </Button>
@@ -275,9 +309,13 @@ export function ModelsSettings() {
   const [addForm, setAddForm] = useState<ProviderFormValue>(emptyProviderForm);
   const [addError, setAddError] = useState("");
   const [addBusy, setAddBusy] = useState(false);
+  const [vault, setVault] = useState<VaultState | null>(null);
+  const providersHeading = useRef<HTMLHeadingElement>(null);
 
   const load = useCallback(async () => {
-    setSettings(await settingsApi<ModelSettings>(""));
+    const [loaded, state] = await Promise.all([settingsApi<ModelSettings>(""), vaultState()]);
+    setSettings(loaded);
+    setVault(state);
   }, []);
 
   useEffect(() => {
@@ -300,6 +338,7 @@ export function ModelsSettings() {
       setSettings(await settingsApi<ModelSettings>("/roles", "PUT", body));
       setAnnouncement(text);
     } catch (e) {
+      if (needsVaultReset(e)) setVault("reset_required");
       setRoleError(settingsError(e));
     } finally {
       setRoleBusy(false);
@@ -314,6 +353,7 @@ export function ModelsSettings() {
       setAddForm(emptyProviderForm);
       await changed(text);
     } catch (e) {
+      if (needsVaultReset(e)) setVault("reset_required");
       setAddError(settingsError(e));
     } finally {
       setAddBusy(false);
@@ -366,6 +406,19 @@ export function ModelsSettings() {
         </p>
       </div>
 
+      {vault === "reset_required" && (
+        <VaultReset
+          onReset={async () => {
+            setVault("empty");
+            setRoleError("");
+            setAddError("");
+            await changed("Your saved keys were deleted. Enter each provider's API key again.");
+            providersHeading.current?.focus();
+          }}
+          onRefresh={() => changed("Your saved keys open again. Nothing was deleted.")}
+        />
+      )}
+
       <div className="flex flex-col gap-4">
         <Heading level={3} className="text-lg font-semibold">
           Your models
@@ -414,7 +467,12 @@ export function ModelsSettings() {
       </div>
 
       <div className="flex flex-col gap-4">
-        <Heading level={3} className="text-lg font-semibold">
+        <Heading
+          level={3}
+          ref={providersHeading}
+          tabIndex={-1}
+          className="text-lg font-semibold outline-none"
+        >
           Providers
         </Heading>
         {providers.length > 0 && (
@@ -429,6 +487,7 @@ export function ModelsSettings() {
                   ...(roles.background?.provider === row.id ? ["Background model"] : []),
                 ]}
                 onChanged={changed}
+                onVaultLocked={() => setVault("reset_required")}
               />
             ))}
           </ul>

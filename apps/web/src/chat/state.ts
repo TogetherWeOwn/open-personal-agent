@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { HarnessEvent, TurnLimit } from "@opa/core";
+import type { HarnessEvent, TurnFailure, TurnLimit } from "@opa/core";
 import type { ConversationSummary, StoredMessage } from "./transport";
 
 /** The statuses D1 stores, so a loaded message keeps its own. */
@@ -10,6 +10,8 @@ export type Message = {
   role: "user" | "assistant" | "system";
   text: string;
   status: Status;
+  /** Why a failed reply failed, when the fix is elsewhere (a vault reset in Settings). */
+  failure?: TurnFailure;
 };
 /** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
 export type Conversation = {
@@ -225,8 +227,10 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return finish(state, "complete", state.announcement);
     case "turn.interrupted":
       return finish(state, "interrupted", "The reply stopped before it finished.");
-    case "turn.failed":
-      return finish(state, "error", `Something went wrong: ${event.payload.message}`);
+    case "turn.failed": {
+      const { message, code } = event.payload;
+      return finish(state, "error", `Something went wrong: ${message}`, code && { failure: code });
+    }
     case "usage.updated":
       return state;
   }
@@ -277,10 +281,15 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   return reply && reply.status !== "streaming" ? { ...next, pending: null } : next;
 }
 
-function finish(state: ChatState, status: Status, announcement: string): ChatState {
+function finish(
+  state: ChatState,
+  status: Status,
+  announcement: string,
+  patch: Partial<Message> | undefined = {},
+): ChatState {
   if (!state.pending) return state;
   return {
-    ...updateMessage(state, state.pending, () => ({ status })),
+    ...updateMessage(state, state.pending, () => ({ status, ...patch })),
     pending: null,
     announcement,
   };

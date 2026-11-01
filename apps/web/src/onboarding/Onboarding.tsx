@@ -25,9 +25,11 @@ import {
   settingsApi as api,
   type ModelSettings,
   settingsError as message,
+  needsVaultReset,
   type TestResult,
 } from "../models/settings-api";
 import { TestResultView } from "../models/TestResult";
+import { VaultReset } from "../settings/VaultReset";
 
 const STEPS = ["Claim", "About you", "Choose a model", "Test", "Costs and limits", "First chat"];
 
@@ -54,6 +56,9 @@ export function Onboarding() {
     apiKey: "",
   });
   const [test, setTest] = useState<TestResult | null>(null);
+  // The save came back `vault_reset_required`: the saved keys don't open, so offer the reset.
+  const [locked, setLocked] = useState(false);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     api<ModelSettings>("").then(
@@ -78,9 +83,11 @@ export function Onboarding() {
   const run = (fn: () => Promise<void>) => async () => {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       await fn();
     } catch (e) {
+      if (needsVaultReset(e)) setLocked(true);
       setError(message(e));
     } finally {
       setBusy(false);
@@ -129,6 +136,24 @@ export function Onboarding() {
       </Button>
     </Form>,
     <div key="model" className="flex flex-col gap-4">
+      {locked && (
+        <VaultReset
+          onReset={async () => {
+            setLocked(false);
+            setError("");
+            setNotice("Your saved keys were deleted. Enter your API key again.");
+            // The saved key is gone, so the form stops offering to keep it.
+            setSettings(await api<ModelSettings>(""));
+          }}
+          onRefresh={async () => {
+            setLocked(false);
+            setError("");
+            setNotice("Your saved keys open again. Nothing was deleted. Save again to continue.");
+            setSettings(await api<ModelSettings>(""));
+          }}
+        />
+      )}
+      {notice && <p role="status">{notice}</p>}
       <RadioGroup
         aria-label="How your assistant reaches a model"
         value={choice}
