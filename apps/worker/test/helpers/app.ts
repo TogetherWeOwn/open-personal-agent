@@ -4,6 +4,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { beforeAll, beforeEach } from "vitest";
 import { app } from "../../src/app";
+import { newSession, SESSION_COOKIE } from "../../src/auth";
 import type { Env } from "../../src/env";
 import { SoftPasskey } from "./softauthn";
 
@@ -94,4 +95,14 @@ export async function claim() {
   if (res.status !== 200) throw new Error(`claim failed: ${res.status}`);
   const owner = (await db.prepare("SELECT id FROM users").first<string>("id")) as string;
   return { key, browser, owner };
+}
+
+/** Signs `userId` in without a passkey: a live `sessions` row, and the headers that carry it. */
+export async function sessionHeaders(userId: string) {
+  const { cookie, row } = await newSession(userId);
+  await db
+    .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
+    .bind(row.id, row.userId, row.tokenHash, row.expiresAt)
+    .run();
+  return { cookie: `${SESSION_COOKIE}=${cookie}`, origin: ORIGIN };
 }

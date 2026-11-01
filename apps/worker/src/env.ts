@@ -17,6 +17,12 @@ export interface Bindings {
   OPA_SESSION_SECRET?: string;
   OPA_SETUP_TOKEN?: string;
   /**
+   * The fetch for model-provider calls. Node's composition root sets an SSRF-guarded one
+   * (ADR 0010 D8); on Workers it is unset and the runtime's fetch, which can't reach a private
+   * network, is used.
+   */
+  MODEL_FETCH?: typeof fetch;
+  /**
    * Set by a composition root whose runtime lacks these (the Node root, for now). Health reports
    * them as false without degrading.
    */

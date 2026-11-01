@@ -47,6 +47,9 @@ importers:
       tsx:
         specifier: 4.23.15
         version: 4.23.15
+      undici:
+        specifier: 7.30.1
+        version: 7.30.1
     devDependencies:
       '@types/node':
         specifier: 22.20.5
@@ -91,12 +94,18 @@ importers:
 
   apps/worker:
     dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@opa/db':
         specifier: workspace:*
         version: link:../../packages/db
       '@opa/log':
         specifier: workspace:*
         version: link:../../packages/log
+      '@opa/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@opa/vault':
         specifier: workspace:*
         version: link:../../packages/vault

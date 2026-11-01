@@ -6,7 +6,7 @@ import * as schema from "./schema";
 export * from "./schema";
 
 /** The schema version this build expects: the version the newest migration records. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export type Db = DrizzleD1Database<typeof schema>;
 

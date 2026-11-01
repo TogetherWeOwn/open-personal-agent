@@ -5,7 +5,7 @@ import { and, desc, eq } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
-import { conversations, users } from "./schema";
+import { conversations, secrets, userSettings, users } from "./schema";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
@@ -50,6 +50,11 @@ export interface DataBindings<Stub, Id> {
   };
   ASSISTANT: { idFromName(name: string): Id; get(id: Id): Stub };
 }
+
+/** The `user_settings` columns a route may write; the user and timestamps come from here. */
+export type SettingsUpdate = Partial<
+  Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
+>;
 
 /** IDs are server-generated; the check also keeps a key inside the user's R2 prefix. */
 function checkId(id: string): string {
@@ -97,6 +102,53 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           (await db.select().from(conversations).where(own(id)).limit(1))[0],
         createConversation: async (id: string, title: string | null = null) => {
           await db.insert(conversations).values({ id: checkId(id), userId, title });
+        },
+        /** Onboarding answers and the chat model (M2-15). The key itself is in `secrets`. */
+        settings: {
+          get: async () =>
+            (
+              await db
+                .select({
+                  displayName: users.displayName,
+                  about: userSettings.about,
+                  modelKind: userSettings.modelKind,
+                  providerId: userSettings.providerId,
+                  baseUrl: userSettings.baseUrl,
+                  model: userSettings.model,
+                  keySecretId: userSettings.modelKeySecretId,
+                  onboardedAt: userSettings.onboardedAt,
+                  keyLast4: secrets.last4,
+                  keyUpdatedAt: secrets.updatedAt,
+                  keyLastUsedAt: secrets.lastUsedAt,
+                })
+                .from(users)
+                .leftJoin(userSettings, eq(userSettings.userId, users.id))
+                .leftJoin(
+                  secrets,
+                  and(eq(secrets.id, userSettings.modelKeySecretId), eq(secrets.userId, users.id)),
+                )
+                .where(eq(users.id, userId))
+                .limit(1)
+            )[0],
+          save: async (values: SettingsUpdate) => {
+            const set = { ...values, updatedAt: Date.now() };
+            await db
+              .insert(userSettings)
+              .values({ ...set, userId })
+              .onConflictDoUpdate({ target: userSettings.userId, set });
+          },
+          rename: async (displayName: string) => {
+            await db
+              .update(users)
+              .set({ displayName, updatedAt: Date.now() })
+              .where(eq(users.id, userId));
+          },
+          keyUsed: async (secretId: string) => {
+            await db
+              .update(secrets)
+              .set({ lastUsedAt: Date.now() })
+              .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
+          },
         },
         getFile: (id: string) => FILES.get(fileKey(id)),
         putFile: (id: string, value: string, contentType: string) =>
