@@ -3,9 +3,11 @@
 // values), approvals with their scope, tool-setting changes, exports, deletions and settings
 // changes, grouped by day, newest first. Filter by kind; search. Each row opens Details with the
 // raw record. Read-only in M3: standing grants are revoked from Settings › Privacy & security.
+
 import { useEffect, useId, useRef, useState } from "react";
 import { Input, Label, Link, SearchField } from "react-aria-components";
 import { Button, Disclosure, EmptyState, Page, Skeleton } from "../ui";
+import { ActivityNav } from "./ActivityNav";
 import { byDay, fetchLog, LOG_KINDS, type LogEntry, type LogKind, rawRecord, summary } from "./log";
 
 const input = "min-h-11 rounded-lg border border-border-strong bg-surface px-3";
@@ -108,6 +110,7 @@ export function ActivityLog() {
 
   return (
     <Page title="Activity log">
+      <ActivityNav current="log" />
       <p className="text-text-muted">
         What happened in your account over the last 365 days. To stop allowing something you
         approved, go to{" "}

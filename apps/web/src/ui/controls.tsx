@@ -49,15 +49,20 @@ export function Disclosure({
 export function Menu({
   label,
   variant = "quiet",
+  className = "",
   children,
 }: {
   label: ReactNode;
   variant?: Variant;
+  /** Layout for the trigger, as `Button` takes it. */
+  className?: string;
   children: ReactNode;
 }) {
   return (
     <MenuTrigger>
-      <Button variant={variant}>{label}</Button>
+      <Button variant={variant} className={className}>
+        {label}
+      </Button>
       <Popover className="min-w-48 rounded-xl border border-border bg-surface-raised p-1 shadow-lg">
         <AriaMenu className="outline-none">{children}</AriaMenu>
       </Popover>

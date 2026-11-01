@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { FilePlus } from "lucide-react";
 import { type ReactNode, useEffect, useRef } from "react";
 import { FileTrigger, Form, ProgressBar, TextArea } from "react-aria-components";
 import { Button } from "../ui";
@@ -118,7 +119,11 @@ export function Composer({
             acceptedFileTypes={config.accept.split(",")}
             onSelect={(picked) => picked && onPick([...picked])}
           >
-            <Button>Attach</Button>
+            {/* An icon on phones, so the message box keeps the room (m3-ux §4.9). */}
+            <Button className="max-sm:min-w-11 max-sm:px-0">
+              <FilePlus aria-hidden="true" size={20} className="sm:hidden" />
+              <span className="max-sm:sr-only">Attach</span>
+            </Button>
           </FileTrigger>
           <TextArea
             aria-label="Message"
@@ -133,7 +138,7 @@ export function Composer({
               e.preventDefault();
               if (!busy) submit();
             }}
-            className="field-sizing-content block max-h-52 min-h-11 flex-1 resize-none rounded-xl border border-border-strong bg-surface-raised px-3 py-2 placeholder:text-text-muted"
+            className="field-sizing-content block max-h-52 min-h-11 min-w-0 flex-1 resize-none rounded-xl border border-border-strong bg-surface-raised px-3 py-2 placeholder:text-text-muted"
           />
           <Button type="submit" variant="primary">
             {busy ? "Stop" : uploading ? "Sending after upload…" : "Send"}

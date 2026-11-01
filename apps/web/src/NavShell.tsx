@@ -163,7 +163,7 @@ export function NavShell({
             key={id}
             href={href}
             aria-current={here(id)}
-            className={`${item} flex-col gap-0.5 py-1 text-xs`}
+            className={`${item} flex-col justify-center gap-0.5 py-1 text-xs`}
           >
             <NavIcon Icon={Icon} count={id === "inbox" ? inboxCount : 0} />
             {label}
@@ -172,6 +172,7 @@ export function NavShell({
         ))}
         <Menu
           variant="quiet"
+          className="justify-center"
           label={
             <span
               data-current={current === "memory" || current === "settings" || undefined}
