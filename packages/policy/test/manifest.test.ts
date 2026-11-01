@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { ManifestError, manifestProblems, type ToolManifest, ToolRegistry } from "../src/index";
+import {
+  ManifestError,
+  manifestProblems,
+  type RegisteredTool,
+  type ToolManifest,
+  ToolRegistry,
+} from "../src/index";
 
 const webFetch: ToolManifest = {
   name: "web_fetch",
@@ -40,8 +46,18 @@ describe("manifestProblems", () => {
 
 describe("ToolRegistry", () => {
   it("registers a tool with a manifest and looks it up by name", () => {
-    const registry = new ToolRegistry();
-    registry.register({ manifest: webFetch });
+    const registry = new ToolRegistry<RegisteredTool & { describe(): string }>();
+    class WebFetch {
+      manifest = webFetch;
+      run = () => "ok";
+      describe() {
+        return this.manifest.description;
+      }
+    }
+    const tool = new WebFetch();
+    registry.register(tool);
+    expect(registry.get("web_fetch")?.tool).toBe(tool);
+    expect(registry.get("web_fetch")?.tool.describe()).toBe("Fetch a web page.");
     expect(registry.get("web_fetch")?.manifest).toEqual(webFetch);
     expect(registry.get("nope")).toBeUndefined();
     expect(registry.manifests().map((m) => m.name)).toEqual(["web_fetch"]);
@@ -58,9 +74,9 @@ describe("ToolRegistry", () => {
 
   it("keeps the risk class and egress as registered, whatever later happens to the input", () => {
     const registry = new ToolRegistry();
-    const manifest = structuredClone(webFetch);
-    registry.register({ manifest });
-    manifest.riskClass = "irreversible";
+    const tool = { manifest: structuredClone(webFetch) };
+    registry.register(tool);
+    tool.manifest.riskClass = "irreversible";
     const stored = registry.get("web_fetch")?.manifest;
     expect(stored?.riskClass).toBe("read");
     expect(Object.isFrozen(stored)).toBe(true);

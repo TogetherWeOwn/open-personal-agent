@@ -102,9 +102,12 @@ function freezeManifest(manifest: ToolManifest): ToolManifest {
 
 export type RegisteredTool = { manifest: ToolManifest };
 
+/** A registered tool and the frozen copy of its manifest the policy engine must read. */
+export type ToolEntry<T> = { readonly tool: T; readonly manifest: ToolManifest };
+
 /** The tools a turn can call. A tool without a valid manifest can't register (M3-02 AC1). */
 export class ToolRegistry<T extends RegisteredTool = RegisteredTool> {
-  readonly #tools = new Map<string, T>();
+  readonly #tools = new Map<string, ToolEntry<T>>();
 
   register(tool: T): void {
     const manifest: unknown = (tool as { manifest?: unknown } | null)?.manifest;
@@ -112,10 +115,11 @@ export class ToolRegistry<T extends RegisteredTool = RegisteredTool> {
     const problems = manifestProblems(manifest);
     if (problems.length > 0) throw new ManifestError(label, problems);
     if (this.#tools.has(label)) throw new ManifestError(label, ["a tool with this name exists"]);
-    this.#tools.set(label, { ...tool, manifest: freezeManifest(tool.manifest) });
+    // The tool is kept as given (a class keeps its methods); only the manifest is copied.
+    this.#tools.set(label, Object.freeze({ tool, manifest: freezeManifest(tool.manifest) }));
   }
 
-  get(name: string): T | undefined {
+  get(name: string): ToolEntry<T> | undefined {
     return this.#tools.get(name);
   }
 
