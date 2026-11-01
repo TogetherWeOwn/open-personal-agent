@@ -13,18 +13,15 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
+import { SESSION_HEADER } from "./chat";
 import { withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
 import { IDLE_MS } from "./session";
 
-/** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
-export const SESSION_HEADER = "x-opa-session-id";
-
 /** Workers AI needs no key, so a fresh deployment can chat (ADR 0006). Onboarding picks later. */
 export const DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const MAX_TEXT = 32_000;
-/** How often a streaming reply is checkpointed, so an eviction keeps most of it. */
-const STASH_MS = 1_000;
+const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
 
 type Emit = <T extends HarnessEvent["type"]>(
   type: T,

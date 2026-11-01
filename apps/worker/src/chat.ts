@@ -4,8 +4,10 @@
 import { chatStore, isConversationId } from "@opa/db/chat";
 import { createRepository } from "@opa/db/repository";
 import { Hono } from "hono";
-import { SESSION_HEADER } from "./assistant";
 import type { AppEnv } from "./env";
+
+/** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
+export const SESSION_HEADER = "x-opa-session-id";
 
 export const chatRoutes = new Hono<AppEnv>();
 

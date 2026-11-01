@@ -5,8 +5,7 @@ import type { ModelUsage } from "./model-provider";
 
 type Envelope<T extends string, P> = {
   seq: number; // increases by one per event within a turn
-  /** The conversation the turn belongs to. */
-  sessionId: string;
+  sessionId: string; // the conversation the turn belongs to
   turnId: string;
   type: T;
   payload: P;

@@ -2,13 +2,6 @@
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineProject } from "vitest/config";
 
-declare global {
-  // Node's ImportMeta field; this Workers-typed project doesn't load Node's types.
-  interface ImportMeta {
-    readonly dirname: string;
-  }
-}
-
 // readD1Migrations resolves relative paths from the cwd, so anchor it to this file. Vite rewrites
 // the literal `import.meta.dirname` to this file's directory when it bundles the config.
 const migrationsDir = `${import.meta.dirname}/../../migrations`;

@@ -172,10 +172,8 @@ describe("chat transport", () => {
 
   it("refuses another user's conversation, bad input and a second concurrent turn", async () => {
     const { browser, owner } = await claim();
-    await db.batch([
-      db.prepare("INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member')"),
-      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('theirs', 'other')"),
-    ]);
+    await db.exec(`INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member');
+      INSERT INTO conversations (id, user_id) VALUES ('theirs', 'other');`);
     await useModel(owner, scripted([], never));
     const tab = await openTab(browser);
     tab.send?.("theirs", "hi");

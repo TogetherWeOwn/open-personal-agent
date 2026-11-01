@@ -5,11 +5,11 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-/** [{ module: "node_modules/.pnpm/x@1/node_modules/x/index.js", rule, reason }] */
+/** [{ module: "node_modules/.pnpm/x@1/…/index.js", or a RegExp for peer-hashed dirs, rule, reason }] */
 export const ALLOWLIST = [
   {
     module:
-      "node_modules/.pnpm/agents@0.32.0_@babel+core@8.0.10_@babel+runtime@7.29.10_@modelcontextprotocol+client@2._23c5a885ea5e06d06556b5a76c24d8e3/node_modules/agents/dist/cloudflare-CUUm_9q9.js",
+      /^node_modules\/\.pnpm\/agents@0\.32\.0_[^/]+\/node_modules\/agents\/dist\/cloudflare-CUUm_9q9\.js$/,
     rule: "cloudflare-env",
     reason: "agents 0.32.0 (M2-13) reads only `tracing` from the module, never `env`",
   },
@@ -37,7 +37,9 @@ export function findBundleViolations(bundle, allowlist = ALLOWLIST) {
     const [module, code] = [modules[i], modules[i + 1]];
     for (const [rule, own, pattern] of CHECKS) {
       if (own.test(module) || !pattern.test(code)) continue;
-      if (allowlist.some((a) => a.module === module && a.rule === rule && a.reason)) continue;
+      const same = (a) =>
+        a.module instanceof RegExp ? a.module.test(module) : a.module === module;
+      if (allowlist.some((a) => same(a) && a.rule === rule && a.reason)) continue;
       problems.push(`${module}: ${rule} (ADR 0010 D4.1 #3)`);
     }
   }
