@@ -1,0 +1,2 @@
+# Keep empty. The worker tests (apps/worker/vitest.config.ts) load this file instead of your
+# `.dev.vars`, so they run without real secrets. Tests that need a secret set it themselves.

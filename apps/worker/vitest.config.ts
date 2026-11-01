@@ -11,7 +11,11 @@ export default defineProject({
     cloudflareTest(async () => ({
       // Tests never reach Cloudflare: the AI binding is remote-only, so it stays unbound here.
       remoteBindings: false,
-      wrangler: { configPath: "../../wrangler.jsonc" },
+      // Wrangler reads `.dev.vars.test` before `.dev.vars` (and then skips `.env`), so the empty
+      // committed one keeps a developer's local secrets out of tests that need them unset. There is
+      // no `env.test` in wrangler.jsonc on purpose (named environments don't inherit bindings), so
+      // the "No environment found" warning is expected and harmless.
+      wrangler: { configPath: "../../wrangler.jsonc", environment: "test" },
       // Tests apply these themselves, so they can also check the unmigrated state.
       miniflare: {
         bindings: {
