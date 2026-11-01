@@ -16,8 +16,11 @@
     "d1IncludedBytes": 5000000000,
     "d1MaxBytes": 10000000000,
     "r2IncludedBytes": 10000000000,
+    "workflowStepsPerMonth": 500000,
+    "doGbSecondsPerMonth": 400000,
+    "doMemoryGb": 0.125,
     "verifiedAt": "2026-11-01",
-    "source": "https://developers.cloudflare.com/d1/platform/pricing/ https://developers.cloudflare.com/d1/platform/limits/ https://developers.cloudflare.com/r2/pricing/"
+    "source": "https://developers.cloudflare.com/d1/platform/pricing/ https://developers.cloudflare.com/d1/platform/limits/ https://developers.cloudflare.com/r2/pricing/ https://developers.cloudflare.com/workflows/reference/pricing/ https://developers.cloudflare.com/durable-objects/platform/pricing/"
   },
   "providers": {
     "workers-ai": {

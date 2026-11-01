@@ -575,6 +575,9 @@ describe("task workflow", () => {
       if (status !== "failed") await new Promise((r) => setTimeout(r, 100));
     }
     expect(status).toBe("failed");
+    // Each step the engine ran counts toward the Workflows-steps meter (M3-16 AC3).
+    const steps = await createRepository(env).deployment.meterTotal("workflow_steps", 0);
+    expect(steps).toBeGreaterThanOrEqual(2); // task:start, then the finish
   });
 });
 

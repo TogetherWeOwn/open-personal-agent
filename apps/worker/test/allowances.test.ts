@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The reconciler's allowance warnings (M3-17 AC4, COST-5): meters from sources the app has,
 // a warning at 70% of each, kept by the owner's assistant and shown to the owner only.
+
+import { createRepository } from "@opa/db/repository";
 import {
   allowanceMeters,
   reconcileAllowances,
@@ -30,6 +32,28 @@ describe("allowance meters", () => {
     expect(byId.d1_storage?.limit).toBe(5_000_000_000);
     expect(byId.r2_storage).toMatchObject({ limit: 10_000_000_000, unit: "bytes" });
     expect(byId.workers_ai_neurons).toMatchObject({ used: 7100, limit: 10_000 });
+  });
+
+  it("counts this month's task steps and estimates DO duration from turn wall-clock", async () => {
+    const { deployment } = createRepository(env);
+    const now = Date.UTC(2026, 10, 15, 12);
+    await deployment.addToMeter("workflow_steps", 3, now);
+    await deployment.addToMeter("workflow_steps", 2, now - 86_400_000); // same month
+    await deployment.addToMeter("workflow_steps", 50, Date.UTC(2026, 9, 31)); // last month
+    await deployment.addToMeter("do_ms", 40_000, now); // 40 s at 128 MB is 5 GB-s
+    const byId = Object.fromEntries((await allowanceMeters(env, now)).map((m) => [m.id, m]));
+    expect(byId.workflows_steps).toEqual({
+      id: "workflows_steps",
+      used: 5,
+      limit: 500_000,
+      unit: "steps",
+    });
+    expect(byId.do_duration).toEqual({
+      id: "do_duration",
+      used: 5,
+      limit: 400_000,
+      unit: "gb_seconds",
+    });
   });
 
   it("counts every stored object, not only uploads, across pages of the listing", async () => {

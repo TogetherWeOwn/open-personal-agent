@@ -1,22 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Usage page v1 (M3-16, m3-ux §3.10): today, this month and the month-end projection, then the
-// PRD §15 cost categories in order, the Workers AI allowance and the breakdowns. Read like an
+// PRD §15 cost categories in order, the Cloudflare allowance meters and the breakdowns. Read like an
 // account statement. The server groups, labels and sums everything (GET /api/usage); this only
 // formats. `\uFE0E` keeps the ⚠ and ↗ glyphs as text, not colour emoji.
 import { useCallback, useEffect, useState } from "react";
 import { Heading, Label, Link, Meter } from "react-aria-components";
 import { HalfBudgetLine } from "../settings/Spending";
-import { getSpending, type Spending } from "../settings/spending-api";
+import { dollars, getSpending, type Spending } from "../settings/spending-api";
 import { Button, buttonClass, EmptyState, Page, Skeleton } from "../ui";
 import { Breakdown } from "./Breakdown";
-import {
-  type Category,
-  type CategoryId,
-  dateWords,
-  money,
-  num,
-  type UsageData,
-} from "./usage-data";
+import { Meters } from "./Meters";
+import { type Category, type CategoryId, dateWords, money, type UsageData } from "./usage-data";
 
 const link = "font-medium text-accent underline underline-offset-2";
 
@@ -52,13 +46,47 @@ function Figure({ term, value, note }: { term: string; value: string; note?: str
   );
 }
 
-function Headline({ data }: { data: UsageData }) {
+/** This month against the monthly budget (M3-17 AC2): one meter, the budget's words beside it. */
+function MonthFigure({ data, spending }: { data: UsageData; spending: Spending | null }) {
+  const budget = spending?.settings.monthlyBudgetMicroUsd;
+  // The budget's own month (UTC) and total, so the meter agrees with the 50% line and the banners
+  // even in the hours where the local month and the UTC month differ.
+  const spent = spending?.monthMicroUsd ?? 0;
+  return (
+    <div className="flex flex-col gap-1">
+      <dt className="text-sm text-text-muted">This month</dt>
+      <dd className="text-2xl font-semibold tabular-nums">
+        about {money(data.month.costMicroUsd, data.currency)}
+      </dd>
+      {budget && (
+        <dd>
+          <Meter
+            value={Math.min(spent, budget)}
+            maxValue={budget}
+            valueLabel={`${Math.floor((spent / budget) * 100)}% of your ${dollars(budget)} budget`}
+            className="flex flex-col gap-1"
+          >
+            <Label className="text-sm text-text-muted">of your {dollars(budget)} budget</Label>
+            <div className="h-2 overflow-hidden rounded-full bg-surface-sunken">
+              <div
+                className="h-full bg-accent"
+                style={{ width: `${Math.min(100, (spent / budget) * 100)}%` }}
+              />
+            </div>
+          </Meter>
+        </dd>
+      )}
+    </div>
+  );
+}
+
+function Headline({ data, spending }: { data: UsageData; spending: Spending | null }) {
   const c = data.currency;
   return (
     <div className="flex flex-col gap-2">
       <dl className="grid gap-4 sm:grid-cols-3">
         <Figure term="Today" value={`about ${money(data.today.costMicroUsd, c)}`} />
-        <Figure term="This month" value={`about ${money(data.month.costMicroUsd, c)}`} />
+        <MonthFigure data={data} spending={spending} />
         <Figure
           term="Projected by month-end"
           value={`about ${money(data.projected.costMicroUsd, c)}`}
@@ -84,7 +112,25 @@ function Stale({ date }: { date: string }) {
 function CategoryFigures({ category: k, currency }: { category: Category; currency: string }) {
   if (k.status === "none-configured")
     return <span className="text-text-muted">None configured</span>;
-  if (k.status === "included") return <span>Included in Workers Paid</span>;
+  if (k.status === "included")
+    return (
+      <span>
+        Included in Workers Paid
+        {/* No meter counts Workers requests; the row's dashboard link has them. */}
+        {k.id === "cloudflare" && (
+          <span className="block text-sm text-text-muted">
+            Workers requests aren't counted here
+          </span>
+        )}
+      </span>
+    );
+  if (k.status === "over-allowance")
+    return (
+      <span>
+        {k.label}
+        <span className="block text-sm text-text-muted">The amount isn't tracked here</span>
+      </span>
+    );
   if (k.id === "workers-paid") {
     return (
       <span className="tabular-nums">
@@ -142,38 +188,6 @@ function Categories({ categories, currency }: { categories: Category[]; currency
   );
 }
 
-function Allowance({ allowance }: { allowance: NonNullable<UsageData["allowance"]> }) {
-  const { freeNeuronsUsed, billedNeurons, neuronsPerDay, resetsAt } = allowance;
-  const pct = Math.min(100, Math.round((freeNeuronsUsed / neuronsPerDay) * 100));
-  const reset = new Date(resetsAt).toLocaleTimeString(undefined, { timeStyle: "short" });
-  return (
-    <section className="flex flex-col gap-2 rounded-xl border border-border bg-surface-raised p-4">
-      <Heading level={2} className="text-lg font-semibold">
-        Free Workers AI allowance
-      </Heading>
-      <Meter
-        value={freeNeuronsUsed}
-        maxValue={neuronsPerDay}
-        valueLabel={`${pct}% used, resets at ${reset} your time`}
-        className="flex flex-col gap-1"
-      >
-        <Label>
-          {num.format(freeNeuronsUsed)} of {num.format(neuronsPerDay)} free today ·{" "}
-          {num.format(billedNeurons)} billed
-        </Label>
-        <div className="h-2 overflow-hidden rounded-full bg-surface-sunken">
-          <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
-        </div>
-      </Meter>
-      <p className="text-sm text-text-muted">
-        Neurons are how Cloudflare measures Workers AI work; longer messages use more. The count
-        covers everyone on this assistant. The allowance is shared by your whole Cloudflare account,
-        other apps included, and resets at {reset} your time. Past it, Cloudflare bills each neuron.
-      </p>
-    </section>
-  );
-}
-
 export function Usage() {
   const [data, setData] = useState<UsageData | null>(null);
   const [failed, setFailed] = useState(false);
@@ -189,7 +203,7 @@ export function Usage() {
     fetch(`/api/usage?today=${today}&month=${month}&tz=${tz}`)
       .then((res) => (res.ok ? res.json() : Promise.reject()))
       .then(setData, () => setFailed(true));
-    getSpending().then(setSpending, () => {}); // only the 50% line needs it
+    getSpending().then(setSpending, () => {}); // the budget and its 50% line; Usage works without
   }, []);
   useEffect(load, [load]);
 
@@ -206,7 +220,7 @@ export function Usage() {
       {data &&
         (used ? (
           <>
-            <Headline data={data} />
+            <Headline data={data} spending={spending} />
             {spending && <HalfBudgetLine spending={spending} />}
           </>
         ) : (
@@ -222,7 +236,14 @@ export function Usage() {
           </EmptyState>
         ))}
       {data && <Categories categories={data.categories} currency={data.currency} />}
-      {data?.allowance && <Allowance allowance={data.allowance} />}
+      {/* The neuron line stands even when the other meters can't be read. */}
+      {(data?.meters || data?.allowance) && (
+        <Meters
+          meters={data.meters ?? []}
+          allowance={data.allowance}
+          verifiedAt={data.metersVerifiedAt}
+        />
+      )}
       {data && used && <Breakdown data={data} />}
     </Page>
   );

@@ -36,6 +36,7 @@ import {
   dataExports,
   grants,
   messages,
+  meters,
   modelProviders,
   secrets,
   tasks,
@@ -521,6 +522,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .select({ n: sql<number>`coalesce(sum(${usage.neurons}), 0)`.mapWith(Number) })
             .from(usage)
             .where(gte(usage.createdAt, since))
+        )[0]?.n ?? 0,
+      /** Adds to a ledger meter's UTC day (M3-16 AC3): one upsert, no read. */
+      addToMeter: async (meter: "workflow_steps" | "do_ms", amount: number, at: number) => {
+        await db
+          .insert(meters)
+          .values({ meter, day: at - (at % 86_400_000), amount })
+          .onConflictDoUpdate({
+            target: [meters.meter, meters.day],
+            set: { amount: sql`${meters.amount} + ${amount}` },
+          });
+      },
+      /** A ledger meter's total over the UTC days from `since`. */
+      meterTotal: async (meter: "workflow_steps" | "do_ms", since: number) =>
+        (
+          await db
+            .select({ n: sql<number>`coalesce(sum(${meters.amount}), 0)`.mapWith(Number) })
+            .from(meters)
+            .where(and(eq(meters.meter, meter), gte(meters.day, since - (since % 86_400_000))))
         )[0]?.n ?? 0,
       /**
        * The database's size in bytes (M3-16 AC3): D1 reports it with every result as

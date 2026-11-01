@@ -36,7 +36,8 @@ export type CategoryId =
   | "enhanced";
 export interface Category {
   id: CategoryId;
-  status: "billed" | "included" | "none-configured";
+  /** "over-allowance": a Cloudflare meter passed the included amount; the excess cost is unknown. */
+  status: "billed" | "included" | "over-allowance" | "none-configured";
   label: string | null;
   today?: number | null;
   month?: number;
@@ -59,6 +60,19 @@ export interface Day {
   costMicroUsd: number;
   unpricedCalls: number;
 }
+/** One Cloudflare allowance, as the reconciler's banners read it (M3-16 AC3). */
+export interface AllowanceMeter {
+  id:
+    | "d1_cap"
+    | "d1_storage"
+    | "r2_storage"
+    | "workers_ai_neurons"
+    | "workflows_steps"
+    | "do_duration";
+  used: number;
+  limit: number;
+  unit: "bytes" | "neurons" | "steps" | "gb_seconds";
+}
 export interface UsageData {
   currency: string;
   today: Period;
@@ -74,6 +88,10 @@ export interface UsageData {
     billedNeurons: number;
     resetsAt: number;
   } | null;
+  /** Only the owner gets them: the allowances are the Cloudflare account's. */
+  meters: AllowanceMeter[] | null;
+  /** When the included amounts were checked; null with the meters. */
+  metersVerifiedAt: string | null;
 }
 
 export const num = new Intl.NumberFormat();
