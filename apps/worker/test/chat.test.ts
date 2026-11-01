@@ -74,6 +74,7 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
   ws.accept();
   const events: HarnessEvent[] = [];
   ws.addEventListener("message", (e) => {
+    console.log("DIAG test recv", Date.now(), e.data);
     events.push(JSON.parse(e.data as string));
   });
   const closed = new Promise<number>((resolve) =>
@@ -81,8 +82,10 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
   );
   const until = (type: HarnessEvent["type"]) =>
     vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type));
-  const send = (conversationId: string, text: string) =>
+  const send = (conversationId: string, text: string) => {
+    console.log("DIAG test send", Date.now(), conversationId, text);
     ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
+  };
   return { res, ws, events, until, send, closed };
 }
 
@@ -249,30 +252,35 @@ describe("chat transport", () => {
     await live.until?.("turn.interrupted");
   });
 
-  it("refuses another user's conversation, bad input and a second concurrent turn", async () => {
-    const { browser, owner } = await claim();
-    await db.exec(`INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member');
+  it.each(Array.from({ length: 25 }, (_, i) => i))(
+    "refuses another user's conversation, bad input and a second concurrent turn %i",
+    async () => {
+      const { browser, owner } = await claim();
+      await db.exec(`INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member');
       INSERT INTO conversations (id, user_id) VALUES ('theirs', 'other');`);
-    const tab = await openTab(browser);
-    // Before onboarding picks a model, the real resolver finds none, and nothing is written.
-    tab.send?.("mine", "first");
-    const failed = (message: string) => ({ type: "turn.failed", seq: 0, payload: { message } });
-    const noModel = failed("Pick a model in Settings first.");
-    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]));
-    expect(await count("conversations", "id = 'mine'")).toBe(0);
-    await useModel(owner, scripted([], never));
-    tab.send?.("theirs", "hi");
-    tab.send?.("../x", "hi");
-    const gone = failed("That conversation doesn't exist.");
-    const bad = failed("That message can't be sent.");
-    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, gone, bad]));
-    expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
-    expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
-    tab.send?.("mine", "first");
-    await tab.until?.("message.delta");
-    tab.send?.("mine", "second");
-    const busy = { message: "Another reply is still being written." };
-    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }));
-    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
-  });
+      const tab = await openTab(browser);
+      // Before onboarding picks a model, the real resolver finds none, and nothing is written.
+      tab.send?.("mine", "first");
+      const failed = (message: string) => ({ type: "turn.failed", seq: 0, payload: { message } });
+      const noModel = failed("Pick a model in Settings first.");
+      await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]));
+      expect(await count("conversations", "id = 'mine'")).toBe(0);
+      console.log("DIAG test useModel", Date.now());
+      await useModel(owner, scripted([], never));
+      console.log("DIAG test useModel done", Date.now());
+      tab.send?.("theirs", "hi");
+      tab.send?.("../x", "hi");
+      const gone = failed("That conversation doesn't exist.");
+      const bad = failed("That message can't be sent.");
+      await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, gone, bad]));
+      expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
+      expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
+      tab.send?.("mine", "first");
+      await tab.until?.("message.delta");
+      tab.send?.("mine", "second");
+      const busy = { message: "Another reply is still being written." };
+      await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }));
+      tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    },
+  );
 });

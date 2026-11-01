@@ -69,6 +69,7 @@ export class Assistant extends Agent<Bindings> {
 
   override onMessage(connection: Connection, message: WSMessage): void {
     const msg = parse(message);
+    diag("onMessage", msg?.type, msg && "text" in msg ? msg.text : "", "running", !!this.#running);
     // A tab whose session is still live may stop the running turn.
     if (msg?.type === "turn.cancel")
       void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
@@ -87,6 +88,7 @@ export class Assistant extends Agent<Bindings> {
         // The model's failures are reported in the turn; this is D1 failing.
         .catch(() => reject(connection, msg.conversationId, "The reply couldn't be saved."))
         .finally(() => {
+          diag("turn settled", msg.conversationId);
           if (this.#running === running) this.#running = null;
         });
     }
@@ -99,10 +101,15 @@ export class Assistant extends Agent<Bindings> {
     signal: AbortSignal,
     stash: (data: TurnRecord) => void,
   ) {
+    diag("turn start", conversationId);
     if (!(await this.#sessionLive(connection))) return;
+    diag("session ok");
     const chat = this.#chat;
+    const composed = await this.#composed;
+    diag("composed");
     // Picked before `open`, so a send that can't run never creates an empty conversation.
-    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
+    const picked = await this.resolveModel(composed, this.#scope, "chat");
+    diag("picked");
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
       return reject(connection, conversationId, message);
@@ -111,6 +118,7 @@ export class Assistant extends Agent<Bindings> {
     if (!(await chat.open(conversationId, title))) {
       return reject(connection, conversationId, "That conversation doesn't exist.");
     }
+    diag("opened");
     await picked.used?.();
     const { provider, model } = picked;
     const turn: TurnRecord = {
@@ -126,11 +134,14 @@ export class Assistant extends Agent<Bindings> {
     // Checkpoint before the first write, so a recovery can always name the turn.
     stash(turn);
     const emit = this.#emitter(conversationId, turn.turnId);
+    diag("stashed");
     await chat.startTurn(conversationId, text, turn.replyId);
+    diag("startTurn");
     // The model context comes from D1, never from memory, so it survives an eviction.
     const messages = ((await chat.listMessages(conversationId)) ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }));
+    diag("listed");
     emit("turn.started", { messageId: turn.replyId });
     turn.called = true;
     stash(turn);
@@ -201,6 +212,9 @@ export class Assistant extends Agent<Bindings> {
   }
 }
 
+// TWO-470 diagnostics, not for merge.
+const diag = (...args: unknown[]) => console.log("DIAG do", Date.now(), ...args);
+
 /** What a tab may send: `chat.send` or `turn.cancel`. Anything else is ignored. */
 function parse(message: WSMessage) {
   if (typeof message !== "string") return null;
@@ -233,5 +247,6 @@ function reject(connection: Connection, sessionId: string, message: string) {
     type: "turn.failed",
     payload: { message },
   };
+  diag("reject", message);
   connection.send(JSON.stringify(event));
 }
