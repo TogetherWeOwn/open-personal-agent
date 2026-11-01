@@ -10,7 +10,7 @@ import { createRepository, type ExportRow, isId, isUniqueViolation } from "@opa/
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { userContent } from "./security";
-import { hasStepUp } from "./session";
+import { hasAccountStepUp } from "./session";
 
 /** How long an export stays downloadable: stamped at creation, swept after (PR1). */
 export const EXPORT_TTL_MS = 3_600_000;
@@ -32,7 +32,7 @@ function present(row: ExportRow) {
 
 exportRoutes.post("/", async (c) => {
   // The gate is first, so a refused start claims no row and starts no Workflow run.
-  if (!hasStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
+  if (!hasAccountStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const inFlight = await user.exports.running();
   if (inFlight) {
