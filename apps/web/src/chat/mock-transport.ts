@@ -40,6 +40,7 @@ const LIMIT_MESSAGES: Record<TurnLimit, string> = {
 /** Streams a canned reply a word at a time, for the e2e tests and `vite dev` without a Worker. */
 export function createMockTransport(delayMs = 30): ChatTransport {
   let turns = 0;
+  let seq = 0; // one counter, as the server's per-conversation `seq` never restarts per turn
   let onEvent: (event: HarnessEvent) => void = () => {};
   let stop: (() => void) | null = null;
   return {
@@ -68,7 +69,6 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         return queueMicrotask(() => onEvent(event as HarnessEvent));
       }
       const turnId = `mock-${++turns}`;
-      let seq = 0;
       const emit = (type: HarnessEvent["type"], payload = {}) =>
         onEvent({ v: 1, seq: ++seq, sessionId, turnId, type, payload } as HarnessEvent);
       const reply = text === MOCK_HOSTILE ? HOSTILE_REPLY : REPLY;
