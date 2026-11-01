@@ -121,8 +121,10 @@ included amounts. The ones you are most likely to meet are:
 - **Later features you switch on.** Cloud computers, web search, AI Gateway logging and extra
   browser hours are not in this release. Each will say what it costs before you turn it on.
 
-Budgets, spending warnings and a Usage page are planned but not in this release. Until then, check
-your usage in the Cloudflare dashboard under **Billing**.
+The app's **Usage** page shows today's and this month's model calls, with an estimate from published
+prices for each and, for the owner, the Workers AI free allowance used today. Your providers' bills
+and the Cloudflare dashboard under **Billing** are the final word. Budgets and spending warnings are
+planned but not in this release.
 
 What each binding in `wrangler.jsonc` uses (CI checks that every binding has a row here):
 

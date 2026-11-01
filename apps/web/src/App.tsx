@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
-import { Button, Heading } from "react-aria-components";
+import { Button, Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
 import { type ChatAction, type Conversation, chatReducer, initialState } from "./chat/state";
@@ -114,6 +114,9 @@ export function App({ transport }: { transport: ChatTransport }) {
         >
           New chat
         </Button>
+        <Link href="/usage" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
+          Usage
+        </Link>
         <ConversationList
           conversations={state.conversations}
           activeId={active.id}

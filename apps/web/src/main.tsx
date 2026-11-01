@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import "./styles.css";
 import { StrictMode, useEffect, useState } from "react";
+import { RouterProvider } from "react-aria-components";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { Setup } from "./auth/Setup";
@@ -8,6 +9,7 @@ import { SignIn } from "./auth/SignIn";
 import { createMockTransport } from "./chat/mock-transport";
 import { createSocketTransport } from "./chat/socket-transport";
 import { Onboarding } from "./onboarding/Onboarding";
+import { Usage } from "./usage/Usage";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
@@ -33,7 +35,7 @@ function fragmentToken(hash: string): string {
 const transport =
   import.meta.env.VITE_MOCK_CHAT === "1" ? createMockTransport() : createSocketTransport();
 
-type View = "setup" | "sign-in" | "onboarding" | "chat";
+type View = "setup" | "sign-in" | "onboarding" | "chat" | "usage";
 
 /** Who is asking decides the screen. Anything but a signed-in user is kept from the chat. */
 async function route(): Promise<View | null> {
@@ -46,6 +48,7 @@ async function route(): Promise<View | null> {
   }
   if (!me?.ok) return "sign-in";
   if (window.location.pathname === "/onboarding") return "onboarding";
+  if (window.location.pathname === "/usage") return "usage";
   const settings = await fetch("/api/settings").catch(() => null);
   const { onboarded } = ((await settings?.json().catch(() => null)) ?? {}) as {
     onboarded?: boolean;
@@ -66,8 +69,34 @@ function Root() {
   if (view === "setup") return <Setup initialToken={setupToken} />;
   if (view === "sign-in") return <SignIn />;
   if (view === "onboarding") return <Onboarding />;
-  if (view === "chat") return <App transport={transport} />;
+  if (view === "chat" || view === "usage") return <Shell initialPath={window.location.pathname} />;
   return null;
+}
+
+/**
+ * The signed-in app. Links move between the chat and `/usage` without a reload, and the chat stays
+ * mounted (hidden) meanwhile, so its conversations and drafts survive a look at Usage.
+ */
+function Shell({ initialPath }: { initialPath: string }) {
+  const [path, setPath] = useState(initialPath);
+  useEffect(() => {
+    const back = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", back);
+    return () => window.removeEventListener("popstate", back);
+  }, []);
+  const navigate = (href: string) => {
+    window.history.pushState(null, "", href);
+    setPath(new URL(href, window.location.href).pathname);
+  };
+  const usage = path === "/usage";
+  return (
+    <RouterProvider navigate={navigate}>
+      <div hidden={usage}>
+        <App transport={transport} />
+      </div>
+      {usage && <Usage />}
+    </RouterProvider>
+  );
 }
 
 createRoot(root).render(
