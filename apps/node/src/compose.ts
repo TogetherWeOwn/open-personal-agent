@@ -4,12 +4,13 @@
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { app } from "@opa/server/app";
+import { createApp } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
 import { runRetention } from "@opa/server/retention";
 import { runRotation } from "@opa/server/vault-rotation";
 import { Hono } from "hono";
+import { NodeAssistant, nodeRoutes } from "./assistant";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
 import { modelFetch } from "./egress";
@@ -56,6 +57,8 @@ export interface NodeApp {
   /** The Worker's cron (every 10 minutes): `main.ts` runs it on a timer. */
   scheduled(): Promise<void>;
   db: DatabaseSync;
+  /** The user's in-process assistant, one per user, as `/api/chat` and the routes reach it. */
+  assistantFor(userId: string): NodeAssistant;
 }
 
 /**
@@ -73,12 +76,28 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   const assets = new Hono()
     .use(serveStatic({ root: assetsDir }))
     .use(serveStatic({ root: assetsDir, path: "index.html" }));
+  // The user's in-process assistant, one per user like the Worker's Durable Object. The
+  // database outlives them; a restart drops only the sockets, which reconnect and resume.
+  const assistants = new Map<string, NodeAssistant>();
+  const { assistantFor } = {
+    assistantFor(userId: string): NodeAssistant {
+      let assistant = assistants.get(userId);
+      if (!assistant) {
+        assistant = new NodeAssistant(userId, { db, getEnv: () => env });
+        assistants.set(userId, assistant);
+      }
+      return assistant;
+    },
+  };
   const raw: AppPorts & MasterKeys = {
     DB: sqliteD1(db),
     FILES: localBlobStore(join(dataDir, "files")),
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
-    // The per-user assistant, in process. It has no state until the chat transport lands.
-    ASSISTANT: { idFromName: (name: string) => name, get: () => ({ ping: async () => "pong" }) },
+    ASSISTANT: {
+      idFromName: (name: string) => name,
+      get: (name: string) =>
+        name.startsWith("u:") ? assistantFor(name.slice(2)) : { ping: async () => "pong" },
+    },
     MODEL_FETCH: modelFetch({ allowPrivate }),
     MODEL_PRIVATE_HOSTS: allowPrivate,
     UNAVAILABLE: ["workflow", "ai"],
@@ -94,6 +113,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   };
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
   const env = compose(raw);
+  const nodeApp = createApp(nodeRoutes(assistantFor));
   return {
     fetch: async (request, bindings) => {
       const url = new URL(request.url);
@@ -107,7 +127,10 @@ export function createNodeApp(options: NodeOptions): NodeApp {
         const address = bindings?.incoming?.socket?.remoteAddress;
         if (address) forwarded.headers.set(SOCKET_ADDRESS_HEADER, address);
       }
-      return app.fetch(forwarded, await env);
+      // Over the bindings `@hono/node-server` passes in: on an upgrade they carry its symbols,
+      // which `upgradeWebSocket` reads from the env. A new object would drop them, and with them
+      // the tab's socket (the symbols link the route's reply to the upgrade).
+      return nodeApp.fetch(forwarded, Object.assign(bindings ?? {}, await env));
     },
     scheduled: async () => {
       const app = await env;
@@ -115,5 +138,6 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       await runRetention(app);
     },
     db,
+    assistantFor,
   };
 }
