@@ -4,7 +4,7 @@
 // which stays mounted behind the others so drafts and streams survive.
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
-import { Outputs } from "./outputs/Outputs";
+import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { EmptyState, Page } from "./ui";
@@ -149,16 +149,7 @@ export const routes: Route[] = [
     ),
   },
   { path: "/activity/outputs", nav: "activity", screen: Outputs },
-  {
-    path: "/activity/outputs/:outputId",
-    nav: "activity",
-    screen: placeholder(
-      "Output",
-      "This file doesn't exist or was deleted.",
-      undefined,
-      go("/activity/outputs", "All files"),
-    ),
-  },
+  { path: "/activity/outputs/:outputId", nav: "activity", screen: Output },
   {
     path: "/activity/log",
     nav: "activity",

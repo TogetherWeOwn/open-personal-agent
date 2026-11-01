@@ -32,9 +32,10 @@ export interface ChatState {
   activeId: string;
   /**
    * The assistant message the running turn streams into, from this tab or another. One turn runs
-   * at a time. `turnId` is `null` until `turn.started` names the turn this tab sent.
+   * at a time. `turnId` is `null` until `turn.started` names the turn this tab sent. `seq` is
+   * the last event applied for it, so a replay after a reconnect can't apply one twice.
    */
-  pending: { conversationId: string; turnId: string | null; messageId: string } | null;
+  pending: { conversationId: string; turnId: string | null; messageId: string; seq: number } | null;
   /** Text for the polite live region: start, finish and failure, never each token. */
   announcement: string;
   /**
@@ -115,6 +116,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversationId: action.conversationId,
         turnId: null,
         messageId: `${action.id}-reply`,
+        seq: 0,
       };
       const firstLine = text.split("\n", 1)[0] ?? "";
       const sent: Message = {
@@ -205,7 +207,12 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
   const { pending } = state;
   if (event.type === "turn.started") {
     const { messageId } = event.payload;
-    const turn = { conversationId: event.sessionId, turnId: event.turnId, messageId };
+    const turn = {
+      conversationId: event.sessionId,
+      turnId: event.turnId,
+      messageId,
+      seq: event.seq,
+    };
     if (pending?.turnId === null && pending.conversationId === event.sessionId) {
       // The turn this tab sent: its reply takes the server's message ID.
       const next = updateMessage(state, pending, () => ({ id: messageId }));
@@ -246,7 +253,12 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     // A turn that was already running when this tab (re)connected: stream into its reply.
     const last = state.conversations.find((c) => c.id === event.sessionId)?.messages.at(-1);
     if (!pending && event.type === "message.delta" && last?.status === "streaming") {
-      const adopted = { conversationId: event.sessionId, turnId: event.turnId, messageId: last.id };
+      const adopted = {
+        conversationId: event.sessionId,
+        turnId: event.turnId,
+        messageId: last.id,
+        seq: 0,
+      };
       return onEvent({ ...state, pending: adopted }, event);
     }
     // A turn ended unseen: the next load of its conversation shows how.
@@ -255,26 +267,33 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     }
     return state;
   }
+  // A replayed event this tab already applied live: on a reconnect the log replays what the
+  // dropped socket missed, and the live stream can deliver the same event too (M3-03 AC11).
+  let seen = state;
+  if (event.seq > 0 && event.turnId === pending.turnId) {
+    if (event.seq <= pending.seq) return state;
+    seen = { ...state, pending: { ...pending, seq: event.seq } };
+  }
   switch (event.type) {
     case "status":
-      return { ...state, announcement: event.payload.text };
+      return { ...seen, announcement: event.payload.text };
     case "message.delta":
-      return updateMessage(state, pending, (m) => ({ text: m.text + event.payload.text }));
+      return updateMessage(seen, pending, (m) => ({ text: m.text + event.payload.text }));
     case "message.completed":
       return {
-        ...updateMessage(state, pending, () => ({ text: event.payload.text })),
+        ...updateMessage(seen, pending, () => ({ text: event.payload.text })),
         announcement: `Assistant replied: ${event.payload.text}`,
       };
     case "turn.completed":
-      return finish(state, "complete", state.announcement);
+      return finish(seen, "complete", seen.announcement);
     case "turn.interrupted":
-      return finish(state, "interrupted", "The reply stopped before it finished.");
+      return finish(seen, "interrupted", "The reply stopped before it finished.");
     case "turn.failed": {
       const { message, code } = event.payload;
-      return finish(state, "error", `Something went wrong: ${message}`, code && { failure: code });
+      return finish(seen, "error", `Something went wrong: ${message}`, code && { failure: code });
     }
     case "usage.updated":
-      return state;
+      return seen;
     // The M3 events (steps, tools, approvals, limits) get their timeline with the cards that
     // render them; until then they leave the thread as it is.
     case "turn.cancelled":
@@ -289,7 +308,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     case "limit.reached":
     case "artifact.created":
     case "memory.proposed":
-      return state;
+      return seen;
   }
 }
 
