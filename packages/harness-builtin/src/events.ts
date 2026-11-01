@@ -42,6 +42,7 @@ export type LoopEvent =
   | E<"approval.requested", { batchId: string; items: ApprovalItem[] }>
   | E<"approval.resolved", { batchId: string; decisions: ApprovalDecision[] }>
   | E<"context.tainted", { stepId: string; source: { kind: TaintSourceKind; label: string } }>
+  | E<"artifact.created", { artifactId: string; name: string; type: string; bytes: number }>
   | E<"limit.reached", { kind: LimitKind; detail: string }>
   | E<"turn.completed", Record<string, never>>
   | E<"turn.cancelled", Record<string, never>>

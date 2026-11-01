@@ -11,11 +11,22 @@ const gcm = (iv: Uint8Array<ArrayBuffer>, binding: string) => ({
 });
 
 describe("credential binding", () => {
-  it("canonicalizes the origin and ignores the path", () => {
+  it("canonicalizes the origin and the path, without trailing slashes", () => {
     expect(canonicalOrigin("HTTPS://API.OpenAI.com:443/v1/")).toBe("https://api.openai.com");
     expect(canonicalOrigin("http://localhost:11434/v1")).toBe("http://localhost:11434");
-    expect(credentialBinding("openai", "https://api.openai.com/v1")).toBe(
-      "model:openai|https://api.openai.com",
+    for (const url of [
+      "https://api.openai.com/v1",
+      "HTTPS://API.OpenAI.com:443/v1//",
+      "https://api.openai.com/x/../v1",
+    ]) {
+      expect(credentialBinding("openai", url)).toBe("model:openai|https://api.openai.com/v1");
+    }
+    // The root keeps its `/`, so this form never equals an origin-only binding saved earlier.
+    expect(credentialBinding("openai", "https://api.openai.com/")).toBe(
+      "model:openai|https://api.openai.com/",
+    );
+    expect(credentialBinding("openai", "https://api.openai.com")).toBe(
+      "model:openai|https://api.openai.com/",
     );
   });
 
@@ -26,7 +37,7 @@ describe("credential binding", () => {
     expect(() => credentialBinding("a|b", "https://example.test")).toThrow("provider id");
   });
 
-  it("a key bound to one origin fails decryption under another", async () => {
+  it("a key bound to one endpoint fails decryption under another", async () => {
     const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
       "encrypt",
       "decrypt",
@@ -41,11 +52,13 @@ describe("credential binding", () => {
     const open = (providerId: string, baseUrl: string) =>
       crypto.subtle.decrypt(gcm(iv, credentialBinding(providerId, baseUrl)), key, sealed);
 
-    // Same origin, different path: still opens.
-    expect(new TextDecoder().decode(await open("openai", "https://api.openai.com/v2"))).toBe(
+    expect(new TextDecoder().decode(await open("openai", "https://api.openai.com/v1/"))).toBe(
       "sk-canary",
     );
     for (const [providerId, baseUrl] of [
+      // Same origin, another path: another AI Gateway account, say (crypto review I-2).
+      ["openai", "https://api.openai.com/v2"],
+      ["openai", "https://api.openai.com/v1/other"],
       ["openai", "https://api.openai.com.attacker.test/v1"],
       ["openai", "http://api.openai.com/v1"],
       ["openai", "https://api.openai.com:8443/v1"],

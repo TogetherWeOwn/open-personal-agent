@@ -41,6 +41,9 @@ export type ToolOutput = {
   // What the result adds to the context, for taint. Omitted, it counts as an untrusted tool result;
   // a tool whose result is only its own text says `{ kind: "system" }`.
   context?: ContextEvent;
+  // A file the call created (M3-08 AC3): the loop announces it with `artifact.created`, so the
+  // transcript and Outputs learn about it from the event log, not from the tool's text.
+  artifact?: { artifactId: string; name: string; type: string; bytes: number };
 };
 
 export interface LoopTool extends RegisteredTool {
@@ -255,6 +258,7 @@ export async function* runTurn(
         const o = await out;
         stepId = id;
         yield* result(run.call, o.ok, o.content);
+        if (o.ok && o.artifact) yield ev("artifact.created", o.artifact);
         const was = state.taint.taint;
         state.taint = addContext(state.taint, o.context ?? { kind: "tool", label: run.call.name });
         const source = state.taint.sources[0];
@@ -368,7 +372,7 @@ export async function* runTurn(
       if (budget) host.budget?.settle(usage);
     }
     if (usage) {
-      for (const k of Object.keys(ZERO) as (keyof ModelUsage)[]) state.usage[k] += usage[k];
+      for (const k of Object.keys(ZERO) as (keyof ModelUsage)[]) state.usage[k] += usage[k] ?? 0;
       yield ev("usage.updated", { usage, providerId: host.provider.id, model: host.model });
     }
     const ids = new Set(

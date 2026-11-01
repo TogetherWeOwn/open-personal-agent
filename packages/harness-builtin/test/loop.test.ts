@@ -42,6 +42,43 @@ describe("tool input (M3-03 AC2)", () => {
   });
 });
 
+describe("artifact.created (M3-08 AC3)", () => {
+  it("announces a file a tool created, and only for a call that ran", async () => {
+    const artifact = { artifactId: "a1", name: "notes.md", type: "text/markdown", bytes: 12 };
+    const make = tool(
+      "make",
+      "write_reversible",
+      (): ToolOutput => ({
+        ok: true,
+        content: "made",
+        context: { kind: "system" },
+        artifact,
+      }),
+    );
+    const { provider } = scripted([{ calls: [["make", { q: "x" }]] }, { text: "done" }]);
+    const { events } = await drain(host(provider, [make]), newTurn());
+    expect(ofType(events, "artifact.created").map((e) => e.payload)).toEqual([artifact]);
+    // The event follows the tool's result, inside the same step.
+    const order = types(events);
+    expect(order.indexOf("artifact.created")).toBeGreaterThan(order.indexOf("tool.result"));
+    expect(order.indexOf("artifact.created")).toBeLessThan(order.lastIndexOf("step.completed"));
+
+    // A failed call created nothing, whatever its output claims.
+    const fail = tool(
+      "make",
+      "write_reversible",
+      (): ToolOutput => ({
+        ok: false,
+        content: "no",
+        artifact,
+      }),
+    );
+    const second = scripted([{ calls: [["make", { q: "x" }]] }, { text: "done" }]);
+    const failed = await drain(host(second.provider, [fail]), newTurn());
+    expect(ofType(failed.events, "artifact.created")).toEqual([]);
+  });
+});
+
 describe("several calls in one step (M3-03 AC3)", () => {
   it("runs ungated reads in parallel and gates the rest as one batch", async () => {
     let running = 0;

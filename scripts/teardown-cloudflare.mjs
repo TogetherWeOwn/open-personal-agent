@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { DeployError } from "./deploy-cloudflare.mjs";
 
-export const PREFIX_PATTERN = /^opa-v-[0-9]{8}-[a-z0-9]{6}$/;
+// M2 form plus the T3/T4/T7 campaign form `opa-v-q4-<yyyymmdd>-<8hex>` (TWO-669).
+export const PREFIX_PATTERN = /^opa-v-(?:[0-9]{8}-[a-z0-9]{6}|q4-[0-9]{8}-[0-9a-f]{8})$/;
 
 // [kind, list path, name field, delete path]: `{p}` is the prefix, `{field}` a field of the item;
 // `{page}` lists are followed to the end. Deleting the Worker removes its DOs, cron and assets.
@@ -65,7 +66,7 @@ export async function teardownCloudflare(argv, deps) {
   const prefix = values.name ?? deps.env.OPA_PREFIX ?? "";
   if (!PREFIX_PATTERN.test(prefix)) {
     throw new DeployError(
-      `refusing "${prefix}": teardown only accepts opa-v-<yyyymmdd>-<6 lowercase letters or digits>`,
+      `refusing "${prefix}": teardown only accepts opa-v-<yyyymmdd>-<6 alphanumerics> or opa-v-q4-<yyyymmdd>-<8 hex>`,
     );
   }
   if (values.confirm !== undefined && values.confirm !== prefix) {

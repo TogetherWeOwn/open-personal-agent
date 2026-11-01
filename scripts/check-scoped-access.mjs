@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Lint for ADR 0010 D3 and D4.1 #2 over app and package sources (tests are exempt), and D4.1 #4
+// Lint for ADR 0010 D3 and D4.1 #2 and ADR 0008 #4 over app and package sources (tests are exempt), and D4.1 #4
 // over packages/vault/package.json. Runs in `pnpm lint`.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -35,6 +35,25 @@ export const RULES = [
     "only the assistant scopes itself, by the name the session gave it (ADR 0010 D3)",
   ],
   [
+    "memory-tables",
+    /^packages\/db\/src\/(?:memory|schema|index)\.ts$/, // index.ts hands the schema to Drizzle
+    // The Drizzle tables by name, by import, through a namespace import of the schema or through
+    // Drizzle's relational `query`; and the SQL table names in a query.
+    new RegExp(
+      [
+        /\b(?:memoryLinks|memory_links|memories_fts)\b/,
+        /\b(?:schema|query)\.memories\b/,
+        /\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+[`"']?memories\b/,
+        /\bimport\b[^;]*\bmemories\b[^;]*\bfrom\s*["'][^"']*(?:@opa\/db|schema|index)["']/,
+        /\bimport\s*\*\s*as\s+\w+\s*from\s*["'][^"']*(?:@opa\/db|schema)["']/,
+      ]
+        .map((r) => r.source)
+        .join("|"),
+      "gi",
+    ),
+    "MemoryService is the only way to memory (ADR 0008 #4): use forUser(scope).memory",
+  ],
+  [
     "scope-minting",
     /^(?:packages\/db\/|apps\/worker\/src\/task-workflow\.ts$)/,
     /\bscopeForTask\b/g,
@@ -42,9 +61,9 @@ export const RULES = [
   ],
   [
     "master-key",
-    /^(?:packages\/vault\/|apps\/(?:worker|node)\/src\/compose\.ts$)/,
+    /^(?:packages\/vault\/|(?:apps\/(?:worker|node)|packages\/server)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,
-    "only packages/vault and the composition root may name it (ADR 0010 D4.1 #2)",
+    "only packages/vault and the composition roots may name it (ADR 0010 D4.1 #2)",
   ],
   [
     "cloudflare-env",

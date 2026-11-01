@@ -43,8 +43,22 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
  * What is wrong with a manifest, or an empty list. It checks at runtime what the types already say,
  * because manifests from M5 plugins and MCP servers arrive as JSON.
  */
+/**
+ * Whether the value holds a reference cycle. `structuredClone` keeps cycles, but JSON can never
+ * express one, and the deep freeze below would recurse into it forever.
+ */
+function hasCycle(value: unknown, path: Set<object> = new Set()): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  if (path.has(value)) return true;
+  path.add(value);
+  const cycle = Object.values(value).some((v) => hasCycle(v, path));
+  path.delete(value);
+  return cycle;
+}
+
 export function manifestProblems(manifest: unknown): string[] {
   if (!isRecord(manifest)) return ["no manifest"];
+  if (hasCycle(manifest)) return ["the manifest must be plain data"];
   const { name, description, inputSchema, riskClass, destinations, scopes } = manifest;
   const problems: string[] = [];
   if (typeof name !== "string" || !TOOL_NAME.test(name)) {

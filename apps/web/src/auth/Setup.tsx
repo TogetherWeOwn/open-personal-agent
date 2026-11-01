@@ -7,8 +7,9 @@ import {
   startRegistration,
 } from "@simplewebauthn/browser";
 import { type ReactNode, useState } from "react";
-import { Button, Checkbox, Input, Label, TextField } from "react-aria-components";
-import { Alert, cancelled, type Failure, input, post, primary, Screen, secondary } from "./ui";
+import { Checkbox, Input, Label, TextField } from "react-aria-components";
+import { Button } from "../ui";
+import { Alert, cancelled, type Failure, input, post, Screen } from "./ui";
 
 type Mode = "claim" | "recovery";
 const SIGN_IN = { href: "/", label: "Sign in" };
@@ -99,7 +100,8 @@ export function Setup({ initialToken }: { initialToken: string }) {
       <Button
         onPress={start}
         isDisabled={busy || !token.trim()}
-        className={`${primary} self-start`}
+        variant="primary"
+        className="self-start"
       >
         {error ? "Try again" : "Create your passkey"}
       </Button>
@@ -148,7 +150,6 @@ export function RecoveryCodes({
       </ol>
       <div className="flex flex-wrap gap-2">
         <Button
-          className={secondary}
           onPress={() =>
             navigator.clipboard.writeText(text).then(
               () => setStatus("Copied all codes."),
@@ -158,9 +159,7 @@ export function RecoveryCodes({
         >
           Copy all
         </Button>
-        <Button className={secondary} onPress={download}>
-          Download .txt
-        </Button>
+        <Button onPress={download}>Download .txt</Button>
         <p role="status" className="self-center text-sm text-text-muted">
           {status}
         </p>
@@ -180,7 +179,8 @@ export function RecoveryCodes({
       </Checkbox>
       <Button
         isDisabled={!saved}
-        className={`${primary} self-start`}
+        variant="primary"
+        className="self-start"
         // A recovered owner has usually finished onboarding already; the app routes them.
         onPress={() => window.location.assign(mode === "claim" ? "/onboarding" : "/")}
       >

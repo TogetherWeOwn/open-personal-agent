@@ -1,12 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { HarnessEvent, TurnLimit } from "@opa/core";
-import type { ConversationSummary, StoredMessage } from "./transport";
+import type { HarnessEvent, TurnFailure, TurnLimit } from "@opa/core";
+import type { ConversationSummary, StoredAttachment, StoredMessage } from "./transport";
 
 /** The statuses D1 stores, so a loaded message keeps its own. */
 type Status = StoredMessage["status"];
-export type Message = { id: string; role: "user" | "assistant"; text: string; status: Status };
+/**
+ * `system` lines record a model switch. The server keeps each switch it saved; this tab keeps its
+ * own until then, and for good when nothing was saved (a failed switch, or a chat's first pick).
+ */
+export type Message = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  status: Status;
+  /** Why a failed reply failed, when the fix is elsewhere (a vault reset in Settings). */
+  failure?: TurnFailure;
+  attachments?: StoredAttachment[];
+};
 /** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
-export type Conversation = { id: string; title: string; messages: Message[]; stale: number };
+export type Conversation = {
+  id: string;
+  title: string;
+  messages: Message[];
+  stale: number;
+  /** The chat's own model (M3-06 AC3); null follows the Chat role. */
+  model: { provider: string; model: string } | null;
+};
 
 export interface ChatState {
   conversations: Conversation[];
@@ -22,20 +41,52 @@ export interface ChatState {
    * The last send a limit refused (M2-22), until the next send. It wrote nothing, so its message
    * leaves the chat and its text goes back to the composer.
    */
-  limit: { reason: TurnLimit; message: string; conversationId: string; text: string } | null;
+  limit: {
+    reason: TurnLimit;
+    message: string;
+    conversationId: string;
+    text: string;
+    attachments: StoredAttachment[];
+  } | null;
 }
 
 export type ChatAction =
   | { type: "new"; id: string }
   | { type: "select"; id: string }
-  | { type: "send"; id: string; text: string }
+  | {
+      type: "send";
+      id: string;
+      // Named, not "the active chat": a send that waited on uploads may go after a switch.
+      conversationId: string;
+      text: string;
+      attachments?: StoredAttachment[];
+    }
   | { type: "event"; event: HarnessEvent }
   | { type: "connected" }
   | { type: "listed"; conversations: ConversationSummary[] }
-  | { type: "loaded"; id: string; messages: StoredMessage[] };
+  | { type: "loaded"; id: string; messages: StoredMessage[] }
+  /**
+   * A model switch in this tab: the new pick, and the system line that records it. A line that
+   * reuses an earlier `noticeId` replaces that line, so a failed switch doesn't leave both.
+   */
+  | {
+      type: "model";
+      id: string;
+      noticeId: string;
+      pick: Conversation["model"];
+      notice: string;
+    }
+  /** A switch saved: the server's line takes the place of this tab's `noticeId` line. */
+  | { type: "saved"; id: string; noticeId: string; message: StoredMessage };
 
 const NEW_TITLE = "New chat";
-const blank = (id: string): Conversation => ({ id, title: NEW_TITLE, messages: [], stale: 0 });
+const blank = (id: string): Conversation => ({
+  id,
+  title: NEW_TITLE,
+  messages: [],
+  stale: 0,
+  model: null,
+});
 
 export const initialState = (id: string): ChatState => ({
   conversations: [blank(id)],
@@ -57,18 +108,32 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, activeId: action.id };
     case "send": {
       const text = action.text.trim();
-      if (state.pending || !text) return state;
+      const attachments = action.attachments ?? [];
+      // Files alone are a message too; their first name titles a new chat, as the server's does.
+      if (state.pending || (!text && !attachments.length)) return state;
       const pending = {
-        conversationId: state.activeId,
+        conversationId: action.conversationId,
         turnId: null,
         messageId: `${action.id}-reply`,
       };
+      const firstLine = text.split("\n", 1)[0] ?? "";
+      const sent: Message = {
+        id: action.id,
+        role: "user",
+        text,
+        status: "complete",
+        ...(attachments.length ? { attachments } : {}),
+      };
       return {
         ...toTop(state, pending.conversationId, (c) => ({
-          title: c.messages.length ? c.title : (text.split("\n", 1)[0]?.slice(0, 40) ?? text),
+          // The first message names the chat (or its first file); a model switch before it
+          // doesn't count.
+          title: c.messages.some((m) => m.role === "user")
+            ? c.title
+            : (firstLine || (attachments[0]?.name ?? "")).slice(0, 40) || c.title,
           messages: [
             ...c.messages,
-            { id: action.id, role: "user", text, status: "complete" },
+            sent,
             { id: pending.messageId, role: "assistant", text: "", status: "streaming" },
           ],
         })),
@@ -91,14 +156,43 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         conversations: [
           ...state.conversations.filter((c) => !listed.has(c.id)),
-          ...action.conversations.map(({ id, title }) => ({
+          ...action.conversations.map(({ id, title, model }) => ({
             id,
             title: title || NEW_TITLE,
             messages: known.get(id)?.messages ?? [],
             stale: (known.get(id)?.stale ?? 0) + 1,
+            // The server's pin wins; a summary without one (the mock transport) keeps this tab's.
+            model: model === undefined ? (known.get(id)?.model ?? null) : model,
           })),
         ],
       };
+    }
+    case "model": {
+      const line: Message = {
+        id: action.noticeId,
+        role: "system",
+        text: action.notice,
+        status: "complete",
+      };
+      return {
+        ...update(state, action.id, (c) => ({
+          model: action.pick,
+          messages: c.messages.some((m) => m.id === line.id)
+            ? c.messages.map((m) => (m.id === line.id ? line : m))
+            : [...c.messages, line],
+        })),
+        announcement: action.notice,
+      };
+    }
+    case "saved": {
+      const { id, content } = action.message;
+      const line: Message = { id, role: "system", text: content, status: "complete" };
+      return update(state, action.id, (c) => ({
+        // A load may have brought the saved line already; then this tab's copy just goes.
+        messages: c.messages.some((m) => m.id === id)
+          ? c.messages.filter((m) => m.id !== action.noticeId)
+          : c.messages.map((m) => (m.id === action.noticeId ? line : m)),
+      }));
     }
     case "loaded":
       return loaded(state, action.id, action.messages);
@@ -134,13 +228,15 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     if (pending?.turnId !== null) return state;
     const { conversationId } = pending;
     const chat = state.conversations.find((c) => c.id === conversationId);
-    const text = chat?.messages.at(-2)?.text ?? "";
+    const sent = chat?.messages.at(-2);
+    const text = sent?.text ?? "";
+    const attachments = sent?.attachments ?? [];
     const next = update(state, conversationId, (c) => {
       const messages = c.messages.slice(0, -2);
-      return { messages, ...(messages.length ? {} : { title: NEW_TITLE }) };
+      return { messages, ...(messages.some((m) => m.role === "user") ? {} : { title: NEW_TITLE }) };
     });
     const { reason, message } = event.payload;
-    const limit = { reason, message, conversationId, text };
+    const limit = { reason, message, conversationId, text, attachments };
     return { ...next, pending: null, limit, announcement: message };
   }
   // A rejection (`seq` 0) answers this tab's send before any turn started.
@@ -173,8 +269,10 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return finish(state, "complete", state.announcement);
     case "turn.interrupted":
       return finish(state, "interrupted", "The reply stopped before it finished.");
-    case "turn.failed":
-      return finish(state, "error", `Something went wrong: ${event.payload.message}`);
+    case "turn.failed": {
+      const { message, code } = event.payload;
+      return finish(state, "error", `Something went wrong: ${message}`, code && { failure: code });
+    }
     case "usage.updated":
       return state;
   }
@@ -187,11 +285,11 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   if (!current) return state;
   const local = new Map(current.messages.map((m) => [m.id, m]));
   // D1 holds a streaming reply's text only once it ends; the stream here is ahead.
-  const messages = stored.map(({ id, role, status, content }): Message => {
+  const messages = stored.map(({ id, role, status, content, attachments }): Message => {
     const m = local.get(id);
     return m?.status === "streaming" && status === "streaming"
       ? m
-      : { id, role, status, text: content };
+      : { id, role, status, text: content, ...(attachments?.length ? { attachments } : {}) };
   });
   const mine = pending?.conversationId === id ? pending : null;
   const reply = mine && stored.find((s) => s.id === mine.messageId);
@@ -202,15 +300,39 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     if (sent?.role === "user" && !stored.some((s) => s.id === sent.id)) messages.push(sent);
     if (at >= 0) messages.push(current.messages[at] as Message);
   }
+  // This tab's system lines the server doesn't have (unsaved model switches): put each back after
+  // the last message before it that the server kept, or at the end when that message is gone.
+  const saved = new Set(stored.map((s) => s.id));
+  const kept = (m: Message) => m.role !== "system" || saved.has(m.id);
+  const lines: { line: Message; after: string | null }[] = [];
+  current.messages.forEach((m, i) => {
+    if (!kept(m))
+      lines.push({
+        line: m,
+        after: [...current.messages.slice(0, i)].reverse().find(kept)?.id ?? null,
+      });
+  });
+  // Backwards, so several lines after one message keep their order. A line whose message is
+  // gone goes last: it still happened after everything the server kept.
+  for (const { line, after } of [...lines].reverse()) {
+    const found = after === null ? -1 : messages.findIndex((m) => m.id === after);
+    const at = after !== null && found === -1 ? messages.length - 1 : found;
+    messages.splice(at + 1, 0, line);
+  }
   const next = update(state, id, () => ({ messages, stale: 0 }));
   // The turn ended while this tab was disconnected.
   return reply && reply.status !== "streaming" ? { ...next, pending: null } : next;
 }
 
-function finish(state: ChatState, status: Status, announcement: string): ChatState {
+function finish(
+  state: ChatState,
+  status: Status,
+  announcement: string,
+  patch: Partial<Message> | undefined = {},
+): ChatState {
   if (!state.pending) return state;
   return {
-    ...updateMessage(state, state.pending, () => ({ status })),
+    ...updateMessage(state, state.pending, () => ({ status, ...patch })),
     pending: null,
     announcement,
   };

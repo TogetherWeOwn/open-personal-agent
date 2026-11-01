@@ -16,9 +16,42 @@ export interface ModelTool {
   inputSchema: Record<string, unknown>;
 }
 
+/**
+ * Provider-specific reasoning state from one assistant reply (OpenAI reasoning items, Anthropic
+ * thinking signatures). `items` is opaque to everything but the adapter that wrote it, and it is
+ * replayed only when provider, API and model all match the request (A-M2); otherwise it is
+ * dropped and the history still holds the text and tool calls.
+ */
+export interface ModelReasoning {
+  providerId: string;
+  api: string;
+  model: string;
+  items: unknown[];
+}
+
+/**
+ * A file the user attached, ready for a model call (M3-10 AC2). Images and PDFs carry base64 in
+ * `data`; text files carry their decoded `text`. The caller only fills one in where the model's
+ * capability flags allow that kind (text always, as it rides in the message text).
+ */
+export interface ModelAttachment {
+  kind: "image" | "pdf" | "text";
+  /** The type sniffed server-side from the file's first bytes, never the client's claim. */
+  mediaType: string;
+  name: string;
+  data?: string;
+  text?: string;
+}
+
 export type ModelMessage =
-  | { role: "system" | "user"; content: string }
-  | { role: "assistant"; content: string; toolCalls?: ModelToolCall[] }
+  | { role: "system"; content: string }
+  | { role: "user"; content: string; attachments?: ModelAttachment[] }
+  | {
+      role: "assistant";
+      content: string;
+      toolCalls?: ModelToolCall[];
+      reasoning?: ModelReasoning;
+    }
   /** The result of the assistant's call `toolCallId`. */
   | { role: "tool"; toolCallId: string; content: string };
 
@@ -32,12 +65,17 @@ export interface ModelRequest {
   signal?: AbortSignal;
 }
 
-/** Token counts for one call. `inputTokens` includes `cachedInputTokens`. */
+/**
+ * Token counts for one call. `inputTokens` includes `cachedInputTokens` (read from the prompt
+ * cache) and `cacheWriteInputTokens` (written to it, which some providers bill above input).
+ */
 export interface ModelUsage {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
   reasoningTokens: number;
+  /** Absent when the provider doesn't report cache writes apart from input. */
+  cacheWriteInputTokens?: number;
 }
 
 export type FinishReason = "stop" | "length" | "tool_calls" | "content_filter" | "other";
@@ -53,13 +91,16 @@ export type ModelErrorCode =
 
 /**
  * Normalized stream events. A stream always ends with exactly one `done` or `error`. Each
- * `tool_call` arrives once, complete, after the deltas. `usage` comes after the last delta and
- * tool call and before `done`, and is absent when the upstream reported none.
+ * `tool_call` arrives once, complete, after the deltas. `reasoning` arrives at most once, after
+ * the tool calls, from adapters with replayable state; the caller saves it on the assistant
+ * message. `usage` comes after the last delta and tool call and before `done`, and is absent when
+ * the upstream reported none.
  */
 export type ModelEvent =
   | { type: "text.delta"; text: string }
   | { type: "reasoning.delta"; text: string }
   | { type: "tool_call"; toolCall: ModelToolCall }
+  | { type: "reasoning"; reasoning: ModelReasoning }
   | { type: "usage"; usage: ModelUsage }
   | { type: "done"; finishReason: FinishReason }
   | { type: "error"; code: ModelErrorCode; message: string; status?: number };
@@ -73,6 +114,12 @@ export interface ModelCapabilities {
   tools: boolean;
   /** The upstream reports token usage on streamed calls. */
   usageInStream: boolean;
+  /**
+   * The model can read attached images / PDFs (M3-10 AC2). Absent means no: an adapter claims a
+   * flag only where it knows the wire shape the model accepts, so a file is never sent on a guess.
+   */
+  imageInput?: boolean;
+  pdfInput?: boolean;
 }
 
 export interface ModelProvider {

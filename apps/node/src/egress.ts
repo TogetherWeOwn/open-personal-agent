@@ -68,7 +68,7 @@ const first = (addresses: LookupAddress[], refuse: Refuse) =>
   addresses.map((a) => refuse(a.address)).find((reason) => reason !== null) ?? null;
 
 const blockedHost = (host: string, reason: string) =>
-  Object.assign(new Error(`Model host ${host} is ${reason}`), { code: "EBLOCKED" });
+  Object.assign(new Error(`Host ${host} is ${reason}`), { code: "EBLOCKED" });
 
 /**
  * The fetch model providers use on Node. Unless `allowPrivate` (the operator's
@@ -90,7 +90,25 @@ export function modelFetch({
       if (isBlocked(address)) return allowPrivate ? null : "on a private network";
       return plain ? "public, so it needs https" : null;
     };
-  const [refuseTls, refusePlain] = [refuse(false), refuse(true)];
+  return guardedFetch(refuse(false), refuse(true));
+}
+
+/**
+ * The fetch `web_fetch` uses on Node (M3-08 AC1): the same SSRF guard, for model-chosen URLs.
+ * There is no `allowPrivate` here — the operator's model-host allowance names servers they run,
+ * and a page the model picks is never one of them. Plain HTTP is allowed, as it is on Workers:
+ * the request carries no key and no cookies, and the tool re-checks every redirect itself.
+ */
+export function pageFetch({
+  isBlocked = isPrivateAddress,
+}: {
+  isBlocked?: IsBlocked;
+} = {}): typeof fetch {
+  const refuse: Refuse = (address) => (isBlocked(address) ? "on a private network" : null);
+  return guardedFetch(refuse, refuse);
+}
+
+function guardedFetch(refuseTls: Refuse, refusePlain: Refuse): typeof fetch {
   const tls = buildConnector({ lookup: guardedLookup(refuseTls) });
   const plain = buildConnector({ lookup: guardedLookup(refusePlain) });
   const dispatcher = new Agent({

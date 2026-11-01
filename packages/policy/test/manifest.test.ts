@@ -54,6 +54,12 @@ describe("manifestProblems", () => {
   ])("rejects %s", (_, manifest, problem) => {
     expect(manifestProblems(manifest).join("; ")).toContain(problem);
   });
+
+  it("rejects a manifest with a reference cycle, which JSON can never express", () => {
+    const cyclic = { ...webFetch } as Record<string, unknown>;
+    cyclic.self = cyclic;
+    expect(manifestProblems(cyclic).join("; ")).toContain("plain data");
+  });
 });
 
 describe("ToolRegistry", () => {
@@ -114,5 +120,15 @@ describe("ToolRegistry", () => {
     const registry = new ToolRegistry();
     const tool = { manifest: { ...webFetch, inputSchema: { type: "object", check: () => true } } };
     expect(() => registry.register(tool as { manifest: ToolManifest })).toThrow(/plain data/);
+  });
+
+  it("refuses a manifest with a reference cycle instead of overflowing the stack", () => {
+    const registry = new ToolRegistry();
+    const cyclic = { ...webFetch } as Record<string, unknown>;
+    cyclic.self = cyclic;
+    expect(() => registry.register({ manifest: cyclic } as { manifest: ToolManifest })).toThrow(
+      ManifestError,
+    );
+    expect(registry.get("web_fetch")).toBeUndefined();
   });
 });

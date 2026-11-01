@@ -1,0 +1,228 @@
+# SPDX-License-Identifier: Apache-2.0
+# T3/T4/T7 cf-verify window (TWO-669, plan TWO-573). Manual only, never a PR gate.
+# `start` deploys the fixtures, runs the T3 sync cases, starts the real 25 h wait, then runs
+# T4 (one real hour) and the T7 pilot. Each phase records its exit code in steps.txt, and a
+# failing phase never skips the later ones: a T3 assumption failure is a legitimate *result*,
+# and the per-test verdicts land in the bundle via `collect`. The operator dispatches `finish`
+# at least 25 h later with the start run's prefix and run id: it delivers the synthetic
+# approval event, collects the redacted bundles and tears everything down by manifest. Shares
+# the deploy-verify concurrency group so two campaigns never touch the account at once.
+# Authenticity: the fixture requires the CF_VERIFY_BEARER bearer (cf-verify environment) on
+# every route but /health. Artifacts carry the worker name only, never the workers.dev
+# subdomain: the driver rebuilds the full URL at runtime from the /workers/subdomain API.
+name: cf-verify-t3t4t7
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "start, finish (at least 25 h after start) or teardown-only"
+        required: true
+        default: "start"
+        type: choice
+        options: ["start", "finish", "teardown-only"]
+      prefix:
+        description: "Campaign prefix from the start run (finish and teardown-only)"
+        required: false
+        type: string
+      start_run_id:
+        description: "Start run id (finish: restores manifest and wait state)"
+        required: false
+        type: string
+      model:
+        description: "Pinned Workers AI starter model for the T7 pilot"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency: deploy-verify
+
+jobs:
+  start:
+    if: inputs.phase == 'start'
+    runs-on: ubuntu-latest
+    environment: cf-verify
+    timeout-minutes: 200
+    # No secrets at job level: setup runs install plus lifecycle scripts, which must never
+    # see them (same pattern as deploy-verify.yml). Each driver step takes its own env.
+    env:
+      T7_MODEL: ${{ inputs.model }}
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Deploy the fixtures
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+        run: |
+          # The driver prints the prefix before the first deploy call, so even a failed deploy
+          # records it: the failure pointer below never prints an empty prefix.
+          set +e
+          out=$(pnpm cf-verify:t3t4t7 deploy --model "$T7_MODEL")
+          code=$?
+          echo "$out"
+          echo "prefix=$(echo "$out" | grep -o 'opa-v-q4-[0-9-]*-[0-9a-f]*' | head -1)" >> "$GITHUB_OUTPUT"
+          exit $code
+      - name: T3 sync cases
+        id: t3sync
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+          PREFIX: ${{ steps.deploy.outputs.prefix }}
+        run: |
+          set +e
+          pnpm cf-verify:t3t4t7 t3-sync --prefix "$PREFIX"
+          code=$?
+          echo "t3-sync:$code" >> "$RUNNER_TEMP/$PREFIX/steps.txt"
+          exit $code
+      - name: Start the 25 h wait
+        id: t3wait
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+          PREFIX: ${{ steps.deploy.outputs.prefix }}
+        run: |
+          set +e
+          pnpm cf-verify:t3t4t7 t3-wait-start --prefix "$PREFIX"
+          code=$?
+          echo "t3-wait-start:$code" >> "$RUNNER_TEMP/$PREFIX/steps.txt"
+          if [ "$code" -eq 0 ]; then
+            echo "Dispatch finish with the above prefix no earlier than:"
+            cat "$RUNNER_TEMP/$PREFIX/wait.json"
+          fi
+          exit $code
+      - name: T4 real-hour run
+        id: t4
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+          PREFIX: ${{ steps.deploy.outputs.prefix }}
+        run: |
+          set +e
+          pnpm cf-verify:t3t4t7 t4 --prefix "$PREFIX"
+          code=$?
+          echo "t4:$code" >> "$RUNNER_TEMP/$PREFIX/steps.txt"
+          exit $code
+      - name: T7 pilot
+        id: t7
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+          PREFIX: ${{ steps.deploy.outputs.prefix }}
+        run: |
+          set +e
+          pnpm cf-verify:t3t4t7 t7 --prefix "$PREFIX" --model "$T7_MODEL"
+          code=$?
+          echo "t7:$code" >> "$RUNNER_TEMP/$PREFIX/steps.txt"
+          exit $code
+      - name: Collect partial evidence
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+          PREFIX: ${{ steps.deploy.outputs.prefix }}
+        run: pnpm cf-verify:t3t4t7 collect --prefix "$PREFIX"
+      - name: Upload start state
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3t4t7-${{ steps.deploy.outputs.prefix }}
+          path: ${{ runner.temp }}/${{ steps.deploy.outputs.prefix }}
+          retention-days: 7
+      - name: Point the operator at teardown-only on failure
+        if: failure()
+        env:
+          PREFIX: ${{ steps.deploy.outputs.prefix }}
+        run: |
+          echo "Start failed partway. Fixtures under prefix \"$PREFIX\" may still be up (the 25 h wait stays up by design)."
+          echo "After triage, dispatch teardown-only with that prefix, or finish if the wait started cleanly."
+
+  finish:
+    if: inputs.phase == 'finish'
+    runs-on: ubuntu-latest
+    environment: cf-verify
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      GH_TOKEN: ${{ github.token }}
+      PREFIX: ${{ inputs.prefix }}
+      START_RUN_ID: ${{ inputs.start_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Restore start state
+        run: gh run download "$START_RUN_ID" -n "t3t4t7-$PREFIX" -D "$RUNNER_TEMP/$PREFIX"
+      - name: Deliver the +25 h approval and verify
+        id: callback
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+        run: |
+          set +e
+          pnpm cf-verify:t3t4t7 callback --prefix "$PREFIX"
+          code=$?
+          echo "callback:$code" >> "$RUNNER_TEMP/$PREFIX/steps.txt"
+          exit $code
+      # Two steps, both always(): a collect failure must never skip teardown.
+      - name: Collect evidence
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+        run: pnpm cf-verify:t3t4t7 collect --prefix "$PREFIX"
+      - name: Tear down
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_VERIFY_BEARER: ${{ secrets.CF_VERIFY_BEARER }}
+        run: pnpm cf-verify:t3t4t7 teardown --prefix "$PREFIX"
+      - name: Upload evidence bundles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3t4t7-evidence-${{ inputs.prefix }}
+          path: ${{ runner.temp }}/${{ inputs.prefix }}
+          retention-days: 90
+
+  teardown-only:
+    if: inputs.phase == 'teardown-only'
+    runs-on: ubuntu-latest
+    environment: cf-verify
+    timeout-minutes: 30
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      PREFIX: ${{ inputs.prefix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # No bearer here: teardown runs bearer-less by design (the recovery path).
+      - run: pnpm cf-verify:t3t4t7 teardown --prefix "$PREFIX"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

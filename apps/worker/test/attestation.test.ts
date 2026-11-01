@@ -2,10 +2,11 @@
 // TWO-427 L-5 (M3-21 AC6 and AC8): every registration path takes only "none" attestation. Any
 // other format is refused before the verifier runs, with no outbound request. A self-signed
 // "packed" statement would verify if it reached the library.
+
+import type { AttestationFormat } from "@opa/server/test/softauthn";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { Browser, claim, count, env, freshDatabase, passkey, TOKEN } from "./helpers/app";
-import type { AttestationFormat } from "./helpers/softauthn";
 
 freshDatabase();
 
