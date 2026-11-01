@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-8 and M2-8+, and the ADR 0010 D4.1 tests M2-8+V1, V2 and V7 to V9.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createVault, decrypt, encrypt, type Purpose, type Vault } from "../src/index";
+import {
+  createVault,
+  decrypt,
+  encrypt,
+  type Purpose,
+  type UserScope,
+  type Vault,
+} from "../src/index";
 import { importKek } from "../src/kek";
 import { MemoryStore } from "./memory-store";
 
@@ -13,15 +20,23 @@ const FAILED = { name: "VaultError", message: "vault: decrypt_failed" };
 const caller = "test";
 type Ask = { userId?: string; id?: string; purpose?: string; binding?: string };
 const put = (vault: Vault, { userId = "u1", id = "s1", binding = BINDING }: Ask = {}) =>
-  encrypt(
-    vault,
-    { userId },
-    { secretId: id, purpose: "model_api_key", binding, plaintext: CANARY, caller },
-  );
+  encrypt(vault, { userId } as UserScope, {
+    secretId: id,
+    purpose: "model_api_key",
+    binding,
+    plaintext: CANARY,
+    caller,
+  });
 const get = (
   vault: Vault,
   { userId = "u1", id = "s1", purpose = "model_api_key", binding = BINDING }: Ask = {},
-) => decrypt(vault, { userId }, { secretId: id, purpose: purpose as Purpose, binding, caller });
+) =>
+  decrypt(vault, { userId } as UserScope, {
+    secretId: id,
+    purpose: purpose as Purpose,
+    binding,
+    caller,
+  });
 function only<T>(rows: T[]): T {
   if (rows.length !== 1 || rows[0] === undefined)
     throw new Error(`expected one row, got ${rows.length}`);
@@ -79,6 +94,12 @@ describe("envelope encryption (M2-8, M2-8+)", () => {
     await expect(get(vault, { binding: "openai|https://evil.example" })).rejects.toMatchObject(
       FAILED,
     );
+  });
+
+  it("takes only a UserScope minted by the repository layer (ADR 0010 D3)", async () => {
+    const input = { secretId: "s1", purpose: "model_api_key", binding: BINDING, caller } as const;
+    // @ts-expect-error: a plain object isn't a UserScope.
+    await expect(decrypt(vault, { userId: "u1" }, input)).rejects.toMatchObject(FAILED);
   });
 
   it("rejects ids that could make AAD ambiguous, and unknown purposes", async () => {
@@ -156,12 +177,13 @@ describe("D4.1 key hygiene", () => {
       newKey(16),
       newKey(48),
       `0:${key1}`,
+      `${"A".repeat(42)}B=`, // non-canonical: decodes like `…AA=`
     ];
     for (const masterKey of bad) {
       await expect(createVault({ masterKey, store })).rejects.toThrow("vault: unavailable");
     }
-    // So does a malformed PREV, or one whose epoch isn't older.
-    for (const previousMasterKey of [newKey(16), newKey()]) {
+    // So does an empty or malformed PREV, or one whose epoch isn't older.
+    for (const previousMasterKey of ["", newKey(16), newKey()]) {
       await expect(createVault({ masterKey: key1, previousMasterKey, store })).rejects.toThrow();
     }
   });

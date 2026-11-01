@@ -10,9 +10,11 @@ import { importKek, type Kek, vaultError } from "./kek";
 export type Purpose = "model_api_key" | "connector_token";
 const PURPOSES: readonly string[] = ["model_api_key", "connector_token"] satisfies Purpose[];
 
-/** The signed-in user, from the repository layer (ADR 0010 D3). */
+declare const scopeBrand: unique symbol;
+/** The signed-in user. Only the repository layer mints one, from the session (ADR 0010 D3). */
 export interface UserScope {
   readonly userId: string;
+  readonly [scopeBrand]: true;
 }
 
 type Bytes = Uint8Array<ArrayBuffer>;
@@ -79,7 +81,8 @@ const encoder = new TextEncoder();
 export async function createVault(config: VaultConfig): Promise<Vault> {
   const current = await importKek(config.masterKey);
   const keks = new Map([[current.version, current]]);
-  if (config.previousMasterKey) {
+  // An empty PREV is a misconfiguration, not "unset": it fails closed too.
+  if (config.previousMasterKey !== undefined) {
     const previous = await importKek(config.previousMasterKey);
     if (previous.version >= current.version) throw vaultError("unavailable");
     keks.set(previous.version, previous);
