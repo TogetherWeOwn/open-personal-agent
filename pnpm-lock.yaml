@@ -75,6 +75,9 @@ importers:
       '@opa/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@opa/vault':
+        specifier: workspace:*
+        version: link:../../packages/vault
       '@simplewebauthn/server':
         specifier: 14.0.3
         version: 14.0.3

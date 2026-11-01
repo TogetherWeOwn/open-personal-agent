@@ -6,6 +6,11 @@
 # Losing it makes stored per-user secrets unrecoverable, so back it up.
 OPA_MASTER_KEY=
 
+# Only while rotating the KEK: the previous OPA_MASTER_KEY. Prefix the new OPA_MASTER_KEY with its
+# epoch number, e.g. `2:<base64>` (a bare key is epoch 1). Delete this once every data key is
+# re-wrapped and the old epoch is past the 30-day D1 Time Travel window.
+# OPA_MASTER_KEY_PREV=
+
 # Secret for signing session state: 32 random bytes, base64.
 OPA_SESSION_SECRET=
 
