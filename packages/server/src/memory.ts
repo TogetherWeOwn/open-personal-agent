@@ -255,8 +255,10 @@ memorySettings.put("/", async (c) => {
   if (typeof value !== "boolean") return c.json({ error: "invalid_setting" }, 400);
   const user = userOf(c);
   const from = (await user.settings.get())?.learnFromChats ?? true;
-  await user.settings.save({ learnFromChats: value });
   const detail = changes({ learnFromChats: from }, { learnFromChats: value });
-  if (detail) await user.audit.add({ action: "settings.memory", module: "settings", detail });
+  await user.settings.save(
+    { learnFromChats: value },
+    { audit: detail ? { action: "settings.memory", module: "settings", detail } : undefined },
+  );
   return c.json({ learnFromChats: value });
 });

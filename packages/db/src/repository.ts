@@ -165,6 +165,24 @@ export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
 >;
 
+/** An audit row a user's own change writes with it; `detail` is a fact, never a secret or content. */
+export interface AuditRow {
+  action: string;
+  module: string;
+  targetId?: string | null;
+  result?: "ok" | "denied" | "error";
+  detail?: Record<string, unknown> | null;
+}
+
+const auditValues = (userId: string, row: AuditRow) => ({
+  userId,
+  action: row.action,
+  module: row.module,
+  targetId: row.targetId ?? null,
+  result: row.result ?? "ok",
+  detail: row.detail ? JSON.stringify(row.detail) : null,
+});
+
 /** An override change as the audit log records it (M3-02 AC7): the tool, both values, its risk. */
 export interface OverrideChange {
   tool: string;
@@ -1817,18 +1835,31 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .where(eq(users.id, userId))
                 .limit(1)
             )[0],
-          save: async (values: SettingsUpdate) => {
-            const set = { ...values, updatedAt: Date.now() };
-            await db
-              .insert(userSettings)
-              .values({ ...set, userId })
-              .onConflictDoUpdate({ target: userSettings.userId, set });
-          },
-          rename: async (displayName: string) => {
-            await db
-              .update(users)
-              .set({ displayName, updatedAt: Date.now() })
-              .where(eq(users.id, userId));
+          /**
+           * Saves the fields, and with them, in one batch, a new display name and the change's
+           * audit row (M3-19 AC3): a change the log can't record isn't made.
+           */
+          save: async (
+            values: SettingsUpdate,
+            o: { displayName?: string; audit?: AuditRow | undefined } = {},
+          ) => {
+            const now = Date.now();
+            const set = { ...values, updatedAt: now };
+            await db.batch([
+              db
+                .insert(userSettings)
+                .values({ ...set, userId })
+                .onConflictDoUpdate({ target: userSettings.userId, set }),
+              ...(o.displayName === undefined
+                ? []
+                : [
+                    db
+                      .update(users)
+                      .set({ displayName: o.displayName, updatedAt: now })
+                      .where(eq(users.id, userId)),
+                  ]),
+              ...(o.audit ? [db.insert(auditLog).values(auditValues(userId, o.audit))] : []),
+            ]);
           },
           keyUsed: async (secretId: string) => {
             await db
@@ -2014,22 +2045,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         audit: {
           list: () =>
             db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
-          /** One row of the user's own trail; `detail` is a fact, never a secret or content. */
-          add: async (row: {
-            action: string;
-            module: string;
-            targetId?: string | null;
-            result?: "ok" | "denied" | "error";
-            detail?: Record<string, unknown> | null;
-          }) => {
-            await db.insert(auditLog).values({
-              userId,
-              action: row.action,
-              module: row.module,
-              targetId: row.targetId ?? null,
-              result: row.result ?? "ok",
-              detail: row.detail ? JSON.stringify(row.detail) : null,
-            });
+          /** One row of the user's own trail. */
+          add: async (row: AuditRow) => {
+            await db.insert(auditLog).values(auditValues(userId, row));
           },
         },
         /**
@@ -2085,11 +2103,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]);
           },
           /** Removes the row and its key; roles and conversations naming it fall back. */
-          remove: async (id: string) => {
+          /** Deletes the provider and its key, with `audit` in the same batch when given. */
+          remove: async (id: string, audit?: AuditRow) => {
             const row = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
             if (!row) return false;
             await db.batch([
               db.delete(modelProviders).where(ownProvider(id)),
+              ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
               ...(row.keySecretId
                 ? [
                     db

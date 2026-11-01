@@ -240,6 +240,23 @@ describe("memory settings", () => {
     ]);
   });
 
+  it("doesn't change the setting when its audit row can't be written", async () => {
+    const { browser } = await claim();
+    await db.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const put = await browser.req("/api/settings/memory", {
+        method: "PUT",
+        body: { learnFromChats: false },
+      });
+      expect(put.status).toBe(500);
+    } finally {
+      await db.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect(await (await browser.req("/api/settings/memory")).json()).toEqual({
+      learnFromChats: true,
+    });
+  });
+
   it("takes remember from the turn's tools while Learn from our chats is off", async () => {
     const { browser, owner } = await claim();
     // What a host registers for the user's turn, read afresh as each turn starts.
