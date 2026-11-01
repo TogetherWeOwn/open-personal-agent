@@ -321,7 +321,7 @@ describe("chat transport", () => {
     // The list holds the user's own conversations only.
     const list = await (await browser.req("/api/conversations")).json<{ conversations: unknown }>();
     expect(list.conversations).toEqual([
-      { id: "mine", title: "first", updatedAt: expect.any(Number) },
+      { id: "mine", title: "first", updatedAt: expect.any(Number), model: null },
     ]);
   });
 });

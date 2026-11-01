@@ -3,7 +3,7 @@
 // into the vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
 import type { ModelProvider, ModelUsage } from "@opa/core";
 import { createRepository, type ProviderValues } from "@opa/db/repository";
-import { findPrice, isStale } from "@opa/pricing";
+import { findPrice, isStale, providerInfo } from "@opa/pricing";
 import {
   credentialBinding,
   isLoopbackHost,
@@ -69,13 +69,18 @@ const apiOf = (row: Provider) =>
 function providerView(row: Provider) {
   // `last4` is null for keys shorter than 8 characters; the join still finds the row.
   const keyed = row.keyCreatedAt !== null && row.kind !== "workers-ai";
+  const billingId = billerOf(row);
   return {
     id: row.id,
     kind: row.kind,
     api: apiOf(row),
     providerId: row.providerId,
     baseUrl: row.baseUrl,
+    // Names a person reads ("GPT-4.1 mini · OpenAI"), from the price table where it has them;
+    // a provider it doesn't know is named by its billing host, as on the Usage page.
+    providerName: providerInfo(billingId).name,
     model: row.model,
+    modelName: (row.model && findPrice(billingId, row.model)?.name) || row.model,
     createdAt: row.createdAt,
     key: keyed
       ? {

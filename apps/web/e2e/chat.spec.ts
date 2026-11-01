@@ -2,12 +2,56 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
+const provider = (over: Record<string, unknown>) => ({
+  id: "p1",
+  kind: "openai-chat",
+  api: "openai-responses",
+  providerId: "openai",
+  baseUrl: "https://api.openai.com/v1",
+  providerName: "OpenAI",
+  model: "gpt-4.1-mini",
+  modelName: "GPT-4.1 mini",
+  createdAt: Date.UTC(2026, 9, 20),
+  key: {
+    last4: "WXYZ",
+    createdAt: Date.UTC(2026, 9, 20),
+    updatedAt: Date.UTC(2026, 9, 20),
+    lastUsedAt: null,
+  },
+  price: { inputUsdPerMTok: 0.4, outputUsdPerMTok: 1.6, verifiedAt: "2026-11-01", stale: false },
+  ...over,
+});
+/** The settings view behind onboarding's gate and the composer's context chip (M3-06). */
+const SETTINGS = {
+  displayName: "Sam",
+  about: "",
+  onboarded: true,
+  model: null,
+  providers: [
+    provider({}),
+    provider({
+      id: "p2",
+      providerId: "openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      providerName: "OpenRouter",
+      model: "some/model",
+      modelName: "some/model",
+      price: null,
+    }),
+  ],
+  roles: {
+    chat: { provider: "p1", model: "gpt-4.1-mini" },
+    background: { provider: "p1", model: "gpt-4.1-mini", default: true },
+    embedding: null,
+  },
+};
+
 // The chat loads nothing from another origin (ADR 0010 D7).
 test.beforeEach(async ({ page, baseURL }) => {
   page.on("request", (req) => expect(new URL(req.url()).origin).toBe(baseURL));
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
-  await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
+  await page.route("/api/settings", (route) => route.fulfill({ json: SETTINGS }));
 });
 
 /** Tabs to the composer, types, presses Enter and waits for the whole reply. */
@@ -70,6 +114,55 @@ test("a refused send explains the limit and goes back to the composer", async ({
   ).toBeVisible();
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+});
+
+test("the context chip names the model and switches this chat to another (M3-06 AC3, AC6)", async ({
+  page,
+}) => {
+  const pins: unknown[] = [];
+  await page.route("/api/conversations/*/model", async (route) => {
+    pins.push(route.request().postDataJSON());
+    await route.fulfill({ status: 204 });
+  });
+  await page.goto("/");
+  const chip = page.getByRole("button", { name: /GPT-4\.1 mini · OpenAI, model for this chat/ });
+  await expect(chip).toContainText("GPT-4.1 mini · OpenAI");
+  await expect(page.getByText("about $0.09 per 100 messages")).toBeVisible();
+  await chip.click();
+  await page.getByRole("menuitem", { name: /some\/model · OpenRouter/ }).click();
+  await expect(page.getByRole("log", { name: "Messages" })).toContainText(
+    "Switched to some/model via OpenRouter",
+  );
+  await expect(
+    page.getByRole("button", { name: /some\/model · OpenRouter, model for this chat/ }),
+  ).toBeVisible();
+  expect(pins).toEqual([{ provider: "p2", model: "some/model" }]);
+  // Back to the chat model clears the pin instead of naming a provider.
+  await page.getByRole("button", { name: /model for this chat/ }).click();
+  await page.getByRole("menuitem", { name: /Use my chat model/ }).click();
+  await expect(page.getByRole("log")).toContainText("Switched to GPT-4.1 mini via OpenAI");
+  expect(pins).toEqual([{ provider: "p2", model: "some/model" }, null]);
+});
+
+test("with no model set up, the chip says so and Send opens Settings › Models", async ({
+  page,
+}) => {
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: {
+        ...SETTINGS,
+        providers: [],
+        roles: { chat: null, background: null, embedding: null },
+      },
+    }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: /No model set up/ })).toBeVisible();
+  await page.getByRole("textbox", { name: "Message" }).fill("Hello?");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page).toHaveURL(/\/settings\/models$/);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
+  await expect(page.getByText("No model set up yet.")).toBeVisible();
 });
 
 for (const colorScheme of ["light", "dark"] as const) {

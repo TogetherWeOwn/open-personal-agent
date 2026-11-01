@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { HarnessEvent } from "@opa/core";
 
-/** A row of `GET /api/conversations`, newest first. */
-export type ConversationSummary = { id: string; title: string | null; updatedAt: number };
+/** A row of `GET /api/conversations`, newest first. `model` is the chat's own pick, if it has one. */
+export type ConversationSummary = {
+  id: string;
+  title: string | null;
+  updatedAt: number;
+  model?: { provider: string; model: string } | null;
+};
 
 /** A row of `GET /api/conversations/:id/messages`, oldest first. */
 export type StoredMessage = {

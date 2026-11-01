@@ -4,9 +4,22 @@ import type { ConversationSummary, StoredMessage } from "./transport";
 
 /** The statuses D1 stores, so a loaded message keeps its own. */
 type Status = StoredMessage["status"];
-export type Message = { id: string; role: "user" | "assistant"; text: string; status: Status };
+/** `system` lines are this tab's own record (a model switch); the server never stores them. */
+export type Message = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  status: Status;
+};
 /** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
-export type Conversation = { id: string; title: string; messages: Message[]; stale: number };
+export type Conversation = {
+  id: string;
+  title: string;
+  messages: Message[];
+  stale: number;
+  /** The chat's own model (M3-06 AC3); null follows the Chat role. */
+  model: { provider: string; model: string } | null;
+};
 
 export interface ChatState {
   conversations: Conversation[];
@@ -32,10 +45,24 @@ export type ChatAction =
   | { type: "event"; event: HarnessEvent }
   | { type: "connected" }
   | { type: "listed"; conversations: ConversationSummary[] }
-  | { type: "loaded"; id: string; messages: StoredMessage[] };
+  | { type: "loaded"; id: string; messages: StoredMessage[] }
+  /** A model switch in this tab: the new pick, and the system line that records it. */
+  | {
+      type: "model";
+      id: string;
+      noticeId: string;
+      pick: Conversation["model"];
+      notice: string;
+    };
 
 const NEW_TITLE = "New chat";
-const blank = (id: string): Conversation => ({ id, title: NEW_TITLE, messages: [], stale: 0 });
+const blank = (id: string): Conversation => ({
+  id,
+  title: NEW_TITLE,
+  messages: [],
+  stale: 0,
+  model: null,
+});
 
 export const initialState = (id: string): ChatState => ({
   conversations: [blank(id)],
@@ -91,13 +118,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         conversations: [
           ...state.conversations.filter((c) => !listed.has(c.id)),
-          ...action.conversations.map(({ id, title }) => ({
+          ...action.conversations.map(({ id, title, model }) => ({
             id,
             title: title || NEW_TITLE,
             messages: known.get(id)?.messages ?? [],
             stale: (known.get(id)?.stale ?? 0) + 1,
+            // The server's pin wins; a summary without one (the mock transport) keeps this tab's.
+            model: model === undefined ? (known.get(id)?.model ?? null) : model,
           })),
         ],
+      };
+    }
+    case "model": {
+      const line: Message = {
+        id: action.noticeId,
+        role: "system",
+        text: action.notice,
+        status: "complete",
+      };
+      return {
+        ...update(state, action.id, (c) => ({
+          model: action.pick,
+          messages: [...c.messages, line],
+        })),
+        announcement: action.notice,
       };
     }
     case "loaded":
@@ -201,6 +245,24 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     const sent = current.messages[at - 1];
     if (sent?.role === "user" && !stored.some((s) => s.id === sent.id)) messages.push(sent);
     if (at >= 0) messages.push(current.messages[at] as Message);
+  }
+  // This tab's system lines (model switches) aren't on the server; put each back after the
+  // message it followed, or at the end when that message is gone.
+  const lines: { line: Message; after: string | null }[] = [];
+  current.messages.forEach((m, i) => {
+    if (m.role === "system")
+      lines.push({
+        line: m,
+        after:
+          [...current.messages.slice(0, i)].reverse().find((p) => p.role !== "system")?.id ?? null,
+      });
+  });
+  // Backwards, so several lines after one message keep their order. A line whose message is
+  // gone goes last: it still happened after everything the server kept.
+  for (const { line, after } of [...lines].reverse()) {
+    const found = after === null ? -1 : messages.findIndex((m) => m.id === after);
+    const at = after !== null && found === -1 ? messages.length - 1 : found;
+    messages.splice(at + 1, 0, line);
   }
   const next = update(state, id, () => ({ messages, stale: 0 }));
   // The turn ended while this tab was disconnected.
