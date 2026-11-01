@@ -62,7 +62,7 @@ async function api<T>(path: string, method = "GET", body?: unknown): Promise<T> 
 const ERRORS: Record<string, string> = {
   key_required: "Enter the API key again: it belongs to a different provider or address.",
   invalid_base_url:
-    "The base URL must be a valid https:// address, or http:// for a server on this machine.",
+    "The base URL must be a valid https:// address (http:// only for a local or LAN model server this deployment allows).",
   vault_unavailable: "Keys can't be saved until the server's master key is fixed.",
   ai_unavailable: "Workers AI isn't connected to this deployment. Use an API key instead.",
 };
