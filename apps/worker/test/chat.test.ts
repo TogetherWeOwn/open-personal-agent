@@ -384,6 +384,37 @@ describe("chat transport", () => {
     expect(spend).toEqual({ day, spentMicroUsd: 0, held: {} });
   });
 
+  it("writes a call's ledger row once when an eviction hid that it was written", async () => {
+    const { owner } = await claim();
+    const turn = { conversationId: "c6", turnId: "t6", replyId: "r6", providerId: "p", model: "m" };
+    const usage = { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0 };
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("c6", "Hi", undefined);
+    await user.chat.startTurn("c6", "Hi", "r6", []);
+    // The row landed; the process died before the checkpoint said so.
+    await user.usage.record({
+      id: "call-6",
+      providerId: "p",
+      model: "m",
+      usage,
+      conversationId: "c6",
+    });
+    const snapshot = {
+      ...turn,
+      reply: "Hel",
+      wrote: true,
+      holds: [],
+      callStarted: true,
+      callRecorded: false,
+      callUsage: usage,
+      callId: "call-6",
+    };
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({ name: "chat-turn", snapshot } as never),
+    );
+    expect(await count("usage", "1")).toBe(1);
+  });
+
   it("names the DO from the session, never from the request", async () => {
     const { browser, owner } = await claim();
     expect((await openTab(new Browser())).res.status).toBe(401);
@@ -463,6 +494,77 @@ describe("chat transport", () => {
     resume("conv-7", turnId, -1); // not a valid frame either
     await new Promise((r) => setTimeout(r, 500)); // settled and unknown turns answer nothing
     expect(b.events.length).toBe(before);
+  });
+
+  it("holds live frames from a resuming tab until its replay is sent, so they stay in order", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const a = await openTab(browser);
+    // A tab that reconnects with `?resume` and hasn't sent its resume yet: a live frame now
+    // would reach it ahead of the ones it missed.
+    const b = await openTab(browser, "/api/chat?resume=1");
+    a.send?.("conv-9", "Tell me a story");
+    await a.until?.("message.delta");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(b.events).toEqual([]);
+    const turnId = a.events[0]?.turnId;
+    b.ws?.send(JSON.stringify({ type: "resume", conversationId: "conv-9", turnId, afterSeq: 0 }));
+    await vi.waitFor(() => expect(b.events).toEqual(a.events), SOCKET_WAIT);
+    // Its replay sent, it is live again.
+    release();
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+    const seqs = b.events.map((e) => e.seq);
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+  });
+
+  it("sends a resuming tab the end of a turn that settled before its replay", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const a = await openTab(browser);
+    const b = await openTab(browser, "/api/chat?resume=1");
+    a.send?.("conv-9b", "Hi!");
+    await a.until?.("turn.completed");
+    expect(b.events).toEqual([]);
+    // The turn settled and left the log: the replay is empty, the held frames are not.
+    const turnId = a.events[0]?.turnId;
+    b.ws?.send(JSON.stringify({ type: "resume", conversationId: "conv-9b", turnId, afterSeq: 0 }));
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+  });
+
+  it("sends live frames again to a tab that said resume but sent something else", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const b = await openTab(browser, "/api/chat?resume=1");
+    b.send?.("conv-10", "Hi!");
+    await b.until?.("turn.completed");
+  });
+
+  it("keeps a turn's frames for replay when D1 can't settle it", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    // D1 refuses the reply's final status, both at the turn's end and in the fallback.
+    await db.exec(
+      "CREATE TRIGGER no_settle BEFORE UPDATE OF status ON messages WHEN NEW.status IN ('complete', 'error') BEGIN SELECT RAISE(ABORT, 'D1 is down'); END;",
+    );
+    try {
+      const a = await openTab(browser);
+      a.send?.("conv-11", "Hi!");
+      await a.until?.("turn.failed");
+      const turnId = a.events[0]?.turnId;
+      // A tab that missed it all still learns how the turn ended, from the log.
+      const b = await openTab(browser, "/api/chat?resume=1");
+      b.ws?.send(
+        JSON.stringify({ type: "resume", conversationId: "conv-11", turnId, afterSeq: 0 }),
+      );
+      await b.until?.("turn.failed");
+      expect(b.events.map((e) => e.seq)).toEqual(a.events.map((e) => e.seq));
+    } finally {
+      await db.exec("DROP TRIGGER no_settle;");
+    }
   });
 
   it("answers no resume from a session that has ended", async () => {
@@ -809,6 +911,30 @@ describe("turn and spend limits (M2-22)", () => {
     expect(await count("conversations")).toBe(0);
   });
 
+  it("gives back the first call's hold when Stop lands before the model is called", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      const pick = instance.resolveModel;
+      instance.resolveModel = async (...args) => {
+        await gate; // the Stop lands while the turn is still starting
+        return pick(...args);
+      };
+    });
+    const tab = await openTab(browser);
+    tab.send?.("conv-stop", "Hi!");
+    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await new Promise((r) => setTimeout(r, 200));
+    release();
+    await tab.until?.("turn.cancelled");
+    expect(maxTokens).toEqual([]);
+    const spend = await storage(owner, (kv) => kv.get<{ held: object }>("spend"));
+    expect(spend?.held).toEqual({});
+  });
+
   it("caps max_tokens from the budget left and charges the call's cost", async () => {
     const { browser, owner } = await claim();
     const maxTokens: (number | undefined)[] = [];
@@ -838,6 +964,255 @@ describe("approvals in the DO host (M3-07a)", () => {
   };
   const completed = (events: HarnessEvent[]) =>
     events.filter((e) => e.type === "turn.completed").length;
+
+  it("resumes on the conversation's own model, with its files still in the context", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const seen: ModelMessage[][] = [];
+    const picks: unknown[] = [];
+    const scripted = replying([{ calls: [["send", { q: "a" }]] }, { text: "Sent" }]);
+    const provider: ModelProvider = {
+      ...scripted,
+      capabilities: () => ({ tools: true, usageInStream: true }),
+      async *stream(request) {
+        seen.push(request.messages);
+        yield* scripted.stream(request);
+      },
+    };
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveModel = async (_env, _scope, _caller, pick) => {
+        picks.push(pick);
+        return { provider, model: "test-model", apiKey: null };
+      };
+    });
+    await useTools(owner, [send.tool]);
+    const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    const uploaded = await workerApp.request(
+      `${ORIGIN}/api/attachments`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          origin: ORIGIN,
+          "content-type": "text/plain",
+          "x-file-name": "notes.txt",
+        },
+        body: new TextEncoder().encode("the file's words"),
+      } as never,
+      browser.bindings,
+    );
+    const { id } = await uploaded.json<{ id: string }>();
+    const tab = await openTab(browser);
+    tab.ws?.send(
+      JSON.stringify({
+        type: "chat.send",
+        conversationId: "conv-files",
+        text: "",
+        attachmentIds: [id],
+      }),
+    );
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    await decideInD1(batchId, approvalId, "approved");
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(batchId),
+    );
+    expect(resumed).toBe("resumed");
+    await vi.waitFor(() => expect(completed(tab.events)).toBe(1), SOCKET_WAIT);
+    expect(picks.at(-1)).toEqual({ conversationId: "conv-files" });
+    // The file-only message and its file reach the resumed call as they reached the first.
+    const [first, again] = seen;
+    expect(first?.[0]).toMatchObject({ role: "user", attachments: [{ name: "notes.txt" }] });
+    expect(again?.[0]).toEqual(first?.[0]);
+  });
+
+  it("interrupts a resumed turn evicted mid-run, and drops its stale stop", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    const turn = {
+      conversationId: "conv-evict",
+      turnId: started?.turnId ?? "",
+      replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+      providerId: "scripted",
+      model: "test-model",
+    };
+    const checkpoint = {
+      reply: "Sending.",
+      wrote: true,
+      holds: [],
+      callStarted: false,
+      callRecorded: false,
+      callUsage: null,
+    };
+    expect(await count("turn_states", "1")).toBe(1);
+    // The resumed run's fiber dies with the old stop still in D1: that row is not a clean stop.
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: { ...turn, ...checkpoint, resumed: true },
+      } as never),
+    );
+    await tab.until?.("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict")).at(-1)?.status).toBe("interrupted");
+  });
+
+  it("keeps a resumed turn's new stop when it was evicted while saving it", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict2", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict2",
+          turnId: started?.turnId ?? "",
+          replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+          // It began saving before the row's save stamped it: the row is the new stop.
+          stopping: Date.now() - 60_000,
+        },
+      } as never),
+    );
+    expect(await count("turn_states", "1")).toBe(1);
+    expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+  });
+
+  it("interrupts a resumed turn evicted before its new stop saved, and drops the old one", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict3", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict3",
+          turnId: started?.turnId ?? "",
+          replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+          // The new stop's save never landed: the row is older than the attempt.
+          stopping: Date.now() + 60_000,
+        },
+      } as never),
+    );
+    await tab.until?.("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict3")).at(-1)).toMatchObject({
+      content: "Sending.",
+      status: "interrupted",
+    });
+  });
+
+  it("keeps a resumed reply's text when it is evicted before its drive starts", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict4", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    const { batchId, items } = asked?.payload ?? { batchId: "", items: [] };
+    await decideInD1(batchId, items[0]?.approvalId ?? "", "approved");
+    let snapshot: unknown = null;
+    await runInDurableObject(assistantOf(owner), async (i: Assistant) => {
+      // The process dies right after the resumed fiber's first stash.
+      const fiber = {
+        stash: (cp: unknown) => {
+          snapshot = structuredClone(cp);
+          throw new Error("evicted");
+        },
+      };
+      const run = (_: string, fn: (f: typeof fiber) => Promise<void>) => fn(fiber);
+      Object.assign(i, { runFiber: run });
+      expect(await i.resumeBatch(batchId)).toBe("resumed");
+      await vi.waitFor(() => expect(snapshot).not.toBeNull());
+      await i.onFiberRecovered({ name: "chat-turn", snapshot } as never);
+    });
+    expect(send.inputs).toEqual([]);
+    expect((await stored(browser, "conv-evict4")).at(-1)).toMatchObject({
+      content: "Sending.",
+      status: "interrupted",
+    });
+  });
+
+  it("keeps a resumed reply that settled before the eviction, and sends its end", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict5", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    const replyId = (started?.payload as { messageId?: string } | undefined)?.messageId ?? "";
+    // The resumed run settled its reply, then died before removing its old stop.
+    await db
+      .prepare("UPDATE messages SET status = 'complete', content = 'Sending.\n\nSent' WHERE id = ?")
+      .bind(replyId)
+      .run();
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict5",
+          turnId: started?.turnId ?? "",
+          replyId,
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+        },
+      } as never),
+    );
+    await tab.until?.("turn.completed");
+    expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict5")).at(-1)).toMatchObject({
+      content: "Sending.\n\nSent",
+      status: "complete",
+    });
+  });
 
   it("waits in the FIFO behind a running turn, then appends a late approval at the end (AC14)", async () => {
     const { browser, owner } = await claim();
@@ -1021,6 +1396,31 @@ describe("approvals in the DO host (M3-07a)", () => {
     });
     expect(queue).toEqual([b.batchId, c.batchId]);
     expect(send.inputs).toEqual([]);
+  });
+
+  it("ends a row a restart left executing as failed with an unknown outcome", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ calls: [["send", { q: "hi" }]] }, { text: "Not sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-claimed", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    // A run claimed the row and then the DO restarted: whether the call acted is unknown.
+    await decideInD1(batchId, approvalId, "approved");
+    await db
+      .prepare("UPDATE approvals SET status = 'executing' WHERE batch_id = ?")
+      .bind(batchId)
+      .run();
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(batchId));
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([]);
+    const row = await db
+      .prepare("SELECT status, reason FROM approvals WHERE batch_id = ?")
+      .bind(batchId)
+      .first();
+    expect(row).toEqual({ status: "failed", reason: "outcome_unknown" });
   });
 
   it("refuses an approved call whose tool changed since it was approved (AC12)", async () => {

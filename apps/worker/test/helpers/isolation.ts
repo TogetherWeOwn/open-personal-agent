@@ -10,7 +10,7 @@ import { workerApp as app } from "../../src/worker-app";
 import { db, env, ORIGIN, sessionHeaders } from "./app";
 
 /** The Worker's env with a working vault, so a model credential is really encrypted. */
-const bindings: Promise<Env> = compose({
+export const bindings: Promise<Env> = compose({
   ...env,
   OPA_MASTER_KEY: btoa("i".repeat(32)),
 } as unknown as WorkerEnv);
