@@ -313,7 +313,7 @@ export function taskContextContract(
       const out = await h.ctx.step("llm:1", async (key) => {
         expect(key).toBe(`${h.instanceId}:llm:1`);
         const reservation = await h.ctx.budget.reserve(key, "openai", "gpt-4.1", 2000);
-        expect(reservation?.maxOutputTokens).toBeGreaterThan(0);
+        expect("maxOutputTokens" in reservation && reservation.maxOutputTokens).toBeGreaterThan(0);
         await h.ctx.budget.settle(key, "openai", "gpt-4.1", {
           inputTokens: 1,
           outputTokens: 1,

@@ -42,6 +42,17 @@ export const workersAiAllowance: {
   verifiedAt: string;
 } = table.workersAi;
 
+/**
+ * The Workers Paid allowances the app can measure itself (COST-5, M3-16 AC3): D1 storage included
+ * and the per-database cap, and R2 storage included. The reconciler warns at 70% of each.
+ */
+export const cloudflareAllowances: {
+  d1IncludedBytes: number;
+  d1MaxBytes: number;
+  r2IncludedBytes: number;
+  verifiedAt: string;
+} = table.cloudflare;
+
 const providers: Record<string, ProviderInfo> = table.providers as Record<string, ProviderInfo>;
 const models: ModelPrice[] = table.models;
 

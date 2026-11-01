@@ -39,6 +39,7 @@ import {
 import { NavShell } from "./NavShell";
 import { hasNavigated, match, navigate, usePath } from "./router";
 import { NotFound, routes } from "./routes";
+import { SpendingBanners } from "./settings/SpendingBanners";
 import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet } from "./ui";
 
 const newId = () => crypto.randomUUID();
@@ -432,6 +433,8 @@ export function App({ transport }: AppProps) {
 
   return (
     <NavShell current={matched?.route.nav} sidebar={chats} hideTabs={composing} fit={chat}>
+      {/* Above every screen, and on a phone above both the Chats list and a thread. */}
+      <SpendingBanners />
       {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
       <div hidden={!chat} className="flex min-h-0 flex-1">
         <header className="sr-only">
