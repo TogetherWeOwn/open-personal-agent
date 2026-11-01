@@ -216,6 +216,42 @@ test("Change what needs my OK finishes setup in Apps & tools, with the first cha
   expect(posts.some((p) => p.endsWith("/onboarded"))).toBe(true);
 });
 
+test("a prompt picked in First chat is visible in the composer at phone width", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  let onboarded = false;
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/onboarded")) onboarded = true;
+    if (path.endsWith("/model/test")) {
+      return route.fulfill({ json: { ok: true, latencyMs: 300, tools: false, reply: "ready" } });
+    }
+    const settings = { displayName: "Owner", about: "", onboarded, model: null };
+    const starter = { kind: "workers-ai", model: "@cf/meta/llama", key: null };
+    if (path.endsWith("/model")) return route.fulfill({ json: { ...settings, model: starter } });
+    if (path.endsWith("/setup")) return route.fulfill({ json: { skipped: [], hidden: false } });
+    return route.fulfill(path.endsWith("/settings") ? { json: settings } : { status: 204 });
+  });
+
+  await page.goto("/onboarding");
+  await page.getByRole("button", { name: "Skip for now" }).click();
+  await page.getByText("Try without a key", { exact: true }).click();
+  await page.getByRole("button", { name: "Save and test" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Skip for now" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Remember that I'm vegetarian." }).click();
+  await page.waitForURL("/");
+  // Below sm the thread panel swaps with the Chats list; the prefilled composer must be the
+  // one on screen, not hidden behind the list.
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await expect(composer).toBeVisible();
+  await expect(composer).toHaveValue("Remember that I'm vegetarian.");
+});
+
 test("budgets that don't load offer Try again, never a guess to change", async ({ page }) => {
   let failing = true;
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));

@@ -112,7 +112,12 @@ export function App({ transport }: AppProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: once, into the chat open at load
   useEffect(() => {
     const text = takePrefill();
-    if (text) setDrafts((d) => ({ ...d, [active.id]: text }));
+    if (text) {
+      setDrafts((d) => ({ ...d, [active.id]: text }));
+      // On phones the thread panel stays hidden until opened, so show the composer the
+      // prompt waits in — the same opening the `/c/:id` effect makes.
+      setThreadOpen(true);
+    }
   }, []);
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
