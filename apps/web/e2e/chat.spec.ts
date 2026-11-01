@@ -312,6 +312,33 @@ test("attaching a file: chips, plain refusals, and what the model can't read", a
   await expect(chips).toHaveCount(0);
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+  });
+
+test("returning from Settings reloads the model settings", async ({ page }) => {
+  // A chat model is picked while the chat stays mounted behind the screen.
+  let picked = false;
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: picked
+        ? SETTINGS
+        : {
+            ...SETTINGS,
+            providers: [],
+            roles: { chat: null, background: null, embedding: null },
+          },
+    }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: /No model set up/ })).toBeVisible();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/models$/);
+  picked = true;
+  await page.getByRole("link", { name: "Chats" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: /model for this chat/ })).toContainText(
+    "GPT-4.1 mini",
+  );
+  await expect(page.getByRole("link", { name: /No model set up/ })).toHaveCount(0);
 });
 
 for (const colorScheme of ["light", "dark"] as const) {

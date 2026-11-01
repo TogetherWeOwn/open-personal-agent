@@ -63,13 +63,9 @@ function useLoad(
 
 interface AppProps {
   transport: ChatTransport;
-  /** Client-side navigation, from the shell; a full load when the app stands alone. */
-  onNavigate?: (href: string) => void;
-  /** False while another screen covers the chat; becoming visible reloads the model settings. */
-  visible?: boolean;
 }
 
-export function App({ transport, onNavigate, visible = true }: AppProps) {
+export function App({ transport }: AppProps) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
@@ -91,8 +87,10 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
   const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  // The chat stays mounted while another screen shows; becoming visible again reloads the
+  // model settings, so a model picked in Settings › Models is live on return (#88).
   useEffect(() => {
-    if (!visible) return;
+    if (!chat) return;
     let current = true;
     settingsApi<ModelSettings>("").then(
       (loaded) => {
@@ -103,7 +101,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     return () => {
       current = false;
     };
-  }, [visible]);
+  }, [chat]);
 
   // The chats the server has: listed, or one whose turn has started. A switch in any other chat
   // waits in `pendingPins`, and the chat's first send carries it, so its first reply already uses
@@ -356,10 +354,8 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     setThreadOpen(true);
   };
 
-  // The route table serves /settings/models in-app, so stay client-side. A full load only ever
-  // happens if the app stands alone without the Router (link fallback / tests).
-  const goModels = () =>
-    onNavigate ? onNavigate("/settings/models") : navigate("/settings/models");
+  // The route table serves /settings/models in-app, so stay client-side.
+  const goModels = () => navigate("/settings/models");
 
   // A new chat's first message is on its way, so the chat isn't on the server yet.
   const starting =
