@@ -33,6 +33,7 @@ const turn = (outcome: Turn["outcome"], updatedAt: number): Turn => ({
   messageId: "r-t1",
   startedAt: updatedAt - 60_000,
   outcome,
+  pausedAt: null,
   steps: [],
   tools: [],
   taint: [],

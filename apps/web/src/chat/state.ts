@@ -105,6 +105,12 @@ export interface Turn {
    */
   startedAt: number;
   outcome: TurnOutcome;
+  /**
+   * When the turn paused for approval or a limit, freezing its header and summary (M3-09
+   * AC1). `updatedAt` keeps moving under usage and status flushes, so the pause needs its
+   * own stamp; null while the turn runs or after it settles.
+   */
+  pausedAt: number | null;
   steps: TurnStep[];
   tools: TurnTool[];
   taint: TurnTaint[];
@@ -197,6 +203,7 @@ const shellTurn = (turnId: string, messageId: string): Turn => ({
   messageId,
   startedAt: Date.now(),
   outcome: "running",
+  pausedAt: null,
   steps: [],
   tools: [],
   taint: [],
@@ -566,6 +573,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return updateTurn(seen, event, (t) => ({
         ...t,
         outcome: t.outcome === "waiting" ? ("running" as const) : t.outcome,
+        pausedAt: null,
       }));
     // The artifact and memory cards that render these belong to M3-10 and M3-15; the turn
     // model leaves them for those cards.
@@ -651,7 +659,14 @@ function updateTurn(
     (mutated.outcome === "waiting" || mutated.outcome === "limited") && PROGRESS.has(event.type)
       ? ("running" as const)
       : mutated.outcome;
-  const turn = { ...mutated, outcome, updatedAt: Date.now() };
+  // Resuming clears the pause stamp; anything still waiting or limited keeps the moment it
+  // paused, so later usage and status flushes can't move the frozen header (M3-09 AC1).
+  const turn = {
+    ...mutated,
+    outcome,
+    updatedAt: Date.now(),
+    pausedAt: outcome === "running" ? null : mutated.pausedAt,
+  };
   return update(ensured.state, at.conversationId, (c) => ({
     turns: c.turns.map((t) => (t.turnId === at.turnId ? turn : t)),
   }));
@@ -674,7 +689,12 @@ const touchTurn = (state: ChatState, event: HarnessEvent): ChatState =>
 
 /** Names the turn's outcome, creating its shell first when this tab adopted the turn. */
 const setOutcome = (state: ChatState, event: HarnessEvent, outcome: TurnOutcome): ChatState =>
-  updateTurn(state, event, (t) => ({ ...t, outcome }));
+  updateTurn(state, event, (t) => ({
+    ...t,
+    outcome,
+    // A repeated pause keeps the first pause moment; anything else clears the stamp.
+    pausedAt: outcome === "waiting" || outcome === "limited" ? (t.pausedAt ?? Date.now()) : null,
+  }));
 
 /** Records a starting step, linking a tool call that already arrived to its step. */
 function startStep(turn: Turn, payload: StepPayload): Turn {
@@ -758,28 +778,36 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   }
   const next = update(state, id, () => ({ messages, stale: 0 }));
   // The turn ended while this tab was disconnected: the terminal event trimmed with the
-  // settled turn, so the load is the only word. A tracked turn still marked live settles
-  // with its reply — complete reads succeeded, error reads failed, and an interrupted
-  // reply reads interrupted, since D1 cannot tell a cancel from an interruption (M3-09 AC1).
+  // settled turn, so the load is the only word. Every turn still marked live settles with
+  // its reply — complete reads succeeded, error reads failed, and an interrupted reply
+  // reads interrupted, since D1 cannot tell a cancel from an interruption (M3-09 AC1).
+  // Settle runs off the stored replies, not the pending send: a paused turn (pending null)
+  // whose end this tab never saw still leaves waiting or limited behind otherwise.
   // Turns the tab already settled keep their outcome.
-  if (!reply || reply.status === "streaming") return next;
-  const outcome =
-    reply.status === "complete"
-      ? ("succeeded" as const)
-      : reply.status === "error"
-        ? ("failed" as const)
-        : ("interrupted" as const);
-  return {
-    ...update(next, id, (c) => ({
-      turns: c.turns.map((t) =>
-        t.messageId === reply.id &&
-        (t.outcome === "running" || t.outcome === "waiting" || t.outcome === "limited")
-          ? { ...t, outcome, updatedAt: Date.now() }
-          : t,
-      ),
-    })),
-    pending: null,
-  };
+  const settled = new Map(
+    stored
+      .filter((s) => s.role === "assistant" && s.status !== "streaming")
+      .map((s) => [s.id, s.status] as const),
+  );
+  const withTurns = update(next, id, (c) => ({
+    turns: c.turns.map((t) => {
+      const status = settled.get(t.messageId);
+      if (
+        status === undefined ||
+        (t.outcome !== "running" && t.outcome !== "waiting" && t.outcome !== "limited")
+      )
+        return t;
+      const outcome =
+        status === "complete"
+          ? ("succeeded" as const)
+          : status === "error"
+            ? ("failed" as const)
+            : ("interrupted" as const);
+      return { ...t, outcome, updatedAt: Date.now(), pausedAt: null };
+    }),
+  }));
+  if (!reply || reply.status === "streaming") return withTurns;
+  return { ...withTurns, pending: null };
 }
 
 function finish(
@@ -796,7 +824,7 @@ function finish(
   return {
     ...update(next, conversationId, (c) => ({
       turns: c.turns.map((t) =>
-        t.turnId === turnId ? { ...t, outcome, updatedAt: Date.now() } : t,
+        t.turnId === turnId ? { ...t, outcome, updatedAt: Date.now(), pausedAt: null } : t,
       ),
     })),
     pending: null,

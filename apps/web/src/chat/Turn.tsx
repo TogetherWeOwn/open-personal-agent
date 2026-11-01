@@ -46,7 +46,11 @@ export function TurnView({
   const now = Date.now();
   const steps = turn.steps;
   const current = [...steps].reverse().find((s) => s.status === "running") ?? steps.at(-1) ?? null;
-  const elapsed = formatElapsed(Math.max(0, now - turn.startedAt));
+  // A paused turn reads the moment it paused, not the latest render: `updatedAt` keeps moving
+  // under usage and status flushes, so the pause has its own stamp (M3-09 AC1). A running
+  // turn ticks with now; a settled one with its last change.
+  const end = turn.pausedAt ?? (live ? now : turn.updatedAt);
+  const elapsed = formatElapsed(Math.max(0, end - turn.startedAt));
   // Visual only: the app's status region announces the turn's start and finish (UX §4.2).
   // A paused turn reads paused, never working: its timer stopped at the pause, and the chip
   // below names the pause (M3-09 AC1).
@@ -61,7 +65,7 @@ export function TurnView({
           ? `Still working on: ${current.label} · ${elapsed}`
           : `Working · ${elapsed} · ${current.label}`;
   const summary = formatSummary({
-    durationMs: Math.max(0, (live ? now : turn.updatedAt) - turn.startedAt),
+    durationMs: Math.max(0, end - turn.startedAt),
     tools: turn.tools.length,
     failed: failedTools(turn).length,
     costMicroUsd: turnCostMicroUsd(turn.usage, prices),
