@@ -11,9 +11,16 @@ export type MemoryKind = (typeof memories.$inferSelect)["kind"];
 export type MemorySourceKind = (typeof memories.$inferSelect)["source"];
 export type Memory = typeof memories.$inferSelect;
 
-/** FTS5 query syntax from free text: each word quoted and prefix-matched, all of them required. */
+/**
+ * FTS5 query syntax from free text: each word quoted and prefix-matched, all of them required. A
+ * word keeps its combining marks, as the tokenizer does, so "re\u0301sume\u0301" stays one word.
+ */
 export function ftsQuery(text: string): string | null {
-  const words = text.match(/[\p{L}\p{N}_]+/gu)?.slice(0, 16) ?? [];
+  const words =
+    text
+      .normalize("NFC")
+      .match(/[\p{L}\p{M}\p{N}_]+/gu)
+      ?.slice(0, 16) ?? [];
   return words.length > 0 ? words.map((w) => `"${w}"*`).join(" ") : null;
 }
 
@@ -62,8 +69,8 @@ export function memoryService(db: Db, userId: string) {
         SELECT m.id FROM memories_fts JOIN memories m ON m.n = memories_fts.rowid
         WHERE memories_fts MATCH ${query} AND m.user_id = ${userId} AND m.status = 'active'
         ORDER BY bm25(memories_fts), m.n DESC LIMIT ${limit}`);
-      const rows = await active(ids.map((r) => r.id));
-      return ids.flatMap(({ id }) => rows.filter((r) => r.id === id));
+      const rows = new Map((await active(ids.map((r) => r.id))).map((r) => [r.id, r]));
+      return ids.flatMap(({ id }) => rows.get(id) ?? []);
     },
   };
 }

@@ -223,9 +223,13 @@ export function memoryContract(name: string, migrated: () => Promise<D1Database>
       expect(await texts("VEGETARIAN")).toEqual(["I'm vegetarian and love the café on Main St"]);
       expect(await texts("veg cafe")).toHaveLength(1);
       expect(await texts("vegetarian lisbon")).toEqual([]);
+      expect(await texts("cafe\u0301")).toHaveLength(1); // a decomposed accent
+      const decomposed = await a.insert("Sent her re\u0301sume\u0301");
+      expect((await a.memory.search("résumé")).map((m) => m.id)).toEqual([decomposed]);
+      expect((await a.memory.search("re\u0301sume\u0301")).map((m) => m.id)).toEqual([decomposed]);
       expect(await texts('") OR * NEAR(')).toEqual([]); // FTS5 syntax is never passed through
       expect(await texts("")).toEqual([]);
-      expect((await a.memory.list()).map((m) => m.id)).toEqual([id]);
+      expect((await a.memory.list()).map((m) => m.id)).toEqual([decomposed, id]);
       expect(await a.memory.get(id)).toMatchObject({ id, trust: "user", source: "chat" });
       expect(await b.memory.get(id)).toBeUndefined();
     });

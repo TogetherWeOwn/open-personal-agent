@@ -49,6 +49,9 @@ describe("scoped-access lint", () => {
       "sql`DELETE FROM memories WHERE id = ?`",
       "SELECT * FROM memories_fts WHERE memories_fts MATCH ?",
       "INSERT INTO `memories` (id) VALUES (?)",
+      'import * as db from "@opa/db";',
+      'import { memories } from "./index";',
+      "db.query.memories.findMany()",
     ]) {
       expect(
         [
@@ -65,6 +68,7 @@ describe("scoped-access lint", () => {
       'const label = "Memories to confirm";',
       "state.memories.length",
       'import { memoryService } from "./memory";',
+      'import * as auth from "./auth";',
     ]) {
       expect(lint("apps/web/src/a.tsx", text), text).toBe(0);
     }

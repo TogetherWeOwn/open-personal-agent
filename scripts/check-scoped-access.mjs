@@ -36,9 +36,21 @@ export const RULES = [
   ],
   [
     "memory-tables",
-    /^packages\/db\/src\/(?:memory|schema)\.ts$/,
-    // The Drizzle tables by import or namespace, and the SQL table names in a query.
-    /\b(?:memoryLinks|memory_links|memories_fts)\b|\bschema\.memories\b|\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+[`"']?memories\b|\bimport\b[^;]*\bmemories\b[^;]*\bfrom\s*["'][^"']*(?:@opa\/db|schema)["']/gi,
+    /^packages\/db\/src\/(?:memory|schema|index)\.ts$/, // index.ts hands the schema to Drizzle
+    // The Drizzle tables by name, by import, through a namespace import of the schema or through
+    // Drizzle's relational `query`; and the SQL table names in a query.
+    new RegExp(
+      [
+        /\b(?:memoryLinks|memory_links|memories_fts)\b/,
+        /\b(?:schema|query)\.memories\b/,
+        /\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+[`"']?memories\b/,
+        /\bimport\b[^;]*\bmemories\b[^;]*\bfrom\s*["'][^"']*(?:@opa\/db|schema|index)["']/,
+        /\bimport\s*\*\s*as\s+\w+\s*from\s*["'][^"']*(?:@opa\/db|schema)["']/,
+      ]
+        .map((r) => r.source)
+        .join("|"),
+      "gi",
+    ),
     "MemoryService is the only way to memory (ADR 0008 #4): use forUser(scope).memory",
   ],
   [
