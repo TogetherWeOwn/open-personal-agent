@@ -69,7 +69,11 @@ const period = {
   ],
 };
 const empty = { costMicroUsd: 0, unpricedCalls: 0, groups: [] };
-const allowance = { neuronsPerDay: 10_000, neuronsUsed: 3_200, resetsAt: Date.UTC(2026, 10, 2) };
+const allowance = {
+  neuronsPerDay: 10_000,
+  neuronsUsedHere: 3_200,
+  resetsAt: Date.UTC(2026, 10, 2),
+};
 
 async function open(page: Page, today: unknown, month: unknown, allowed: unknown = allowance) {
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));

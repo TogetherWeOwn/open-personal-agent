@@ -41,7 +41,7 @@ interface UsageData {
   today: Period;
   month: Period;
   /** Only the owner gets it: the total includes everyone's calls. */
-  allowance: { neuronsPerDay: number; neuronsUsed: number; resetsAt: number } | null;
+  allowance: { neuronsPerDay: number; neuronsUsedHere: number; resetsAt: number } | null;
 }
 
 const link = "font-medium text-accent underline underline-offset-2";
@@ -184,8 +184,8 @@ function GroupSection({
 }
 
 function Allowance({ allowance }: { allowance: NonNullable<UsageData["allowance"]> }) {
-  const { neuronsUsed, neuronsPerDay, resetsAt } = allowance;
-  const pct = Math.min(100, Math.round((neuronsUsed / neuronsPerDay) * 100));
+  const { neuronsUsedHere, neuronsPerDay, resetsAt } = allowance;
+  const pct = Math.min(100, Math.round((neuronsUsedHere / neuronsPerDay) * 100));
   const reset = new Date(resetsAt).toLocaleTimeString(undefined, { timeStyle: "short" });
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-border bg-surface-raised p-4">
@@ -193,13 +193,13 @@ function Allowance({ allowance }: { allowance: NonNullable<UsageData["allowance"
         Free Workers AI allowance
       </Heading>
       <Meter
-        value={Math.min(neuronsUsed, neuronsPerDay)}
+        value={Math.min(neuronsUsedHere, neuronsPerDay)}
         maxValue={neuronsPerDay}
         valueLabel={`${pct}% used, resets at ${reset} your time`}
         className="flex flex-col gap-1"
       >
         <Label>
-          Today: {num.format(neuronsUsed)} of {num.format(neuronsPerDay)} neurons used
+          Today: {num.format(neuronsUsedHere)} of {num.format(neuronsPerDay)} neurons used
         </Label>
         <div className="h-2 overflow-hidden rounded-full bg-surface-sunken">
           <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
