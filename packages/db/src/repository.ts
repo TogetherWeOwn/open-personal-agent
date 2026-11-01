@@ -242,6 +242,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(usage)
             .where(gte(usage.createdAt, since))
         )[0]?.n ?? 0,
+      /**
+       * The database's size in bytes (M3-16 AC3): D1 reports it with every result as
+       * `meta.size_after`; Node's SQLite doesn't, so there it is pages × page size.
+       */
+      databaseBytes: async () => {
+        const raw = DB as unknown as {
+          prepare(sql: string): {
+            run(): Promise<{ meta: { size_after?: number } }>;
+            first<T>(column: string): Promise<T | null>;
+          };
+        };
+        const { meta } = await raw.prepare("SELECT 1").run();
+        if (typeof meta.size_after === "number") return meta.size_after;
+        const pages = (await raw.prepare("PRAGMA page_count").first<number>("page_count")) ?? 0;
+        const size = (await raw.prepare("PRAGMA page_size").first<number>("page_size")) ?? 0;
+        return pages * size;
+      },
+      /** What every user's stored files add up to: the sum of the object rows' sizes. */
+      fileBytes: async () =>
+        (
+          await db
+            .select({
+              n: sql<number>`coalesce(sum(${attachments.sizeBytes}), 0)`.mapWith(Number),
+            })
+            .from(attachments)
+        )[0]?.n ?? 0,
+      /**
+       * The owner's assistant, for deployment-wide notices only the owner sees (the allowance
+       * warnings, COST-5); `null` before the claim.
+       */
+      ownerAssistant: async () => {
+        const owner = (
+          await db.select({ id: users.id }).from(users).where(eq(users.role, "owner")).limit(1)
+        )[0];
+        return owner ? ASSISTANT.get(ASSISTANT.idFromName(`u:${owner.id}`)) : null;
+      },
     },
 
     forUser(scope: UserScope) {

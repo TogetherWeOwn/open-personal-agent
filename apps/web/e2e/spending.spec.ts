@@ -129,3 +129,12 @@ test("a reached hard limit says background tasks are paused", async ({ page }) =
   ).toBeVisible();
   await expect(page.getByRole("switch", { name: "Hard limit" })).toHaveCount(0);
 });
+
+test("70% of a Cloudflare allowance is a banner that links to Usage (COST-5)", async ({ page }) => {
+  await stub(page, spending({ allowanceWarnings: [{ id: "d1_cap", percent: 72 }] }));
+  await page.goto("/");
+  await expect(page.getByText("Your database is at 72% of its 10 GB limit.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "See usage" })).toHaveAttribute("href", "/usage");
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByText("Your database is at 72% of its 10 GB limit.")).toHaveCount(0);
+});

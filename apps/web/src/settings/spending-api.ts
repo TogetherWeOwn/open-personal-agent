@@ -21,6 +21,8 @@ export interface Spending {
   hardCapReached: boolean;
   /** The UTC month the figures are for, as its first instant. */
   month: number;
+  /** The reconciler's warnings at 70% of a Cloudflare allowance (COST-5); the owner's only. */
+  allowanceWarnings?: { id: string; percent: number }[];
 }
 
 export async function getSpending(): Promise<Spending> {
