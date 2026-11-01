@@ -62,8 +62,14 @@ test("claim, onboard and get a first answer", async ({ browser }) => {
   await expect(page.getByText("ms to the first word")).toBeVisible({ timeout: 60_000 });
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Got it" }).click();
+  // The chat lists conversations once its socket opens; a send before that is refused.
+  const connected = page.waitForResponse(
+    (res) => new URL(res.url()).pathname === "/api/conversations" && res.ok(),
+    { timeout: 60_000 },
+  );
   await page.getByRole("button", { name: "Start chatting" }).click();
   await page.waitForURL("/");
+  await connected;
 
   const prompt = "Say hello in five words or fewer.";
   await page.getByRole("textbox", { name: "Message" }).fill(prompt);
