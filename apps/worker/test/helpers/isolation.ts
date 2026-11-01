@@ -180,6 +180,17 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       conversation,
       message,
     ),
+    // The task's run journal, keyed by its Workflow instance rather than by user.
+    run(
+      "INSERT INTO task_events (instance_id, type, payload) VALUES (?, 'isolation', ?)",
+      `wf-${task}`,
+      JSON.stringify({ tag }),
+    ),
+    run(
+      "INSERT INTO task_steps (instance_id, name, output) VALUES (?, 'isolation', ?)",
+      `wf-${task}`,
+      JSON.stringify({ tag }),
+    ),
   ]);
   const artifact = crypto.randomUUID();
   await createRepository(env)
@@ -206,31 +217,44 @@ export async function seedBoth() {
   return { a, b };
 }
 
-/** The tables with a `user_id` column: every table that holds one user's data. */
+/**
+ * Every table that holds one user's data: by `user_id`, or by `instance_id` for a task's run
+ * journal, which belongs to whoever owns the task with that Workflow instance.
+ */
 async function userTables() {
   const { results } = await db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     .all<{ name: string }>();
-  const tables: string[] = [];
+  const byUser: string[] = [];
+  const byInstance: string[] = [];
   for (const { name } of results) {
     if (name.startsWith("_cf_") || name.startsWith("sqlite_")) continue;
     const columns = await db.prepare(`PRAGMA table_info("${name}")`).all<{ name: string }>();
-    if (columns.results.some((c) => c.name === "user_id")) tables.push(name);
+    const has = (column: string) => columns.results.some((c) => c.name === column);
+    if (has("user_id")) byUser.push(name);
+    else if (has("instance_id")) byInstance.push(name);
   }
-  return tables;
+  return { byUser, byInstance };
 }
 
 /**
- * Everything `user` owns: their `users` row, every row with their `user_id` and their R2 objects.
+ * Everything `user` owns: their `users` row, every row with their `user_id`, their tasks' run
+ * journals and their R2 objects.
  * Two equal snapshots mean a request changed nothing of theirs. Without `audit`, it leaves out
  * the audit log, whose denied rows rightly name the ID a user tried.
  */
 export async function snapshot(user: Seeded, { audit = true } = {}) {
   const rows: Record<string, unknown[]> = {};
   rows.users = (await db.prepare("SELECT * FROM users WHERE id = ?").bind(user.id).all()).results;
-  for (const table of await userTables()) {
+  const { byUser, byInstance } = await userTables();
+  for (const table of byUser) {
     if (!audit && table === "audit_log") continue;
     const sql = `SELECT * FROM "${table}" WHERE user_id = ? ORDER BY rowid`;
+    rows[table] = (await db.prepare(sql).bind(user.id).all()).results;
+  }
+  const instances = "SELECT workflow_instance_id FROM tasks WHERE user_id = ?";
+  for (const table of byInstance) {
+    const sql = `SELECT * FROM "${table}" WHERE instance_id IN (${instances}) ORDER BY rowid`;
     rows[table] = (await db.prepare(sql).bind(user.id).all()).results;
   }
   const listed = await FILES.list({ prefix: `u/${user.id}/` });
