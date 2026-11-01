@@ -2,7 +2,7 @@
 // Onboarding answers and model settings (M2-15, M3-06). Keys arrive in a request body, go straight
 // into the vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
 import type { ModelUsage } from "@opa/core";
-import { createRepository } from "@opa/db/repository";
+import { createRepository, type ProviderValues } from "@opa/db/repository";
 import { findPrice, isStale } from "@opa/pricing";
 import { credentialBinding, isLoopbackHost, STARTER_MODEL } from "@opa/providers";
 import { encrypt, type UserScope as VaultScope } from "@opa/vault";
@@ -115,13 +115,17 @@ const fail = (c: Ctx, status: Failure, error: string) => c.json({ error }, statu
  * Checks an OpenAI-compatible provider body and stores its key, if it has one. Without a key it
  * keeps `current`'s, but only for the same provider, origin and path.
  */
-async function keyedValues(c: Ctx, body: Record<string, unknown> | null, current?: Provider) {
+async function keyedValues(
+  c: Ctx,
+  body: Record<string, unknown> | null,
+  current?: Provider,
+): Promise<{ status: Failure; error: string } | (ProviderValues & { model: string })> {
   const providerId = text(body?.providerId, 63);
   const baseUrl = text(body?.baseUrl, 500);
   const model = text(body?.model, 200);
   const apiKey = body?.apiKey === undefined ? null : text(body.apiKey, 4096);
   if (!providerId || !baseUrl || !model || (body?.apiKey !== undefined && !apiKey)) {
-    return [400, "invalid_model"] as const;
+    return { status: 400, error: "invalid_model" } as const;
   }
   let binding: string;
   try {
@@ -138,11 +142,11 @@ async function keyedValues(c: Ctx, body: Record<string, unknown> | null, current
     }
     binding = credentialBinding(providerId, baseUrl);
   } catch {
-    return [400, "invalid_base_url"] as const;
+    return { status: 400, error: "invalid_base_url" } as const;
   }
   let secretId = current?.keySecretId ?? null;
   if (apiKey) {
-    if (!c.env.VAULT) return [503, "vault_unavailable"] as const;
+    if (!c.env.VAULT) return { status: 503, error: "vault_unavailable" } as const;
     secretId ??= crypto.randomUUID();
     const input = { secretId, purpose: PURPOSE, binding, plaintext: apiKey, caller: CALLER };
     await encrypt(c.env.VAULT, vaultScope(c), input);
@@ -150,12 +154,13 @@ async function keyedValues(c: Ctx, body: Record<string, unknown> | null, current
     // A key is bound to its provider and origin: a change means entering it again (ADR 0006 #5).
     // So does a new path, as one host can serve many accounts (an AI Gateway, for one).
     const { providerId: savedProvider, baseUrl: savedUrl } = current ?? {};
-    if (!secretId || !savedProvider || !savedUrl) return [400, "key_required"] as const;
+    if (!secretId || !savedProvider || !savedUrl)
+      return { status: 400, error: "key_required" } as const;
     if (
       credentialBinding(savedProvider, savedUrl) !== binding ||
       path(savedUrl) !== path(baseUrl)
     ) {
-      return [400, "key_required"] as const;
+      return { status: 400, error: "key_required" } as const;
     }
   }
   return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
@@ -216,7 +221,7 @@ settings.put("/model", async (c) => {
   const keyed = (await user.providers.list()).filter((p) => p.kind === "openai-chat");
   const current = keyed.find((p) => p.id === settings.chatProvider) ?? keyed.at(-1);
   const values = await keyedValues(c, body, current);
-  if (Array.isArray(values)) return fail(c, ...values);
+  if ("error" in values) return fail(c, values.status, values.error);
   let id = current?.id;
   if (id) await user.providers.update(id, values);
   else id = await user.providers.add(values);
@@ -234,7 +239,7 @@ settings.post("/providers", async (c) => {
   if (body?.kind !== "openai-chat") return fail(c, 400, "invalid_model");
   if (body.apiKey === undefined) return fail(c, 400, "key_required");
   const values = await keyedValues(c, body);
-  if (Array.isArray(values)) return fail(c, ...values);
+  if ("error" in values) return fail(c, values.status, values.error);
   const row = await user.providers.get(await user.providers.add(values));
   return c.json(providerView(row as Provider), 201);
 });
@@ -249,7 +254,7 @@ settings.put("/providers/:id", async (c) => {
     return fail(c, 400, "invalid_model");
   }
   const values = await keyedValues(c, body, current);
-  if (Array.isArray(values)) return fail(c, ...values);
+  if ("error" in values) return fail(c, values.status, values.error);
   await user.providers.update(current.id, values);
   return c.json(providerView((await user.providers.get(current.id)) as Provider));
 });
