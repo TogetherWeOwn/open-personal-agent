@@ -124,8 +124,9 @@ authRoutes.post("/login", async (c) => {
 /**
  * Step-up, step 1: a challenge for one of the signed-in user's own passkeys. The account actions
  * (loosening a tool, and in M3-19 and M3-20 credential changes, export and deletion) need one.
+ * Lives under `/step-up/session` so the vault's action-bound `/step-up` keeps its path.
  */
-authRoutes.post("/step-up/options", async (c) => {
+authRoutes.post("/step-up/session/options", async (c) => {
   const { userId } = c.var.session;
   const store = systemStore(c.env);
   const options = await generateAuthenticationOptions({
@@ -146,9 +147,10 @@ authRoutes.post("/step-up/options", async (c) => {
 /**
  * Step-up, step 2: the assertion must come from a passkey of the session's user, for a challenge
  * issued to that user. It stamps this session only: another session of the same user, or a new
- * login, has to step up for itself.
+ * login, has to step up for itself. Lives under `/step-up/session`, apart from the vault's
+ * action-bound `/step-up`.
  */
-authRoutes.post("/step-up", async (c) => {
+authRoutes.post("/step-up/session", async (c) => {
   const { id, userId } = c.var.session;
   const store = systemStore(c.env);
   const challenge = await auth.takeChallenge(store, getCookie(c, auth.CHALLENGE_COOKIE), "step_up");

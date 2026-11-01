@@ -73,7 +73,7 @@ export interface Session {
   userId: string;
   /** For the scoped repository (ADR 0010 D3). */
   scope: UserScope;
-  /** When this session last confirmed a passkey (`POST /api/auth/step-up`), or `null`. */
+  /** When this session last confirmed a passkey (`POST /api/auth/step-up/session`), or `null`. */
   stepUpAt: number | null;
 }
 

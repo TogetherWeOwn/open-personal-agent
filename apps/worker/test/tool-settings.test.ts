@@ -34,9 +34,11 @@ const setOverride = (br: Browser, name: string, override: unknown) =>
   br.req(`/api/settings/tools/${name}`, { method: "PUT", body: { override } });
 
 async function stepUp(br: Browser, key: ReturnType<typeof passkey>) {
-  const res = await br.req("/api/auth/step-up/options", { body: {} });
+  const res = await br.req("/api/auth/step-up/session/options", { body: {} });
   const { options } = await res.json<Options>();
-  return br.req("/api/auth/step-up", { body: { credential: await key.get(options) } });
+  return br.req("/api/auth/step-up/session", {
+    body: { credential: await key.get(options) },
+  });
 }
 
 const overrideAudit = async () =>
@@ -161,15 +163,17 @@ describe("account step-up", () => {
 
   it("offers only the user's own passkeys and uses a challenge once", async () => {
     const { browser, key } = await claim();
-    const res = await browser.req("/api/auth/step-up/options", { body: {} });
+    const res = await browser.req("/api/auth/step-up/session/options", { body: {} });
     const { options } = await res.json<Options>();
     const own = await db.prepare("SELECT id FROM passkeys").first<string>("id");
     expect(options.allowCredentials?.map((c) => c.id)).toEqual([own]);
     const challenge = browser.cookies.get(CHALLENGE_COOKIE) as string;
     const credential = await key.get(options);
-    expect((await browser.req("/api/auth/step-up", { body: { credential } })).status).toBe(200);
+    expect((await browser.req("/api/auth/step-up/session", { body: { credential } })).status).toBe(
+      200,
+    );
     browser.cookies.set(CHALLENGE_COOKIE, challenge);
-    const replay = await browser.req("/api/auth/step-up", { body: { credential } });
+    const replay = await browser.req("/api/auth/step-up/session", { body: { credential } });
     expect([replay.status, await replay.json()]).toEqual([400, { error: "no_challenge" }]);
   });
 
@@ -179,26 +183,41 @@ describe("account step-up", () => {
     const login = await browser.req("/api/auth/login/options", { body: {} });
     const { options: loginOptions } = await login.json<Options>();
     const credential = await key.get(loginOptions);
-    expect((await browser.req("/api/auth/step-up", { body: { credential } })).status).toBe(400);
+    expect((await browser.req("/api/auth/step-up/session", { body: { credential } })).status).toBe(
+      400,
+    );
 
     const stranger = passkey();
     await stranger.create({ challenge: "x" });
-    const res = await browser.req("/api/auth/step-up/options", { body: {} });
+    const res = await browser.req("/api/auth/step-up/session/options", { body: {} });
     const { options } = await res.json<Options>();
     const foreign = await stranger.get(options);
-    expect((await browser.req("/api/auth/step-up", { body: { credential: foreign } })).status).toBe(
-      401,
-    );
+    expect(
+      (await browser.req("/api/auth/step-up/session", { body: { credential: foreign } })).status,
+    ).toBe(401);
 
-    await browser.req("/api/auth/step-up/options", { body: {} }).then(async (r) => {
+    await browser.req("/api/auth/step-up/session/options", { body: {} }).then(async (r) => {
       const { options: again } = await r.json<Options>();
       const noUv = await key.get(again, { uv: false });
-      expect((await browser.req("/api/auth/step-up", { body: { credential: noUv } })).status).toBe(
-        401,
-      );
+      expect(
+        (await browser.req("/api/auth/step-up/session", { body: { credential: noUv } })).status,
+      ).toBe(401);
     });
     expect(await count("sessions", "step_up_at IS NOT NULL")).toBe(0);
     expect(await count("audit_log", "action = 'auth.step_up' AND result = 'denied'")).toBe(3);
+  });
+
+  it("refuses a vault-reset challenge: the kinds don't cross-use", async () => {
+    const { browser, key } = await claim();
+    const vault = await browser.req("/api/auth/step-up/options", {
+      body: { action: "vault.reset" },
+    });
+    expect(vault.status).toBe(200);
+    const { options } = await vault.json<Options>();
+    const credential = await key.get(options);
+    const res = await browser.req("/api/auth/step-up/session", { body: { credential } });
+    expect([res.status, await res.json()]).toEqual([400, { error: "no_challenge" }]);
+    expect(await count("sessions", "step_up_at IS NOT NULL")).toBe(0);
   });
 });
 

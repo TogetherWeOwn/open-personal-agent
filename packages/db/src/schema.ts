@@ -105,7 +105,7 @@ export const webauthnChallenges = sqliteTable(
   {
     idHash: text("id_hash").primaryKey(),
     kind: text("kind", {
-      enum: ["claim", "recovery", "recovery_code", "login", "step_up"],
+      enum: ["claim", "recovery", "recovery_code", "login", "step_up", "step_up_vault_reset"],
     }).notNull(),
     challenge: text("challenge").notNull(),
     userId: text("user_id"),
