@@ -90,6 +90,31 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         o.passkey.deviceType,
         o.passkey.backedUp ? 1 : 0,
       );
+  /**
+   * A possible-compromise signal (M3-07 AC13): recovery-code redemption, recovery with the setup
+   * token, "sign out everywhere" and, with M3-19, passkey removal. Every pending approval of the
+   * user expires, interactive and background, with its ceremony burned, and every task waiting
+   * on one is cancelled as on expiry. Part of the signal's own batch, so the two can't diverge.
+   */
+  const expireApprovals = (userId: string, now: number, signal: string) => [
+    db
+      .prepare(
+        `UPDATE approvals SET status = 'expired', reason = ?, decided_at = ?, nonce = NULL,
+           step_up_digest = NULL, step_up_expires_at = NULL, step_up_session_id = NULL
+         WHERE user_id = ? AND status = 'pending'`,
+      )
+      .bind(`signal:${signal}`, now, userId),
+    db
+      .prepare(
+        `UPDATE tasks SET status = 'cancelled', finished_at = ?, updated_at = ?
+         WHERE user_id = ? AND status = 'waiting_for_approval' AND id IN (
+           SELECT task_id FROM approvals WHERE user_id = ? AND status = 'expired'
+             AND reason = ? AND decided_at = ? AND task_id IS NOT NULL)`,
+      )
+      .bind(now, now, userId, userId, `signal:${signal}`, now),
+    audit(userId, "approval.expire_all", "approvals", "ok", signal),
+  ];
+
   /** Breaks the single-row CHECK when the statement before it changed nothing: rolls back a batch. */
   const requireChange = () =>
     db.prepare("INSERT INTO setup_state (id) SELECT 0 WHERE changes() = 0");
@@ -157,6 +182,7 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           db.prepare("DELETE FROM passkeys WHERE user_id = ?").bind(o.userId),
           db.prepare("DELETE FROM recovery_codes WHERE user_id = ?").bind(o.userId),
           db.prepare("UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL").bind(o.now),
+          ...expireApprovals(o.userId, o.now, "setup_recovery"),
           ...credentials(o, "recovery"),
         ]);
       },
@@ -233,6 +259,7 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
             .bind(r.now, userId),
           insertSession(r.session),
+          ...expireApprovals(userId, r.now, "recovery_code"),
           audit(userId, "recovery.code", "auth", "redeemed"),
         ]);
       },
@@ -305,6 +332,18 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           audit(s.userId, "auth.step_up", "auth", "ok", s.action),
         ]);
       },
+    },
+
+    approvals: {
+      /**
+       * Expires every pending approval of the user on a compromise signal (AC13), on its own:
+       * the signals above already include it in their batches. M3-19's passkey removal puts
+       * `expireAllStatements` in its batch instead.
+       */
+      expireAll: async (userId: string, now: number, signal: string) => {
+        await db.batch(expireApprovals(userId, now, signal));
+      },
+      expireAllStatements: expireApprovals,
     },
 
     sessions: {
@@ -418,6 +457,7 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           db
             .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
             .bind(now, userId),
+          ...expireApprovals(userId, now, "sign_out_everywhere"),
           audit(userId, "auth.sign_out_everywhere", "auth", "ok"),
         ]);
       },

@@ -66,6 +66,33 @@ describe("parseInput", () => {
   });
 });
 
+describe("parseInput refuses what an approval couldn't bind exactly (M3-07 AC1, C3)", () => {
+  const any = { type: "object" } as const;
+
+  it("refuses a key that appears twice, at any depth", () => {
+    const twice = parseInput(any, '{"to":"owner@example.com","to":"attacker@example.net"}');
+    expect(twice).toEqual({
+      ok: false,
+      error: 'The arguments can\'t be used: the key "to" appears twice.',
+    });
+    expect(parseInput(any, '{"a":{"b":1,"b":2}}').ok).toBe(false);
+    expect(parseInput(any, '{"a":[{"b":1},{"b":2}]}').ok).toBe(true);
+    // An escaped spelling is the same key.
+    expect(parseInput(any, '{"to":1,"\\u0074o":2}').ok).toBe(false);
+    // A value equal to a key is not a key.
+    expect(parseInput(any, '{"a":"b","b":"a","c":["a","a"]}').ok).toBe(true);
+    expect(parseInput(any, '{"a\\"":1,"a":2}').ok).toBe(true);
+  });
+
+  it("refuses integers past 2^53, lone surrogates and deep nesting", () => {
+    expect(parseInput(any, '{"n":12345678901234567890}').ok).toBe(false);
+    expect(parseInput(any, '{"n":9007199254740991}').ok).toBe(true);
+    expect(parseInput(any, '{"s":"\\ud800"}').ok).toBe(false);
+    expect(parseInput(any, '{"s":"\\ud83d\\ude00"}').ok).toBe(true);
+    expect(parseInput(any, `{"a":${"[".repeat(40)}${"]".repeat(40)}}`).ok).toBe(false);
+  });
+});
+
 describe("canonical", () => {
   it("sorts keys at every depth", () => {
     expect(canonical({ b: 1, a: { d: [2, { f: 1, e: 0 }], c: null } })).toBe(
