@@ -28,6 +28,7 @@ const alice = repo.forUser(scopeFromSession({ userId: "alice" }));
 const bob = repo.forUser(scopeFromSession({ userId: "bob" }));
 const carol = repo.forUser(scopeFromSession({ userId: "carol" }));
 const dave = repo.forUser(scopeFromSession({ userId: "dave" }));
+const erin = repo.forUser(scopeFromSession({ userId: "erin" }));
 /** The user's assistant over DO RPC, as the Workflow and the routes reach it. */
 const rpc = (user: typeof alice) => user.assistant() as unknown as DurableObjectStub<Assistant>;
 
@@ -181,12 +182,13 @@ async function run(
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   await env.DB.prepare(
-    "INSERT INTO users (id, display_name, role) VALUES ('alice', 'A', 'owner'), ('bob', 'B', 'member'), ('carol', 'C', 'member'), ('dave', 'D', 'member')",
+    "INSERT INTO users (id, display_name, role) VALUES ('alice', 'A', 'owner'), ('bob', 'B', 'member'), ('carol', 'C', 'member'), ('dave', 'D', 'member'), ('erin', 'E', 'member')",
   ).run();
   await alice.createConversation("ca", "Alice's");
   await bob.createConversation("cb", "Bob's");
   await carol.createConversation("cc", "Carol's");
   await dave.createConversation("cd", "Dave's");
+  await erin.createConversation("ce", "Erin's");
 });
 
 describe("task workflow", () => {
@@ -411,6 +413,39 @@ describe("task limits (M3-17)", () => {
     const row = await dave.tasks.get(taskId);
     expect(row?.status).toBe("budget_limited");
     expect(JSON.parse(row?.state ?? "{}").paused).toMatchObject({ kind: "monthly_hard" });
+  });
+
+  it("a replay on a later day takes the path the paused run took", async () => {
+    // Erin's day is spent: every call is refused at the daily cap.
+    await rpc(erin).setSpending({ dailyCapMicroUsd: 10_000 });
+    await rpc(erin).reserveTaskCall("chat", "openai", "gpt-4.1", 2000, {});
+    await rpc(erin).settleTaskCall("chat", "openai", "gpt-4.1", null);
+    const { taskId, instanceId } = await makeTask(erin, "ce", "background");
+    const DAY = 86_400_000;
+    let clock = Date.now();
+    // The first pause's wait runs out past midnight, so the cap lifts on its own; the second
+    // pause (still refused) waits out nothing and ends the run.
+    const stepper = new FakeStepper([
+      async () => {
+        clock += DAY;
+        return null;
+      },
+    ]);
+    const first = await run([{ text: "hi" }], instanceId, stepper, [], { now: () => clock });
+    await first.promise;
+    expect(stepper.waits).toBe(2);
+    const steps = [...stepper.persisted.keys()];
+    expect(steps.filter((n) => n.startsWith("task:wake:"))).toHaveLength(2);
+    expect((await erin.tasks.get(taskId))?.status).toBe("budget_limited");
+    // The engine replays the same instance two days later: every step comes back from storage,
+    // so no new step runs and the run ends where it ended.
+    clock += 2 * DAY;
+    const replay = new FakeStepper();
+    for (const [k, v] of stepper.persisted) replay.persisted.set(k, v);
+    const again = await run([{ text: "hi" }], instanceId, replay, [], { now: () => clock });
+    await again.promise;
+    expect([...replay.persisted.keys()]).toEqual(steps);
+    expect(again.streams()).toBe(0);
   });
 
   it("refuses the 61st tool call in a minute without running it, as slow-down (COST-2)", async () => {

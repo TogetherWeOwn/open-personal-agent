@@ -56,6 +56,8 @@ export interface WorkflowTaskContextDeps {
   turnId: string;
   /** When the task's clock started (its row's `started_at`, else `created_at`). */
   startedAt: number;
+  /** Time spent paused at a limit (M3-17), which the duration limit doesn't count. */
+  pausedMs?: () => number;
   mode: "interactive" | "background";
   /** A fresh read of the task row's status; `undefined` when the row is gone. */
   readStatus(): Promise<TaskStatus | undefined>;
@@ -120,7 +122,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
   async function guard(): Promise<"cancelled" | "duration" | null> {
     const status = await deps.readStatus();
     if (status === undefined || TERMINAL.includes(status)) return "cancelled";
-    if (now() - deps.startedAt > durationMs) return "duration";
+    if (now() - deps.startedAt - (deps.pausedMs?.() ?? 0) > durationMs) return "duration";
     return null;
   }
 

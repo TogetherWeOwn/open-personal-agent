@@ -16,6 +16,7 @@ interface TaskWorkflows {
 /** The assistant's task-budget RPC (apps/worker's `Assistant`). */
 interface BudgetRpc {
   raiseTask(taskId: string): Promise<boolean>;
+  taskBudget(taskId: string): Promise<unknown>;
 }
 
 export const taskRoutes = new Hono<AppEnv>();
@@ -64,7 +65,11 @@ taskRoutes.post("/:id/continue", async (c) => {
   if (kind === "task_budget") {
     const assistant = user.assistant() as unknown as Partial<BudgetRpc>;
     if (typeof assistant.raiseTask !== "function") return c.json({ error: "unavailable" }, 503);
-    if (!(await assistant.raiseTask(task.id))) return c.json({ error: "already_raised" }, 409);
+    if (!(await assistant.raiseTask(task.id))) {
+      // No budget left to raise means the run settled it and ended: nothing can continue.
+      const ended = (await assistant.taskBudget?.(task.id)) == null;
+      return c.json({ error: ended ? "ended" : "already_raised" }, 409);
+    }
   }
   if (!(await user.tasks.resume(task.id))) return c.json({ error: "not_paused" }, 409);
   if (!(await wake(c, task.workflowInstanceId))) {
