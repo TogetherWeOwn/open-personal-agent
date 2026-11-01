@@ -27,6 +27,7 @@ export type ChallengeKind =
   | "recovery_code"
   | "login"
   | "step_up"
+  | "passkey_add"
   | "step_up_vault_reset";
 
 /** A session row to insert. The cookie value never reaches the store, only its hash. */
@@ -75,10 +76,10 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       )
       .bind(userId, action, module, result, detail);
 
-  const insertPasskey = (o: { userId: string; passkey: NewPasskey }) =>
+  const insertPasskey = (o: { userId: string; passkey: NewPasskey; name?: string | null }) =>
     db
       .prepare(
-        "INSERT INTO passkeys (id, user_id, webauthn_user_id, public_key, counter, transports, device_type, backed_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO passkeys (id, user_id, webauthn_user_id, public_key, counter, transports, device_type, backed_up, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .bind(
         o.passkey.id,
@@ -89,6 +90,7 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         o.passkey.transports,
         o.passkey.deviceType,
         o.passkey.backedUp ? 1 : 0,
+        o.name ?? null,
       );
   /**
    * A possible-compromise signal (M3-07 AC13): recovery-code redemption, recovery with the setup
@@ -269,6 +271,37 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           audit(userId, "recovery.code", "auth", "redeemed"),
         ]);
       },
+      /**
+       * Replaces the user's recovery codes (M3-19 AC2): the old set stops working and the new
+       * one takes its place in one batch, with the audit row. Unlike redeeming a code this is
+       * a routine rotation, not a compromise signal, so pending approvals are untouched. The
+       * caller shows the new codes once: they never come back from the store.
+       */
+      regenerate: async (r: {
+        userId: string;
+        codes: { id: string; hash: string }[];
+        now: number;
+      }) => {
+        await db.batch([
+          db.prepare("DELETE FROM recovery_codes WHERE user_id = ?").bind(r.userId),
+          ...r.codes.map((code) =>
+            db
+              .prepare("INSERT INTO recovery_codes (id, user_id, code_hash) VALUES (?, ?, ?)")
+              .bind(code.id, r.userId, code.hash),
+          ),
+          audit(r.userId, "auth.recovery_regenerate", "auth", "ok"),
+        ]);
+      },
+      /** How many of the user's recovery codes are still unused, for the Security page. */
+      remaining: async (userId: string) =>
+        (
+          await db
+            .prepare(
+              "SELECT count(*) AS n FROM recovery_codes WHERE user_id = ? AND used_at IS NULL",
+            )
+            .bind(userId)
+            .first<{ n: number }>()
+        )?.n ?? 0,
     },
 
     challenges: {
@@ -337,6 +370,69 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             .bind(s.counter, s.now, s.passkeyId, s.userId),
           audit(s.userId, "auth.step_up", "auth", "ok", s.action),
         ]);
+      },
+      /**
+       * The user's passkeys for Settings › Privacy & security (M3-19 AC2): newest first, with
+       * the names and dates the page shows. Secrets never leave the store: no public keys here.
+       */
+      list: async (userId: string) =>
+        (
+          await db
+            .prepare(
+              `SELECT id, name, created_at, last_used_at FROM passkeys
+               WHERE user_id = ? ORDER BY created_at DESC`,
+            )
+            .bind(userId)
+            .all<{
+              id: string;
+              name: string | null;
+              created_at: number;
+              last_used_at: number | null;
+            }>()
+        ).results,
+      /**
+       * Adds a passkey the user just registered on this signed-in session. Throws on a
+       * duplicate credential id, so registering the same authenticator twice is a 409.
+       */
+      add: async (a: { userId: string; passkey: NewPasskey; name: string; now: number }) => {
+        await db.batch([
+          insertPasskey({ userId: a.userId, passkey: a.passkey, name: a.name }),
+          audit(a.userId, "auth.passkey_add", "auth", "ok", a.passkey.id),
+        ]);
+      },
+      /** Renames one of the user's own passkeys. `false` when it is missing or another's. */
+      rename: async (r: { id: string; userId: string; name: string; now: number }) => {
+        const [update] = await db.batch([
+          db
+            .prepare("UPDATE passkeys SET name = ? WHERE id = ? AND user_id = ?")
+            .bind(r.name, r.id, r.userId),
+          db
+            .prepare(
+              "INSERT INTO audit_log (user_id, action, module, result, detail) VALUES (?, 'auth.passkey_rename', 'auth', CASE WHEN changes() > 0 THEN 'ok' ELSE 'denied' END, ?)",
+            )
+            .bind(r.userId, r.id),
+        ]);
+        return (update?.meta.changes ?? 0) > 0;
+      },
+      /**
+       * Removes one of the user's own passkeys (M3-19 AC2, M3-07 AC13): the row goes, every
+       * pending approval expires with the `passkey_removal` signal, and the audit row lands in
+       * the same batch, so the two can't diverge. `false` when it is missing or another's.
+       */
+      remove: async (r: { id: string; userId: string; now: number }) => {
+        try {
+          await db.batch([
+            db.prepare("DELETE FROM passkeys WHERE id = ? AND user_id = ?").bind(r.id, r.userId),
+            // A concurrent removal already took it: break the single-row CHECK so the batch
+            // rolls back instead of expiring approvals for a passkey that isn't going anywhere.
+            requireChange(),
+            ...expireApprovals(r.userId, r.now, "passkey_removal"),
+            audit(r.userId, "auth.passkey_remove", "auth", "ok", r.id),
+          ]);
+          return true;
+        } catch {
+          return false;
+        }
       },
     },
 
