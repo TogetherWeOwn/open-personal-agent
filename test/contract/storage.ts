@@ -515,5 +515,44 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       const all = await DB.prepare("SELECT text, source_excerpt FROM memories").all();
       expect(JSON.stringify(all.results)).not.toContain(key);
     });
+
+    it("misses another user's memories and proposals by raw ID on every operation", async () => {
+      const a = await user();
+      const b = await user();
+      const fact = saved(await a.memory.create(screen, "A only: collects thimbles", "fact", said));
+      const proposed = await a.memory.create(tainted, "A only: proposed text", "fact", web);
+      if (proposed.status !== "proposed") throw new Error("gate");
+      const proposalId = proposed.proposal.memoryId;
+      expect(await b.memory.get(fact)).toBeUndefined();
+      expect(await b.memory.list()).toEqual([]);
+      expect(await b.memory.search("thimbles")).toEqual([]);
+      expect(await b.memory.proposals()).toEqual([]);
+      expect(await b.memory.update(screen, fact, "B overwrites", said)).toEqual({
+        status: "not_found",
+      });
+      expect(await b.memory.merge(screen, [fact], "B merges", said)).toEqual({
+        status: "not_found",
+      });
+      expect(await b.memory.forget(screen, [fact], said)).toEqual({ status: "not_found" });
+      expect(await b.memory.accept(proposalId)).toEqual({ status: "not_found" });
+      expect(await b.memory.reject(proposalId)).toBe(false);
+      // Nothing of A's moved: the fact is current and the proposal still waits for A.
+      expect((await a.memory.list()).map((m) => m.id)).toEqual([fact]);
+      expect((await a.memory.proposals()).map((p) => p.id)).toEqual([proposalId]);
+      expect(await a.memory.reject(proposalId)).toBe(true);
+    });
+
+    it("never accepts an expired proposal", async () => {
+      const { memory, DB } = await user();
+      const proposed = await memory.create(tainted, "Too old to apply", "fact", web);
+      if (proposed.status !== "proposed") throw new Error("gate");
+      await DB.prepare("UPDATE memories SET expires_at = 1 WHERE id = ?")
+        .bind(proposed.proposal.memoryId)
+        .run();
+      expect(await memory.proposals()).toEqual([]);
+      expect(await memory.accept(proposed.proposal.memoryId)).toEqual({ status: "not_found" });
+      expect(await memory.list()).toEqual([]);
+      expect(await memory.search("old")).toEqual([]);
+    });
   });
 }
