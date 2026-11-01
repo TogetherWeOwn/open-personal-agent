@@ -43,5 +43,24 @@
     "vitest": "5.0.5",
     "wrangler": "4.156.0",
     "yaml": "2.9.1"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "The app's D1 database. Keep the suggested name, or use `<worker name>-db`."
+      },
+      "FILES": {
+        "description": "The R2 bucket for uploaded files. Keep the suggested name, or use `<worker name>-files`."
+      },
+      "OPA_MASTER_KEY": {
+        "description": "Key-encryption key: 32 random bytes, base64. Generate one with `openssl rand -base64 32` and **back it up**: losing it makes stored keys unrecoverable."
+      },
+      "OPA_SESSION_SECRET": {
+        "description": "Signs session state: 32 random bytes, base64. Generate one with `openssl rand -base64 32`."
+      },
+      "OPA_SETUP_TOKEN": {
+        "description": "One-time token that claims the new deployment at `/setup`: 32 random bytes, base64. Generate one with `openssl rand -base64 32` and keep it for the first visit."
+      }
+    }
   }
 }
