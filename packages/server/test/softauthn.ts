@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// A software passkey (ES256, "none" attestation) so tests run a real registration ceremony
-// inside workerd without a browser. Taken from the M2-08 spike; `get` answers a login.
+// A software passkey (ES256, "none" attestation by default) so tests run a real registration
+// ceremony inside workerd without a browser. Taken from the M2-08 spike; `get` answers a login.
 import { base64url } from "../src/auth";
 
 const encoder = new TextEncoder();
@@ -21,7 +21,7 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-// Minimal CBOR: integers, byte strings, text strings and maps.
+// Minimal CBOR: integers, byte strings, text strings, arrays and maps.
 function cbor(value: unknown): Uint8Array {
   const head = (major: number, n: number) =>
     n < 24
@@ -35,6 +35,7 @@ function cbor(value: unknown): Uint8Array {
     const bytes = encoder.encode(value);
     return concat(head(3, bytes.length), bytes);
   }
+  if (Array.isArray(value)) return concat(head(4, value.length), ...value.map(cbor));
   if (value instanceof Map) {
     return concat(head(5, value.size), ...[...value].flatMap(([k, v]) => [cbor(k), cbor(v)]));
   }
@@ -57,6 +58,8 @@ function derSignature(raw: Uint8Array): Uint8Array {
   return concat(new Uint8Array([0x30, seq.length]), seq);
 }
 
+export type AttestationFormat = "none" | "packed" | "android-key";
+
 export class SoftPasskey {
   readonly credentialId = crypto.getRandomValues(new Uint8Array(16));
   keys?: CryptoKeyPair;
@@ -67,8 +70,14 @@ export class SoftPasskey {
     readonly origin: string,
   ) {}
 
-  /** Answers `navigator.credentials.create()` for `options`, with or without user verification. */
-  async create(options: { challenge: string }, { uv = true, origin = this.origin } = {}) {
+  /**
+   * Answers `navigator.credentials.create()` for `options`, with or without user verification.
+   * `fmt` other than "none" self-signs the statement with the new key; "android-key" adds `x5c`.
+   */
+  async create(
+    options: { challenge: string },
+    { uv = true, origin = this.origin, fmt = "none" as AttestationFormat } = {},
+  ) {
     const keys = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
       "sign",
     ])) as CryptoKeyPair;
@@ -97,10 +106,26 @@ export class SoftPasskey {
     const clientData = encoder.encode(
       JSON.stringify({ type: "webauthn.create", challenge: options.challenge, origin }),
     );
+    const attStmt = new Map<string, unknown>();
+    if (fmt !== "none") {
+      const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", clientData));
+      const signature = new Uint8Array(
+        await crypto.subtle.sign(
+          { name: "ECDSA", hash: "SHA-256" },
+          keys.privateKey,
+          concat(authData, clientHash),
+        ),
+      );
+      attStmt.set("alg", -7);
+      attStmt.set("sig", derSignature(signature));
+      // Not a real certificate: the verifier must refuse the format before it parses one.
+      if (fmt === "android-key")
+        attStmt.set("x5c", [new Uint8Array([0x30, 0x03, 0x02, 0x01, 0x01])]);
+    }
     const attestation = cbor(
       new Map<string, unknown>([
-        ["fmt", "none"],
-        ["attStmt", new Map()],
+        ["fmt", fmt],
+        ["attStmt", attStmt],
         ["authData", authData],
       ]),
     );

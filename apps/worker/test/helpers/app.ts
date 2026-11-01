@@ -3,7 +3,7 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { newSession, SESSION_COOKIE } from "@opa/server/auth";
-import { SoftPasskey } from "@opa/server/test/softauthn";
+import { type AttestationFormat, SoftPasskey } from "@opa/server/test/softauthn";
 import { beforeAll, beforeEach } from "vitest";
 import type { Env } from "../../src/env";
 import { workerApp as app } from "../../src/worker-app";
@@ -87,7 +87,10 @@ export class Browser {
   }
 
   /** Runs both setup steps with a new passkey and returns the final response. */
-  async setup(token: string, opts: { uv?: boolean; origin?: string; key?: SoftPasskey } = {}) {
+  async setup(
+    token: string,
+    opts: { uv?: boolean; origin?: string; fmt?: AttestationFormat; key?: SoftPasskey } = {},
+  ) {
     const res = await this.options(token);
     if (res.status !== 200) return res;
     const { options } = await res.json<Options>();
