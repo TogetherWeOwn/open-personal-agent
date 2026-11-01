@@ -45,8 +45,9 @@ describe("an unmigrated deployment with no secrets", () => {
     expect(html).toContain("npx wrangler d1 migrations apply DB --remote");
     expect(html).toContain("npx wrangler d1 migrations apply DB --local");
     for (const name of Object.keys(SECRETS)) {
-      expect(html).toContain(`npx wrangler secret put ${name}`);
+      expect(html).toContain(`<pre><code>npx wrangler secret put ${name}</code></pre>`);
     }
+    expect(html).toContain("crypto.getRandomValues(Buffer.alloc(32))");
     expect(html).not.toMatch(/Error|\bat .+:\d+:\d+/);
   });
 });
