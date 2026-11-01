@@ -36,6 +36,15 @@ const sse = (...lines: string[]) =>
     },
   });
 
+/** Whether a model request offers tools: the Test's tool-call probe (M3-06 AC4) does. */
+const offersTools = (init?: RequestInit) => !!JSON.parse(String(init?.body ?? "{}")).tools;
+/** A Chat Completions stream that calls the probe's tool. */
+const toolCall = () => {
+  const call = { index: 0, id: "call_1", function: { name: "report_ready", arguments: "{}" } };
+  const chunk = { choices: [{ delta: { tool_calls: [call] }, finish_reason: "tool_calls" }] };
+  return new Response(sse(JSON.stringify(chunk), "[DONE]"));
+};
+
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   await env.DB.batch([
@@ -103,12 +112,15 @@ describe("model settings", () => {
       return new Response(sse(chunk, "[DONE]"));
     });
     const body = JSON.parse((await call("/model/test", { method: "POST" })).text);
-    expect(body).toMatchObject({ ok: true, tools: true });
+    // This server answers the probe in text, so tools are reported as not working.
+    expect(body).toMatchObject({ ok: true, tools: false, toolProbe: "ignored" });
     expect(body.latencyMs).toBeTypeOf("number");
     expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8788/v1/chat/completions");
     // No usage came back, so the ledger keeps the call unpriced, billed by the endpoint's host.
     const ledger = "SELECT provider_id, cost_micro_usd FROM usage WHERE model = 'echo'";
+    // The probe is a second call, so it is in the ledger too.
     expect((await env.DB.prepare(ledger).all()).results).toEqual([
+      { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
       { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
     ]);
   });
@@ -159,13 +171,16 @@ describe("model settings", () => {
   });
 
   it("tests the saved key against its own origin and reports latency and tools", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) return toolCall();
       const chunk = (content: string) => JSON.stringify({ choices: [{ delta: { content } }] });
       return new Response(sse(chunk("rea"), chunk("dy"), "[DONE]"));
     });
     const res = await call("/model/test", { method: "POST" });
     const body = JSON.parse(res.text);
-    expect(body).toMatchObject({ ok: true, tools: true, reply: "ready" });
+    expect(body).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    const probe = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    expect(probe.tools).toMatchObject([{ function: { name: "report_ready" } }]);
     expect(body.latencyMs).toBeTypeOf("number");
     expect(res.text).not.toContain(CANARY);
     const [url, init] = fetch.mock.calls[0] ?? [];
@@ -213,13 +228,19 @@ describe("model settings", () => {
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
-    const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
+    const called = '{"tool_calls":[{"name":"report_ready","arguments":{}}]}';
+    const AI = {
+      run: async (_model: string, inputs: { tools?: unknown }) =>
+        inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]"),
+    } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: true, reply: "ready" });
-    // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
-    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
+    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    // Both calls are billed, so the ledger has them. The first is priced: 25 × $0.293/M +
+    // 6 × $2.253/M. The probe reported no usage, so it is unpriced.
+    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai' ORDER BY rowid";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
       { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
+      { input_tokens: 0, cost_micro_usd: null },
     ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
@@ -245,7 +266,21 @@ describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
       kind: "openai-chat",
       api: "openai-responses",
     });
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) {
+        const item = {
+          type: "function_call",
+          call_id: "fc_1",
+          name: "report_ready",
+          arguments: "{}",
+        };
+        return new Response(
+          sse(
+            event("response.output_item.done", { item }),
+            event("response.completed", { response: { status: "completed" } }),
+          ),
+        );
+      }
       const done = {
         response: { status: "completed", usage: { input_tokens: 9, output_tokens: 1 } },
       };
@@ -257,7 +292,7 @@ describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
       );
     });
     const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
-    expect(tested).toMatchObject({ ok: true, tools: true, reply: "ready" });
+    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
     const [url, init] = fetch.mock.calls[0] ?? [];
     expect(url).toBe("https://api.openai.com/v1/responses");
     expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${CANARY}`);
