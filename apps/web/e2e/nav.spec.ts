@@ -42,7 +42,8 @@ const PAGES: [path: string, heading: string, url?: RegExp][] = [
   ["/settings/models", "Settings"],
   ["/settings/agent-engine", "Settings"],
   ["/settings/computer", "Computer"],
-  ["/settings/spending", "Usage", /\/usage$/],
+  // Spending shipped with M3-17; Usage keeps its own address and Spending links to it.
+  ["/settings/spending", "Settings"],
   ["/usage", "Usage"],
   ["/nope", "This page doesn't exist"],
   ["/settings/nope", "This page doesn't exist"],

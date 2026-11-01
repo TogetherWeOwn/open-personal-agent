@@ -36,6 +36,7 @@ import {
 } from "./models/settings-api";
 import { hasNavigated, match, navigate, usePath } from "./router";
 import { NotFound, routes } from "./routes";
+import { SpendingBanners } from "./settings/SpendingBanners";
 import { ThemeToggle } from "./ThemeToggle";
 import { APP_NAME, Banner, Button, buttonClass, pageTitle } from "./ui";
 
@@ -457,6 +458,7 @@ export function App({ transport }: AppProps) {
               Your assistant's server isn't responding properly, so replies may fail.
             </Banner>
           )}
+          {chat && <SpendingBanners />}
           <Thread key={active.id} conversation={active} />
           {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
           <Composer
@@ -484,7 +486,12 @@ export function App({ transport }: AppProps) {
           />
         </main>
       </div>
-      {!chat && <Screen params={matched?.params ?? {}} />}
+      {!chat && (
+        <>
+          <SpendingBanners />
+          <Screen params={matched?.params ?? {}} />
+        </>
+      )}
       <div role="status" className="sr-only" hidden={!chat}>
         {state.announcement}
       </div>

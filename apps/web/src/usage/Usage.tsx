@@ -11,6 +11,8 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from "react-aria-components";
+import { HalfBudgetLine } from "../settings/Spending";
+import { getSpending, type Spending } from "../settings/spending-api";
 import { Page } from "../ui";
 
 interface Line {
@@ -219,6 +221,7 @@ export function Usage() {
   const [data, setData] = useState<UsageData | null>(null);
   const [failed, setFailed] = useState(false);
   const [key, setKey] = useState<"today" | "month">("today");
+  const [spending, setSpending] = useState<Spending | null>(null);
 
   useEffect(() => {
     const now = new Date();
@@ -227,6 +230,7 @@ export function Usage() {
     fetch(`/api/usage?today=${today}&month=${month}`)
       .then((res) => (res.ok ? res.json() : Promise.reject()))
       .then(setData, () => setFailed(true));
+    getSpending().then(setSpending, () => {}); // only the 50% line needs it
   }, []);
 
   const period = data?.[key];
@@ -247,6 +251,7 @@ export function Usage() {
             <p className="text-sm text-text-muted">
               Estimated from published prices. Your provider's bill is the final word.
             </p>
+            {spending && <HalfBudgetLine spending={spending} />}
           </div>
           <ToggleButtonGroup
             aria-label="Period"
