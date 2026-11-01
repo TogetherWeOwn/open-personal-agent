@@ -53,7 +53,12 @@ export function AssistantSettings() {
         <form onSubmit={submit} className="flex flex-col gap-5">
           <RadioGroup
             value={choice}
-            onChange={(v) => setChoice(v as ShowWork)}
+            onChange={(v) => {
+              // A new pick is unsaved until the next Save: the old "Saved." must go, or the
+              // thread's choice reads saved when it isn't.
+              setChoice(v as ShowWork);
+              setStatus("idle");
+            }}
             className="flex flex-col gap-2"
           >
             <Label className={hint}>How much of a run the thread shows.</Label>

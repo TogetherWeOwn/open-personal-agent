@@ -150,8 +150,46 @@ test("Settings › Assistant saves the Show-work choice", async ({ page, baseURL
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Saved.");
   expect(writes).toEqual([{ showWork: "expanded" }]);
+  // Picking another choice unsaves the form: the old confirmation goes, and Save enables
+  // again for the choice that isn't saved yet.
+  await page.getByText("Collapsed", { exact: true }).click();
+  await expect(page.getByRole("status")).not.toContainText("Saved.");
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+});
+
+test("a failed Show-work reload falls back to the collapsed default (AC3)", async ({
+  page,
+  baseURL,
+}) => {
+  await stub(page, baseURL, "expanded");
+  await page.goto("/");
+  await send(page, "/mock timeline");
+  const log = page.getByRole("log", { name: "Messages" });
+  // The saved Expanded arrived: opening the summary shows the tool card, no step to open.
+  await expect(log).toContainText("Here's what I found in the docs.");
+  await log.getByRole("button", { name: /Worked for/ }).click();
+  await expect(log.getByText("https://docs.example/guide", { exact: false })).toBeVisible();
+  // The reload fails on the way back from Settings; the thread falls back to the default
+  // instead of keeping the stale Expanded the settings no longer holds.
+  await page.unroute("/api/settings/assistant");
+  await page.route("/api/settings/assistant", (route) => route.fulfill({ status: 500, json: {} }));
+  await page
+    .getByRole("navigation", { name: "Main" })
+    .getByRole("link", { name: "Settings" })
+    .click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await page.getByRole("link", { name: "Assistant", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/assistant$/);
+  await page.getByRole("link", { name: "Chats" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  // A fresh run renders collapsed: the summary opens, but the tool card stays shut.
+  await page.getByRole("button", { name: "New chat" }).click();
+  await send(page, "/mock timeline");
+  await expect(log).toContainText(/Worked for .* · 1 tool/);
+  await log.getByRole("button", { name: /Worked for/ }).click();
+  await expect(log.getByText("https://docs.example/guide", { exact: false })).not.toBeVisible();
 });
 
 test("a queued follow-up cancels from its bubble (AC4)", async ({ page, baseURL }) => {

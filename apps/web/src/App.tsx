@@ -126,13 +126,16 @@ export function App({ transport }: AppProps) {
       },
       () => {},
     );
-    // A choice saved in Settings › Assistant is live on return too (#88); a failed load keeps
-    // the default, so the thread never waits on settings.
+    // A choice saved in Settings › Assistant is live on return too (#88). A failed reload
+    // falls back to the default instead of keeping a stale choice the settings no longer
+    // holds, so the thread never waits on settings and never shows steps it shouldn't.
     getShowWork().then(
       (loaded) => {
         if (current) setShowWork(loaded);
       },
-      () => {},
+      () => {
+        if (current) setShowWork(SHOW_WORK_DEFAULT);
+      },
     );
     return () => {
       current = false;
