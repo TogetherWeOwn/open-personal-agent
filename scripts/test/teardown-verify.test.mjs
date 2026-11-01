@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { DeployError } from "../deploy-cloudflare.mjs";
 import { renderGuide } from "../generate-verify-guide.mjs";
 import { teardownCloudflare } from "../teardown-cloudflare.mjs";
 import { newPrefix, verifyCloudflare } from "../verify-cloudflare.mjs";
@@ -94,7 +95,7 @@ const r2 = (name) => ({ kind: "r2", name, item: {} });
 const ONE_EACH = async () => [d1("u1"), r2("b")];
 
 /** verify:cloudflare with the deploy, teardown and inventory steps faked. */
-function verifySetup({ changes, inventory = ONE_EACH } = {}) {
+function verifySetup({ changes, inventory = ONE_EACH, fail = null } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
   fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
   fs.mkdirSync(path.join(root, "migrations"));
@@ -107,6 +108,7 @@ function verifySetup({ changes, inventory = ONE_EACH } = {}) {
     deploy: async (_argv, deps) => {
       calls.push(`deploy ${fs.readdirSync(path.join(root, "migrations")).sort()}`);
       deps.stdout(`Using fallback value in non-interactive context: yes\n${url}\n`);
+      if (fail) throw fail(url);
       return { changed: plan[calls.length - 1], url };
     },
     teardown: async (argv) =>
@@ -145,6 +147,18 @@ describe("verify:cloudflare", () => {
     await expect(t.run()).rejects.toThrow("Re-run (up to date): expected [], changed [worker]");
     expect(t.calls.at(-1)).toBe(`teardown --name ${P} --confirm ${P}`);
     expect(t.report()).toContain("Result: **FAIL**");
+  });
+
+  it("keeps the subdomain out of the error it rethrows", async () => {
+    // The health wait's message carries the URL, and the CLI prints the error to the public log.
+    const fail = (url) => new DeployError(`${url}/api/health did not answer 200 within 60 s`);
+    const t = verifySetup({ fail });
+    const error = await t.run().catch((e) => e);
+    expect(error.message).toBe(
+      `https://${P}.<subdomain>.workers.dev/api/health did not answer 200 within 60 s`,
+    );
+    expect(error.stack).not.toContain("owner-sub");
+    expect(t.report()).not.toContain("owner-sub");
   });
 
   it("fails when a re-deploy binds a different bucket", async () => {
