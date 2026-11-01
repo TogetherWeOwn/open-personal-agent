@@ -74,7 +74,7 @@ export async function stageExportItem(
       });
       return;
     case "tasks":
-      await put("tasks.json", await user.tasks.list());
+      await put("tasks.json", await user.tasks.listForExport());
       return;
     case "approvals":
       await put("approvals.json", {

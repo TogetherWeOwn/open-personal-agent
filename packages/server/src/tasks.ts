@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// The Tasks view's data (M3-13 AC1-2): the user's runs with their conversation and spend so
+// far, and cancel. Cancelling writes the row first and terminates the Workflow best-effort:
+// where the runtime has no Workflow binding (apps/node) the row still moves to `cancelled`
+// and the run's next step finds the terminal row and stops without writing (M3-12 AC3).
 // Continue and Stop on a task paused by a limit (M3-17 AC1, A-Co2; m3-ux Flow D). The route
 // changes D1 and the user's limits first and only then wakes the task's Workflow, whose run reads
-// what happened from D1 and never from the event (M3-12 AC3). The Tasks view is M3-13's.
+// what happened from D1 and never from the event (M3-12 AC3).
 import { createRepository, isId } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
 import type { AppEnv } from "./env";
@@ -25,6 +29,47 @@ export const taskRoutes = new Hono<AppEnv>();
 taskRoutes.use(async (c, next) => {
   c.header("Cache-Control", "no-store");
   return next();
+});
+
+/** A numeric filter, or `undefined` when absent or blank so the repository default applies. */
+function numeric(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  return Number(value);
+}
+
+taskRoutes.get("/", async (c) => {
+  const user = createRepository(c.env).forUser(c.var.session.scope);
+  const tasks = await user.tasks.list({
+    status: c.req.queries("status"),
+    since: numeric(c.req.query("since")),
+    until: numeric(c.req.query("until")),
+    limit: numeric(c.req.query("limit")),
+  });
+  return c.json({ tasks });
+});
+
+taskRoutes.get("/:id", async (c) => {
+  const task = await createRepository(c.env)
+    .forUser(c.var.session.scope)
+    .tasks.details(c.req.param("id"));
+  if (!task) return c.json({ error: "not_found" }, 404);
+  return c.json({ task });
+});
+
+taskRoutes.post("/:id/cancel", async (c) => {
+  const id = c.req.param("id");
+  const user = createRepository(c.env).forUser(c.var.session.scope);
+  const row = await user.tasks.get(id);
+  if (!row) return c.json({ error: "not_found" }, 404);
+  if (!(await user.tasks.cancel(id))) return c.json({ error: "already_ended" }, 409);
+  const binding = c.env.TASK_WORKFLOW;
+  if (row.workflowInstanceId && typeof binding?.get === "function") {
+    await binding
+      .get(row.workflowInstanceId)
+      .then((instance) => instance.terminate())
+      .catch(() => {});
+  }
+  return c.json({ task: await user.tasks.details(id) });
 });
 
 /** The task, if it's the user's and paused at a limit, with why it paused. */
