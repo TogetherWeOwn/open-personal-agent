@@ -412,12 +412,12 @@ async function test(c: Ctx, pick: ModelPick) {
   };
   const first = await timedCall(provider, { model, messages: TEST_PROMPT, maxOutputTokens: 16 });
   await record(first);
-  // The provider writes this text. If it echoes any 8 characters of the key, drop it: a saved
-  // key never returns to the browser, even in part beyond its last 4 (ADR 0010 D4).
+  // The provider writes both the error text and the reply. If either echoes any 8 characters
+  // of the key, drop it: a saved key never returns to the browser, even in part beyond its
+  // last 4 (ADR 0010 D4).
+  const echoesKey = (text: string) => apiKey !== null && leaks(text, apiKey);
   const safe = (message: string) =>
-    apiKey !== null && leaks(message, apiKey)
-      ? "The provider rejected the request. Check the key and model."
-      : message;
+    echoesKey(message) ? "The provider rejected the request. Check the key and model." : message;
   if (first.failure) {
     return c.json({
       ok: false,
@@ -427,6 +427,7 @@ async function test(c: Ctx, pick: ModelPick) {
   const probe = await timedCall(provider, { model, ...TOOL_PROBE });
   await record(probe);
   const called = probe.toolCalls.includes(PROBE_TOOL.name);
+  const reply = first.reply.slice(0, 200);
   return c.json({
     ok: true,
     latencyMs: first.firstOutputMs ?? first.totalMs,
@@ -434,7 +435,7 @@ async function test(c: Ctx, pick: ModelPick) {
     tools: called,
     toolProbe: called ? "called" : probeOutcome(probe.failure?.code),
     price: priceHint(billingId, model),
-    reply: first.reply.slice(0, 200),
+    reply: echoesKey(reply) ? "" : reply,
   });
 }
 
