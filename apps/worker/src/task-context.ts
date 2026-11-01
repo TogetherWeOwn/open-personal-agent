@@ -16,7 +16,7 @@ import {
   type TaskStepper,
 } from "@opa/core";
 import type { TaskStatus } from "@opa/db/repository";
-import type { Reservation } from "./limits";
+import type { CallScope, Refusal, Reservation } from "./limits";
 
 /** The assistant RPC surface a task may use, structural so tests can stand in for the stub. */
 export interface AssistantTaskRpc {
@@ -25,7 +25,8 @@ export interface AssistantTaskRpc {
     providerId: string,
     model: string,
     chars: number,
-  ): Promise<Reservation | null>;
+    scope: CallScope,
+  ): Promise<Reservation | Refusal>;
   settleTaskCall(
     key: string,
     providerId: string,
@@ -33,6 +34,9 @@ export interface AssistantTaskRpc {
     usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null,
   ): Promise<void>;
   releaseTaskCall(key: string): Promise<void>;
+  startTask(taskId: string, budgetMicroUsd?: number): Promise<{ budgetMicroUsd: number }>;
+  endTask(taskId: string): Promise<number>;
+  allowToolCall(): Promise<boolean>;
   taskProgress(progress: {
     conversationId: string;
     turnId: string;
@@ -135,12 +139,17 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
     if (why) stop(why);
   }
 
+  // Every call draws on this task's budget; a background task's also stops at the hard cap.
+  const scope: CallScope = { taskId: deps.taskId, background: deps.mode === "background" };
   const budget: TaskBudget = {
+    start: (budgetMicroUsd) => deps.assistant.startTask(deps.taskId, budgetMicroUsd),
     reserve: (key, providerId, model, chars) =>
-      deps.assistant.reserveTaskCall(key, providerId, model, chars),
+      deps.assistant.reserveTaskCall(key, providerId, model, chars, scope),
     settle: (key, providerId, model, usage) =>
       deps.assistant.settleTaskCall(key, providerId, model, usage),
     release: (key) => deps.assistant.releaseTaskCall(key),
+    end: () => deps.assistant.endTask(deps.taskId),
+    allowToolCall: () => deps.assistant.allowToolCall(),
   };
 
   return {

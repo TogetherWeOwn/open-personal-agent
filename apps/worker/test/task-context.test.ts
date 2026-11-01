@@ -51,6 +51,9 @@ const quietAssistant = (): AssistantTaskRpc => ({
   reserveTaskCall: async () => ({ maxOutputTokens: 1024, reservedMicroUsd: 0 }),
   settleTaskCall: async () => {},
   releaseTaskCall: async () => {},
+  startTask: async () => ({ budgetMicroUsd: 500_000 }),
+  endTask: async () => 0,
+  allowToolCall: async () => true,
   taskProgress: async () => {},
 });
 
@@ -206,7 +209,7 @@ describe("budget and progress over DO RPC (AC8)", () => {
     const { ctx, stepper } = await context({ assistant: assistantOf() });
     const result = await ctx.step("llm:1", async (key) => {
       const reservation = await ctx.budget.reserve(key, "openai", "gpt-4.1", 2000);
-      expect(reservation?.maxOutputTokens).toBeGreaterThan(0);
+      expect("maxOutputTokens" in reservation && reservation.maxOutputTokens).toBeGreaterThan(0);
       await ctx.budget.settle(key, "openai", "gpt-4.1", {
         inputTokens: 1000,
         outputTokens: 500,
@@ -231,11 +234,11 @@ describe("budget and progress over DO RPC (AC8)", () => {
           ).ctx.storage.kv.get("spend").spentMicroUsd,
       );
     const before = await spent().catch(() => 0);
-    const first = await rpc.reserveTaskCall("inst:llm", "openai", "gpt-4.1", 2000);
+    const first = await rpc.reserveTaskCall("inst:llm", "openai", "gpt-4.1", 2000, {});
     // The step "crashes" after reserving; the retry reserves the same key again.
-    const second = await rpc.reserveTaskCall("inst:llm", "openai", "gpt-4.1", 2000);
-    expect(second).not.toBeNull();
-    expect((await spent()) - before).toBe(first?.reservedMicroUsd);
+    const second = await rpc.reserveTaskCall("inst:llm", "openai", "gpt-4.1", 2000, {});
+    expect(second).toHaveProperty("maxOutputTokens");
+    expect((await spent()) - before).toBe("reservedMicroUsd" in first && first.reservedMicroUsd);
     await rpc.releaseTaskCall("inst:llm");
   });
 

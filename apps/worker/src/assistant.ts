@@ -21,7 +21,13 @@ import {
 } from "agents";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
-import { type CallScope, Limits, type Reservation, type SpendingSettings } from "./limits";
+import {
+  type CallScope,
+  Limits,
+  type Refusal,
+  type Reservation,
+  type SpendingSettings,
+} from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
@@ -94,9 +100,9 @@ export class Assistant extends Agent<Bindings> {
     model: string,
     chars: number,
     scope: CallScope = {},
-  ): Reservation | null {
+  ): Reservation | Refusal {
     this.limits.settle(key, providerId, model, null);
-    return this.limits.reserve(key, providerId, model, chars, 0, scope);
+    return this.limits.reserveFor(key, providerId, model, chars, 0, scope);
   }
 
   /** Settles a task's model call to what it used; settling twice charges once. */
