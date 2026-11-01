@@ -18,7 +18,37 @@ export const MIN_RELEASE_AGE_MINUTES = 1440;
  * `OPA_MASTER_KEY` at runtime (D4 residual risk), so a PR that extends this list needs a Security
  * Engineer review stage. Version bumps don't; a new package, direct or transitive, does.
  */
-export const REVIEWED_RUNTIME = ["@cloudflare/workers-types", "drizzle-orm", "hono"];
+export const REVIEWED_RUNTIME = [
+  "@cloudflare/workers-types",
+  "drizzle-orm",
+  "hono",
+  // @simplewebauthn/server (M2-09) and its closure. No install scripts; only the library's MDS
+  // and CRL helpers call `fetch`, and nothing in the closure reads env or evals.
+  "@hexagon/base64",
+  "@levischuck/tiny-cbor",
+  "@peculiar/asn1-android",
+  "@peculiar/asn1-asym-key",
+  "@peculiar/asn1-cms",
+  "@peculiar/asn1-csr",
+  "@peculiar/asn1-ecc",
+  "@peculiar/asn1-pfx",
+  "@peculiar/asn1-pkcs8",
+  "@peculiar/asn1-pkcs9",
+  "@peculiar/asn1-rsa",
+  "@peculiar/asn1-schema",
+  "@peculiar/asn1-x509",
+  "@peculiar/asn1-x509-attr",
+  "@peculiar/asn1-x509-post-quantum",
+  "@peculiar/utils",
+  "@peculiar/x509",
+  "@simplewebauthn/server",
+  "asn1js",
+  "pvtsutils",
+  "pvutils",
+  "reflect-metadata",
+  "tslib",
+  "tsyringe",
+];
 export const WORKER_IMPORTER = "apps/worker";
 
 /** Every third-party package `apps/worker` reaches through `dependencies`, from pnpm-lock.yaml. */

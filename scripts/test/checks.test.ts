@@ -115,18 +115,18 @@ snapshots:
   hono@4.0.0: {}
   vitest@1.0.0: { dependencies: { evil: 1.0.0 } }
   drizzle-orm@1.0.0(@cloudflare/workers-types@5.0.0):
-    dependencies: { '@cloudflare/workers-types': 5.0.0, tslib: 2.0.0 }
+    dependencies: { '@cloudflare/workers-types': 5.0.0, left-pad: 2.0.0 }
     optionalDependencies: { strip: string-width@4.0.0 }
 `;
     expect(runtimeClosure(lock)).toEqual([
       "@cloudflare/workers-types",
       "drizzle-orm",
       "hono",
+      "left-pad",
       "string-width",
-      "tslib",
     ]);
     expect(checkRuntimeDependencies(lock)).toHaveLength(2);
-    expect(checkRuntimeDependencies(lock)[0]).toContain('"string-width"');
+    expect(checkRuntimeDependencies(lock)[1]).toContain('"string-width"');
   });
 
   it("follows importer optional dependencies and aliases", () => {
