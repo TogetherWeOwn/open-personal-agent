@@ -94,6 +94,25 @@ describe("spending settings", () => {
     }
   });
 
+  it("never puts back a field a later change has replaced since", async () => {
+    const { owner } = await claim();
+    const assistant = env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${owner}`)) as unknown as {
+      setSpending(b: unknown): Promise<{ before: Body["settings"]; after: Body["settings"] }>;
+      revertSpending(before: unknown, after: unknown): Promise<void>;
+      spending(): Promise<{ settings: Body["settings"] }>;
+    };
+    // A sets the daily cap to $10 and the task budget to $1; B then sets the daily cap to $15.
+    const a = await assistant.setSpending({
+      dailyCapMicroUsd: 10_000_000,
+      taskBudgetMicroUsd: 1_000_000,
+    });
+    await assistant.setSpending({ dailyCapMicroUsd: 15_000_000 });
+    // A's audit failed: only what is still A's goes back.
+    await assistant.revertSpending(a.before, a.after);
+    const { settings } = await assistant.spending();
+    expect(settings).toMatchObject({ dailyCapMicroUsd: 15_000_000, taskBudgetMicroUsd: 500_000 });
+  });
+
   it("warns at 50, 80 and 100% of the monthly budget from the ledger", async () => {
     const { browser, owner } = await claim();
     const warning = async () =>
