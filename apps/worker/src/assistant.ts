@@ -15,7 +15,7 @@ import {
 import { type ChatModelError, resolveChatModel } from "./chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
-import { Limits } from "./limits";
+import { Limits, type Reservation } from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
@@ -26,6 +26,16 @@ type Emit = <T extends HarnessEvent["type"]>(
   type: T,
   payload: Extract<HarnessEvent, { type: T }>["payload"],
 ) => void;
+
+/** One progress event from a Workflow task (M3-12 AC8), as its driver numbers them. */
+export interface TaskProgress {
+  conversationId: string;
+  turnId: string;
+  taskId: string;
+  seq: number;
+  type: string;
+  payload: unknown;
+}
 
 export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
@@ -46,6 +56,60 @@ export class Assistant extends Agent<Bindings> {
   /** Liveness check for `/api/health`. */
   ping(): string {
     return "pong";
+  }
+
+  /**
+   * Budget for a Workflow task's model call (M3-12 AC8), reached over DO RPC. The Workflow holds
+   * this stub only through the scope its own task row minted, so a task can only ever spend its
+   * own user's budget. Plain methods are Worker-side RPC, not client callables — tabs cannot
+   * reach them. The key is the call's idempotency key (`instanceId:stepName`): a retried step
+   * may already hold a reservation under it and may already have spent it, so that hold settles
+   * at its full reservation before a new one is taken. Settling a key with no hold charges
+   * nothing, so the first reserve is unaffected.
+   */
+  reserveTaskCall(
+    key: string,
+    providerId: string,
+    model: string,
+    chars: number,
+  ): Reservation | null {
+    this.limits.settle(key, providerId, model, null);
+    return this.limits.reserve(key, providerId, model, chars);
+  }
+
+  /** Settles a task's model call to what it used; settling twice charges once. */
+  settleTaskCall(
+    key: string,
+    providerId: string,
+    model: string,
+    usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null,
+  ): void {
+    this.limits.settle(key, providerId, model, usage);
+  }
+
+  /** Drops a task call's reservation without a charge: the call never happened. */
+  releaseTaskCall(key: string): void {
+    this.limits.release(key);
+  }
+
+  /**
+   * A Workflow task's progress, broadcast to the user's tabs in the v1 envelope. `seq` is the
+   * driver's per-task counter; persisting these into the per-conversation event log is M3-03c's
+   * (AC10), which will dedupe replays by it. Until then a Workflow replay can repeat a live
+   * progress event, never invent one.
+   */
+  taskProgress(progress: TaskProgress): void {
+    this.broadcast(
+      JSON.stringify({
+        v: 1,
+        seq: progress.seq,
+        sessionId: progress.conversationId,
+        turnId: progress.turnId,
+        taskId: progress.taskId,
+        type: progress.type,
+        payload: progress.payload,
+      }),
+    );
   }
 
   /** The user's scope, from this DO's own name, which only the server sets. */
