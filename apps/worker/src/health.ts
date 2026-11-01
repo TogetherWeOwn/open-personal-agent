@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { SCHEMA_VERSION } from "@opa/db";
 import { createRepository } from "@opa/db/repository";
+import { masterKeySet, type SecretName } from "./compose";
 import type { Env } from "./env";
 
 export interface Health {
@@ -13,9 +14,10 @@ export interface Health {
     durableObject: boolean;
     workflow: boolean;
     ai: boolean;
+    /** The vault started: the master keys are valid (ADR 0010 D4.1 #7). */
+    vault: boolean;
   };
-  /** Presence of each required Worker secret, by name; never a value. */
-  secrets: Record<string, boolean>;
+  secrets: Record<SecretName, boolean>;
 }
 
 const PROBE_TIMEOUT_MS = 5_000;
@@ -53,10 +55,15 @@ export async function checkHealth(env: Env): Promise<Health> {
   const workflow = typeof env.TASK_WORKFLOW?.create === "function";
   const ai = typeof env.AI?.run === "function";
 
-  const secrets = { ...env.SECRETS_SET };
+  const isSet = (value: string | undefined) => typeof value === "string" && value !== "";
+  const secrets: Record<SecretName, boolean> = {
+    ...masterKeySet(env),
+    OPA_SESSION_SECRET: isSet(env.OPA_SESSION_SECRET),
+    OPA_SETUP_TOKEN: isSet(env.OPA_SETUP_TOKEN),
+  };
   // A newer schema is fine: migrations stay compatible with the previous Worker (ADR 0004).
   const current = applied !== null && applied >= SCHEMA_VERSION;
-  const checks = { database, storage, durableObject, workflow, ai };
+  const checks = { database, storage, durableObject, workflow, ai, vault: env.VAULT !== null };
 
   let status: Health["status"] = "ok";
   if (Object.values(checks).includes(false)) status = "degraded";

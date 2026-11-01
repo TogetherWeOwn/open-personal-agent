@@ -48,7 +48,7 @@ export const exactOrigin: MiddlewareHandler = async (c, next) => {
   const site = c.req.header("Sec-Fetch-Site") ?? "same-origin";
   if (c.req.header("Origin") === new URL(c.req.url).origin && site === "same-origin") return next();
   log.warn("request.rejected", { reason: "origin", method: c.req.method, route: c.req.routePath });
-  return c.json({ error: "forbidden_origin" }, 403);
+  return c.json({ error: "bad_origin" }, 403);
 };
 
 /** Shown inline, sandboxed. Everything else downloads as an opaque attachment. */

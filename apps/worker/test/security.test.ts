@@ -54,10 +54,11 @@ describe("origin and CORS", () => {
     ]) {
       const res = await fetchApp(path, { method: "POST", headers });
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: "forbidden_origin" });
+      expect(await res.json()).toEqual({ error: "bad_origin" });
     }
     const ok = await fetchApp("/api/nope", { method: "POST", headers: { Origin: ORIGIN } });
-    expect(ok.status).toBe(404); // past the check, into routing
+    // Past the check, into the claim guard (M2-09).
+    expect(await ok.json()).toEqual({ error: "not_claimed" });
   });
 
   it("answers no preflight or cross-origin read with CORS headers", async () => {

@@ -7,7 +7,7 @@ import { env as workerEnv } from "cloudflare:workers";
 import { beforeAll, expect, it, vi } from "vitest";
 import { canaryForms } from "../../../scripts/canary-forms.mjs";
 import { app } from "../src/app";
-import { appEnv, type WorkerEnv } from "../src/compose";
+import { compose, type WorkerEnv } from "../src/compose";
 
 const env = workerEnv as unknown as WorkerEnv & {
   TEST_MIGRATIONS: D1Migration[];
@@ -49,7 +49,7 @@ const consoleSpies = (["log", "info", "warn", "error", "debug"] as const).map((m
 beforeAll(() => applyD1Migrations(env.DB, env.TEST_MIGRATIONS));
 
 it.each([env.DB, throwing])("canaries never appear in output", async (db) => {
-  const bindings = appEnv({ ...env, ...secrets, DB: db });
+  const bindings = await compose({ ...env, ...secrets, DB: db });
   // The env filter (D4.1 #1): the app never receives the master keys.
   expect(JSON.stringify(bindings)).not.toMatch(/-master|-prev/);
   for (const [path, init] of requests) {
