@@ -23,8 +23,8 @@ It serves the web app as built, so for live reload of web changes run `pnpm dev:
 (`pnpm dev:mock-model` starts it alone). It answers `GET /models` and streams an echo of your last
 message from `POST /chat/completions`, so model calls accept any API key and cost nothing. The web
 chat still uses canned replies; once onboarding and the chat transport land, choose the
-OpenAI-compatible option with that base URL. Base URLs must use `https://`, except for a server on
-this machine (`localhost`, `127.0.0.1`, `[::1]`), which may use `http://`.
+OpenAI-compatible option with that base URL. Base URLs must use `https://`, except that a server on
+this machine (`localhost`, `127.0.0.1`, `[::1]`) may use `http://` (on Node, see below).
 
 ### Run on Node (self-host)
 

@@ -108,7 +108,9 @@ settings.put("/model", async (c) => {
     // plain HTTP to a public address. The adapter refuses a query or fragment, so a URL with one
     // could be saved but never tested.
     const url = new URL(baseUrl);
-    const plain = url.protocol === "http:" && (isLoopbackHost(url.hostname) || privateHttp(c));
+    // Node's guarded fetch refuses loopback unless private hosts are allowed.
+    const local = isLoopbackHost(url.hostname) && !c.env.MODEL_FETCH;
+    const plain = url.protocol === "http:" && (local || privateHttp(c));
     if ((url.protocol !== "https:" && !plain) || url.search || url.hash) {
       throw new Error("invalid URL");
     }
@@ -164,7 +166,12 @@ settings.post("/model/test", async (c) => {
     // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
     const fetch = c.env.MODEL_FETCH ? { fetch: c.env.MODEL_FETCH } : {};
     const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(c), ...fetch };
-    provider = createOpenAIChatProvider(options);
+    try {
+      provider = createOpenAIChatProvider(options);
+    } catch {
+      // Saved as plain HTTP while private hosts were allowed, and they no longer are.
+      return fail(c, 409, "invalid_base_url");
+    }
     await store.keyUsed(secretId);
   }
   const started = Date.now();

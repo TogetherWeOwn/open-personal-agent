@@ -85,6 +85,10 @@ describe("model settings", () => {
     const lan = { ...OPENAI, baseUrl: "http://192.168.1.5:11434/v1", model: "m", apiKey: CANARY };
     const unguarded = await put("/model", lan, { MODEL_PRIVATE_HOSTS: true });
     expect(unguarded).toEqual({ status: 400, text: '{"error":"invalid_base_url"}' });
+    // On Node without the flag, the guarded fetch refuses loopback, so it can't be saved there.
+    const local = { ...lan, baseUrl: "http://127.0.0.1:8788/v1" };
+    const guarded = await put("/model", local, { MODEL_FETCH: vi.fn() as typeof fetch });
+    expect(guarded).toEqual({ status: 400, text: '{"error":"invalid_base_url"}' });
   });
 
   it("takes plain HTTP for a model server on this machine, and Test reaches it", async () => {
@@ -118,6 +122,9 @@ describe("model settings", () => {
     expect(node.MODEL_FETCH.mock.calls[0]?.[0]).toBe(
       "http://192.168.1.5:11434/v1/chat/completions",
     );
+    // The operator turns the flag off again: Test refuses the saved URL instead of failing.
+    const off = await call("/model/test", { method: "POST" }, { MODEL_FETCH: node.MODEL_FETCH });
+    expect(off).toEqual({ status: 409, text: '{"error":"invalid_base_url"}' });
   });
 
   it("encrypts the key and only ever returns its last 4 characters", async () => {
