@@ -25,6 +25,14 @@ export function newPrefix(date, randomBytes) {
   return `opa-v-${day}-${[...randomBytes(6)].map((b) => (b % 36).toString(36)).join("")}`;
 }
 
+/** Hides the setup token, raw and as the claim URL carries it. */
+export function maskToken(text, token) {
+  return [encodeURIComponent(token), token].reduce(
+    (t, v) => t.replaceAll(v, "<setup token>"),
+    text,
+  );
+}
+
 /** test/first-run in Playwright on the deployment. The setup token reaches it only in its env. */
 async function firstRun(url, setupToken, deps) {
   const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
@@ -34,7 +42,7 @@ async function firstRun(url, setupToken, deps) {
     {
       cwd: deps.root,
       env: { ...deps.env, BASE_URL: url, OPA_SETUP_TOKEN: setupToken },
-      onOutput: (text) => deps.stdout(text.replaceAll(setupToken, "<setup token>")),
+      onOutput: (text) => deps.stdout(maskToken(text, setupToken)),
     },
   );
   if (res.code !== 0) throw new DeployError(`the first run in the browser failed (${res.code})`);
@@ -113,6 +121,9 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     const same = (s) => one(s) && one(s) === one(snapshots[0]);
     if (!snapshots.every(same)) throw new DeployError("a re-deploy did not re-bind the same D1/R2");
     await phase("Health and smoke", () => smoke(deps.fetch, url));
+    // Over budget fails the run, after the remaining phases so the report still has them.
+    const missed = missedBudgets(metrics);
+    if (missed.length) throw new DeployError(`over budget: ${missed.join(", ")}`);
   } catch (error) {
     failure = error;
   } finally {
@@ -151,6 +162,15 @@ async function smoke(fetch, url) {
   if (body.status !== "ok") throw new DeployError(`/api/health: ${health.status} ${body.status}`);
   const home = await fetch(`${url}/`);
   if (home.status !== 200) throw new DeployError(`GET /: HTTP ${home.status}`);
+}
+
+function missedBudgets({ deploy, firstAnswer }) {
+  return [
+    deploy.minutes > BUDGET.deploy && `fresh deploy took ${deploy.minutes.toFixed(1)} min`,
+    deploy.prompts > BUDGET.prompts && `fresh deploy needed ${deploy.prompts} prompts`,
+    firstAnswer.minutes > BUDGET.firstAnswer &&
+      `first answer took ${firstAnswer.minutes.toFixed(1)} min`,
+  ].filter(Boolean);
 }
 
 function budgets({ deploy, firstAnswer }) {

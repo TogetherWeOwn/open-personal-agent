@@ -83,6 +83,10 @@ test("claim, onboard and get a first answer", async ({ browser }) => {
   await expect(log.locator(".caret")).toHaveCount(0, { timeout: 60_000 });
   await expect(log.getByText("This reply failed")).toHaveCount(0);
   if (stack) await expect(reply).toHaveText(`You said: ${prompt}`);
-  else await expect(reply).not.toBeEmpty();
+  else {
+    await expect(reply).not.toBeEmpty();
+    // The web build's stand-in transport; a deployment must answer from the model.
+    await expect(reply).not.toContainText("This is a placeholder reply");
+  }
   await context.close();
 });
