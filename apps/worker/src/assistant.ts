@@ -313,10 +313,7 @@ export class Assistant extends Agent<Bindings> {
       )
         // The model's failures are reported in the turn; this is D1 failing.
         .catch(() => reject(connection, msg.conversationId, "The reply couldn't be saved."))
-        .finally(() => {
-          if (this.#running === running) this.#running = null;
-          void this.#drain();
-        });
+        .finally(() => this.#release(running));
     }
   }
 
@@ -539,8 +536,18 @@ export class Assistant extends Agent<Bindings> {
       // The fiber owns the claim once a drive starts; every other exit releases it here.
       // (`#resume` releases the claim itself on its re-stop path, where it returns `true`
       // without starting a fiber.)
-      if (!started && this.#running === running) this.#running = null;
+      if (!started) this.#release(running);
     }
+  }
+
+  /**
+   * Releases a claim on the turn slot, then resumes whatever queued behind it: a batch decided
+   * while this claim was held waits on that, whether or not a fiber ever started.
+   */
+  #release(running: AbortController): void {
+    if (this.#running !== running) return;
+    this.#running = null;
+    void this.#drain();
   }
 
   /** Holds a decided batch until the running turn ends; it resumes then, in order. */
@@ -556,8 +563,15 @@ export class Assistant extends Agent<Bindings> {
       const [next, ...rest] = this.ctx.storage.kv.get<string[]>(QUEUE_KEY) ?? [];
       if (next === undefined) return;
       this.ctx.storage.kv.put(QUEUE_KEY, rest);
-      const result = await this.resumeBatch(next).catch(() => "gone" as const);
+      const result = await this.resumeBatch(next).catch(() => "failed" as const);
       if (result === "queued") return; // something else started first; it drains again
+      if (result === "failed") {
+        // D1 or the vault failed, not the batch: it goes back to the front, and the next
+        // turn's end or the route's retry tries it again, rather than spin on it here.
+        const now = this.ctx.storage.kv.get<string[]>(QUEUE_KEY) ?? [];
+        if (!now.includes(next)) this.ctx.storage.kv.put(QUEUE_KEY, [next, ...now]);
+        return;
+      }
     }
   }
 
@@ -629,7 +643,7 @@ export class Assistant extends Agent<Bindings> {
       started = await this.#resume(saved, state, running);
       return started;
     } finally {
-      if (!started && this.#running === running) this.#running = null;
+      if (!started) this.#release(running);
     }
   }
 
@@ -676,7 +690,7 @@ export class Assistant extends Agent<Bindings> {
         kind: "daily",
         detail: "Today's spending limit",
       });
-      if (this.#running === running) this.#running = null;
+      this.#release(running);
       return true;
     }
     // A late approval moves the turn to the end of the chat (AC14), once it is sure to run.
@@ -722,10 +736,7 @@ export class Assistant extends Agent<Bindings> {
       });
     })
       .catch(() => {}) // a D1 failure surfaces as the interrupted recovery, never silently
-      .finally(() => {
-        if (this.#running === running) this.#running = null;
-        void this.#drain();
-      });
+      .finally(() => this.#release(running));
     return true;
   }
 

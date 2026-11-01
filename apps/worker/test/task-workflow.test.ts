@@ -271,6 +271,8 @@ describe("task workflow", () => {
       // writes), bound to this task.
       async () => {
         const row = await alice.tasks.get(taskId);
+        // The early wake left it waiting, where a compromise signal looks for it (AC13).
+        expect(row?.status).toBe("waiting_for_approval");
         const state = JSON.parse(row?.state ?? "{}");
         batchId = state.turn.pending.batchId as string;
         const approvalId = state.turn.pending.items[0].approvalId as string;

@@ -323,6 +323,12 @@ async function driveLoop(
       );
       const applied = await applyStoredDecisions(turn, rows, expect, now());
       if (applied.waiting) {
+        // Woken before the decision: the load marked the task running, so it says waiting
+        // again, where a compromise signal (AC13) and the UI look for it.
+        const rewaited = await ctx.step(`task:rewait:${cycle}`, async () =>
+          user.tasks.saveState(taskId, loaded as string, "waiting_for_approval"),
+        );
+        if (!rewaited) throw new TaskCancelledError(taskId);
         await waitForDecision(ctx, cycle, turn, now);
         continue;
       }
