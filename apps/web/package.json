@@ -12,6 +12,7 @@
     "test:visual:update": "playwright test --update-snapshots"
   },
   "dependencies": {
+    "@opa/core": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",
     "react": "19.3.1",
     "react-aria-components": "1.22.1",

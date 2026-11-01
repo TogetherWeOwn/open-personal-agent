@@ -1,18 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { HarnessEvent } from "@opa/core";
 
-type Event<T extends string, P> = { seq: number; turnId: string; type: T; payload: P };
+/** A row of `GET /api/conversations`, newest first. */
+export type ConversationSummary = { id: string; title: string | null; updatedAt: number };
+
+/** A row of `GET /api/conversations/:id/messages`, oldest first. */
+export type StoredMessage = {
+  id: string;
+  role: "user" | "assistant";
+  status: "complete" | "streaming" | "interrupted" | "error";
+  content: string;
+};
 
 /**
- * The `HarnessEvent` v1 subset the chat renders (ADR 0005 envelope), mirrored here until
- * `packages/core` exports the shared type.
+ * The port the chat screen talks to. Every tab of the user receives the events of every turn, so
+ * a turn another tab started streams here too.
  */
-export type ChatEvent =
-  | Event<"turn.started" | "turn.completed", Record<string, never>>
-  | Event<"message.delta" | "message.completed" | "status", { text: string }>
-  | Event<"turn.failed", { message: string }>;
-
-/** The port the chat screen talks to. The Assistant DO WebSocket (M2-13) implements it next. */
 export interface ChatTransport {
-  /** Starts a turn and streams its events to `onEvent`. Returns a function that stops the turn. */
-  send(conversationId: string, text: string, onEvent: (event: ChatEvent) => void): () => void;
+  /**
+   * Streams the user's turn events to `onEvent` and calls `onOpen` on every connect and
+   * reconnect, after which the caller reloads what it shows. Returns a function that disconnects.
+   */
+  connect(onEvent: (event: HarnessEvent) => void, onOpen: () => void): () => void;
+  /** Starts a turn. A send that can't be made is answered with a `turn.failed` at `seq` 0. */
+  send(conversationId: string, text: string): void;
+  /** Stops the running turn, which then ends with `turn.interrupted`. */
+  cancel(): void;
+  conversations(): Promise<ConversationSummary[]>;
+  /** `null` when the conversation isn't on the server (yet). */
+  messages(conversationId: string): Promise<StoredMessage[] | null>;
 }
