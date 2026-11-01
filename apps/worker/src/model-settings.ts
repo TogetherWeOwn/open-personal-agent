@@ -23,7 +23,7 @@ const text = (value: unknown, max: number): string | null =>
   typeof value === "string" && value.trim() !== "" && value.length <= max ? value.trim() : null;
 
 function view(row: Settings) {
-  // `last4` is null for keys shorter than 8 characters; the join still finds the row. The starter
+  // `last4` is null for keys shorter than 20 characters; the join still finds the row. The starter
   // keeps the key's binding for switching back, but reports none: it uses the AI binding only.
   const starter = row.modelKind === "workers-ai";
   const key = row.keyUpdatedAt !== null && !starter;

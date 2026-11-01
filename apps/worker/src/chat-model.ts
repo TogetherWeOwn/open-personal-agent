@@ -8,9 +8,10 @@ import {
   createOpenAIChatProvider,
   createWorkersAIProvider,
   credentialBinding,
+  legacyCredentialBinding,
   type WorkersAIBinding,
 } from "@opa/providers";
-import { decrypt, type UserScope as VaultScope } from "@opa/vault";
+import { decrypt, encrypt, type Vault, type UserScope as VaultScope } from "@opa/vault";
 import type { Env } from "./env";
 
 export const MODEL_KEY_PURPOSE = "model_api_key" as const;
@@ -54,11 +55,13 @@ export async function resolveChatModel(
   if (!env.VAULT) return { error: "vault_unavailable" };
   const { providerId, baseUrl, keySecretId: secretId } = row;
   if (!providerId || !baseUrl || !secretId) return { error: "no_model" };
-  const binding = credentialBinding(providerId, baseUrl);
-  const ref = { secretId, purpose: MODEL_KEY_PURPOSE, binding, caller } as const;
   // The vault takes the repository's scope too; its own brand keeps it from importing `@opa/db`.
   // A lost master key makes saved keys unreadable; the user enters theirs again.
-  const apiKey = await decrypt(env.VAULT, scope as unknown as VaultScope, ref).catch(() => null);
+  const ref = { secretId, purpose: MODEL_KEY_PURPOSE, caller } as const;
+  const apiKey = await savedKey(env.VAULT, scope as unknown as VaultScope, ref, {
+    current: credentialBinding(providerId, baseUrl),
+    legacy: legacyCredentialBinding(providerId, baseUrl),
+  }).catch(() => null);
   if (apiKey === null) return { error: "key_required" };
   // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
   const fetch = env.MODEL_FETCH ? { fetch: env.MODEL_FETCH } : {};
@@ -72,4 +75,24 @@ export async function resolveChatModel(
   }
   const billingId = billingProviderId(baseUrl);
   return { provider, model: row.model, apiKey, billingId, used: () => store.keyUsed(secretId) };
+}
+
+/**
+ * Decrypts the saved key. A key saved before its binding covered the base path opens under the
+ * origin-only binding once, and is saved again under the full one, so the next read is bound to
+ * the path. One already saved with a path never opens this way (crypto review I-2).
+ */
+async function savedKey(
+  vault: Vault,
+  scope: VaultScope,
+  ref: { secretId: string; purpose: typeof MODEL_KEY_PURPOSE; caller: string },
+  binding: { current: string; legacy: string },
+): Promise<string> {
+  const saved = await decrypt(vault, scope, { ...ref, binding: binding.current }).catch(() => null);
+  if (saved !== null) return saved;
+  if (binding.legacy === binding.current) throw new Error("no saved key");
+  const plaintext = await decrypt(vault, scope, { ...ref, binding: binding.legacy });
+  // If this fails, the key still works, and the next call tries again.
+  await encrypt(vault, scope, { ...ref, binding: binding.current, plaintext }).catch(() => {});
+  return plaintext;
 }

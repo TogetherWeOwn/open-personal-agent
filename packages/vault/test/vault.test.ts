@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// R7 M2-8 and M2-8+, and the ADR 0010 D4.1 tests M2-8+V1 to V3 and V6 to V10.
+// R7 M2-8 and M2-8+, the ADR 0010 D4.1 tests M2-8+V1 to V3 and V6 to V10, and the re-key on
+// rotation, AAD v2 and L-1/L-2 fixes from the crypto review (TWO-482 C-2).
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { dekAad, secretAad } from "../src/aad";
 import * as surface from "../src/index";
 import {
   createVault,
@@ -40,6 +42,10 @@ const get = (
     binding,
     caller,
   });
+/** Puts a row in place directly, as someone with D1 write access could. */
+const place = (row: (typeof store.secrets)[number]) => {
+  store.secrets = [...store.secrets.filter((s) => s.id !== row.id), row];
+};
 function only<T>(rows: T[]): T {
   if (rows.length !== 1 || rows[0] === undefined)
     throw new Error(`expected one row, got ${rows.length}`);
@@ -83,9 +89,9 @@ describe("envelope encryption (M2-8, M2-8+)", () => {
     await put(vault);
     await put(vault, { userId: "u2", id: "s2" });
     const own = only(store.secrets.filter((s) => s.userId === "u1"));
-    await store.putSecret({ ...own, id: "s3" });
+    place({ ...own, id: "s3" });
     await expect(get(vault, { id: "s3" })).rejects.toMatchObject(FAILED);
-    await store.putSecret({ ...own, id: "s2", userId: "u2" });
+    place({ ...own, id: "s2", userId: "u2" });
     await expect(get(vault, { userId: "u2", id: "s2" })).rejects.toMatchObject(FAILED);
     await put(vault, { userId: "u2", id: "s2" });
     const dek = only(store.keys.filter((k) => k.userId === "u1"));
@@ -148,10 +154,10 @@ describe("D4.1 key hygiene", () => {
   it("V3: every encryption and re-wrap uses a fresh 96-bit IV", async () => {
     const ivs = new Set<string>();
     const putSecret = store.putSecret.bind(store);
-    store.putSecret = async (row) => {
+    store.putSecret = async (row, ...rest) => {
       expect(row.iv.length).toBe(12);
       ivs.add(b64(row.iv));
-      return putSecret(row);
+      return putSecret(row, ...rest);
     };
     for (let i = 0; i < 10_000; i++) await put(vault);
     expect(ivs.size).toBe(10_000);
@@ -201,7 +207,11 @@ describe("D4.1 key hygiene", () => {
     );
     expect(outcome).toMatchObject({ message: "vault: audit_failed" });
     expect(outcome).not.toHaveProperty("plaintext");
-    await expect(put(vault)).rejects.toThrow("vault: audit_failed");
+    // An encrypt whose audit row fails writes neither (crypto review L-2).
+    const before = only(store.secrets);
+    await expect(put(vault)).rejects.toThrow("vault: encrypt_failed");
+    expect(only(store.secrets)).toBe(before);
+    expect(store.audits.filter((a) => a.action === "vault.encrypt")).toHaveLength(1);
   });
 
   it("V8: refuses to start with a missing, malformed or short key", async () => {
@@ -231,7 +241,7 @@ describe("D4.1 key hygiene", () => {
     const raw = Uint8Array.from(atob(key1), (c) => c.charCodeAt(0));
     const kek = await crypto.subtle.importKey("raw", raw, "AES-GCM", true, ["decrypt"]);
     const { iv, wrappedDek } = only(store.keys);
-    const params = { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("u1|1") };
+    const params = { name: "AES-GCM", iv, additionalData: dekAad(2, "u1", 1) };
     const dek = new Uint8Array(await crypto.subtle.decrypt(params, kek, wrappedDek));
     const hex = (bytes: Uint8Array) =>
       [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -307,5 +317,198 @@ describe("D4.1 key hygiene", () => {
     store.failAudit = false;
     await put(vault);
     expect(await get(migrating)).toBe(CANARY);
+  });
+});
+
+describe("re-key on rotation (crypto review C-2)", () => {
+  type Format = 1 | 2;
+  const ref = { secretId: "s1", purpose: "model_api_key", binding: BINDING, caller } as const;
+  const scope = { userId: "u1" } as UserScope;
+  const seal = (v: Vault, plaintext: string, secretId = "s1") =>
+    encrypt(v, scope, { ...ref, secretId, plaintext });
+  const open = (v: Vault, secretId = "s1") => decrypt(v, scope, { ...ref, secretId });
+  const key2 = `2:${newKey()}`;
+  const migrate = async () => {
+    const migrating = await createVault({ masterKey: key2, previousMasterKey: key1, store });
+    await rewrap(migrating, { caller });
+    await retireEpoch(migrating, 1, { caller });
+    return createVault({ masterKey: key2, store });
+  };
+
+  /** The KEK as an extractable key that can see raw DEKs, as only a test can. */
+  const rawKek = (master: string) => {
+    const bytes = Uint8Array.from(atob(master.replace(/^\d+:/, "")), (c) => c.charCodeAt(0));
+    return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+  };
+  /** Takes the user's DEK out of its row, as a thief with the KEK and a D1 copy would. */
+  async function stealDek(master: string, format: Format = 2) {
+    const row = only(store.keys.filter((k) => k.userId === "u1"));
+    const additionalData = dekAad(format, "u1", row.kekVersion);
+    const kek = await rawKek(master);
+    const raw = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: row.iv, additionalData },
+      kek,
+      row.wrappedDek,
+    );
+    return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+  }
+  const openWith = async (dek: CryptoKey, row: (typeof store.secrets)[number], format: Format) =>
+    new TextDecoder().decode(
+      await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: row.iv, additionalData: secretAad(format, row) },
+        dek,
+        row.ciphertext,
+      ),
+    );
+
+  /** Stores a DEK and a secret in the v1 (`|`-joined) AAD format, as the vault wrote them before. */
+  async function legacyPut(plaintext: string) {
+    const kek = await rawKek(key1);
+    const dekBytes = crypto.getRandomValues(new Uint8Array(32));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const dekParams = { name: "AES-GCM", iv, additionalData: encoder("u1|1") };
+    const wrappedDek = new Uint8Array(await crypto.subtle.encrypt(dekParams, kek, dekBytes));
+    store.keys.push({ userId: "u1", kekVersion: 1, wrappedDek, iv });
+    const dek = await crypto.subtle.importKey("raw", dekBytes, "AES-GCM", false, ["encrypt"]);
+    const secretIv = crypto.getRandomValues(new Uint8Array(12));
+    const aad = encoder(`u1|s1|model_api_key|${BINDING}|1`);
+    const ciphertext = new Uint8Array(
+      await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: secretIv, additionalData: aad },
+        dek,
+        encoder(plaintext),
+      ),
+    );
+    place({ ...ref, id: "s1", userId: "u1", version: 1, ciphertext, iv: secretIv, last4: null });
+  }
+  const encoder = (text: string) => new Uint8Array(new TextEncoder().encode(text));
+
+  it("an old copy of a replaced secret no longer opens after re-key and retire", async () => {
+    await seal(vault, "sk-replaced-key-1-abcdefgh");
+    const oldRow = structuredClone(only(store.secrets)); // a backup or Time Travel copy
+    await seal(vault, "sk-current-key-2-abcdefgh");
+    const retired = await migrate();
+    expect(await open(retired)).toBe("sk-current-key-2-abcdefgh");
+    place(oldRow);
+    await expect(open(retired)).rejects.toMatchObject(FAILED);
+  });
+
+  it("a DEK stolen before rotation opens nothing written after it", async () => {
+    await seal(vault, "sk-before-rotation-abcdefgh");
+    const stolen = await stealDek(key1);
+    const before = structuredClone(only(store.secrets));
+    expect(await openWith(stolen, before, 2)).toBe("sk-before-rotation-abcdefgh");
+    const retired = await migrate();
+    await seal(retired, "sk-after-rotation-abcdefgh");
+    const after = only(store.secrets);
+    expect(after.version).toBe(2);
+    await expect(openWith(stolen, after, 2)).rejects.toThrow();
+    // And the new DEK is a different key: the old ciphertext doesn't open under it.
+    await expect(openWith(await stealDek(key2), before, 2)).rejects.toThrow();
+  });
+
+  it("a failure mid-batch leaves the old DEK and ciphertexts usable", async () => {
+    await seal(vault, "sk-first-secret-abcdefgh");
+    await seal(vault, "sk-second-secret-abcdefgh", "s2");
+    const keys = structuredClone(store.keys);
+    const secrets = structuredClone(store.secrets);
+    const migrating = await createVault({ masterKey: key2, previousMasterKey: key1, store });
+    store.failBatchAt = 2; // after the DEK row and the first secret
+    await expect(rewrap(migrating, { caller })).rejects.toThrow();
+    expect(store.keys).toEqual(keys);
+    expect(store.secrets).toEqual(secrets);
+    expect(await open(migrating)).toBe("sk-first-secret-abcdefgh");
+    expect(await open(vault, "s2")).toBe("sk-second-secret-abcdefgh");
+    expect(await rewrap(migrating, { caller })).toEqual({ rewrapped: 1 });
+    expect(await open(migrating, "s2")).toBe("sk-second-secret-abcdefgh");
+  });
+
+  it("retries a user whose secrets change mid re-key, and never seals under a replaced DEK", async () => {
+    await seal(vault, "sk-first-secret-abcdefgh");
+    const migrating = await createVault({ masterKey: key2, previousMasterKey: key1, store });
+    const userSecrets = store.userSecrets.bind(store);
+    let raced = false;
+    store.userSecrets = async (userId) => {
+      const rows = await userSecrets(userId);
+      if (!raced) {
+        raced = true;
+        await seal(vault, "sk-written-meanwhile-abcdefgh", "s2");
+      }
+      return rows;
+    };
+    expect(await rewrap(migrating, { caller })).toEqual({ rewrapped: 1 });
+    expect(await open(migrating, "s2")).toBe("sk-written-meanwhile-abcdefgh");
+    // A write sealed under the epoch-1 DEK, landing after the re-key, is refused.
+    const stale = { ...only(store.secrets.filter((s) => s.id === "s2")), id: "s3" };
+    const oldDek = { userId: "u1", kekVersion: 1, wrappedDek: new Uint8Array(0), iv: stale.iv };
+    const audit = { ...ref, userId: "u1", action: "vault.encrypt" } as const;
+    await expect(
+      store.putSecret(stale, oldDek, {
+        ...audit,
+        module: caller,
+        targetId: "s3",
+        result: "ok",
+        detail: null,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("stops, writing nothing, when a user's secrets keep changing mid re-key", async () => {
+    await seal(vault, "sk-first-secret-abcdefgh");
+    const migrating = await createVault({ masterKey: key2, previousMasterKey: key1, store });
+    const userSecrets = store.userSecrets.bind(store);
+    store.userSecrets = async (userId) => {
+      const rows = await userSecrets(userId);
+      await seal(vault, "sk-written-meanwhile-abcdefgh");
+      return rows;
+    };
+    await expect(rewrap(migrating, { caller })).rejects.toThrow("rewrap_conflict");
+    expect(only(store.keys).kekVersion).toBe(1);
+    expect(await open(vault)).toBe("sk-written-meanwhile-abcdefgh");
+  });
+
+  it("opens v1-format rows, keeps writing v1 for that DEK, and moves them to v2 on re-key", async () => {
+    await legacyPut("sk-legacy-abcdefghijklmn");
+    expect(await open(vault)).toBe("sk-legacy-abcdefghijklmn");
+    await seal(vault, "sk-legacy-two-abcdefghij", "s2");
+    const legacyDek = await stealDek(key1, 1);
+    const s2 = only(store.secrets.filter((s) => s.id === "s2"));
+    expect(await openWith(legacyDek, s2, 1)).toBe("sk-legacy-two-abcdefghij");
+
+    const retired = await migrate();
+    expect(await open(retired)).toBe("sk-legacy-abcdefghijklmn");
+    expect(await open(retired, "s2")).toBe("sk-legacy-two-abcdefghij");
+    await expect(stealDek(key2, 1)).rejects.toThrow();
+    const dek = await stealDek(key2, 2);
+    for (const row of store.secrets) {
+      await expect(openWith(dek, row, 1)).rejects.toThrow();
+      expect(await openWith(dek, row, 2)).toMatch(/^sk-legacy/);
+    }
+  });
+
+  it("v2 AAD is length-prefixed and refuses a version that isn't a positive safe integer", async () => {
+    const aad = secretAad(2, { userId: "u1", id: "s1", purpose: "p", binding: "b|c", version: 1 });
+    expect(new TextDecoder().decode(aad)).toContain("opa/secret/v2");
+    const shifted = secretAad(2, {
+      userId: "u1",
+      id: "s1",
+      purpose: "p|b",
+      binding: "c",
+      version: 1,
+    });
+    expect(aad).not.toEqual(shifted);
+    await seal(vault, "sk-versioned-abcdefghij");
+    const row = only(store.secrets);
+    for (const version of [0, -1, 1.5, 2 ** 53, "1"]) {
+      store.secrets = [{ ...row, version: version as number }];
+      await expect(open(vault)).rejects.toMatchObject(FAILED);
+    }
+  });
+
+  it("L-1: keeps last4 only for secrets of 20 characters or more", async () => {
+    await seal(vault, "a".repeat(19));
+    expect(only(store.secrets).last4).toBeNull();
+    await seal(vault, `${"a".repeat(16)}wxyz`);
+    expect(only(store.secrets).last4).toBe("wxyz");
   });
 });

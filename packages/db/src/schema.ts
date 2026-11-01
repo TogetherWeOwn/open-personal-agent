@@ -122,7 +122,10 @@ export const recoveryCodes = sqliteTable(
   (t) => [index("recovery_codes_user_idx").on(t.userId, t.codeHash)],
 );
 
-/** Each user's DEK, AES-GCM-wrapped under KEK epoch `kek_version` with AAD `user_id|kek_version`. */
+/**
+ * Each user's DEK, AES-GCM-wrapped under KEK epoch `kek_version` with AAD `(user_id, kek_version)`
+ * (`@opa/vault` `aad.ts`). A rotation replaces the DEK, not only its wrap.
+ */
 export const userKeys = sqliteTable(
   "user_keys",
   {
@@ -137,7 +140,7 @@ export const userKeys = sqliteTable(
 
 /**
  * Envelope-encrypted per-user secrets (ADR 0010 D4). AAD is
- * `user_id|secret_id|purpose|binding|version`; `binding` includes the provider origin.
+ * `(user_id, secret_id, purpose, binding, version)`; `binding` includes the provider's base URL.
  */
 export const secrets = sqliteTable(
   "secrets",
@@ -238,7 +241,7 @@ export const usage = sqliteTable(
 
 /**
  * One row per user: onboarding answers and the chat model. The key itself lives envelope-encrypted
- * in `secrets` (ADR 0010 D4), bound to `provider_id` and the origin of `base_url` (ADR 0006 #5).
+ * in `secrets` (ADR 0010 D4), bound to `provider_id` and `base_url`'s origin and path (ADR 0006 #5).
  */
 export const userSettings = sqliteTable("user_settings", {
   userId: userId().primaryKey(),

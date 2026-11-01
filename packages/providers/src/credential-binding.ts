@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Model credentials are bound to `(provider_id, canonical base_url origin)` (ADR 0006 #5). The
-// binding string goes into the `binding` field of the secret's AES-GCM AAD (ADR 0010 D4), so a
-// key saved for one origin can't be decrypted for another: changing the URL means re-entering
-// the key.
+// Model credentials are bound to `(provider_id, canonical base_url origin and path)` (ADR 0006
+// #5). The binding string goes into the `binding` field of the secret's AES-GCM AAD (ADR 0010 D4),
+// so a key saved for one endpoint can't be decrypted for another, even by someone who can write
+// the saved base URL: one host can serve many accounts (an AI Gateway, for one). Changing the URL
+// means re-entering the key.
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
@@ -26,8 +27,18 @@ export function canonicalOrigin(baseUrl: string): string {
   return url.origin;
 }
 
-/** The `binding` value for a model credential's AAD. */
+/** The `binding` value for a model credential's AAD. `/v1` and `/v1/` are one endpoint. */
 export function credentialBinding(providerId: string, baseUrl: string): string {
+  // Validates the provider and URL first; the WHATWG parser has already normalized the path.
+  const origin = legacyCredentialBinding(providerId, baseUrl);
+  return `${origin}${new URL(baseUrl).pathname.replace(/\/+$/, "")}`;
+}
+
+/**
+ * The origin-only binding keys were saved with before the path was bound (crypto review I-2).
+ * Only for reading such a key once, to save it again under `credentialBinding`.
+ */
+export function legacyCredentialBinding(providerId: string, baseUrl: string): string {
   if (!PROVIDER_ID.test(providerId)) throw new Error("Invalid provider id");
   return `model:${providerId}|${canonicalOrigin(baseUrl)}`;
 }

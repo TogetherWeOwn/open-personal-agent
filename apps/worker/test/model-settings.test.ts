@@ -3,7 +3,8 @@
 // and tool support.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { STARTER_MODEL } from "@opa/providers";
+import { legacyCredentialBinding, STARTER_MODEL } from "@opa/providers";
+import { encrypt, type UserScope, type Vault } from "@opa/vault";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
@@ -227,5 +228,40 @@ describe("model settings", () => {
 
   it("keeps the saved key for switching back from the starter", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
+  });
+
+  it("re-saves a key bound to the origin only under its path, once", async () => {
+    // A key as saved before its binding covered the path (crypto review I-2).
+    const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
+    const row = await env.DB.prepare("SELECT model_key_secret_id AS id FROM user_settings").first();
+    const secretId = row?.id as string;
+    const binding = legacyCredentialBinding("openai", OPENAI.baseUrl);
+    const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
+    await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
+    const secret = "SELECT binding, version FROM secrets WHERE id = ?";
+    const before = await env.DB.prepare(secret).bind(secretId).first<{ version: number }>();
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
+      );
+    });
+    expect(JSON.parse((await call("/model/test", { method: "POST" })).text)).toMatchObject({
+      ok: true,
+    });
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      `Bearer ${CANARY}`,
+    );
+    expect(await env.DB.prepare(secret).bind(secretId).first()).toEqual({
+      binding: "model:openai|https://api.example.com/v1",
+      version: (before?.version ?? 0) + 1,
+    });
+    // Now bound to the path: pointing the saved URL at another path on the host, in D1, fails.
+    await env.DB.prepare(
+      "UPDATE user_settings SET base_url = 'https://api.example.com/x/v1'",
+    ).run();
+    const moved = await call("/model/test", { method: "POST" });
+    expect(moved).toEqual({ status: 409, text: '{"error":"key_required"}' });
+    await env.DB.prepare("UPDATE user_settings SET base_url = ?").bind(OPENAI.baseUrl).run();
   });
 });

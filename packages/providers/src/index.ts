@@ -4,7 +4,11 @@ export {
   OPENAI_CHAT_HOST_PRESETS,
   type OpenAIChatCompat,
 } from "./compat";
-export { canonicalOrigin, credentialBinding } from "./credential-binding";
+export {
+  canonicalOrigin,
+  credentialBinding,
+  legacyCredentialBinding,
+} from "./credential-binding";
 export {
   createOpenAIChatProvider,
   isLoopbackHost,
