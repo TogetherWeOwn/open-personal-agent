@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { resolveChatModel } from "../src/chat-model";
 import { compose, type WorkerEnv } from "../src/compose";
+import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "../src/limits";
 import { workerApp } from "../src/worker-app";
 import { Browser, claim, count, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
@@ -281,5 +282,76 @@ describe("chat transport", () => {
     expect(list.conversations).toEqual([
       { id: "mine", title: "first", updatedAt: expect.any(Number) },
     ]);
+  });
+});
+
+describe("turn and spend limits (M2-22)", () => {
+  /** gpt-4.1 at $2 in and $8 out per million tokens, recording each request's `max_tokens`. */
+  function priced(userId: string, maxTokens: (number | undefined)[]) {
+    const provider = { ...scripted(), id: "openai" };
+    const stream = provider.stream;
+    provider.stream = (request) => {
+      maxTokens.push(request.maxOutputTokens);
+      return stream(request);
+    };
+    return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
+      instance.resolveModel = async () => ({ provider, model: "gpt-4.1", apiKey: null });
+    });
+  }
+  /** The DO's storage is usable only inside it. */
+  const storage = <T>(userId: string, fn: (kv: SyncKvStorage) => T) =>
+    runInDurableObject(assistantOf(userId), (_: Assistant, state) => fn(state.storage.kv));
+  const spendLeft = async (userId: string, left: number) => {
+    const now = Date.now();
+    const day = now - (now % 86_400_000);
+    const spend = { day, spentMicroUsd: DAILY_SPEND_CAP_MICRO_USD - left, held: {} };
+    await storage(userId, (kv) => kv.put("spend", spend));
+  };
+
+  it("asks to slow down past 30 turns a minute, without calling the model", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    await useModel(owner, scripted(seen));
+    await storage(owner, (kv) => kv.put("turns", Array(TURNS_PER_MINUTE).fill(Date.now())));
+    const tab = await openTab(browser);
+    tab.send?.("conv-1", "Hi!");
+    await tab.until?.("turn.failed");
+    expect(tab.events).toMatchObject([
+      { seq: 0, type: "turn.failed", payload: { reason: "slow_down" } },
+    ]);
+    expect(seen).toEqual([]);
+    expect(await count("messages")).toBe(0);
+  });
+
+  it("refuses a turn the day's budget can't cover, leaving no trace", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    await spendLeft(owner, 100);
+    const tab = await openTab(browser);
+    tab.send?.("conv-1", "Hi!");
+    await tab.until?.("turn.failed");
+    expect(tab.events).toMatchObject([
+      { seq: 0, type: "turn.failed", payload: { reason: "limit_reached" } },
+    ]);
+    expect(maxTokens).toEqual([]);
+    expect(await count("messages")).toBe(0);
+  });
+
+  it("caps max_tokens from the budget left and charges the call's cost", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    // "Hi!" counts as 2 input tokens (4 micro-USD), leaving room for 1,000 output tokens.
+    await spendLeft(owner, 4 + 1000 * 8);
+    const tab = await openTab(browser);
+    tab.send?.("conv-1", "Hi!");
+    await tab.until?.("turn.completed");
+    expect(maxTokens).toEqual([1000]);
+    // USAGE: 12 input tokens at 2 and 3 output tokens at 8.
+    expect(await storage(owner, (kv) => kv.get("spend"))).toMatchObject({
+      spentMicroUsd: DAILY_SPEND_CAP_MICRO_USD - (4 + 1000 * 8) + 12 * 2 + 3 * 8,
+      held: {},
+    });
   });
 });
