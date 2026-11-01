@@ -68,7 +68,8 @@ describe("Outputs", () => {
     expect((await list(alice, "?conversationId=trip")).map((a) => a.id)).toEqual(["a1"]);
     expect(await list(alice, "?conversationId=none")).toEqual([]);
     expect((await get(alice, "/api/artifacts?conversationId=../x")).status).toBe(400);
-    expect((await get(alice, "/api/artifacts?before=soon")).status).toBe(400);
+    expect((await get(alice, "/api/artifacts?before=soon&beforeId=a1")).status).toBe(400);
+    expect((await get(alice, "/api/artifacts?before=1000")).status).toBe(400);
 
     const one = await get(alice, "/api/artifacts/a1");
     expect(one.status).toBe(200);
@@ -118,6 +119,16 @@ describe("Outputs", () => {
     expect((await list(alice)).map((a) => a.id)).toEqual(["a1"]);
     expect((await get(alice, "/api/artifacts/a1", "DELETE")).status).toBe(204);
     expect(await env.FILES.head("u/alice/files/a1")).toBeNull();
+  });
+
+  it("a row whose object is already gone still opens as missing and still deletes", async () => {
+    // What a failed row delete after the object delete leaves, or a save cut off before its put.
+    const alice = await user("alice");
+    await as("alice").files({}).putFile("a1", "x", "text/plain", "x.txt");
+    await env.FILES.delete("u/alice/files/a1");
+    expect((await get(alice, "/api/artifacts/a1/content")).status).toBe(404);
+    expect((await get(alice, "/api/artifacts/a1", "DELETE")).status).toBe(204);
+    expect(await list(alice)).toEqual([]);
   });
 
   it("keeps the file when its chat is deleted, with the source cleared", async () => {
