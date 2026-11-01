@@ -55,6 +55,11 @@ export class Assistant extends Agent<Env> {
     return false;
   }
 
+  /** Tabs can't write the SDK's state; they talk only through `onMessage`. */
+  override shouldConnectionBeReadonly(): boolean {
+    return true;
+  }
+
   override onMessage(connection: Connection, message: WSMessage): void {
     const msg = parse(message);
     if (msg?.type === "turn.cancel") this.#running?.abort();
