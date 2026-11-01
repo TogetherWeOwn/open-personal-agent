@@ -258,6 +258,8 @@ function parse(message: WSMessage) {
 const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
   no_model: "Pick a model in Settings first.",
   key_required: "Enter your model key again in Settings.",
+  vault_reset_required:
+    "Your saved keys can't be opened. Reset them in Settings, then enter your key again.",
 };
 
 /**

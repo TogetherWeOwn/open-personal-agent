@@ -69,6 +69,8 @@ const ERRORS: Record<string, string> = {
   invalid_base_url:
     "The base URL must be a valid https:// address (http:// only for a local or LAN model server this deployment allows).",
   vault_unavailable: "Keys can't be saved until the server's master key is fixed.",
+  vault_reset_required:
+    "Your saved keys can't be opened with this server's master key. Reset them, then enter your key again.",
   ai_unavailable: "Workers AI isn't connected to this deployment. Use an API key instead.",
 };
 const message = (e: unknown) =>

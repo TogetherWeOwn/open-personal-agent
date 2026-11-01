@@ -57,6 +57,12 @@ importers:
         specifier: 7.30.1
         version: 7.30.1
     devDependencies:
+      '@opa/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@opa/vault':
+        specifier: workspace:*
+        version: link:../../packages/vault
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5

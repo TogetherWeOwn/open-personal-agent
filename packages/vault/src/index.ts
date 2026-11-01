@@ -42,7 +42,12 @@ export interface SealedSecret {
 /** An `audit_log` row; `module` is the calling module. */
 export interface VaultAuditRow {
   userId: string | null;
-  action: "vault.encrypt" | "vault.decrypt" | "vault.rewrap" | "vault.retire_epoch";
+  action:
+    | "vault.encrypt"
+    | "vault.decrypt"
+    | "vault.rewrap"
+    | "vault.retire_epoch"
+    | "vault.reset_user";
   module: string;
   targetId: string | null;
   result: "ok" | "denied" | "error";
@@ -53,6 +58,8 @@ export interface VaultStore {
   userKeys(userId: string): Promise<WrappedDek[]>;
   userKeysAt(kekVersion: number, limit: number): Promise<WrappedDek[]>;
   countUserKeys(kekVersion: number): Promise<number>;
+  /** `user_keys` plus `secrets` rows of users with no DEK row under any of `heldEpochs`. */
+  countOrphans(heldEpochs: number[]): Promise<number>;
   /**
    * Atomically inserts the row only if the user has no DEK under any epoch and no row is under a
    * newer epoch: during a rolling rotation, an old-epoch Worker can't enrol a user.
@@ -77,6 +84,11 @@ export interface VaultStore {
    * the DEK row `dek` it was sealed under is stored. Rejects, writing neither, otherwise.
    */
   putSecret(row: SealedSecret, dek: WrappedDek, audit: VaultAuditRow): Promise<void>;
+  /**
+   * One batch: deletes the DEK rows `keys` and every secret of their user, and writes `audit`. It
+   * writes nothing and returns false unless `keys` are still exactly the user's DEK rows.
+   */
+  resetUser(keys: WrappedDek[], audit: VaultAuditRow): Promise<boolean>;
   /** Rejects if the row isn't written: vault calls fail closed on audit (D4.1 #6). */
   audit(row: VaultAuditRow): Promise<void>;
 }
@@ -96,6 +108,8 @@ export type Vault = { readonly [brand]: true };
 interface State {
   current: Kek;
   keks: Map<number, Kek>;
+  /** PREV's epoch, while it is configured; retiring it doesn't clear this. */
+  previous: number | null;
   store: VaultStore;
 }
 const states = new WeakMap<Vault, State>();
@@ -105,14 +119,16 @@ const encoder = new TextEncoder();
 export async function createVault(config: VaultConfig): Promise<Vault> {
   const current = await importKek(config.masterKey);
   const keks = new Map([[current.version, current]]);
+  let previous: number | null = null;
   // An empty PREV is a misconfiguration, not "unset": it fails closed too.
   if (config.previousMasterKey !== undefined) {
-    const previous = await importKek(config.previousMasterKey);
-    if (previous.version >= current.version) throw vaultError("unavailable");
-    keks.set(previous.version, previous);
+    const kek = await importKek(config.previousMasterKey);
+    if (kek.version >= current.version) throw vaultError("unavailable");
+    keks.set(kek.version, kek);
+    previous = kek.version;
   }
   const vault = Object.freeze(Object.create(null)) as Vault;
-  states.set(vault, { current, keks, store: config.store });
+  states.set(vault, { current, keks, previous, store: config.store });
   return vault;
 }
 
@@ -171,10 +187,11 @@ export async function decrypt(vault: Vault, scope: UserScope, input: SecretRef):
  */
 export async function rewrap(
   vault: Vault,
-  options: { caller: string },
-): Promise<{ rewrapped: number }> {
+  options: { caller: string; limit?: number },
+): Promise<{ rewrapped: number; remaining: number }> {
   const state = stateOf(vault);
   const { current, store } = state;
+  const limit = options.limit ?? Number.POSITIVE_INFINITY;
   let rewrapped = 0;
   // A user whose secrets change while being re-keyed is retried, a few times at most.
   const conflicts = new Map<string, number>();
@@ -182,6 +199,7 @@ export async function rewrap(
     if (old === current) continue;
     for (let rows = await store.userKeysAt(old.version, 100); rows.length > 0; ) {
       for (const row of rows) {
+        if (rewrapped >= limit) break;
         if (await rekeyUser(state, old, row)) {
           rewrapped++;
           continue;
@@ -190,10 +208,14 @@ export async function rewrap(
         if (tries > 3) throw vaultError("rewrap_conflict");
         conflicts.set(row.userId, tries);
       }
-      rows = await store.userKeysAt(old.version, 100);
+      rows = rewrapped >= limit ? [] : await store.userKeysAt(old.version, 100);
     }
   }
-  const detail = `kek_version=${current.version} rewrapped=${rewrapped}`;
+  let remaining = 0;
+  for (const old of state.keks.values()) {
+    if (old !== current) remaining += await store.countUserKeys(old.version);
+  }
+  const detail = `kek_version=${current.version} rewrapped=${rewrapped} remaining=${remaining}`;
   await record(state, {
     userId: null,
     action: "vault.rewrap",
@@ -202,7 +224,7 @@ export async function rewrap(
     result: "ok",
     detail,
   });
-  return { rewrapped };
+  return { rewrapped, remaining };
 }
 
 /**
@@ -229,6 +251,99 @@ export async function retireEpoch(
     detail,
   });
   state.keks.delete(kekVersion);
+}
+
+/** A rotation's progress, and how many rows no held epoch can open. Counts only, no ids. */
+export interface VaultStatus {
+  /** `none`: no PREV. `pending`: DEKs remain under PREV. `complete`: PREV can be deleted. */
+  rotation: "none" | "pending" | "complete";
+  /** PREV's epoch, while it is configured. */
+  previousEpoch: number | null;
+  /** `user_keys` and `secrets` rows of users with no DEK under an epoch this vault holds. */
+  orphanedRows: number;
+}
+
+export async function vaultStatus(vault: Vault): Promise<VaultStatus> {
+  const { previous, keks, store } = stateOf(vault);
+  const orphanedRows = await store.countOrphans([...keks.keys()]);
+  if (previous === null) return { rotation: "none", previousEpoch: null, orphanedRows };
+  const left = await store.countUserKeys(previous);
+  return { rotation: left > 0 ? "pending" : "complete", previousEpoch: previous, orphanedRows };
+}
+
+/**
+ * Whether the user's DEK opens. `reset_required`: they have DEK rows and none opens with a key this
+ * vault holds, so nothing of theirs can be read or written until they reset. `unavailable`: a row
+ * is under an epoch newer than this vault's, so this instance runs an old key; never a reset.
+ */
+export type UserState = "ok" | "empty" | "reset_required" | "unavailable";
+
+export async function userState(vault: Vault, scope: UserScope): Promise<UserState> {
+  const state = stateOf(vault);
+  const userId = checkedUser(scope);
+  return stateOfRows(state, userId, await state.store.userKeys(userId));
+}
+
+/**
+ * Deletes the user's DEK rows and every secret of theirs, with an audit row, in one batch. Only
+ * for a user in `reset_required`: it refuses (`reset_refused`) a user whose DEK still opens, and
+ * nothing calls it but the user's own confirmed request. The secrets it drops can't be opened
+ * with any key this vault holds; the user enters them again.
+ */
+export async function resetUser(
+  vault: Vault,
+  scope: UserScope,
+  options: { caller: string },
+): Promise<void> {
+  const state = stateOf(vault);
+  const userId = checkedUser(scope);
+  const keys = await state.store.userKeys(userId);
+  if ((await stateOfRows(state, userId, keys)) !== "reset_required") {
+    throw vaultError("reset_refused");
+  }
+  const epochs = [...new Set(keys.map((k) => k.kekVersion))].sort((a, b) => a - b);
+  const audit: VaultAuditRow = {
+    userId,
+    action: "vault.reset_user",
+    module: options.caller,
+    targetId: null,
+    result: "ok",
+    detail: `kek_versions=${epochs.join(",")}`,
+  };
+  const done = await state.store.resetUser(keys, audit).catch(() => {
+    throw vaultError("reset_failed");
+  });
+  // The rows changed since they were read, by a rotation or another reset: the caller retries.
+  if (!done) throw vaultError("reset_conflict");
+}
+
+function checkedUser(scope: UserScope): string {
+  const userId = scope?.userId;
+  if (typeof userId !== "string" || userId === "" || userId.includes("|")) {
+    throw vaultError("invalid_input");
+  }
+  return userId;
+}
+
+async function stateOfRows(state: State, userId: string, rows: WrappedDek[]): Promise<UserState> {
+  if (rows.length === 0) return "empty";
+  if (rows.some((r) => r.kekVersion > state.current.version)) return "unavailable";
+  const row = heldRow(state, rows);
+  const kek = row && state.keks.get(row.kekVersion);
+  if (!row || !kek || row.userId !== userId) return "reset_required";
+  // A key regenerated under the same epoch holds the epoch but opens nothing: GCM tells.
+  return unwrapDek(kek, row).then(
+    () => "ok" as const,
+    () => "reset_required" as const,
+  );
+}
+
+/** The row `userDek` uses: the current epoch's, or else one under a still-held older epoch. */
+function heldRow(state: State, rows: WrappedDek[]): WrappedDek | undefined {
+  return (
+    rows.find((r) => r.kekVersion === state.current.version) ??
+    rows.find((r) => state.keks.has(r.kekVersion))
+  );
 }
 
 function stateOf(vault: Vault): State {
@@ -297,9 +412,7 @@ interface Dek {
  */
 async function userDek(state: State, userId: string, create: boolean): Promise<Dek> {
   const rows = await state.store.userKeys(userId);
-  const row =
-    rows.find((r) => r.kekVersion === state.current.version) ??
-    rows.find((r) => state.keks.has(r.kekVersion));
+  const row = heldRow(state, rows);
   const kek = row && state.keks.get(row.kekVersion);
   if (row && kek && row.userId === userId) return { ...(await unwrapDek(kek, row)), row };
   if (rows.length > 0 || !create) throw vaultError("decrypt_failed");

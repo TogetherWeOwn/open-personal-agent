@@ -25,7 +25,15 @@ const server = serve({ fetch: app.fetch, hostname, port }, (info) => {
   console.log(`Open Personal Agent on http://${hostname}:${info.port}`);
 });
 
+// The Worker's */10 cron (wrangler.jsonc), once at start too: it runs a pending key rotation.
+const TICK_MS = 10 * 60_000;
+void app.scheduled();
+const tick = setInterval(() => void app.scheduled(), TICK_MS);
+
 // Finish in-flight requests before closing the database; a second signal exits at once.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => server.close(() => app.db.close()));
+  process.once(signal, () => {
+    clearInterval(tick);
+    server.close(() => app.db.close());
+  });
 }

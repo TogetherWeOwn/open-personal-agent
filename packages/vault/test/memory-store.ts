@@ -24,6 +24,13 @@ export class MemoryStore implements VaultStore {
   async countUserKeys(kekVersion: number) {
     return this.keys.filter((k) => k.kekVersion === kekVersion).length;
   }
+  async countOrphans(heldEpochs: number[]) {
+    const held = new Set(
+      this.keys.filter((k) => heldEpochs.includes(k.kekVersion)).map((k) => k.userId),
+    );
+    const orphan = (r: { userId: string }) => !held.has(r.userId);
+    return this.keys.filter(orphan).length + this.secrets.filter(orphan).length;
+  }
   async insertUserKey(row: WrappedDek) {
     if (!this.keys.some((k) => k.userId === row.userId || k.kekVersion > row.kekVersion)) {
       this.keys.push(row);
@@ -67,6 +74,23 @@ export class MemoryStore implements VaultStore {
       this.step();
       if (this.failAudit) throw new Error("audit write failed");
       this.audits.push(audit);
+    });
+  }
+  async resetUser(keys: WrappedDek[], audit: VaultAuditRow) {
+    const userId = keys[0]?.userId;
+    const now = this.keys.filter((k) => k.userId === userId);
+    const unchanged =
+      now.length === keys.length && now.every((k) => keys.some((r) => same(r.iv, k.iv)));
+    if (!userId || !unchanged) return false;
+    return this.batch(() => {
+      this.keys = this.keys.filter((k) => k.userId !== userId);
+      this.step();
+      if (this.failAudit) throw new Error("audit write failed");
+      this.audits.push(audit);
+      this.step();
+      this.secrets = this.secrets.filter((s) => s.userId !== userId);
+      this.step();
+      return true;
     });
   }
   async audit(row: VaultAuditRow) {

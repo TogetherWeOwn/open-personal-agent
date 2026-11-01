@@ -168,7 +168,7 @@ describe("the D1 vault store", () => {
     // Re-key writes last4 again from the plaintext (L-1), not the stored value.
     await env.DB.prepare("UPDATE secrets SET last4 = 'XXXX' WHERE id = 's1'").run();
     const before = await env.DB.prepare(sealed).first();
-    expect(await rewrap(rotated, { caller: "test" })).toEqual({ rewrapped: 1 });
+    expect(await rewrap(rotated, { caller: "test" })).toEqual({ rewrapped: 1, remaining: 0 });
     const versions = await env.DB.prepare("SELECT kek_version FROM user_keys").all();
     expect(versions.results).toEqual([{ kek_version: 2 }]);
     // Re-keyed: the secret was sealed again under the new DEK, with a fresh IV.

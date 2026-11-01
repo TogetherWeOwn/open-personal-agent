@@ -71,6 +71,18 @@ export function d1VaultStore({ DB: db }: { DB: SqlDatabase }): VaultStore {
         .first<{ n: number }>();
       return row?.n ?? 0;
     },
+    async countOrphans(heldEpochs) {
+      // Epochs are the vault's own integers, inlined so an empty list still parses.
+      const held = heldEpochs.filter(Number.isSafeInteger).join(", ");
+      const orphan = `user_id NOT IN (SELECT user_id FROM user_keys WHERE kek_version IN (${held}))`;
+      const row = await db
+        .prepare(
+          `SELECT (SELECT count(*) FROM user_keys WHERE ${orphan})
+                + (SELECT count(*) FROM secrets WHERE ${orphan}) AS n`,
+        )
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    },
     async insertUserKey(row) {
       await db
         .prepare(
@@ -168,6 +180,32 @@ export function d1VaultStore({ DB: db }: { DB: SqlDatabase }): VaultStore {
         ),
       ]);
       if (secret?.meta.changes !== 1) throw new Error("secret not written");
+    },
+    async resetUser(keys, a) {
+      const [first] = keys;
+      if (!first) return false;
+      const { userId } = first;
+      // The DEK rows go only if they are still exactly the ones the vault read, by wrap IV: a
+      // re-key or a new enrolment in between leaves everything in place.
+      const ivs = keys.map((k) => hex(k.iv)).join(", ");
+      const [deleted] = await db.batch([
+        db
+          .prepare(
+            `DELETE FROM user_keys WHERE user_id = ? AND iv IN (${ivs})
+             AND (SELECT count(*) FROM user_keys WHERE user_id = ?) = ?
+             AND (SELECT count(*) FROM user_keys WHERE user_id = ? AND iv IN (${ivs})) = ?`,
+          )
+          .bind(userId, userId, keys.length, userId, keys.length),
+        // `changes()` is the delete's row count, so the audit row records only a reset that ran.
+        audit(a, "WHERE changes() = ?", keys.length),
+        // The secrets go only once the user has no DEK row left to open them with.
+        db
+          .prepare(
+            "DELETE FROM secrets WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM user_keys WHERE user_id = ?)",
+          )
+          .bind(userId, userId),
+      ]);
+      return deleted?.meta.changes === keys.length;
     },
     async audit(a) {
       await audit(a).run();

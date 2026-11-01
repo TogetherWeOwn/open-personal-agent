@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { SCHEMA_VERSION } from "@opa/db";
 import { createRepository } from "@opa/db/repository";
-import { masterKeySet, type SecretName } from "./compose";
+import { vaultStatus } from "@opa/vault";
+import { masterKeySet, RETIRE_PREVIOUS_KEY, type SecretName } from "./compose";
 import type { Env } from "./env";
 
 export interface Health {
@@ -21,6 +22,27 @@ export interface Health {
     vault: boolean;
   };
   secrets: Record<SecretName, boolean>;
+  /** The key rotation and unreadable rows (crypto review C-1). Counts only; absent without a vault. */
+  vault?: VaultHealth;
+}
+
+export interface VaultHealth {
+  /** `pending`: the scheduled runner is still re-keying users under the previous master key. */
+  rotation: "none" | "pending" | "complete";
+  /** `user_keys` and `secrets` rows of users no key the vault holds can open. */
+  orphanedRows: number;
+  /** What the operator does next, once the rotation is complete. */
+  action?: typeof RETIRE_PREVIOUS_KEY;
+}
+
+async function vaultHealth(env: Env): Promise<VaultHealth | undefined> {
+  if (!env.VAULT) return undefined;
+  const status = await vaultStatus(env.VAULT).catch(() => null);
+  if (!status) return undefined;
+  const { rotation, orphanedRows } = status;
+  return rotation === "complete"
+    ? { rotation, orphanedRows, action: RETIRE_PREVIOUS_KEY }
+    : { rotation, orphanedRows };
 }
 
 const PROBE_TIMEOUT_MS = 5_000;
@@ -69,7 +91,7 @@ export async function checkHealth(env: Env): Promise<Health> {
   // Assigned inside the database probe; the cast stops TypeScript narrowing it to `null`.
   let applied = null as number | null;
   const { deployment } = createRepository(env);
-  const [database, storage, durableObject] = await Promise.all([
+  const [database, storage, durableObject, vault] = await Promise.all([
     probe(async () => {
       applied = await deployment.schemaVersion();
     }),
@@ -78,6 +100,7 @@ export async function checkHealth(env: Env): Promise<Health> {
       const pong = await deployment.healthObject().ping();
       if (pong !== "pong") throw new Error("unexpected ping reply");
     }),
+    vaultHealth(env),
   ]);
   // Presence only: creating a Workflow instance or running a model would cost money.
   const workflow = typeof env.TASK_WORKFLOW?.create === "function";
@@ -94,5 +117,6 @@ export async function checkHealth(env: Env): Promise<Health> {
   }
   if ((database && !current) || Object.values(secrets).includes(false)) status = "setup_required";
 
-  return { status, schema: { expected: SCHEMA_VERSION, applied, current }, checks, secrets };
+  const schema = { expected: SCHEMA_VERSION, applied, current };
+  return { status, schema, checks, secrets, ...(vault ? { vault } : {}) };
 }

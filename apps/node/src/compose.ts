@@ -7,6 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { app } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
+import { runRotation } from "@opa/server/vault-rotation";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
@@ -51,6 +52,8 @@ interface NodeBindings {
 
 export interface NodeApp {
   fetch(request: Request, bindings?: NodeBindings): Promise<Response>;
+  /** The Worker's cron (every 10 minutes): `main.ts` runs it on a timer. */
+  scheduled(): Promise<void>;
   db: DatabaseSync;
 }
 
@@ -104,6 +107,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       }
       return app.fetch(forwarded, await env);
     },
+    scheduled: async () => runRotation(await env),
     db,
   };
 }
