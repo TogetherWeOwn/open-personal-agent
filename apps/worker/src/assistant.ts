@@ -177,10 +177,16 @@ export class Assistant extends Agent<Bindings> {
     };
   }
 
-  /** Saves a Spending change if every field is valid (`checkSpending`); `null` if not. */
-  setSpending(body: unknown): SpendingSettings | null {
+  /**
+   * Saves a Spending change if every field is valid (`checkSpending`); `null` if not. Returns
+   * the settings before and after together, so an audit of the change can't pair this write
+   * with another request's "before".
+   */
+  setSpending(body: unknown): { before: SpendingSettings; after: SpendingSettings } | null {
     const changes = checkSpending(body);
-    return changes && this.limits.setSettings(changes);
+    if (!changes) return null;
+    const before = this.limits.settings();
+    return { before, after: this.limits.setSettings(changes) };
   }
 
   /**
