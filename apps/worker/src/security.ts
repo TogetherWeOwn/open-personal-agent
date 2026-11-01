@@ -40,11 +40,11 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
  * Every state change must come from this exact origin, or none is accepted (D2). Same-site isn't
- * enough: `evil.example.workers.dev` is same-site with `opa.example.workers.dev`. Webhooks
- * (`/hooks/*`) authenticate by signature instead.
+ * enough: `evil.example.workers.dev` is same-site with `opa.example.workers.dev`. There is no
+ * exemption: a future webhook route must verify its signature before it is exempted here.
  */
 export const exactOrigin: MiddlewareHandler = async (c, next) => {
-  if (SAFE_METHODS.has(c.req.method) || c.req.path.startsWith("/hooks/")) return next();
+  if (SAFE_METHODS.has(c.req.method)) return next();
   const site = c.req.header("Sec-Fetch-Site") ?? "same-origin";
   if (c.req.header("Origin") === new URL(c.req.url).origin && site === "same-origin") return next();
   log.warn("request.rejected", { reason: "origin", method: c.req.method, route: c.req.routePath });

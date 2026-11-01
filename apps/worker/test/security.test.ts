@@ -48,8 +48,11 @@ describe("origin and CORS", () => {
       {},
       { Origin: ORIGIN, "Sec-Fetch-Site": "same-site" },
     ];
-    for (const headers of bad) {
-      const res = await fetchApp("/api/health", { method: "POST", headers });
+    for (const [path, headers] of [
+      ...bad.map((h) => ["/api/health", h] as const),
+      ["/hooks/anything", { Origin: SIBLING }] as const, // no path is exempt
+    ]) {
+      const res = await fetchApp(path, { method: "POST", headers });
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: "forbidden_origin" });
     }
