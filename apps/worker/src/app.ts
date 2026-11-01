@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Hono } from "hono";
-import type { Env } from "./env";
+import type { AppEnv } from "./env";
 import { checkHealth } from "./health";
+import { authRoutes, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupOpen } from "./setup";
 import { finishSetupPage } from "./setup-page";
 
-export const app = new Hono<{ Bindings: Env }>();
+export const app = new Hono<AppEnv>();
 
 app.use(claimGuard);
+app.use(sessionGuard);
 
 app.get("/api/health", async (c) => {
   const health = await checkHealth(c.env);
@@ -36,6 +38,18 @@ app.get("/setup", async (c) => {
 });
 
 app.route("/setup", setup);
+app.route("/api/auth", authRoutes);
+app.route("/api/sessions", sessionRoutes);
+
+/** Who is signed in; the SPA calls it to decide between the login page and the app. */
+app.get("/api/me", async (c) => {
+  const user = await c.env.DB.prepare("SELECT id, display_name, role FROM users WHERE id = ?")
+    .bind(c.var.session.userId)
+    .first<{ id: string; display_name: string; role: string }>();
+  if (!user) return c.json({ error: "unauthenticated" }, 401);
+  c.header("Cache-Control", "no-store");
+  return c.json({ id: user.id, displayName: user.display_name, role: user.role });
+});
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 

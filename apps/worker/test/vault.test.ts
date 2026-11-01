@@ -10,6 +10,7 @@ import { env as workerEnv } from "cloudflare:workers";
 import { decrypt, encrypt, rewrap, type UserScope, type Vault } from "@opa/vault";
 import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
+import { newSession, SESSION_COOKIE } from "../src/auth";
 import { compose, type WorkerEnv } from "../src/compose";
 import worker from "../src/index";
 import { d1VaultStore } from "../src/vault-store";
@@ -19,13 +20,16 @@ const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Ar
 const KEY = key();
 const PREV = key();
 const MASTER_NAMES = ["OPA_MASTER_KEY", "OPA_MASTER_KEY_PREV"];
+let session = "";
 
 // A test route that reports what route handlers and middleware receive.
 app.get("/api/test/env-keys", (c) => c.json(Object.keys(c.env)));
 
 async function fetchWorker(path: string, bindings: WorkerEnv, init?: RequestInit) {
   const ctx = createExecutionContext();
-  const request = new Request(`https://opa.test${path}`, init) as Parameters<
+  // Signed in, from the same origin, so the session guard (M2-10) lets the request through.
+  const headers = { origin: "https://opa.test", cookie: `${SESSION_COOKIE}=${session}` };
+  const request = new Request(`https://opa.test${path}`, { ...init, headers }) as Parameters<
     typeof worker.fetch
   >[0];
   const res = await worker.fetch(request, bindings, ctx);
@@ -45,6 +49,9 @@ beforeAll(async () => {
   await env.DB.prepare(
     "INSERT INTO setup_state (id, claimed_by_user_id, claimed_at) VALUES (1, 'u1', 0)",
   ).run();
+  const { cookie, insert } = await newSession(env.DB, "u1");
+  await insert.run();
+  session = cookie;
 });
 
 describe("V4: the env filter", () => {

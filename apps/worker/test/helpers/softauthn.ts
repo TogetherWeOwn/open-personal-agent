@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // A software passkey (ES256, "none" attestation) so tests run a real registration ceremony
-// inside workerd without a browser. Taken from the M2-08 spike; login (`get`) lands with M2-10.
+// inside workerd without a browser. Taken from the M2-08 spike; `get` answers a login.
 import { base64url } from "../../src/auth";
 
 const encoder = new TextEncoder();
@@ -44,8 +44,23 @@ function cbor(value: unknown): Uint8Array {
 // UP (0x01) | UV (0x04) | BE (0x08) | BS (0x10) | AT (0x40).
 const FLAGS = 0x01 | 0x04 | 0x08 | 0x10 | 0x40;
 
+/** WebCrypto signs ECDSA as raw r‖s; WebAuthn wants an ASN.1 DER sequence of two integers. */
+function derSignature(raw: Uint8Array): Uint8Array {
+  const int = (bytes: Uint8Array) => {
+    let i = 0;
+    while (i < bytes.length - 1 && bytes[i] === 0) i++;
+    const trimmed = bytes.slice(i);
+    const body = (trimmed[0] ?? 0) & 0x80 ? concat(new Uint8Array([0]), trimmed) : trimmed;
+    return concat(new Uint8Array([0x02, body.length]), body);
+  };
+  const seq = concat(int(raw.slice(0, 32)), int(raw.slice(32)));
+  return concat(new Uint8Array([0x30, seq.length]), seq);
+}
+
 export class SoftPasskey {
   readonly credentialId = crypto.getRandomValues(new Uint8Array(16));
+  keys?: CryptoKeyPair;
+  counter = 0;
 
   constructor(
     readonly rpId: string,
@@ -57,6 +72,7 @@ export class SoftPasskey {
     const keys = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
       "sign",
     ])) as CryptoKeyPair;
+    this.keys = keys;
     const jwk = (await crypto.subtle.exportKey("jwk", keys.publicKey)) as JsonWebKey;
     const cose = cbor(
       new Map<number, unknown>([
@@ -97,6 +113,41 @@ export class SoftPasskey {
         clientDataJSON: base64url(clientData),
         attestationObject: base64url(attestation),
         transports: ["internal"],
+      },
+    };
+  }
+
+  /** Answers `navigator.credentials.get()` for `options` with the key `create` made. */
+  async get(options: { challenge: string }, { uv = true, origin = this.origin } = {}) {
+    if (!this.keys) throw new Error("softauthn: create() first");
+    this.counter++;
+    const rpIdHash = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", encoder.encode(this.rpId)),
+    );
+    const flags = (uv ? FLAGS : FLAGS & ~0x04) & ~0x40;
+    const counter = new Uint8Array(4);
+    new DataView(counter.buffer).setUint32(0, this.counter);
+    const authData = concat(rpIdHash, new Uint8Array([flags]), counter);
+    const clientData = encoder.encode(
+      JSON.stringify({ type: "webauthn.get", challenge: options.challenge, origin }),
+    );
+    const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", clientData));
+    const signature = new Uint8Array(
+      await crypto.subtle.sign(
+        { name: "ECDSA", hash: "SHA-256" },
+        this.keys.privateKey,
+        concat(authData, clientHash),
+      ),
+    );
+    return {
+      id: base64url(this.credentialId),
+      rawId: base64url(this.credentialId),
+      type: "public-key",
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: base64url(clientData),
+        authenticatorData: base64url(authData),
+        signature: base64url(derSignature(signature)),
       },
     };
   }
