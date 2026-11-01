@@ -72,32 +72,98 @@ const empty = { costMicroUsd: 0, unpricedCalls: 0, groups: [] };
 const allowance = {
   neuronsPerDay: 10_000,
   neuronsUsedHere: 3_200,
+  freeNeuronsUsed: 3_200,
+  billedNeurons: 0,
   resetsAt: Date.UTC(2026, 10, 2),
 };
+const none = { status: "none-configured", label: null };
+const categories = (today: number, month: number, projected: number) => [
+  {
+    id: "workers-paid",
+    status: "billed",
+    label: "Billed by Cloudflare",
+    today: null,
+    month: 5_000_000,
+    projected: 5_000_000,
+    priceVerifiedAt: "2026-11-01",
+    stale: false,
+  },
+  { id: "cloudflare", status: "included", label: "Included in Workers Paid" },
+  { id: "storage", status: "included", label: "Included in Workers Paid" },
+  { id: "ai", status: "billed", label: null, today, month, projected },
+  { id: "computers", ...none },
+  { id: "connectors", ...none },
+  { id: "enhanced", ...none },
+];
+const days = Array.from({ length: 10 }, (_, i) => ({
+  date: `2026-11-${String(i + 1).padStart(2, "0")}`,
+  calls: i % 3 === 0 ? 0 : i,
+  costMicroUsd: i % 3 === 0 ? 0 : i * 40_000,
+  unpricedCalls: 0,
+}));
+const breakdowns = {
+  conversation: [
+    { id: "c1", title: "=Plan the trip", calls: 4, costMicroUsd: 3_000_000, unpricedCalls: 0 },
+    { id: null, title: null, calls: 2, costMicroUsd: 400_000, unpricedCalls: 1 },
+  ],
+  task: [
+    { id: "t1", title: "Compare flights", calls: 3, costMicroUsd: 2_000_000, unpricedCalls: 0 },
+    { id: null, title: null, calls: 3, costMicroUsd: 1_400_000, unpricedCalls: 1 },
+  ],
+  day: days,
+};
 
-async function open(page: Page, today: unknown, month: unknown, allowed: unknown = allowance) {
+function body(today: typeof period, month: typeof period, allowed: unknown = allowance) {
+  const projected = month.costMicroUsd * 3;
+  return {
+    currency: "USD",
+    today,
+    month,
+    projected: { costMicroUsd: projected },
+    categories: categories(today.costMicroUsd, month.costMicroUsd, projected),
+    breakdowns: month.groups.length ? breakdowns : { conversation: [], task: [], day: [] },
+    allowance: allowed,
+  };
+}
+
+async function open(page: Page, json: unknown) {
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
   // The chat stays mounted behind Usage, so its health check runs too.
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
-  await page.route("/api/usage?*", (route) =>
-    route.fulfill({ json: { currency: "USD", today, month, allowance: allowed } }),
-  );
+  if (json !== undefined) await page.route("/api/usage?*", (route) => route.fulfill({ json }));
   await page.goto("/usage");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
 }
 
-test("leads with the totals, labels every cost and flags old and missing prices", async ({
+test("leads with today, the month and its projection, then the seven categories", async ({
   page,
 }) => {
-  await open(page, period, { ...period, costMicroUsd: 3_400_000 });
-  await expect(page.getByText("Today: about $0.12 · This month: about $3.40")).toBeVisible();
-  const openai = page.getByRole("table", { name: "Billed by OpenAI, today" });
+  await open(page, body(period, { ...period, costMicroUsd: 3_400_000 }));
+  const figures = page.locator("dl");
+  await expect(figures).toContainText("Todayabout $0.12");
+  await expect(figures).toContainText("This monthabout $3.40");
+  await expect(figures).toContainText("Projected by month-endabout $10.20");
+  const where = page.getByRole("region", { name: "Where it goes" }).getByRole("listitem");
+  await expect(where).toHaveCount(7);
+  await expect(where.nth(0)).toContainText("$5.00 a monthBilled by Cloudflare, price as of Nov 1");
+  await expect(where.nth(1)).toContainText("Included in Workers Paid");
+  await expect(where.nth(3)).toContainText("about $3.40 this month");
+  await expect(where.nth(4)).toContainText("ComputersComputers your assistant can work on.");
+  await expect(where.nth(4)).toContainText("None configured");
+  await expect(
+    page.getByRole("link", { name: "Check your Cloudflare dashboard (opens in a new tab)" }),
+  ).toHaveAttribute("target", "_blank");
+});
+
+test("labels every cost by model and flags old and missing prices", async ({ page }) => {
+  await open(page, body(period, period));
+  const openai = page.getByRole("table", { name: "Billed by OpenAI, this month" });
   await expect(openai.getByRole("row", { name: /GPT-4.1 mini/ })).toContainText(
-    "about $0.12estimated",
+    "about $0.12estimated, price as of Nov 1, 2026",
   );
   await expect(openai).toContainText("Price last checked Feb 4, 2026. It may have changed.");
-  await expect(page.getByRole("table", { name: "Billed by my-llm, today" })).toContainText(
+  await expect(page.getByRole("table", { name: "Billed by my-llm, this month" })).toContainText(
     "No price on file",
   );
   await expect(page.getByText("< $0.01").first()).toBeVisible();
@@ -105,20 +171,31 @@ test("leads with the totals, labels every cost and flags old and missing prices"
     "aria-valuetext",
     "32% used, resets at 12:00 AM your time",
   );
+  await expect(page.getByText("3,200 of 10,000 free today · 0 billed")).toBeVisible();
   const bill = page.getByRole("link", { name: "See your bill at OpenAI (opens in a new tab)" });
   await expect(bill).toHaveAttribute("target", "_blank");
-  await page.getByRole("radio", { name: "This month" }).click();
-  await expect(page.getByRole("table", { name: "Billed by OpenAI, this month" })).toBeVisible();
+  await page.getByRole("radio", { name: "Today" }).click();
+  await expect(page.getByRole("table", { name: "Billed by OpenAI, today" })).toBeVisible();
 });
 
-test("an empty period offers a chat instead of an empty table; a member has no meter", async ({
-  page,
-}) => {
-  await open(page, empty, empty, null);
+test("nothing used yet still shows the plan; a member has no meter", async ({ page }) => {
+  await open(page, body(empty, empty, null));
   await expect(page.getByRole("meter")).toHaveCount(0);
-  await expect(page.getByText("No usage yet.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Nothing used yet this month" })).toBeVisible();
+  await expect(page.getByText("$5.00 a month")).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Start a chat" })).toHaveAttribute("href", "/");
+});
+
+test("a failed load says so and tries again", async ({ page }) => {
+  let calls = 0;
+  await page.route("/api/usage?*", (route) =>
+    ++calls === 1 ? route.fulfill({ status: 500 }) : route.fulfill({ json: body(period, period) }),
+  );
+  await open(page, undefined);
+  await expect(page.getByRole("alert")).toContainText("I couldn't load usage.");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("region", { name: "Where it goes" })).toBeVisible();
 });
 
 test("going to Settings › Spending and back keeps the chat and its unsent draft", async ({
@@ -171,7 +248,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     }) => {
       await page.emulateMedia({ colorScheme });
       await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
-      await open(page, period, period);
+      await open(page, body(period, period));
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       const { violations } = await new AxeBuilder({ page }).analyze();
       expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
