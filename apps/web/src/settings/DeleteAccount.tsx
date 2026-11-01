@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Heading } from "react-aria-components";
 import { Button, Card, CardHeader } from "../ui";
-import { deleteAccount, previewDeletion } from "./account-api";
+import { deleteAccount, isDeleteDisabled, previewDeletion } from "./account-api";
 
 const ERRORS: Record<string, string> = {
   step_up_required: "Confirm it's you with your passkey first, then try again.",
@@ -84,8 +84,8 @@ export function DeleteAccount() {
           onlyOwner && (
             <p role="note" className="text-sm">
               You&apos;re the only account on this deployment. Deleting it returns the app to its
-              first-run screen, and claiming it again needs a fresh setup token — rotate SETUP_TOKEN
-              on the server before anyone signs up again.
+              first-run screen, and claiming it again needs a fresh setup token — rotate
+              OPA_SETUP_TOKEN on the server before anyone signs up again.
             </p>
           )
         )}
@@ -109,7 +109,7 @@ export function DeleteAccount() {
             <Button
               variant="danger"
               className="self-start"
-              isDisabled={onlyOwner === null && !previewFailed}
+              isDisabled={isDeleteDisabled(onlyOwner)}
               onPress={() => setConfirming(true)}
             >
               Delete your account

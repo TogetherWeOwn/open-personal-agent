@@ -4,7 +4,7 @@
 // surface their error code — the screen's copy maps those codes, so the test pins the codes,
 // not the words.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deleteAccount, previewDeletion } from "../src/settings/account-api";
+import { deleteAccount, isDeleteDisabled, previewDeletion } from "../src/settings/account-api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -24,6 +24,16 @@ describe("previewDeletion", () => {
   it("surfaces the error code", async () => {
     stubFetch(401, { error: "unauthenticated" });
     await expect(previewDeletion()).rejects.toThrow("unauthenticated");
+  });
+});
+
+describe("isDeleteDisabled", () => {
+  it("stays disabled until the preview names the only owner", () => {
+    // Loading and preview-failed both leave onlyOwner null: the only owner
+    // must see the unclaimed warning before the passkey ceremony.
+    expect(isDeleteDisabled(null)).toBe(true);
+    expect(isDeleteDisabled(true)).toBe(false);
+    expect(isDeleteDisabled(false)).toBe(false);
   });
 });
 

@@ -16,6 +16,16 @@ export interface DeletionResult {
 
 const err = (body: unknown) => new Error((body as { error?: string }).error ?? "request_failed");
 
+/**
+ * The delete stays disabled until the preview names the only owner. A failed
+ * preview leaves `onlyOwner` null, so the button stays off and "Try again" is
+ * the only way forward — the only owner always sees the unclaimed warning
+ * before the passkey ceremony.
+ */
+export function isDeleteDisabled(onlyOwner: boolean | null): boolean {
+  return onlyOwner === null;
+}
+
 async function readError(res: Response): Promise<Error> {
   return err(await res.json().catch(() => ({})));
 }
