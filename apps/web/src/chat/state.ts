@@ -91,6 +91,12 @@ export type TurnOutcome =
 export interface Turn {
   turnId: string;
   messageId: string;
+  /**
+   * When this tab first saw the turn, for the elapsed header (M3-09 AC1). A tab that adopts
+   * the turn mid-run shows a shorter "Worked for" than the tab that sent it; the envelope
+   * carries no timestamp, so per-tab time is the honest one for now.
+   */
+  startedAt: number;
   outcome: TurnOutcome;
   steps: TurnStep[];
   tools: TurnTool[];
@@ -182,6 +188,7 @@ const blank = (id: string): Conversation => ({
 const shellTurn = (turnId: string, messageId: string): Turn => ({
   turnId,
   messageId,
+  startedAt: Date.now(),
   outcome: "running",
   steps: [],
   tools: [],

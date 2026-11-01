@@ -3,8 +3,11 @@ import { type ReactNode, useLayoutEffect, useRef } from "react";
 import { Link } from "react-aria-components";
 import { type AttachmentKind, cannotReadCopy, formatBytes } from "./attachments";
 import { Markdown } from "./Markdown";
+import type { ShowWork } from "./show-work";
 import type { Conversation, Message } from "./state";
+import { TurnView } from "./Turn";
 import type { StoredAttachment } from "./transport";
+import type { PriceTable } from "./turn-summary";
 
 /**
  * The message log. Its own live region is off so streaming tokens are not read out one by one;
@@ -12,10 +15,14 @@ import type { StoredAttachment } from "./transport";
  */
 export function Thread({
   conversation,
+  showWork,
+  prices,
   after,
   afterCount = 0,
 }: {
   conversation: Conversation;
+  showWork: ShowWork;
+  prices: PriceTable;
   /** Below the last message: the chat's approval cards and receipts (M3-07b). */
   after?: ReactNode;
   /** How many things `after` shows, so a new card scrolls into view as a message would. */
@@ -49,9 +56,21 @@ export function Thread({
         {conversation.messages.length === 0 && (
           <p className="text-text-muted">Hi. What can I help you with?</p>
         )}
-        {conversation.messages.map((m) => (
-          <MessageView key={m.id} message={m} />
-        ))}
+        {conversation.messages.map((m) => {
+          // The assistant's reply streams under its turn's timeline; other cards (approvals,
+          // limits, artifacts) keep rendering from the events beside it.
+          if (m.role === "assistant") {
+            const turn = conversation.turns.find((t) => t.messageId === m.id);
+            if (turn) {
+              return (
+                <TurnView key={m.id} turn={turn} showWork={showWork} prices={prices}>
+                  <MessageView message={m} />
+                </TurnView>
+              );
+            }
+          }
+          return <MessageView key={m.id} message={m} />;
+        })}
         {after}
       </div>
     </div>
