@@ -13,7 +13,6 @@ CREATE TABLE `exports` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `exports_workflow_instance_id_unique` ON `exports` (`workflow_instance_id`);--> statement-breakpoint
 CREATE INDEX `exports_user_idx` ON `exports` (`user_id`,`created_at`);--> statement-breakpoint
-CREATE INDEX `exports_sweep_idx` ON `exports` (`status`,`expires_at`);
---> statement-breakpoint
+CREATE INDEX `exports_sweep_idx` ON `exports` (`status`,`expires_at`);--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (10);
+INSERT INTO `schema_version` (`version`) VALUES (11);

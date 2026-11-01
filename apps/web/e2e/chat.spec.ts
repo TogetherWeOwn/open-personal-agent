@@ -67,7 +67,7 @@ test.beforeEach(async ({ page, baseURL }) => {
 /** Tabs to the composer, types, presses Enter and waits for the whole reply. */
 async function sendByKeyboard(page: Page, text: string) {
   const box = page.getByRole("textbox", { name: "Message" });
-  for (let i = 0; i < 10 && !(await box.evaluate((el) => el === document.activeElement)); i++) {
+  for (let i = 0; i < 30 && !(await box.evaluate((el) => el === document.activeElement)); i++) {
     await page.keyboard.press("Tab");
   }
   await page.keyboard.type(text);
@@ -330,7 +330,12 @@ test("returning from Settings reloads the model settings", async ({ page }) => {
   );
   await page.goto("/");
   await expect(page.getByRole("link", { name: /No model set up/ })).toBeVisible();
-  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Main" })
+    .getByRole("link", { name: "Settings" })
+    .click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await page.getByRole("link", { name: "Models", exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/models$/);
   picked = true;
   await page.getByRole("link", { name: "Chats" }).click();
