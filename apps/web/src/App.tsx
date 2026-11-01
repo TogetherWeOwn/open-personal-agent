@@ -44,6 +44,7 @@ import {
 import { NavShell } from "./NavShell";
 import { hasNavigated, match, navigate, resolveChatAddress, usePath } from "./router";
 import { NotFound, routes } from "./routes";
+import { getShowWork } from "./settings/assistant-api";
 import { SpendingBanners } from "./settings/SpendingBanners";
 import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet, setInboxCount } from "./ui";
 
@@ -109,9 +110,9 @@ export function App({ transport }: AppProps) {
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
   const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
-  // How much of a turn's timeline the thread shows (M3-09 AC3); Settings › Assistant owns the
-  // saved value from the next part, until then every thread starts collapsed.
-  const [showWork] = useState<ShowWork>(SHOW_WORK_DEFAULT);
+  // How much of a turn's timeline the thread shows (M3-09 AC3); Settings › Assistant owns
+  // the saved value, and a failed load reads as collapsed until it arrives.
+  const [showWork, setShowWork] = useState<ShowWork>(SHOW_WORK_DEFAULT);
   // The turn summary prices each call under its own pair, like the usage page does.
   const prices: PriceTable = buildPriceTable(modelSettings?.providers ?? []);
   // The chat stays mounted while another screen shows; becoming visible again reloads the
@@ -124,6 +125,17 @@ export function App({ transport }: AppProps) {
         if (current && Array.isArray(loaded.providers) && loaded.roles) setModelSettings(loaded);
       },
       () => {},
+    );
+    // A choice saved in Settings › Assistant is live on return too (#88). A failed reload
+    // falls back to the default instead of keeping a stale choice the settings no longer
+    // holds, so the thread never waits on settings and never shows steps it shouldn't.
+    getShowWork().then(
+      (loaded) => {
+        if (current) setShowWork(loaded);
+      },
+      () => {
+        if (current) setShowWork(SHOW_WORK_DEFAULT);
+      },
     );
     return () => {
       current = false;

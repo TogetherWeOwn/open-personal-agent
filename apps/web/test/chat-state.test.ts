@@ -734,4 +734,100 @@ describe("turn timeline (M3-09)", () => {
     expect(turnOf(live)?.outcome).toBe("running");
     expect(live.pending).toMatchObject({ turnId: "t1" });
   });
+
+  it("settles a paused turn it never saw end, without needing the pending send", () => {
+    // The pause frees the composer, so pending is null; the turn's cancelled end arrives
+    // unseen and only the reload can settle it.
+    const waiting = run(send, started(), ev("approval.requested", { batchId: "b1", items: [] }));
+    expect(waiting.pending).toBe(null);
+    const settled = chatReducer(waiting, load("c1", msg("u1", "Hi"), msg("r-t1", "Done.")));
+    expect(turnOf(settled)?.outcome).toBe("succeeded");
+    expect(settled.pending).toBe(null);
+
+    const limited = run(send, started(), ev("limit.reached", { kind: "tools", detail: "20" }));
+    const cut = chatReducer(
+      limited,
+      load("c1", msg("u1", "Hi"), msg("r-t1", "Half.", "interrupted")),
+    );
+    expect(turnOf(cut)?.outcome).toBe("interrupted");
+
+    // A still-streaming reply leaves the paused turn waiting.
+    const live = chatReducer(
+      waiting,
+      load("c1", msg("u1", "Hi"), msg("r-t1", "Half", "streaming")),
+    );
+    expect(turnOf(live)?.outcome).toBe("waiting");
+    expect(live.pending).toBe(null);
+  });
+
+  it("freezes the paused clock on later flushes, and clears it on resume", () => {
+    const waiting = run(send, started(), ev("approval.requested", { batchId: "b1", items: [] }));
+    const pausedAt = turnOf(waiting)?.pausedAt;
+    expect(typeof pausedAt).toBe("number");
+    // A late usage flush moves updatedAt but never the frozen pause moment.
+    const flushed = chatReducer(
+      waiting,
+      ev("usage.updated", {
+        usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, reasoningTokens: 0 },
+        providerId: "openai",
+        model: "gpt-4.1-mini",
+      }),
+    );
+    expect(turnOf(flushed)?.outcome).toBe("waiting");
+    expect(turnOf(flushed)?.pausedAt).toBe(pausedAt);
+    // Resuming — by decision or by the first progressing event — clears the stamp.
+    const decided = chatReducer(waiting, ev("approval.resolved", { batchId: "b1", decisions: [] }));
+    expect(turnOf(decided)?.outcome).toBe("running");
+    expect(turnOf(decided)?.pausedAt).toBe(null);
+    const resumed = chatReducer(waiting, ev("step.started", { stepId: "s1", label: "L" }));
+    expect(turnOf(resumed)?.outcome).toBe("running");
+    expect(turnOf(resumed)?.pausedAt).toBe(null);
+  });
+
+  it("two tabs watching one run converge on the same timeline (AC6)", () => {
+    // Past the helper's counter, so these read as the run's own sequence.
+    let seq = 10_000;
+    const at = (type: HarnessEvent["type"], payload = {}) =>
+      ({
+        type: "event",
+        event: { v: 1, seq: ++seq, sessionId: "c1", turnId: "t1", type, payload },
+      }) as ChatAction;
+    const full = [
+      at("turn.started", { messageId: "r-t1" }),
+      at("step.started", { stepId: "s1", label: "Searching", toolCallId: "t1" }),
+      at("tool.called", { toolCallId: "t1", tool: "fetch", args: "{}", risk: "read" }),
+      at("tool.result", { toolCallId: "t1", ok: true, preview: "3 pages", bytes: 100 }),
+      at("context.tainted", { stepId: "s1", source: { kind: "web", label: "docs.example" } }),
+      at("step.completed", { stepId: "s1", status: "ok", durationMs: 1500 }),
+      at("usage.updated", {
+        providerId: "openai",
+        model: "m",
+        usage: { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0, reasoningTokens: 0 },
+      }),
+      at("message.completed", { text: "Done." }),
+      at("turn.completed"),
+    ];
+    // The user's send opens the chat; the run's own events follow it.
+    const script = [send, ...full];
+    const a = script.reduce(chatReducer, initialState("c1"));
+    // Tab B's socket dropped a step event and the replay brought it back; the duplicate
+    // applies once, so both tabs end on the same timeline and the same reply.
+    const replayed = [...script.slice(0, 3), ...script.slice(2)];
+    const b = replayed.reduce(chatReducer, initialState("c1"));
+    // Per-tab clocks stamp the shells, so the comparison leaves the timestamps out.
+    const timeline = (state: ChatState) => {
+      const { startedAt: _s, updatedAt: _u, ...turn } = state.conversations[0]?.turns[0] ?? {};
+      return turn;
+    };
+    expect(timeline(b)).toEqual(timeline(a));
+    expect(timeline(b)).toMatchObject({
+      messageId: "r-t1",
+      outcome: "succeeded",
+      steps: [{ stepId: "s1", label: "Searching", status: "ok", durationMs: 1500 }],
+      tools: [{ toolCallId: "t1", tool: "fetch", status: "ok" }],
+      taint: [{ stepId: "s1", kind: "web", label: "docs.example" }],
+    });
+    expect(b.conversations[0]?.messages).toEqual(a.conversations[0]?.messages);
+    expect(b.conversations[0]?.messages[1]).toMatchObject({ text: "Done.", status: "complete" });
+  });
 });

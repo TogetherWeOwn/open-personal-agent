@@ -1829,6 +1829,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   backgroundModel: userSettings.backgroundModel,
                   onboardedAt: userSettings.onboardedAt,
                   learnFromChats: userSettings.learnFromChats,
+                  showWork: userSettings.showWork,
                 })
                 .from(users)
                 .leftJoin(userSettings, eq(userSettings.userId, users.id))

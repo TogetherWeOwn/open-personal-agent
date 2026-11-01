@@ -5,6 +5,7 @@ import { log } from "@opa/log";
 import { Hono } from "hono";
 import { accountRoutes } from "./account";
 import { artifactRoutes } from "./artifacts";
+import { assistantSettings } from "./assistant";
 import { attachmentRoutes } from "./attachments";
 import { chatRoutes } from "./chat";
 import type { AppEnv, AppPorts } from "./env";
@@ -52,6 +53,7 @@ shared.use("/api/secrets/*", async (c, next) => {
   return c.json({ error: "vault_unavailable" }, 503);
 });
 
+shared.route("/api/settings/assistant", assistantSettings);
 shared.route("/api/settings/vault", vaultRoutes);
 shared.route("/api/settings/memory", memorySettings);
 shared.route("/api/settings/spending", spendingRoutes);

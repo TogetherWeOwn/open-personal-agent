@@ -32,6 +32,19 @@ export const MOCK_LIMITS = new Map<string, TurnLimit>([
 export const MOCK_VAULT_RESET = "/mock vault reset";
 /** Sending exactly this holds the turn's start for a second, as a slow server would. */
 export const MOCK_SLOW_START = "/mock slow start";
+/**
+ * Sending exactly this gets a scripted run with one searching step, a tool call, web taint
+ * and usage, for the timeline e2e tests (M3-09). Slow enough to watch the running header.
+ */
+export const MOCK_TIMELINE = "/mock timeline";
+/** Sending exactly this queues a follow-up behind the scripted run, for the queued bubble. */
+export const MOCK_QUEUED = "/mock queued";
+/** Sending exactly this gets the scripted run with its tool call failing (M3-09 AC2). */
+export const MOCK_TIMELINE_FAILED = "/mock timeline failed";
+const TIMELINE_REPLY = "Here's what I found in the docs.";
+const TIMELINE_FAILED_REPLY = "The docs lookup failed, so this is from memory.";
+/** A beat between scripted events: the running header is watchable, the run still ends fast. */
+const SCRIPT_MS = 300;
 const LIMIT_MESSAGES: Record<TurnLimit, string> = {
   slow_down: "You're sending messages quickly. Wait a minute, then try again.",
   limit_reached: "You've reached today's spending limit. It resets at midnight UTC.",
@@ -43,7 +56,8 @@ export function createMockTransport(delayMs = 30): ChatTransport {
   let seq = 0; // one counter, as the server's per-conversation `seq` never restarts per turn
   let onEvent: (event: HarnessEvent) => void = () => {};
   let stop: (() => void) | null = null;
-  /** The running turn's ID, so a dequeue lands on it the way the server's would. */
+  /** The latest turn's ID, so a dequeue lands on it the way the server's would — even when
+   * the run finishes while the Cancel click is on its way. */
   let current: { sessionId: string; turnId: string } | null = null;
   return {
     connect(handle, onOpen) {
@@ -74,10 +88,84 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       current = { sessionId, turnId };
       const emit = (type: HarnessEvent["type"], payload = {}) =>
         onEvent({ v: 1, seq: ++seq, sessionId, turnId, type, payload } as HarnessEvent);
-      const settle = (type: HarnessEvent["type"], payload = {}) => {
-        current = null;
-        emit(type, payload);
-      };
+      // The turn stays answerable after it settles: a Cancel that loses the race with the
+      // run's end still takes its bubble back. The next send replaces it.
+      const settle = (type: HarnessEvent["type"], payload = {}) => emit(type, payload);
+      /** One searching step with a tool call, web taint and usage, then the reply (M3-09). */
+      function scripted(queued: boolean, failTool = false) {
+        begin();
+        const timers: ReturnType<typeof setTimeout>[] = [];
+        const later = (fn: () => void) => void timers.push(setTimeout(fn, SCRIPT_MS));
+        if (queued) {
+          later(() =>
+            emit("turn.queued", {
+              messageId: `${turnId}-queued`,
+              text: "And the follow-up",
+              position: 1,
+              conversationId: sessionId,
+            }),
+          );
+        }
+        later(() =>
+          emit("step.started", { stepId: "s1", label: "Searching the docs", toolCallId: "t1" }),
+        );
+        later(() =>
+          emit("usage.updated", {
+            providerId: "openai",
+            model: "gpt-4.1-mini",
+            usage: {
+              inputTokens: 1200,
+              outputTokens: 300,
+              cachedInputTokens: 0,
+              reasoningTokens: 0,
+            },
+          }),
+        );
+        later(() =>
+          emit("tool.called", {
+            toolCallId: "t1",
+            tool: "fetch",
+            args: '{"url":"https://docs.example/guide"}',
+            risk: "read",
+          }),
+        );
+        later(() => {
+          // A failed call reports like the loop's own failures: the output it got, as the error
+          // (harness-builtin `result`). Nothing arrived, so nothing taints the context.
+          const error = "docs.example refused the connection";
+          emit("tool.result", {
+            toolCallId: "t1",
+            ok: !failTool,
+            preview: failTool ? error : "3 pages · 12 KB",
+            bytes: failTool ? error.length : 12288,
+            ...(failTool ? { error } : {}),
+          });
+          if (!failTool) {
+            emit("context.tainted", {
+              stepId: "s1",
+              source: { kind: "web", label: "docs.example" },
+            });
+          }
+        });
+        later(() =>
+          emit("step.completed", {
+            stepId: "s1",
+            status: failTool ? "error" : "ok",
+            durationMs: 1500,
+          }),
+        );
+        later(() => {
+          stop = null;
+          emit("message.completed", { text: failTool ? TIMELINE_FAILED_REPLY : TIMELINE_REPLY });
+          settle("turn.completed");
+        });
+        stop = () => {
+          for (const timer of timers) clearTimeout(timer);
+          stop = null;
+          if (!started) begin();
+          settle("turn.cancelled");
+        };
+      }
       const reply = text === MOCK_HOSTILE ? HOSTILE_REPLY : REPLY;
       const words = reply.split(/(?<= )/);
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -107,6 +195,8 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         begin();
         timer = setTimeout(tick, delayMs);
       };
+      if (text === MOCK_TIMELINE || text === MOCK_QUEUED || text === MOCK_TIMELINE_FAILED)
+        return void scripted(text === MOCK_QUEUED, text === MOCK_TIMELINE_FAILED);
       if (text === MOCK_SLOW_START) timer = setTimeout(start, 1000);
       else start();
     },

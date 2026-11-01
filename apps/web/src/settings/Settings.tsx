@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings (m3-ux §3.9): one screen, a page per axis. M3-06b ships Models and the read-only
-// Agent engine page, M3-15 the Memory page, M3-17 Spending, M3-19 the Computer and Apps &
-// tools pages, TWO-674 Privacy & security; the other axes arrive with their own cards. The
-// tabs keep the order of the settings list in routes.tsx.
+// Agent engine page, M3-09b the Assistant page, M3-15 the Memory page, M3-17 Spending, M3-19
+// the Computer and Apps & tools pages, TWO-674 Privacy & security; the other axes arrive
+// with their own cards. The tabs keep the order of the settings list in routes.tsx.
 import { useEffect, useRef } from "react";
 import { Heading, Link } from "react-aria-components";
 import { hasNavigated } from "../router";
 import { pageTitle } from "../ui";
 import { AgentEngine } from "./AgentEngine";
 import { AppsTools } from "./AppsTools";
+import { AssistantSettings } from "./AssistantSettings";
 import { Computer } from "./Computer";
 import { MemorySettings } from "./MemorySettings";
 import { ModelsSettings } from "./ModelsSettings";
@@ -17,6 +18,7 @@ import { PrivacySettings } from "./PrivacySettings";
 import { SpendingSettings } from "./Spending";
 
 export type SettingsPage =
+  | "assistant"
   | "models"
   | "agent-engine"
   | "computer"
@@ -26,6 +28,7 @@ export type SettingsPage =
   | "spending";
 
 const PAGES: { id: SettingsPage; label: string; href: string }[] = [
+  { id: "assistant", label: "Assistant", href: "/settings/assistant" },
   { id: "models", label: "Models", href: "/settings/models" },
   { id: "agent-engine", label: "Agent engine", href: "/settings/agent-engine" },
   { id: "computer", label: "Computer", href: "/settings/computer" },
@@ -74,6 +77,8 @@ export function Settings({ page }: { page: SettingsPage }) {
       </nav>
       {page === "models" ? (
         <ModelsSettings />
+      ) : page === "assistant" ? (
+        <AssistantSettings />
       ) : page === "agent-engine" ? (
         <AgentEngine />
       ) : page === "computer" ? (
