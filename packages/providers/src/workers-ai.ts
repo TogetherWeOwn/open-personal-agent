@@ -3,6 +3,7 @@
 // credential is involved, so there is nothing to bind.
 import type { ModelEvent, ModelProvider, ModelRequest } from "@opa/core";
 import {
+  aborted,
   ChatChunkAccumulator,
   error,
   type RawChatChunk,
@@ -22,6 +23,36 @@ export const WORKERS_AI_PROVIDER_ID = "workers-ai";
 /** What a fresh deployment chats with until onboarding picks a model: it needs no key. */
 export const STARTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
+/**
+ * Models whose input schema takes `tools`, from `@cloudflare/workers-types` 5.20261031. A model
+ * missing here reports no tool support until the model Test's tool probe (M3-06) finds it.
+ */
+const TOOL_MODELS: ReadonlySet<string> = new Set([
+  "@cf/aisingapore/gemma-sea-lion-v4-27b-it",
+  "@cf/deepseek-ai/deepseek-v4-flash-0731",
+  "@cf/deepseek-ai/deepseek-v4-pro-0813",
+  "@cf/google/gemma-3-12b-it",
+  "@cf/google/gemma-4-26b-a4b-it",
+  "@cf/meta/llama-3.2-11b-vision-instruct",
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-4-scout-17b-16e-instruct",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct",
+  "@cf/moonshotai/kimi-k2.5",
+  "@cf/moonshotai/kimi-k2.6",
+  "@cf/moonshotai/kimi-k2.7-code",
+  "@cf/nvidia/nemotron-3-120b-a12b",
+  "@cf/openai/gpt-oss-120b",
+  "@cf/openai/gpt-oss-20b",
+  "@cf/qwen/qwen2.5-coder-32b-instruct",
+  "@cf/qwen/qwen3-30b-a3b-fp8",
+  "@cf/qwen/qwen3.8-27b",
+  "@cf/qwen/qwq-32b",
+  "@cf/zai-org/glm-4.7-flash",
+  "@cf/zai-org/glm-5.2",
+  "@cf/zai-org/glm-5.3",
+  "@cf/zai-org/glm-5.3-flash",
+]);
+
 export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
   return {
     id: WORKERS_AI_PROVIDER_ID,
@@ -31,10 +62,8 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
       return models.map((m) => ({ id: m.name, label: m.name }));
     },
 
-    capabilities() {
-      // Many Workers AI chat models take tools and the catalogue changes often; a model that
-      // doesn't fails the call. The model Test's tool probe (M3-06) tells the user up front.
-      return { tools: true, usageInStream: true };
+    capabilities(model) {
+      return { tools: TOOL_MODELS.has(model), usageInStream: true };
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {
@@ -54,7 +83,7 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
       if (!(body instanceof ReadableStream)) {
         // Some models answer a request that offers tools with one whole object instead.
         if (isWholeReply(body)) {
-          yield* whole(body);
+          yield* request.signal?.aborted ? [aborted()] : whole(body);
           return;
         }
         yield error("bad_response", "Workers AI did not return a stream");

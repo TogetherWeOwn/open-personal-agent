@@ -122,10 +122,17 @@ export class ChatChunkAccumulator {
   }
 
   finish(): ModelEvent[] {
+    // The model was billed whatever happens to its calls, so usage is always reported.
+    const events: ModelEvent[] = this.usage ? [{ type: "usage", usage: this.usage }] : [];
     const toolCalls: ModelToolCall[] = [];
-    for (const call of this.calls) {
+    // A reply cut off at the output limit may hold a call with half its arguments: never run it.
+    const calls = this.finishReason === "length" ? [] : this.calls;
+    for (const call of calls) {
       // A call with no name can't be run or answered.
-      if (!call.name) return [error("bad_response", "The provider sent a tool call with no name")];
+      if (!call.name) {
+        events.push(error("bad_response", "The provider sent a tool call with no name"));
+        return events;
+      }
       toolCalls.push({
         id: call.id || callId(),
         name: call.name,
@@ -135,11 +142,8 @@ export class ChatChunkAccumulator {
     // Some hosts report `stop` even when the reply is tool calls.
     let finishReason = this.finishReason ?? "stop";
     if (toolCalls.length && finishReason === "stop") finishReason = "tool_calls";
-    const done: ModelEvent = { type: "done", finishReason };
-    const events: ModelEvent[] = toolCalls.map((toolCall) => ({ type: "tool_call", toolCall }));
-    if (this.usage) events.push({ type: "usage", usage: this.usage });
-    events.push(done);
-    return events;
+    const called = toolCalls.map((toolCall): ModelEvent => ({ type: "tool_call", toolCall }));
+    return [...called, ...events, { type: "done", finishReason }];
   }
 }
 

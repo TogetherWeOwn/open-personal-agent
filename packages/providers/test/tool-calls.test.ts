@@ -166,9 +166,22 @@ describe("openai-chat tool calls", () => {
       "done tool_calls",
     ]);
     const nameless = chunk({ tool_calls: [{ index: 0, id: "c1", function: { arguments: "{}" } }] });
-    const bad = openai([`${nameless}${chunk({}, "tool_calls")}data: [DONE]\n\n`]).p;
+    const usage = `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 2 } })}\n\n`;
+    const bad = openai([`${nameless}${chunk({}, "tool_calls")}${usage}data: [DONE]\n\n`]).p;
+    // The call was billed, so its usage still reaches the ledger.
     expect(await replay(bad.stream({ model: "m", messages: ask, tools: [weather] }))).toEqual([
+      "usage 9/2/0/0",
       "error bad_response: The provider sent a tool call with no name",
+    ]);
+  });
+
+  it("never emits a call from a reply cut off at the output limit", async () => {
+    const half = chunk({
+      tool_calls: [{ index: 0, id: "c1", function: { name: "get_weather", arguments: '{"ci' } }],
+    });
+    const { p } = openai([`${half}${chunk({}, "length")}data: [DONE]\n\n`]);
+    expect(await replay(p.stream({ model: "m", messages: ask, tools: [weather] }))).toEqual([
+      "done length",
     ]);
   });
 
@@ -196,6 +209,8 @@ describe("workers-ai-binding tool calls", () => {
     expect(events.slice(1)).toEqual(["usage 312/18/0/0", "done tool_calls"]);
     expect(inputs[0]).toEqual({ messages: ask, stream: true, tools: [wireTool] });
     expect(p.capabilities(MODEL)).toEqual({ tools: true, usageInStream: true });
+    // A model the catalogue doesn't list as taking tools isn't reported as supporting them.
+    expect(p.capabilities("@cf/meta/llama-2-7b-chat-int8").tools).toBe(false);
   });
 
   it("replays models that stream OpenAI-shaped calls", async () => {
@@ -264,5 +279,21 @@ describe("workers-ai-binding tool calls", () => {
     );
     expect(events.at(-1)).toBe("done tool_calls");
     expect(events[0]).toMatch(/^tool_call \S+ get_weather \{"city":"Faro"\}$/);
+  });
+
+  it("drops a whole-object reply that arrives after a cancel", async () => {
+    const controller = new AbortController();
+    const reply = {
+      response: "",
+      tool_calls: [{ name: "get_weather", arguments: { city: "Faro" } }],
+    };
+    const p = createWorkersAIProvider({
+      run: async () => {
+        controller.abort();
+        return reply;
+      },
+    });
+    const request = { model: MODEL, messages: ask, tools: [weather], signal: controller.signal };
+    expect(await replay(p.stream(request))).toEqual(["error aborted: The request was cancelled"]);
   });
 });
