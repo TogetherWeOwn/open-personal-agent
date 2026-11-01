@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { FileTrigger, Form, ProgressBar, TextArea } from "react-aria-components";
 import { Button } from "../ui";
 import {
@@ -53,6 +53,29 @@ export function Composer({
   onNoModel,
   onFocusChange,
 }: Props) {
+  // The blur report waits a beat: clicking a thread button (copy, retry) blurs the box, and
+  // the re-render would cancel that press before it lands. Refocusing clears the wait.
+  const focusTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (focusTimer.current !== null) window.clearTimeout(focusTimer.current);
+    },
+    [],
+  );
+  const focused = () => {
+    if (focusTimer.current !== null) {
+      window.clearTimeout(focusTimer.current);
+      focusTimer.current = null;
+    }
+    onFocusChange?.(true);
+  };
+  const blurred = () => {
+    if (focusTimer.current !== null) window.clearTimeout(focusTimer.current);
+    focusTimer.current = window.setTimeout(() => {
+      focusTimer.current = null;
+      onFocusChange?.(false);
+    }, 200);
+  };
   const submit = () => {
     if (onNoModel) return onNoModel();
     if (onSend(text)) setText("");
@@ -101,8 +124,8 @@ export function Composer({
             aria-label="Message"
             value={text}
             onChange={(e) => setText(e.target.value)}
-            onFocus={() => onFocusChange?.(true)}
-            onBlur={() => onFocusChange?.(false)}
+            onFocus={focused}
+            onBlur={blurred}
             rows={1}
             placeholder="Message your assistant"
             onKeyDown={(e) => {

@@ -330,7 +330,12 @@ test("returning from Settings reloads the model settings", async ({ page }) => {
   );
   await page.goto("/");
   await expect(page.getByRole("link", { name: /No model set up/ })).toBeVisible();
-  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Main" })
+    .getByRole("link", { name: "Settings" })
+    .click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await page.getByRole("link", { name: "Models", exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/models$/);
   picked = true;
   await page.getByRole("link", { name: "Chats" }).click();
