@@ -1003,6 +1003,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ).length > 0
             );
           },
+          /**
+           * Continue on a task paused by a limit (M3-17 AC1): `budget_limited` back to `running`.
+           * `false` when it isn't paused. Waking its Workflow is the caller's job.
+           */
+          resume: async (id: string) =>
+            (
+              await db
+                .update(tasks)
+                .set({ status: "running", updatedAt: Date.now() })
+                .where(
+                  and(
+                    eq(tasks.id, id),
+                    eq(tasks.userId, userId),
+                    eq(tasks.status, "budget_limited"),
+                  ),
+                )
+                .returning({ id: tasks.id })
+            ).length > 0,
           /** Sets `cancelled` on an active task. Terminating its Workflow is the caller's job. */
           cancel: async (id: string) => {
             const now = Date.now();

@@ -11,7 +11,9 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from "react-aria-components";
-import { Page } from "../ui";
+import { HalfBudgetLine } from "../settings/Spending";
+import { getSpending, type Spending } from "../settings/spending-api";
+import { buttonClass, Page } from "../ui";
 
 interface Line {
   model: string;
@@ -219,6 +221,7 @@ export function Usage() {
   const [data, setData] = useState<UsageData | null>(null);
   const [failed, setFailed] = useState(false);
   const [key, setKey] = useState<"today" | "month">("today");
+  const [spending, setSpending] = useState<Spending | null>(null);
 
   useEffect(() => {
     const now = new Date();
@@ -227,15 +230,13 @@ export function Usage() {
     fetch(`/api/usage?today=${today}&month=${month}`)
       .then((res) => (res.ok ? res.json() : Promise.reject()))
       .then(setData, () => setFailed(true));
+    getSpending().then(setSpending, () => {}); // only the 50% line needs it
   }, []);
 
   const period = data?.[key];
   const label = key === "today" ? "today" : "this month";
   return (
     <Page title="Usage">
-      <Link href="/" className={`${link} self-start`}>
-        <span aria-hidden="true">← </span>Chats
-      </Link>
       {failed && <p role="alert">Usage couldn't be loaded. Try again in a moment.</p>}
       {data && period && (
         <>
@@ -247,6 +248,7 @@ export function Usage() {
             <p className="text-sm text-text-muted">
               Estimated from published prices. Your provider's bill is the final word.
             </p>
+            {spending && <HalfBudgetLine spending={spending} />}
           </div>
           <ToggleButtonGroup
             aria-label="Period"
@@ -277,10 +279,7 @@ export function Usage() {
           {period.groups.length === 0 ? (
             <div className="flex flex-col items-start gap-3">
               <p>No usage yet. Once you chat, you'll see what each message costs here.</p>
-              <Link
-                href="/"
-                className="inline-flex min-h-11 items-center rounded-lg bg-accent px-4 font-medium text-accent-contrast"
-              >
+              <Link href="/" className={buttonClass("primary")}>
                 Start a chat
               </Link>
             </div>
