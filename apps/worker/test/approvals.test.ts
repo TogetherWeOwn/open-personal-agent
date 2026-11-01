@@ -346,6 +346,26 @@ describe("the pending list (M3-07 AC8)", () => {
     expect(batches.map((b) => b.batchId)).toEqual(["b_live"]);
   });
 
+  it("leaves out a whole batch once one of its pending items has expired", async () => {
+    const { browser, owner } = await claim();
+    const insert = (batch: string, position: number, expiresAt: number) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+           VALUES (?, ?, ?, ?, 'c-part', 'turn-1', 'send', ?, 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}_${position}`, position, owner, `c${position}`, expiresAt);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-part', ?)").bind(owner),
+      insert("b_part", 0, Date.now() - 1),
+      insert("b_part", 1, Date.now() + 60_000),
+      insert("b_whole", 0, Date.now() + 60_000),
+      insert("b_whole", 1, Date.now() + 60_000),
+    ]);
+    const { batches } = await (await pending(browser)).json<{ batches: { batchId: string }[] }>();
+    expect(batches.map((b) => b.batchId)).toEqual(["b_whole"]);
+  });
+
   it("still lists the rest when a row's taint or scopes can't be read: careful, deny only", async () => {
     const { browser, owner } = await claim();
     const insert = (batch: string, taint: string | null, scopes: string) =>

@@ -1119,13 +1119,15 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * Every item that can still take a decision (M3-07 AC8): pending, unexpired, and not
            * on a cancelled or finished task. Each with its conversation's title. At most `limit`
            * batches, never part of one (a decision needs every pending item): the batch that
-           * expires soonest first, a batch's items together in their stored order.
+           * expires soonest first, a batch's items together in their stored order. A batch with
+           * a pending item already expired can't take a decision, so none of it is listed.
            */
           pending: (now: number, limit = 100) => {
             const live = and(
               eq(approvals.userId, userId),
               eq(approvals.status, "pending"),
               gt(approvals.expiresAt, now),
+              sql`NOT EXISTS (SELECT 1 FROM approvals stale WHERE stale.batch_id = approvals.batch_id AND stale.status = 'pending' AND stale.expires_at <= ${now})`,
               sql`(${approvals.taskId} IS NULL OR EXISTS (SELECT 1 FROM ${tasks} WHERE ${tasks.id} = ${approvals.taskId} AND ${tasks.status} <> 'cancelled' AND ${tasks.finishedAt} IS NULL))`,
             );
             const batch = db
