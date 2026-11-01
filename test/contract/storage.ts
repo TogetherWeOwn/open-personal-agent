@@ -245,6 +245,7 @@ export function memoryContract(name: string, migrated: () => Promise<D1Database>
         "coffee, not tea, with a long tail of other words",
       ]);
       expect(await memory.search("tea", 1)).toHaveLength(1);
+      expect(await memory.search("tea", -1)).toHaveLength(1);
     });
 
     it("keeps the index in step with inserts, text changes, deletes and deleting the user", async () => {
