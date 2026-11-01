@@ -234,7 +234,7 @@ describe("DELETE /api/account", () => {
     expect(result?.exportInstances).toEqual([`${owner}-inst-e-run`]);
     expect(planted).toBe(true);
     // The route terminates the named runs, then finishes with the final purge.
-    await purgeDeletedUserFiles(racing, owner);
+    await purgeDeletedUserFiles({ FILES: racing }, owner);
     expect(await userR2Keys(owner)).toEqual([]);
   });
 
@@ -318,7 +318,7 @@ describe("DELETE /api/account", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    await purgeDeletedUserFiles(flaky, owner);
+    await purgeDeletedUserFiles({ FILES: flaky }, owner);
     expect(lists).toBe(3);
     expect(await userR2Keys(owner)).toEqual([]);
   });
@@ -335,7 +335,7 @@ describe("DELETE /api/account", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    await expect(purgeDeletedUserFiles(dead, owner, 2)).rejects.toThrow("store down");
+    await expect(purgeDeletedUserFiles({ FILES: dead }, owner, 2)).rejects.toThrow("store down");
   });
 
   it("deletes the only owner: no rows, no R2, no DEK, deployment unclaimed", async () => {

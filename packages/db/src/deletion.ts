@@ -107,7 +107,7 @@ async function purgeUserPrefix(
  * route answers `delete_failed` instead of claiming success with objects possibly left.
  */
 export async function purgeDeletedUserFiles(
-  files: DataBindings<unknown, unknown>["FILES"],
+  bindings: Pick<DataBindings<unknown, unknown>, "FILES">,
   userId: string,
   attempts = 3,
 ): Promise<void> {
@@ -115,7 +115,7 @@ export async function purgeDeletedUserFiles(
   let last: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      await purgeUserPrefix(files, userId);
+      await purgeUserPrefix(bindings.FILES, userId);
       return;
     } catch (error) {
       last = error;

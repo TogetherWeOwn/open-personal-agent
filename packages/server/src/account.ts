@@ -71,7 +71,8 @@ accountRoutes.delete("/", async (c) => {
     );
   }
   try {
-    await purgeDeletedUserFiles(c.env.FILES, userId);
+    // The whole env, as above: only @opa/db touches the raw FILES binding (ADR 0010 D3).
+    await purgeDeletedUserFiles(c.env, userId);
   } catch {
     return c.json({ error: "delete_failed" }, 503);
   }
