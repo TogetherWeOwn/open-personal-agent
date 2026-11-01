@@ -84,9 +84,10 @@ function caller(tool: string, args: unknown[]): ModelProvider {
   };
 }
 
-function gated(name: string, riskClass: RiskClass) {
+function gated(name: string, riskClass: RiskClass, estimateCost?: LoopTool["estimateCost"]) {
   const inputs: unknown[] = [];
   const tool: LoopTool = {
+    ...(estimateCost ? { estimateCost } : {}),
     manifest: {
       name,
       description: `The ${name} tool.`,
@@ -110,9 +111,9 @@ function gated(name: string, riskClass: RiskClass) {
 }
 
 /** Claims, sets up a model and a tool, and stops a turn at its approval. */
-async function stopAt(riskClass: RiskClass, calls = 1) {
+async function stopAt(riskClass: RiskClass, calls = 1, estimateCost?: LoopTool["estimateCost"]) {
   const { browser, owner, key } = await claim();
-  const send = gated("send", riskClass);
+  const send = gated("send", riskClass, estimateCost);
   await runInDurableObject(assistantOf(owner), (i: Assistant) => {
     i.resolveModel = async () => ({
       provider: caller(
@@ -311,6 +312,21 @@ describe("the pending list (M3-07 AC8)", () => {
     });
     await done();
     expect(await (await pending(browser)).json()).toEqual({ batches: [] });
+  });
+
+  it("carries the call's cost estimate on the card, the row and the list (AC6)", async () => {
+    const { browser, batchId, events } = await stopAt("consequential", 1, () => 250_000);
+    const asked = events.find((e) => e.type === "approval.requested");
+    expect(asked).toMatchObject({ payload: { items: [{ costMicroUsd: 250_000 }] } });
+    const stored = db
+      .prepare("SELECT cost_micro_usd FROM approvals WHERE batch_id = ?")
+      .bind(batchId)
+      .first("cost_micro_usd");
+    expect(await stored).toBe(250_000);
+    const { batches } = await (await pending(browser)).json<{
+      batches: { items: { costMicroUsd?: number }[] }[];
+    }>();
+    expect(batches[0]?.items[0]?.costMicroUsd).toBe(250_000);
   });
 
   it("keeps a multi-action batch together, in its stored order", async () => {

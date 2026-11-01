@@ -198,6 +198,7 @@ function itemOf(row: ApprovalRow): ApprovalItem {
     ...(row.taint ? { taint: taintOf(row.taint) } : {}),
     scopes: scopesOf(row),
     expiresAt: row.expiresAt,
+    ...(row.costMicroUsd === null ? {} : { costMicroUsd: row.costMicroUsd }),
   };
 }
 

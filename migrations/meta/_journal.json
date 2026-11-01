@@ -141,6 +141,13 @@
       "when": 1793541007024,
       "tag": "0019_task_cost_and_limit",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1793547222340,
+      "tag": "0020_approval_cost",
+      "breakpoints": true
     }
   ]
 }

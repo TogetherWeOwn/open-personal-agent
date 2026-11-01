@@ -55,6 +55,12 @@ export interface LoopTool extends RegisteredTool {
   /** What the call reaches, e.g. a URL's host: shown on the card and matched by grants. */
   target?(input: Record<string, unknown>): string | undefined;
   /**
+   * What the call itself would spend, in micro-USD, for a tool that spends money (a paid API, a
+   * model it calls itself, priced with `@opa/pricing`). Shown on the card (M3-07 AC6); never
+   * the model call that follows, which every step costs anyway.
+   */
+  estimateCost?(input: Record<string, unknown>): number | undefined;
+  /**
    * Who wrote the manifest's description. A third party's (an MCP server's or a plugin's, M5) is
    * untrusted text the model reads (R7 §5.9), so a turn that offers the tool is tainted.
    */
@@ -557,6 +563,7 @@ export async function* runTurn(
       const source = state.taint.sources[0];
       const items = asks.map(({ call, tool, input, d }): PendingItem => {
         const target = tool.target?.(input);
+        const cost = costOf(tool, input);
         messages.push({ role: "tool", toolCallId: call.id, content: WAITING_FOR_APPROVAL });
         return {
           approvalId: `appr_${call.id}`,
@@ -569,6 +576,7 @@ export async function* runTurn(
           ...(d.taint === "untrusted" && source ? { taint: source } : {}),
           scopes: d.scopes,
           expiresAt: host.now() + APPROVAL_TTL_MS,
+          ...(cost === undefined ? {} : { costMicroUsd: cost }),
           stepUp: d.stepUp,
         };
       });
@@ -579,6 +587,23 @@ export async function* runTurn(
       return "awaiting_approval";
     }
   }
+}
+
+/**
+ * A tool's estimate as a whole number of micro-USD, rounded up so a call that costs anything
+ * never reads as free. One that throws or isn't a usable number is left off the card: the card
+ * says nothing rather than a wrong figure.
+ */
+function costOf(tool: LoopTool, input: Record<string, unknown>): number | undefined {
+  let cost: number | undefined;
+  try {
+    cost = tool.estimateCost?.(input);
+  } catch {
+    return undefined;
+  }
+  return typeof cost === "number" && Number.isFinite(cost) && cost >= 0
+    ? Math.ceil(cost)
+    : undefined;
 }
 
 const TOO_LARGE_TO_APPROVE =

@@ -413,6 +413,7 @@ export type NewApproval = Pick<
   | "stepUp"
   | "scopes"
   | "taint"
+  | "costMicroUsd"
   | "canonical"
   | "bindingHash"
   | "expiresAt"
