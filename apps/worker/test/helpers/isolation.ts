@@ -200,6 +200,15 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       conversation,
       message,
     ),
+    // A turn stopped at its call limit, waiting on Continue.
+    run(
+      "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state) VALUES (?, ?, ?, ?, 'openai', 'gpt-4o', 'limit_reached', ?)",
+      `turn-${tag}`,
+      id,
+      conversation,
+      message,
+      JSON.stringify({ tag }),
+    ),
     // The task's run journal, keyed by its Workflow instance rather than by user.
     run(
       "INSERT INTO task_events (instance_id, type, payload) VALUES (?, 'isolation', ?)",
