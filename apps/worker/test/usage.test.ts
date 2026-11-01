@@ -235,7 +235,7 @@ describe("usage ledger", () => {
     ]);
   });
 
-  it("puts each call on the client's calendar across a DST change, and at UTC+12", () => {
+  it("puts each call on the client's calendar across a DST change, and at UTC+12", async () => {
     const at = (t: number) => ({
       bucket: Math.floor(t / 900_000),
       calls: 1,
@@ -252,10 +252,20 @@ describe("usage ledger", () => {
     const nov2 = Date.UTC(2026, 10, 2, 5);
     const ny = calendar("America/New_York", nov2);
     const calls = rows(nov1 + 30 * 60_000, nov2 - 30 * 60_000, nov2 + 30 * 60_000);
-    expect(breakdowns(calls, nov1, nov2, ny).day.map((d) => [d.date, d.calls])).toEqual([
+    expect(
+      breakdowns(calls, "2026-11-01", "2026-11-02", ny).day.map((d) => [d.date, d.calls]),
+    ).toEqual([
       ["2026-11-01", 2],
       ["2026-11-02", 1],
     ]);
+    // A request without its month falls back to the UTC month, which is still 31 October in New
+    // York: the days start on the client's own 1st all the same.
+    const { browser } = await claim();
+    const now = Date.now();
+    const local = calendar("America/New_York", now)(now);
+    const res = await browser.req(`/api/usage?tz=America%2FNew_York`);
+    const { day } = (await res.json<UsageBody>()).breakdowns;
+    expect([day[0]?.date, day.at(-1)?.date]).toEqual([`${local.slice(0, 7)}-01`, local]);
     // An old client sends no zone: its midnight's offset stands in, and +12 h is a day ahead.
     const auckland = Date.UTC(2026, 10, 1, 12); // midnight on 2 November at UTC+12
     const plus12 = calendar(undefined, auckland);
