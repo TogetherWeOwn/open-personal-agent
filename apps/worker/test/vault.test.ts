@@ -41,6 +41,10 @@ beforeAll(async () => {
   await env.DB.prepare(
     "INSERT INTO users (id, display_name, role) VALUES ('u1', 'A', 'owner')",
   ).run();
+  // Claimed, so the claim guard (M2-09) lets requests reach the secret routes.
+  await env.DB.prepare(
+    "INSERT INTO setup_state (id, claimed_by_user_id, claimed_at) VALUES (1, 'u1', 0)",
+  ).run();
 });
 
 describe("V4: the env filter", () => {
