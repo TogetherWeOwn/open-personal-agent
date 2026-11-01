@@ -27,9 +27,10 @@ export function createSocketTransport({
 }: SocketOptions = {}): ChatTransport {
   let socket: Socket | null = null;
   let onEvent: (event: HarnessEvent) => void = () => {};
-  const json = async <T>(path: string, missing: T): Promise<T> => {
-    const res = await get(path);
-    if (res.status === 404) return missing;
+  /** A read under `/api/conversations`; `null` for a 404. */
+  const json = async <T>(path: string): Promise<T | null> => {
+    const res = await get(`/api/conversations${path}`);
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`${path}: ${res.status}`);
     return res.json();
   };
@@ -74,31 +75,23 @@ export function createSocketTransport({
         socket.send(JSON.stringify({ type: "chat.send", conversationId, text }));
         return;
       }
-      const message = "Not connected to your assistant. Try again in a moment.";
+      const payload = { message: "Not connected to your assistant. Try again in a moment." };
       onEvent({
         v: 1,
         seq: 0,
         sessionId: conversationId,
         turnId: "",
         type: "turn.failed",
-        payload: { message },
+        payload,
       });
     },
     cancel() {
       if (socket?.readyState === OPEN) socket.send(JSON.stringify({ type: "turn.cancel" }));
     },
     conversations: async () =>
-      (
-        await json<{ conversations: ConversationSummary[] }>("/api/conversations", {
-          conversations: [],
-        })
-      ).conversations,
+      (await json<{ conversations: ConversationSummary[] }>(""))?.conversations ?? [],
     messages: async (id) =>
-      (
-        await json<{ messages: StoredMessage[] } | null>(
-          `/api/conversations/${encodeURIComponent(id)}/messages`,
-          null,
-        )
-      )?.messages ?? null,
+      (await json<{ messages: StoredMessage[] }>(`/${encodeURIComponent(id)}/messages`))
+        ?.messages ?? null,
   };
 }
