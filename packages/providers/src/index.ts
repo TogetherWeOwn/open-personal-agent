@@ -5,7 +5,11 @@ export {
   type OpenAIChatCompat,
 } from "./compat";
 export { canonicalOrigin, credentialBinding } from "./credential-binding";
-export { createOpenAIChatProvider, type OpenAIChatOptions } from "./openai-chat";
+export {
+  createOpenAIChatProvider,
+  isLoopbackHost,
+  type OpenAIChatOptions,
+} from "./openai-chat";
 export {
   createWorkersAIProvider,
   WORKERS_AI_PROVIDER_ID,

@@ -7,6 +7,7 @@ import {
   createOpenAIChatProvider,
   createWorkersAIProvider,
   credentialBinding,
+  isLoopbackHost,
   type WorkersAIBinding,
 } from "@opa/providers";
 import { decrypt, encrypt, type UserScope as VaultScope } from "@opa/vault";
@@ -57,6 +58,8 @@ function leaks(text: string, key: string) {
 }
 
 type Ctx = Context<AppEnv>;
+// Only with the guarded fetch that enforces it; the flag alone never widens plain HTTP.
+const privateHttp = (c: Ctx) => c.env.MODEL_PRIVATE_HOSTS === true && !!c.env.MODEL_FETCH;
 const fail = (c: Ctx, status: 400 | 404 | 409 | 503, error: string) => c.json({ error }, status);
 
 export const settings = new Hono<AppEnv>();
@@ -100,10 +103,15 @@ settings.put("/model", async (c) => {
   }
   let binding: string;
   try {
-    // The Worker reaches public hosts only, so a key never travels over plain HTTP. The adapter
-    // refuses a query or fragment, so a URL with one could be saved but never tested.
+    // A key never crosses the internet over plain HTTP: HTTP is for a server on this machine
+    // (`pnpm dev`'s mock, Ollama), or on Node with private hosts allowed, whose fetch refuses
+    // plain HTTP to a public address. The adapter refuses a query or fragment, so a URL with one
+    // could be saved but never tested.
     const url = new URL(baseUrl);
-    if (url.protocol !== "https:" || url.search || url.hash) throw new Error("invalid URL");
+    const plain = url.protocol === "http:" && (isLoopbackHost(url.hostname) || privateHttp(c));
+    if ((url.protocol !== "https:" && !plain) || url.search || url.hash) {
+      throw new Error("invalid URL");
+    }
     binding = credentialBinding(providerId, baseUrl);
   } catch {
     return fail(c, 400, "invalid_base_url");
@@ -155,7 +163,8 @@ settings.post("/model/test", async (c) => {
     if (apiKey === null) return fail(c, 409, "key_required");
     // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
     const fetch = c.env.MODEL_FETCH ? { fetch: c.env.MODEL_FETCH } : {};
-    provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey, ...fetch });
+    const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(c), ...fetch };
+    provider = createOpenAIChatProvider(options);
     await store.keyUsed(secretId);
   }
   const started = Date.now();

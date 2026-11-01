@@ -49,27 +49,32 @@ type LookupCallback = (
   family?: number,
 ) => void;
 type IsBlocked = (address: string) => boolean;
+/** Why an address is refused, or null when it may be reached. */
+type Refuse = (address: string) => string | null;
 
-/** `dns.lookup` that fails when any address for the host is blocked. */
-const publicLookup =
-  (isBlocked: IsBlocked) => (hostname: string, options: LookupOptions, callback: LookupCallback) =>
+/** `dns.lookup` that fails when any address for the host is refused. */
+const guardedLookup =
+  (refuse: Refuse) => (hostname: string, options: LookupOptions, callback: LookupCallback) =>
     lookup(hostname, { ...options, all: true }, (err, addresses) => {
       if (err) return callback(err, []);
-      if (addresses.length === 0 || addresses.some((a) => isBlocked(a.address))) {
-        return callback(blockedHost(hostname), []);
-      }
+      const reason = addresses.length === 0 ? "unresolved" : first(addresses, refuse);
+      if (reason) return callback(blockedHost(hostname, reason), []);
       if (options.all) return callback(null, addresses);
-      const [first] = addresses as [LookupAddress];
-      callback(null, first.address, first.family);
+      const [address] = addresses as [LookupAddress];
+      callback(null, address.address, address.family);
     });
 
-const blockedHost = (host: string) =>
-  Object.assign(new Error(`Model host ${host} is on a private network`), { code: "EBLOCKED" });
+const first = (addresses: LookupAddress[], refuse: Refuse) =>
+  addresses.map((a) => refuse(a.address)).find((reason) => reason !== null) ?? null;
+
+const blockedHost = (host: string, reason: string) =>
+  Object.assign(new Error(`Model host ${host} is ${reason}`), { code: "EBLOCKED" });
 
 /**
  * The fetch model providers use on Node. Unless `allowPrivate` (the operator's
  * `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`, for a model server on the same machine or LAN), it refuses
- * hosts that resolve to a private, loopback, link-local or metadata address. `isBlocked` is for
+ * hosts that resolve to a private, loopback, link-local or metadata address. Plain HTTP reaches
+ * private addresses only, so a key never crosses the internet unencrypted. `isBlocked` is for
  * tests.
  */
 export function modelFetch({
@@ -79,14 +84,23 @@ export function modelFetch({
   allowPrivate: boolean;
   isBlocked?: IsBlocked;
 }): typeof fetch {
-  if (allowPrivate) return fetch;
-  const connectTo = buildConnector({ lookup: publicLookup(isBlocked) });
+  const refuse =
+    (plain: boolean): Refuse =>
+    (address) => {
+      if (isBlocked(address)) return allowPrivate ? null : "on a private network";
+      return plain ? "public, so it needs https" : null;
+    };
+  const [refuseTls, refusePlain] = [refuse(false), refuse(true)];
+  const tls = buildConnector({ lookup: guardedLookup(refuseTls) });
+  const plain = buildConnector({ lookup: guardedLookup(refusePlain) });
   const dispatcher = new Agent({
     // Every connection, including each redirect hop. A literal IP connects without a lookup.
     connect(options, callback) {
+      const isPlain = options.protocol === "http:";
       const host = options.hostname.replace(/^\[(.*)\]$/, "$1");
-      if (isIP(host) && isBlocked(host)) return callback(blockedHost(host), null);
-      return connectTo(options, callback);
+      const reason = isIP(host) ? (isPlain ? refusePlain : refuseTls)(host) : null;
+      if (reason) return callback(blockedHost(host, reason), null);
+      return (isPlain ? plain : tls)(options, callback);
     },
   });
   return async (input, init) => {

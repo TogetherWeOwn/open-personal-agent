@@ -21,9 +21,10 @@ It serves the web app as built, so for live reload of web changes run `pnpm dev:
 
 `pnpm dev` also starts a mock OpenAI-compatible model server at `http://127.0.0.1:8788/v1`
 (`pnpm dev:mock-model` starts it alone). It answers `GET /models` and streams an echo of your last
-message from `POST /chat/completions`, so model calls need no API key and cost nothing. The web
+message from `POST /chat/completions`, so model calls accept any API key and cost nothing. The web
 chat still uses canned replies; once onboarding and the chat transport land, choose the
-OpenAI-compatible option with that base URL.
+OpenAI-compatible option with that base URL. Base URLs must use `https://`, except for a server on
+this machine (`localhost`, `127.0.0.1`, `[::1]`), which may use `http://`.
 
 ### Run on Node (self-host)
 
@@ -38,7 +39,9 @@ now: `/api/health` on Node reports them as `false`, and its status stays `ok`.
 
 On Node, model providers can't reach private, loopback, link-local or cloud-metadata addresses, so
 a base URL can't be used to read your network. To use a model server on the same machine or LAN
-(Ollama, the mock server), set `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`.
+(Ollama, the mock server), set `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`. Base URLs may then use `http://`
+for any host, but plain HTTP only connects to a private address, so a key never crosses the
+internet unencrypted.
 
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
