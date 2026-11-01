@@ -7,6 +7,7 @@
 // (AC4). The adapter takes a structural stepper, so tests drive it without the Workflow engine.
 import {
   type JsonValue,
+  redactSecrets,
   STEP_OUTPUT_INLINE_MAX_BYTES,
   TASK_LIMITS,
   type TaskBudget,
@@ -16,7 +17,7 @@ import {
   type TaskStepper,
 } from "@opa/core";
 import type { TaskStatus } from "@opa/db/repository";
-import type { Reservation } from "./limits";
+import type { CallScope, Refusal, Reservation } from "./limits";
 
 /** The assistant RPC surface a task may use, structural so tests can stand in for the stub. */
 export interface AssistantTaskRpc {
@@ -25,7 +26,8 @@ export interface AssistantTaskRpc {
     providerId: string,
     model: string,
     chars: number,
-  ): Promise<Reservation | null>;
+    scope: CallScope,
+  ): Promise<Reservation | Refusal>;
   settleTaskCall(
     key: string,
     providerId: string,
@@ -33,6 +35,9 @@ export interface AssistantTaskRpc {
     usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null,
   ): Promise<void>;
   releaseTaskCall(key: string): Promise<void>;
+  startTask(taskId: string, budgetMicroUsd?: number): Promise<{ budgetMicroUsd: number }>;
+  endTask(taskId: string): Promise<number>;
+  allowToolCall(callKey: string): Promise<boolean>;
   taskProgress(progress: {
     conversationId: string;
     turnId: string;
@@ -52,6 +57,8 @@ export interface WorkflowTaskContextDeps {
   turnId: string;
   /** When the task's clock started (its row's `started_at`, else `created_at`). */
   startedAt: number;
+  /** Time spent paused at a limit (M3-17), which the duration limit doesn't count. */
+  pausedMs?: () => number;
   mode: "interactive" | "background";
   /** A fresh read of the task row's status; `undefined` when the row is gone. */
   readStatus(): Promise<TaskStatus | undefined>;
@@ -116,7 +123,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
   async function guard(): Promise<"cancelled" | "duration" | null> {
     const status = await deps.readStatus();
     if (status === undefined || TERMINAL.includes(status)) return "cancelled";
-    if (now() - deps.startedAt > durationMs) return "duration";
+    if (now() - deps.startedAt - (deps.pausedMs?.() ?? 0) > durationMs) return "duration";
     return null;
   }
 
@@ -135,12 +142,17 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
     if (why) stop(why);
   }
 
+  // Every call draws on this task's budget; a background task's also stops at the hard cap.
+  const scope: CallScope = { taskId: deps.taskId, background: deps.mode === "background" };
   const budget: TaskBudget = {
+    start: (budgetMicroUsd) => deps.assistant.startTask(deps.taskId, budgetMicroUsd),
     reserve: (key, providerId, model, chars) =>
-      deps.assistant.reserveTaskCall(key, providerId, model, chars),
+      deps.assistant.reserveTaskCall(key, providerId, model, chars, scope),
     settle: (key, providerId, model, usage) =>
       deps.assistant.settleTaskCall(key, providerId, model, usage),
     release: (key) => deps.assistant.releaseTaskCall(key),
+    end: () => deps.assistant.endTask(deps.taskId),
+    allowToolCall: (key) => deps.assistant.allowToolCall(key),
   };
 
   return {
@@ -206,28 +218,6 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
         .catch(() => {}); // progress is best-effort; the task's state lives in D1
     },
   };
-}
-
-/**
- * Replaces every exact occurrence of a guarded secret in a step output's strings, object keys
- * included. Step outputs
- * are persisted (and replayed from storage), so a provider or tool that echoes a key back —
- * the failure M3-06a had to guard in the Test reply — must not fix it in durable state.
- */
-export function redactSecrets<T>(value: T, secrets: readonly string[]): T {
-  if (secrets.length === 0) return value;
-  if (typeof value === "string") {
-    let out: string = value;
-    for (const secret of secrets) out = out.split(secret).join("[redacted]");
-    return out as T;
-  }
-  if (Array.isArray(value)) return value.map((v) => redactSecrets(v, secrets)) as T;
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [redactSecrets(k, secrets), redactSecrets(v, secrets)]),
-    ) as T;
-  }
-  return value;
 }
 
 /** The storage id of a step's offloaded output: the hex SHA-256 of its idempotency key. */
