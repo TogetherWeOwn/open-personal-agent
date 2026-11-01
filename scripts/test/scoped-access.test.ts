@@ -40,6 +40,40 @@ describe("scoped-access lint", () => {
     ]);
   });
 
+  it("keeps the memory tables to MemoryService", () => {
+    for (const text of [
+      'import { memories } from "@opa/db";',
+      'import {\n  conversations,\n  memories,\n} from "../../packages/db/src/schema";',
+      "db.select().from(schema.memories)",
+      "db.insert(memoryLinks)",
+      "sql`DELETE FROM memories WHERE id = ?`",
+      "SELECT * FROM memories_fts WHERE memories_fts MATCH ?",
+      "INSERT INTO `memories` (id) VALUES (?)",
+      'import * as db from "@opa/db";',
+      'import { memories } from "./index";',
+      "db.query.memories.findMany()",
+    ]) {
+      expect(
+        [
+          lint("apps/worker/src/a.ts", text),
+          lint("packages/db/src/repository.ts", text),
+          lint("packages/db/src/memory.ts", text),
+          lint("packages/db/src/schema.ts", text),
+          lint("apps/worker/test/a.ts", text),
+        ].map((n) => n > 0),
+      ).toEqual([true, true, false, false, false]);
+    }
+    for (const text of [
+      "const memory = repo.forUser(scope).memory;",
+      'const label = "Memories to confirm";',
+      "state.memories.length",
+      'import { memoryService } from "./memory";',
+      'import * as auth from "./auth";',
+    ]) {
+      expect(lint("apps/web/src/a.tsx", text), text).toBe(0);
+    }
+  });
+
   it("limits scope minting, the master key and the runtime env", () => {
     const cases: [string, string, number][] = [
       ["apps/worker/src/chat.ts", "scopeFromSession(s)", 1],

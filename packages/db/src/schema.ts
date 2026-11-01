@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import {
   blob,
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -288,3 +289,63 @@ export const userSettings = sqliteTable("user_settings", {
   onboardedAt: integer("onboarded_at"),
   updatedAt: integer("updated_at").notNull().default(now),
 });
+
+/**
+ * Memory (ADR 0008). Only `MemoryService` (`./memory.ts`) reads or writes these tables; the
+ * scoped-access lint enforces it. A row's text never changes: an edit inserts a new row that
+ * supersedes the old one through `memory_links`. `n` is the rowid the `memories_fts` index
+ * (hand-written in migration 0005) points at, so it survives VACUUM; `id` is the public ID.
+ */
+export const memories = sqliteTable(
+  "memories",
+  {
+    n: integer("n").primaryKey(),
+    id: text("id").notNull().unique(),
+    userId: userId(),
+    kind: text("kind", { enum: ["fact", "instruction"] }).notNull(),
+    text: text("text").notNull(),
+    trust: text("trust", { enum: ["system", "user", "inferred", "external"] }).notNull(),
+    status: text("status", { enum: ["active", "proposed", "superseded"] }).notNull(),
+    /** What the row does to the rows it links to; acted on when a proposal is accepted. */
+    op: text("op", { enum: ["create", "update", "merge", "delete"] }).notNull(),
+    source: text("source", {
+      enum: ["memory_screen", "chat", "web", "file", "tool", "system"],
+    }).notNull(),
+    sourceRef: text("source_ref"),
+    sourceExcerpt: text("source_excerpt"),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+    lastUsedAt: integer("last_used_at"),
+    /** A proposal expires to rejected after this (M3-15 AC2); null on every other row. */
+    expiresAt: integer("expires_at"),
+  },
+  (t) => [
+    uniqueIndex("memories_id_user_idx").on(t.id, t.userId),
+    index("memories_user_idx").on(t.userId, t.status, t.createdAt),
+  ],
+);
+
+/** `memory_id` supersedes (or, as a proposal, would replace) `target_id`. Both are the user's. */
+export const memoryLinks = sqliteTable(
+  "memory_links",
+  {
+    memoryId: text("memory_id").notNull(),
+    targetId: text("target_id").notNull(),
+    userId: userId(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.memoryId, t.targetId] }),
+    foreignKey({
+      columns: [t.memoryId, t.userId],
+      foreignColumns: [memories.id, memories.userId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.targetId, t.userId],
+      foreignColumns: [memories.id, memories.userId],
+    }).onDelete("cascade"),
+    index("memory_links_target_idx").on(t.userId, t.targetId),
+  ],
+);
