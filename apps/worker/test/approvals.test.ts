@@ -4,6 +4,7 @@
 // anything is recorded or resumed. Includes the M3-21a isolation cases for these routes.
 import { runInDurableObject } from "cloudflare:test";
 import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
 import type { LoopTool } from "@opa/harness-builtin";
 import { type RiskClass, ToolRegistry } from "@opa/policy";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -343,6 +344,39 @@ describe("the pending list (M3-07 AC8)", () => {
     ]);
     const { batches } = await (await pending(browser)).json<{ batches: { batchId: string }[] }>();
     expect(batches.map((b) => b.batchId)).toEqual(["b_live"]);
+  });
+
+  it("limits by batch, never cutting one, and keeps a batch's items in their stored order", async () => {
+    const { owner } = await claim();
+    const now = Date.now();
+    // Position 0 expires after position 1: the order is still the stored one.
+    const insert = (batch: string, position: number, expiresAt: number) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+           VALUES (?, ?, ?, ?, 'c-order', 'turn-1', 'send', ?, 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}_${position}`, position, owner, `c${position}`, expiresAt);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-order', ?)").bind(owner),
+      insert("b_soon", 0, now + 120_000),
+      insert("b_soon", 1, now + 60_000),
+      insert("b_soon", 2, now + 90_000),
+      insert("b_later", 0, now + 300_000),
+    ]);
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    const one = await user.approvals.pending(now, 1);
+    expect(one.map(({ row }) => row.approvalId)).toEqual([
+      "appr_b_soon_0",
+      "appr_b_soon_1",
+      "appr_b_soon_2",
+    ]);
+    expect((await user.approvals.pending(now)).map(({ row }) => row.batchId)).toEqual([
+      "b_soon",
+      "b_soon",
+      "b_soon",
+      "b_later",
+    ]);
   });
 
   it("answers only for the session's user, and only with a session", async () => {
