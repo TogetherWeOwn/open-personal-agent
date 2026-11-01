@@ -332,22 +332,33 @@ describe("the Anthropic preset on Messages (M3-05 AC3)", () => {
       key: { last4: CANARY.slice(-4) },
     });
     expect(saved.text).not.toContain(CANARY);
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      const usage = { input_tokens: 9, output_tokens: 1 };
-      return new Response(
+    const usage = { input_tokens: 9, output_tokens: 1 };
+    const reply = (block: object, delta: object, stop: string) =>
+      new Response(
         sse(
           event("message_start", { message: { usage } }),
-          event("content_block_start", { index: 0, content_block: { type: "text", text: "" } }),
-          event("content_block_delta", { index: 0, delta: { type: "text_delta", text: "ready" } }),
-          event("message_delta", { delta: { stop_reason: "end_turn" }, usage }),
+          event("content_block_start", { index: 0, content_block: block }),
+          event("content_block_delta", { index: 0, delta }),
+          event("message_delta", { delta: { stop_reason: stop }, usage }),
           event("message_stop"),
         ),
       );
-    });
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_url, init) =>
+        offersTools(init)
+          ? reply(
+              { type: "tool_use", id: "toolu_1", name: "report_ready", input: {} },
+              { type: "input_json_delta", partial_json: "{}" },
+              "tool_use",
+            )
+          : reply({ type: "text", text: "" }, { type: "text_delta", text: "ready" }, "end_turn"),
+      );
     const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
     expect(tested).toMatchObject({
       ok: true,
       tools: true,
+      toolProbe: "called",
       reply: "ready",
       price: { inputUsdPerMTok: 2, outputUsdPerMTok: 10, verifiedAt: "2026-11-01" },
     });
@@ -357,6 +368,11 @@ describe("the Anthropic preset on Messages (M3-05 AC3)", () => {
     expect(headers.get("x-api-key")).toBe(CANARY);
     expect(headers.get("authorization")).toBeNull();
     expect(headers.get("anthropic-version")).toBe("2026-10-21");
+    // The probe offers its tool in the Messages shape, cached as the last tool.
+    const probe = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    expect(probe.tools).toMatchObject([
+      { name: "report_ready", cache_control: { type: "ephemeral" } },
+    ]);
   });
 
   it("keeps Anthropic's host under another preset on Chat Completions", async () => {
