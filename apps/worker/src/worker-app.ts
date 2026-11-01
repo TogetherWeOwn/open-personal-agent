@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Worker's app: the shared app plus the chat socket (ADR 0002), a WebSocket to the user's
-// assistant. The DO is named from the session only: no route takes a name, and the SDK's
-// `/agents/*` router isn't mounted. apps/node never loads this module (ADR 0011 #3).
+// The Worker's app: the shared app plus the chat socket to the user's assistant (ADR 0002), named
+// from the session only; the SDK's `/agents/*` router isn't mounted. apps/node never loads it.
 import { createRepository } from "@opa/db/repository";
 import { Hono } from "hono";
 import { createApp } from "./app";
