@@ -139,6 +139,11 @@ export class Assistant extends Agent<Bindings> {
     return this.limits.raiseTask(taskId);
   }
 
+  /** Undoes a Continue's raise when the task couldn't be woken, so Continue can try again. */
+  unraiseTask(taskId: string): void {
+    this.limits.unraiseTask(taskId);
+  }
+
   /** Settles a task's budget at its end: what the task spent. */
   endTask(taskId: string): number {
     return this.limits.endTask(taskId);
@@ -149,9 +154,12 @@ export class Assistant extends Agent<Bindings> {
     return this.limits.task(taskId);
   }
 
-  /** Counts a tool call against 60 a minute (COST-2); `false` means the tool must not run. */
-  allowToolCall(): boolean {
-    return this.limits.toolCall();
+  /**
+   * Counts a tool call against 60 a minute (COST-2); `false` means the tool must not run. The
+   * key (the step's idempotency key) keeps a retried step from counting the same call twice.
+   */
+  allowToolCall(callKey?: string): boolean {
+    return this.limits.toolCall(callKey);
   }
 
   /** The Spending settings and what they limit so far, for Settings › Spending (M3-17 AC5). */
@@ -169,10 +177,16 @@ export class Assistant extends Agent<Bindings> {
     };
   }
 
-  /** Saves a Spending change if every field is valid (`checkSpending`); `null` if not. */
-  setSpending(body: unknown): SpendingSettings | null {
+  /**
+   * Saves a Spending change if every field is valid (`checkSpending`); `null` if not. Returns
+   * the settings before and after together, so an audit of the change can't pair this write
+   * with another request's "before".
+   */
+  setSpending(body: unknown): { before: SpendingSettings; after: SpendingSettings } | null {
     const changes = checkSpending(body);
-    return changes && this.limits.setSettings(changes);
+    if (!changes) return null;
+    const before = this.limits.settings();
+    return { before, after: this.limits.setSettings(changes) };
   }
 
   /**

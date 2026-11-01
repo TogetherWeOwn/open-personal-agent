@@ -207,6 +207,7 @@ describe("budget and progress over DO RPC (AC8)", () => {
 
   it("reserves and settles through the user's own assistant", async () => {
     const { ctx, stepper } = await context({ assistant: assistantOf() });
+    await ctx.budget.start(); // a task's calls draw on its budget, reserved as it starts
     const result = await ctx.step("llm:1", async (key) => {
       const reservation = await ctx.budget.reserve(key, "openai", "gpt-4.1", 2000);
       expect("maxOutputTokens" in reservation && reservation.maxOutputTokens).toBeGreaterThan(0);

@@ -29,6 +29,7 @@ const bob = repo.forUser(scopeFromSession({ userId: "bob" }));
 const carol = repo.forUser(scopeFromSession({ userId: "carol" }));
 const dave = repo.forUser(scopeFromSession({ userId: "dave" }));
 const erin = repo.forUser(scopeFromSession({ userId: "erin" }));
+const fred = repo.forUser(scopeFromSession({ userId: "fred" }));
 /** The user's assistant over DO RPC, as the Workflow and the routes reach it. */
 const rpc = (user: typeof alice) => user.assistant() as unknown as DurableObjectStub<Assistant>;
 
@@ -182,13 +183,14 @@ async function run(
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   await env.DB.prepare(
-    "INSERT INTO users (id, display_name, role) VALUES ('alice', 'A', 'owner'), ('bob', 'B', 'member'), ('carol', 'C', 'member'), ('dave', 'D', 'member'), ('erin', 'E', 'member')",
+    "INSERT INTO users (id, display_name, role) VALUES ('alice', 'A', 'owner'), ('bob', 'B', 'member'), ('carol', 'C', 'member'), ('dave', 'D', 'member'), ('erin', 'E', 'member'), ('fred', 'F', 'member')",
   ).run();
   await alice.createConversation("ca", "Alice's");
   await bob.createConversation("cb", "Bob's");
   await carol.createConversation("cc", "Carol's");
   await dave.createConversation("cd", "Dave's");
   await erin.createConversation("ce", "Erin's");
+  await fred.createConversation("cf", "Fred's");
 });
 
 describe("task workflow", () => {
@@ -330,7 +332,10 @@ describe("task workflow", () => {
     );
     await promise;
     expect(streams()).toBe(1); // the next model step's guard stopped it
-    expect((await alice.tasks.get(taskId))?.status).toBe("budget_limited");
+    const row = await alice.tasks.get(taskId);
+    expect(row?.status).toBe("budget_limited");
+    // The run has ended, so Continue must not be offered for it.
+    expect(JSON.parse(row?.state ?? "{}").paused).toMatchObject({ kind: "duration", final: true });
   });
 
   it("runs through the real Workflow binding", async () => {
@@ -405,14 +410,23 @@ describe("task limits (M3-17)", () => {
     await rpc(dave).reserveTaskCall("chat-call", "openai", "gpt-4.1", 2000, {});
     await rpc(dave).settleTaskCall("chat-call", "openai", "gpt-4.1", null);
     const { taskId, instanceId } = await makeTask(dave, "cd", "background");
-    const stepper = new FakeStepper();
+    let pausedAs: unknown;
+    // While it waits, the row says why; then the user presses Stop.
+    const stepper = new FakeStepper([
+      async () => {
+        const row = await dave.tasks.get(taskId);
+        pausedAs = [row?.status, JSON.parse(row?.state ?? "{}").paused?.kind];
+        await dave.tasks.cancel(taskId);
+        return null;
+      },
+    ]);
     const { promise, streams } = await run([{ text: "hi" }], instanceId, stepper);
     await promise;
     expect(streams()).toBe(0);
+    expect(pausedAs).toEqual(["budget_limited", "monthly_hard"]);
     expect(stepper.waits).toBe(1);
-    const row = await dave.tasks.get(taskId);
-    expect(row?.status).toBe("budget_limited");
-    expect(JSON.parse(row?.state ?? "{}").paused).toMatchObject({ kind: "monthly_hard" });
+    expect((await dave.tasks.get(taskId))?.status).toBe("cancelled");
+    expect(await rpc(dave).taskBudget(taskId)).toBeNull(); // settled on the way out
   });
 
   it("a replay on a later day takes the path the paused run took", async () => {
@@ -423,11 +437,15 @@ describe("task limits (M3-17)", () => {
     const { taskId, instanceId } = await makeTask(erin, "ce", "background");
     const DAY = 86_400_000;
     let clock = Date.now();
-    // The first pause's wait runs out past midnight, so the cap lifts on its own; the second
-    // pause (still refused) waits out nothing and ends the run.
+    // The first pause's wait runs out past midnight, so the cap lifts on its own; the call is
+    // refused again (the assistant's day hasn't turned), and during that pause the user stops it.
     const stepper = new FakeStepper([
       async () => {
         clock += DAY;
+        return null;
+      },
+      async () => {
+        await erin.tasks.cancel(taskId);
         return null;
       },
     ]);
@@ -435,8 +453,8 @@ describe("task limits (M3-17)", () => {
     await first.promise;
     expect(stepper.waits).toBe(2);
     const steps = [...stepper.persisted.keys()];
-    expect(steps.filter((n) => n.startsWith("task:wake:"))).toHaveLength(2);
-    expect((await erin.tasks.get(taskId))?.status).toBe("budget_limited");
+    expect(steps.filter((n) => n.startsWith("task:pause:"))).toHaveLength(2);
+    expect((await erin.tasks.get(taskId))?.status).toBe("cancelled");
     // The engine replays the same instance two days later: every step comes back from storage,
     // so no new step runs and the run ends where it ended.
     clock += 2 * DAY;
@@ -446,6 +464,28 @@ describe("task limits (M3-17)", () => {
     await again.promise;
     expect([...replay.persisted.keys()]).toEqual(steps);
     expect(again.streams()).toBe(0);
+  });
+
+  it("waits out a hard-cap pause longer than one wait, in turns, until the month turns", async () => {
+    await rpc(fred).setSpending({ hardCapMicroUsd: 10_000 });
+    await rpc(fred).reserveTaskCall("chat", "openai", "gpt-4.1", 2000, {});
+    await rpc(fred).settleTaskCall("chat", "openai", "gpt-4.1", null);
+    const { taskId, instanceId } = await makeTask(fred, "cf", "background");
+    let clock = Date.UTC(2026, 10, 2); // paused on 2 November; the cap lifts on 1 December
+    const week = async (n: number) => {
+      clock += 7 * 86_400_000;
+      if (n === 5) await rpc(fred).setSpending({ hardCapMicroUsd: null }); // so the retry runs
+      return null;
+    };
+    const stepper = new FakeStepper([1, 2, 3, 4, 5].map((n) => () => week(n)));
+    const { promise, streams } = await run([{ text: "done" }], instanceId, stepper, [], {
+      now: () => clock,
+    });
+    await promise;
+    // 9, 16, 23 and 30 November are still before the reset; 7 December is past it.
+    expect(stepper.waits).toBe(5);
+    expect(streams()).toBe(1);
+    expect((await fred.tasks.get(taskId))?.status).toBe("succeeded");
   });
 
   it("refuses the 61st tool call in a minute without running it, as slow-down (COST-2)", async () => {

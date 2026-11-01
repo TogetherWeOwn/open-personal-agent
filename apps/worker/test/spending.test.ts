@@ -73,6 +73,27 @@ describe("spending settings", () => {
     ]);
   });
 
+  it("puts a change back when its audit row can't be written", async () => {
+    const { browser } = await claim();
+    // Make the audit insert fail: a trigger stands in for D1 refusing the write.
+    await db
+      .prepare(
+        "CREATE TRIGGER no_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'settings.spending' BEGIN SELECT RAISE(ABORT, 'audit down'); END",
+      )
+      .run();
+    try {
+      const res = await browser.req("/api/settings/spending", {
+        method: "PUT",
+        body: { dailyCapMicroUsd: 10_000_000 },
+      });
+      expect(res.status).toBe(500);
+      const { settings } = await (await browser.req("/api/settings/spending")).json<Body>();
+      expect(settings.dailyCapMicroUsd).toBe(5_000_000);
+    } finally {
+      await db.prepare("DROP TRIGGER no_audit").run();
+    }
+  });
+
   it("warns at 50, 80 and 100% of the monthly budget from the ledger", async () => {
     const { browser, owner } = await claim();
     const warning = async () =>

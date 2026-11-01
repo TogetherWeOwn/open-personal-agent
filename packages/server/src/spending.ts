@@ -25,7 +25,7 @@ interface SpendingRpc {
     monthMicroUsd: number;
     heldMicroUsd: number;
   }>;
-  setSpending(body: unknown): Promise<Limits | null>;
+  setSpending(body: unknown): Promise<{ before: Limits; after: Limits } | null>;
 }
 
 /** The soft cap's thresholds (COST-4): 50% on Usage and Spending, 80% and 100% app-wide. */
@@ -78,10 +78,12 @@ spendingRoutes.put("/", async (c) => {
   const rpc = rpcOf(user.assistant());
   if (!rpc) return c.json({ error: "unavailable" }, 503);
   const body = await c.req.json().catch(() => null);
-  const before = (await rpc.spending()).settings;
-  const after = await rpc.setSpending(body);
-  if (!after) return c.json({ error: "invalid_spending" }, 400);
-  // Settings changes are in the Activity log (M3-19 AC3), with the old and new values.
+  const saved = await rpc.setSpending(body);
+  if (!saved) return c.json({ error: "invalid_spending" }, 400);
+  const { before, after } = saved;
+  // Settings changes are in the Activity log (M3-19 AC3), with the old and new values. The
+  // limits live in the assistant and the log in D1, so the two can't commit together: a change
+  // whose audit row can't be written is put back, and the request fails.
   const changed = Object.keys(after).filter(
     (k) => before[k as keyof Limits] !== after[k as keyof Limits],
   ) as (keyof Limits)[];
@@ -89,9 +91,18 @@ spendingRoutes.put("/", async (c) => {
     const detail = JSON.stringify(
       Object.fromEntries(changed.map((k) => [k, { from: before[k], to: after[k] }])),
     );
-    await systemStore(c.env)
-      .audit(c.var.session.scope.userId, "settings.spending", "settings", "ok", detail)
-      .catch(() => {});
+    try {
+      await systemStore(c.env).audit(
+        c.var.session.scope.userId,
+        "settings.spending",
+        "settings",
+        "ok",
+        detail,
+      );
+    } catch {
+      await rpc.setSpending(Object.fromEntries(changed.map((k) => [k, before[k]])));
+      return c.json({ error: "not_saved" }, 500);
+    }
   }
   return c.json({ settings: after });
 });

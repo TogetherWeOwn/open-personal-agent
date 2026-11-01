@@ -78,6 +78,33 @@ describe("task Continue and Stop", () => {
     expect((await post("continue")).status).toBe(409);
   });
 
+  it("a Continue whose wake fails undoes the raise, so a later Continue still works", async () => {
+    const { taskId, assistant, post, sendEvent } = await setup();
+    const down = { ...env, TASK_WORKFLOW: { get: async () => Promise.reject(new Error("blip")) } };
+    expect((await post("continue", down as never)).status).toBe(409);
+    expect(await assistant.taskBudget(taskId)).toMatchObject({
+      budgetMicroUsd: 500_000,
+      raised: false,
+    });
+    expect((await post("continue")).status).toBe(200);
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    expect(await assistant.taskBudget(taskId)).toMatchObject({ budgetMicroUsd: 1_000_000 });
+  });
+
+  it("refuses Continue on a run that ended at an execution limit", async () => {
+    const { user, taskId, post, sendEvent } = await setup();
+    const row = await user.tasks.get(taskId);
+    const state = {
+      ...JSON.parse(row?.state ?? "{}"),
+      paused: { kind: "steps", detail: "200 steps", final: true },
+    };
+    await user.tasks.saveState(taskId, JSON.stringify(state));
+    const res = await post("continue");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "not_continuable" });
+    expect(sendEvent).not.toHaveBeenCalled();
+  });
+
   it("Stop cancels the task and wakes the run so it ends", async () => {
     const { user, taskId, sendEvent, post } = await setup();
     expect((await post("stop")).status).toBe(200);
