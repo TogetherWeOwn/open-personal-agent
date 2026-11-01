@@ -111,9 +111,19 @@ export function ApprovalCard({
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
   const [shown, setShown] = useState<ReadonlySet<string>>(new Set());
   const [scope, setScope] = useState<Scope>("once");
+  // The item whose remove/undo button was just pressed: that button leaves the DOM, so focus
+  // moves to its counterpart (never to Allow, UX-04).
+  const [moved, setMoved] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const hintId = useId();
+  const toggleId = (approvalId: string) => `${idPrefix}-toggle-${approvalId}`;
+
+  useEffect(() => {
+    if (!moved) return;
+    document.getElementById(toggleId(moved))?.focus();
+    setMoved(null);
+  });
 
   const { items } = batch;
   const multi = items.length > 1;
@@ -151,6 +161,11 @@ export function ApprovalCard({
     return next;
   };
 
+  const removeOrUndo = (approvalId: string) => {
+    setRemoved(toggle(removed, approvalId));
+    setMoved(approvalId);
+  };
+
   const title = multi
     ? `${items.length} actions need your OK`
     : `${actionOf(items[0]?.tool ?? "")} · Needs your OK`;
@@ -173,9 +188,10 @@ export function ApprovalCard({
                 <p className="text-text-muted line-through">Removed: {name}.</p>
                 <p className="text-text-muted">I won't do this one.</p>
                 <Button
+                  id={toggleId(item.approvalId)}
                   variant="quiet"
                   isDisabled={sending}
-                  onPress={() => setRemoved(toggle(removed, item.approvalId))}
+                  onPress={() => removeOrUndo(item.approvalId)}
                   aria-label={`Undo: ${name}`}
                 >
                   Undo
@@ -192,9 +208,10 @@ export function ApprovalCard({
             >
               <CardHeader id={id} level={level + 1} title={`${n + 1} of ${items.length}: ${name}`}>
                 <Button
+                  id={toggleId(item.approvalId)}
                   variant="quiet"
                   isDisabled={sending}
-                  onPress={() => setRemoved(toggle(removed, item.approvalId))}
+                  onPress={() => removeOrUndo(item.approvalId)}
                   aria-label={`Don't do this one: ${name}`}
                 >
                   Don't do this one

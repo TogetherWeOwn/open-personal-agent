@@ -81,8 +81,10 @@ async function chatId(page: Page): Promise<string> {
 }
 
 /** Puts `items` in the open chat as one batch and lets the tab read the list again. */
-async function ask(page: Page, s: Stub, items: Item[]) {
+/** `make` runs after the chat menu work, so an expiry it computes isn't eaten by it. */
+async function ask(page: Page, s: Stub, make: Item[] | (() => Item[])) {
   const conversationId = await chatId(page);
+  const items = typeof make === "function" ? make() : make;
   s.batches = [
     {
       batchId: "batch_1",
@@ -160,9 +162,9 @@ test("an empty object or list reads as text, never a blank value", async ({ page
 test("counts down the last minute, then leaves once it expires", async ({ page }) => {
   const s = await stub(page);
   await page.goto("/");
-  await ask(page, s, [email({ expiresAt: Date.now() + 4_000 })]);
+  await ask(page, s, () => [email({ expiresAt: Date.now() + 5_000 })]);
   const c = card(page);
-  await expect(c).toContainText(/Expires in [34] s/);
+  await expect(c).toContainText(/Expires in [345] s/);
   await expect(c).toContainText(/Expires in [12] s/);
   await expect(c).toHaveCount(0, { timeout: 6_000 });
   await expect(page.getByText("1 approval waiting")).toHaveCount(0);
@@ -344,6 +346,24 @@ test.describe("the multi-action card (AC11)", () => {
         },
       },
     ]);
+  });
+
+  test("keeps focus on the item after Don't do this one and Undo, never on Allow", async ({
+    page,
+  }) => {
+    const s = await stub(page);
+    await page.goto("/");
+    await ask(page, s, three());
+    const c = card(page);
+    const remove = c.getByRole("button", { name: "Don't do this one: Post webhook" });
+    const undo = c.getByRole("button", { name: "Undo: Post webhook" });
+    await remove.focus();
+    await page.keyboard.press("Space");
+    await expect(undo).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(remove).toBeFocused();
+    await expect(c.getByRole("button", { name: /^(Allow|Confirm)/ })).not.toBeFocused();
+    expect(s.posts).toEqual([]);
   });
 
   test("Always for names every host it would cover", async ({ page }) => {
