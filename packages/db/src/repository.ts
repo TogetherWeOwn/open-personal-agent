@@ -1632,13 +1632,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * Continue on a task paused by a limit (M3-17 AC1): `budget_limited` back to `running`.
-           * `false` when it isn't paused. Waking its Workflow is the caller's job.
+           * Continuing clears the limit kind, which only ever describes a `budget_limited`
+           * pause. `false` when it isn't paused. Waking its Workflow is the caller's job.
            */
           resume: async (id: string) =>
             (
               await db
                 .update(tasks)
-                .set({ status: "running", updatedAt: Date.now() })
+                .set({ status: "running", limitKind: null, updatedAt: Date.now() })
                 .where(
                   and(
                     eq(tasks.id, id),
