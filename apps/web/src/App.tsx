@@ -166,10 +166,11 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     if (!effective) return;
     const { modelName, providerName } = describePick(modelSettings, effective);
     const previous = active.model;
+    const noticeId = newId();
     dispatch({
       type: "model",
       id: active.id,
-      noticeId: newId(),
+      noticeId,
       pick,
       notice: `Switched to ${modelName} via ${providerName}`,
     });
@@ -182,10 +183,11 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
           pendingPins.current.set(active.id, pick);
           return;
         }
+        // The failure line takes the place of the optimistic "Switched to" line.
         dispatch({
           type: "model",
           id: active.id,
-          noticeId: newId(),
+          noticeId,
           pick: previous,
           notice: "Couldn't switch the model, so nothing changed.",
         });

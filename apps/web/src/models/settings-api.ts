@@ -15,7 +15,7 @@ export interface PriceHint {
 export interface SavedProvider {
   id: string;
   kind: "openai-chat" | "workers-ai";
-  api: "openai-chat" | "openai-responses" | "workers-ai";
+  api: "openai-chat" | "openai-responses" | "anthropic-messages" | "workers-ai";
   providerId: string | null;
   baseUrl: string | null;
   providerName: string;

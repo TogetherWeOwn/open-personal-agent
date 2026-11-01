@@ -6,6 +6,11 @@ import type { SavedProvider } from "./settings-api";
 
 export const PRESETS = {
   openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+  anthropic: {
+    label: "Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+    model: "claude-sonnet-5-5",
+  },
   openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "" },
   custom: { label: "Other OpenAI-compatible", baseUrl: "", model: "" },
 } as const;

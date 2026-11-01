@@ -179,4 +179,26 @@ describe("chatReducer", () => {
     // A summary that says nothing about the model (the mock transport) leaves the pick alone.
     expect(chatReducer(relisted, list("c1")).conversations[0]?.model).toEqual(pick);
   });
+
+  it("replaces the 'Switched to' line when the switch fails, so the thread says one thing", () => {
+    const pick = { provider: "p1", model: "gpt-4.1-mini" };
+    const switched = run(send, {
+      type: "model",
+      id: "c1",
+      noticeId: "n1",
+      pick,
+      notice: "Switched to GPT-4.1 mini via OpenAI",
+    });
+    const failed = "Couldn't switch the model, so nothing changed.";
+    const rolledBack = chatReducer(switched, {
+      type: "model",
+      id: "c1",
+      noticeId: "n1",
+      pick: null,
+      notice: failed,
+    });
+    const system = rolledBack.conversations[0]?.messages.filter((m) => m.role === "system");
+    expect(system?.map((m) => m.text)).toEqual([failed]);
+    expect(rolledBack.conversations[0]?.model).toBe(null);
+  });
 });

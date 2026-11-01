@@ -95,11 +95,24 @@ async function stubSettings(page: Page): Promise<Stub> {
       return route.fulfill({ status: 204 });
     }
     if (method === "POST") {
+      const { providerId, model } = body as { providerId: string; model: string };
       const added = provider({
         id: `p${stub.providers.length + 1}`,
-        providerId: (body as { providerId: string }).providerId,
-        model: (body as { model: string }).model,
-        modelName: (body as { model: string }).model,
+        providerId,
+        model,
+        modelName: model,
+        ...(providerId === "anthropic" && {
+          api: "anthropic-messages",
+          baseUrl: "https://api.anthropic.com/v1",
+          providerName: "Anthropic",
+          modelName: "Claude Sonnet 5.5",
+          price: {
+            inputUsdPerMTok: 2,
+            outputUsdPerMTok: 10,
+            verifiedAt: "2026-11-01",
+            stale: false,
+          },
+        }),
       });
       stub.providers.push(added);
       return route.fulfill({ status: 201, json: added });
@@ -177,6 +190,33 @@ test("adds a provider with the shared form, tests it, and keeps the chat provide
   await page.getByRole("button", { name: "Remove some/model · OpenRouter" }).click();
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(page.getByRole("list").getByText("some/model · OpenRouter")).toHaveCount(0);
+});
+
+test("adds an Anthropic key with the same form, and lists it like the others (M3-05 AC3)", async ({
+  page,
+}) => {
+  const stub = await open(page);
+  const add = page.locator("section").filter({ hasText: "Add a provider" }).last();
+  await add.getByText("Anthropic", { exact: true }).click();
+  await expect(add.getByLabel("Model", { exact: true })).toHaveAttribute(
+    "placeholder",
+    "claude-sonnet-5-5",
+  );
+  await add.getByLabel("API key", { exact: true }).fill(KEY);
+  await add.getByRole("button", { name: "Add provider" }).click();
+  await expect(page.getByRole("status")).toContainText("Provider added.");
+  expect(stub.bodies.at(-1)).toMatchObject({
+    method: "POST",
+    path: "/api/settings/providers",
+    body: {
+      providerId: "anthropic",
+      baseUrl: "https://api.anthropic.com/v1",
+      model: "claude-sonnet-5-5",
+      apiKey: KEY,
+    },
+  });
+  await expect(page.getByRole("list").getByText("Claude Sonnet 5.5 · Anthropic")).toBeVisible();
+  expect(await page.content()).not.toContain(KEY);
 });
 
 test("the Agent engine page names the one engine, read-only (M3-06 AC6)", async ({ page }) => {

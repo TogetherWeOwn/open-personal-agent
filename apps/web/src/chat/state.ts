@@ -46,7 +46,10 @@ export type ChatAction =
   | { type: "connected" }
   | { type: "listed"; conversations: ConversationSummary[] }
   | { type: "loaded"; id: string; messages: StoredMessage[] }
-  /** A model switch in this tab: the new pick, and the system line that records it. */
+  /**
+   * A model switch in this tab: the new pick, and the system line that records it. A line that
+   * reuses an earlier `noticeId` replaces that line, so a failed switch doesn't leave both.
+   */
   | {
       type: "model";
       id: string;
@@ -139,7 +142,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...update(state, action.id, (c) => ({
           model: action.pick,
-          messages: [...c.messages, line],
+          messages: c.messages.some((m) => m.id === line.id)
+            ? c.messages.map((m) => (m.id === line.id ? line : m))
+            : [...c.messages, line],
         })),
         announcement: action.notice,
       };

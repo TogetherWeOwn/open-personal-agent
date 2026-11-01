@@ -8,6 +8,7 @@ import {
   credentialBinding,
   isLoopbackHost,
   STARTER_MODEL,
+  usesAnthropicMessages,
   usesOpenAIResponses,
 } from "@opa/providers";
 import { encrypt, type UserScope as VaultScope } from "@opa/vault";
@@ -61,9 +62,11 @@ function priceHint(billingId: string, model: string | null) {
 const apiOf = (row: Provider) =>
   row.kind === "workers-ai"
     ? "workers-ai"
-    : row.providerId && row.baseUrl && usesOpenAIResponses(row.providerId, row.baseUrl)
+    : usesOpenAIResponses(row.providerId, row.baseUrl)
       ? "openai-responses"
-      : "openai-chat";
+      : usesAnthropicMessages(row.providerId, row.baseUrl)
+        ? "anthropic-messages"
+        : "openai-chat";
 
 /** A saved provider as the browser sees it: the key's last 4 and dates, never the key (SEC-7). */
 function providerView(row: Provider) {
