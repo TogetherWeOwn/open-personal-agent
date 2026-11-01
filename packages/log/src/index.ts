@@ -28,6 +28,10 @@ const SECRET_SHAPES = [
   // Long base64, base64url or hex runs with at least two digits or capitals, so a route pattern
   // such as `/api/setup/recovery-codes` survives.
   /(?=(?:[a-z+/_-]*[A-Z0-9]){2})[A-Za-z0-9+/_-]{24,}={0,2}/g,
+  // Recovery codes (lowercase base32, dashed or not) and lowercase hex can hold fewer than two
+  // digits, so the shape above can miss them.
+  /\b(?:[a-z2-7]{5}-?){5}[a-z2-7]\b/g,
+  /\b[0-9a-f]{24,}\b/g,
 ];
 
 /** Redacts before it truncates, so a secret cut at the limit can't slip past its shape. */

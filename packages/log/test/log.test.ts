@@ -27,6 +27,9 @@ describe("allowlist logger", () => {
       "sk-proj-abcdefghijkl",
       "opa-canary-0123456789abcdef0123456789abcdef",
       "b3BhLWNhbmFyeS0wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==", // the same, base64
+      "abcde-fghij-klmno-pqrst-uvwxy-z", // recovery code with one digit or none
+      "abcdefghijklmnopqrstuvwxyz", // the same, typed without dashes
+      "abcdefabcdefabcdefabcdef", // lowercase hex with no digits
     ]) {
       expect(redact(`x ${secret} y`)).toBe("x [redacted] y");
     }
