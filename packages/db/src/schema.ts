@@ -223,6 +223,38 @@ export const messages = sqliteTable(
 );
 
 /**
+ * A file the user attached (M3-10). The bytes live in R2 under `u/{userId}/attachments/{id}`
+ * (the repository derives the key); this row holds what the server sniffed from its first bytes,
+ * never the type or size the client claimed. `message_id` is set when the message carrying it is
+ * sent; until then the file belongs to the composer that uploaded it.
+ */
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    mediaType: text("media_type").notNull(),
+    kind: text("kind", { enum: ["image", "pdf", "text"] }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    /**
+     * Whether the turn's model received the file, set when the message is sent (M3-10 AC2);
+     * null until then. The thread shows the plain wording for a file the model didn't read.
+     */
+    sentToModel: integer("sent_to_model", { mode: "boolean" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("attachments_user_message_idx").on(t.userId, t.messageId),
+    index("attachments_user_created_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+/**
  * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
  * table had no price for the model; `cost_source` says whether it was estimated or reported.
  * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls.

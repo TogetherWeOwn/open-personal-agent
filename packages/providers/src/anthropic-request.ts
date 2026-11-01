@@ -3,12 +3,14 @@
 // shape, with `cache_control` on the system prompt and the tool list, and thinking blocks
 // replayed with their signatures under A-M2.
 import type {
+  ModelAttachment,
   ModelMessage,
   ModelReasoning,
   ModelRequest,
   ModelTool,
   ModelToolCall,
 } from "@opa/core";
+import { attachmentText } from "./attachments";
 
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 
@@ -94,13 +96,24 @@ function wireMessages(
     } else if (m.role === "system") {
       if (m.content) system.push(m.content);
     } else {
-      push("user", m.content ? [{ type: "text", text: m.content }] : []);
+      push("user", [
+        ...(m.content ? [textBlock(m.content)] : []),
+        ...(m.attachments ?? []).map(attachmentBlock),
+      ]);
     }
   }
   return { system: system.join("\n\n"), messages: out };
 }
 
 const textBlock = (text: string): WireBlock => ({ type: "text", text });
+
+/** One file as a content block: an image or a PDF document by base64, text as text. */
+function attachmentBlock(a: ModelAttachment): WireBlock {
+  const source = { type: "base64", media_type: a.mediaType, data: a.data ?? "" };
+  if (a.kind === "image") return { type: "image", source };
+  if (a.kind === "pdf") return { type: "document", source, title: a.name };
+  return textBlock(attachmentText(a));
+}
 
 const isThinking = (b: { type: string }) => b.type === "thinking" || b.type === "redacted_thinking";
 

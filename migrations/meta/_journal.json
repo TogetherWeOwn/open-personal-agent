@@ -57,6 +57,13 @@
       "when": 1793513999000,
       "tag": "0007_policy_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1793524148316,
+      "tag": "0008_attachments",
+      "breakpoints": true
     }
   ]
 }

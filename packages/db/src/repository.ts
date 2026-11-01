@@ -10,6 +10,7 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
 import {
+  attachments,
   auditLog,
   conversations,
   grants,
@@ -51,20 +52,53 @@ export function scopeForAssistant(name: string): UserScope {
   return issue(userId);
 }
 
+/** One part of a multipart upload, as `complete` wants them back. */
+export interface UploadedPart {
+  partNumber: number;
+  etag: string;
+}
+
+/** A stored object's body, as the routes and the assistant read it. */
+export interface StoredObject {
+  /** The bytes as a stream, so a download is never buffered whole. */
+  body: ReadableStream | null;
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
 /** The parts of R2 and Durable Object namespaces used here; the Node root supplies its own. */
 export interface DataBindings<Stub, Id> {
   DB: AnyD1Database;
   FILES: {
     head(key: string): Promise<unknown>;
-    get(key: string): Promise<{ text(): Promise<string> } | null>;
+    get(key: string): Promise<StoredObject | null>;
     put(
       key: string,
-      value: string,
+      value: string | ReadableStream,
       options: { httpMetadata: { contentType: string } },
     ): Promise<unknown>;
+    delete(key: string): Promise<unknown>;
+    /**
+     * R2's multipart upload, for streaming a body whose length is not known up front: `put`
+     * there takes only a known-length stream. Absent where the store streams any body (Node).
+     */
+    createMultipartUpload?(
+      key: string,
+      options: { httpMetadata: { contentType: string } },
+    ): Promise<{
+      uploadPart(partNumber: number, value: Uint8Array): Promise<UploadedPart>;
+      complete(parts: UploadedPart[]): Promise<unknown>;
+      abort(): Promise<unknown>;
+    }>;
   };
   ASSISTANT: { idFromName(name: string): Id; get(id: Id): Stub };
 }
+
+/** An attachment row as routes and the thread read it: the sniffed facts, never the R2 key. */
+export type AttachmentRow = Pick<
+  typeof attachments.$inferSelect,
+  "id" | "name" | "mediaType" | "kind" | "sizeBytes" | "sentToModel" | "createdAt"
+>;
 
 /** The `user_settings` columns a route may write; the user and timestamps come from here. */
 export type SettingsUpdate = Partial<
@@ -87,6 +121,9 @@ export type ProviderValues = Pick<
   typeof modelProviders.$inferInsert,
   "kind" | "providerId" | "baseUrl" | "model" | "keySecretId"
 >;
+
+/** R2's smallest multipart part, except the last: an upload streams through in parts this size. */
+const PART_BYTES = 5 * 1024 * 1024;
 
 /** A conversation ID comes from the client, so it is checked before it reaches a query. */
 export const isId = (id: unknown): id is string =>
@@ -153,6 +190,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       if (!issued.has(scope)) throw new Error("scope was not issued by the session layer");
       const { userId } = scope;
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
+      const attachmentKey = (id: string) => `u/${userId}/attachments/${checkId(id)}`;
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
       const getConversation = async (id: string) =>
@@ -196,12 +234,15 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           status: role === "assistant" ? "streaming" : "complete",
           content,
         });
-      /** A conversation's rows with the given roles, oldest first. */
-      const thread = <Role extends "user" | "assistant" | "system">(
+      /**
+       * A conversation's rows with the given roles, oldest first, each with its files' sniffed
+       * facts (M3-10). Only a user row has files; the others get `[]`.
+       */
+      const thread = async <Role extends "user" | "assistant" | "system">(
         conversationId: string,
         roles: Role[],
-      ) =>
-        db
+      ) => {
+        const rows = await db
           .select({
             id: messages.id,
             role: sql<Role>`${messages.role}`, // the filter below
@@ -218,6 +259,38 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ),
           )
           .orderBy(messages.seq);
+        const files = rows.length
+          ? await db
+              .select({
+                id: attachments.id,
+                messageId: attachments.messageId,
+                name: attachments.name,
+                mediaType: attachments.mediaType,
+                kind: attachments.kind,
+                sizeBytes: attachments.sizeBytes,
+                sentToModel: attachments.sentToModel,
+                createdAt: attachments.createdAt,
+              })
+              .from(attachments)
+              // Found through their messages, not by a list of message IDs: D1 binds at most
+              // 100 parameters a query, which a long chat would pass.
+              .innerJoin(messages, eq(messages.id, attachments.messageId))
+              .where(
+                and(
+                  eq(attachments.userId, userId),
+                  eq(messages.conversationId, conversationId),
+                  eq(messages.userId, userId),
+                ),
+              )
+              .orderBy(attachments.createdAt)
+          : [];
+        return rows.map((row) => ({
+          ...row,
+          attachments: files
+            .filter((f) => f.messageId === row.id)
+            .map(({ messageId: _m, ...file }) => file),
+        }));
+      };
       const createConversation = async (
         id: string,
         title: string | null = null,
@@ -287,11 +360,40 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             else await db.batch([update, message(conversationId, line.id, "system", line.content)]);
             return true;
           },
-          /** Writes the user's message and the empty streaming reply after it, both or neither. */
-          startTurn: async (conversationId: string, text: string, replyId: string) => {
+          /**
+           * Writes the user's message and the empty streaming reply after it, both or neither,
+           * and puts the message's files on it, each marked with whether the model received it
+           * (M3-10 AC2): only the user's own, still-unlinked uploads move.
+           */
+          startTurn: async (
+            conversationId: string,
+            text: string,
+            replyId: string,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            const userMessageId = crypto.randomUUID();
+            const link = (sentToModel: boolean) => {
+              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
+              return ids.length
+                ? [
+                    db
+                      .update(attachments)
+                      .set({ messageId: userMessageId, conversationId, sentToModel })
+                      .where(
+                        and(
+                          eq(attachments.userId, userId),
+                          inArray(attachments.id, ids),
+                          isNull(attachments.messageId),
+                        ),
+                      ),
+                  ]
+                : [];
+            };
             await db.batch([
-              message(conversationId, crypto.randomUUID(), "user", text),
+              message(conversationId, userMessageId, "user", text),
               message(conversationId, replyId, "assistant", ""),
+              ...link(true),
+              ...link(false),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
             ]);
           },
@@ -564,6 +666,129 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   ]
                 : []),
             ]);
+            return true;
+          },
+        },
+        /**
+         * Attached files (M3-10): the row is created only after the object is stored, and every
+         * read matches the user, so another user's file ID reads as missing.
+         */
+        attachments: {
+          /**
+           * Streams an upload to the user's prefix; the caller sniffs and bounds it first.
+           * R2's `put` takes only a known-length stream, so a declared length goes through
+           * workerd's `FixedLengthStream` where the runtime offers one, and an undeclared one
+           * through a multipart upload in bounded parts — the whole file is never in memory
+           * on any path (M3-10 AC1). A store with no multipart (Node) streams any body.
+           */
+          putObject: async (
+            id: string,
+            body: ReadableStream<Uint8Array>,
+            contentType: string,
+            knownLength?: number,
+          ) => {
+            const key = attachmentKey(id);
+            const options = { httpMetadata: { contentType } };
+            const FixedLengthStream = (
+              globalThis as { FixedLengthStream?: new (length: number) => TransformStream }
+            ).FixedLengthStream;
+            if (knownLength !== undefined && FixedLengthStream) {
+              await FILES.put(key, body.pipeThrough(new FixedLengthStream(knownLength)), options);
+              return;
+            }
+            if (FILES.createMultipartUpload) {
+              const upload = await FILES.createMultipartUpload(key, options);
+              try {
+                // R2 wants every part but the last the same size, so each is cut at exactly
+                // `PART_BYTES` and a chunk that straddles the cut carries into the next part.
+                const parts: UploadedPart[] = [];
+                let part = new Uint8Array(PART_BYTES);
+                let filled = 0;
+                const reader = body.getReader();
+                for (let next = await reader.read(); !next.done; next = await reader.read()) {
+                  let chunk = next.value;
+                  while (chunk.byteLength) {
+                    const take = Math.min(chunk.byteLength, PART_BYTES - filled);
+                    part.set(chunk.subarray(0, take), filled);
+                    filled += take;
+                    chunk = chunk.subarray(take);
+                    if (filled === PART_BYTES) {
+                      parts.push(await upload.uploadPart(parts.length + 1, part));
+                      part = new Uint8Array(PART_BYTES);
+                      filled = 0;
+                    }
+                  }
+                }
+                if (filled || !parts.length) {
+                  parts.push(await upload.uploadPart(parts.length + 1, part.slice(0, filled)));
+                }
+                await upload.complete(parts);
+              } catch (err) {
+                await upload.abort().catch(() => {});
+                throw err;
+              }
+              return;
+            }
+            await FILES.put(key, body, options);
+          },
+          /** The stored bytes, or `null` when the object is gone. */
+          getObject: (id: string) => FILES.get(attachmentKey(id)),
+          /** Removes a stored object whose row was never (or is no longer) written. */
+          removeObject: (id: string) => FILES.delete(attachmentKey(id)),
+          create: async (values: {
+            id: string;
+            name: string;
+            mediaType: string;
+            kind: "image" | "pdf" | "text";
+            sizeBytes: number;
+          }) => {
+            await db.insert(attachments).values({ ...values, id: checkId(values.id), userId });
+          },
+          /** `undefined` when the row is missing or someone else's: answer 404 for both. */
+          get: async (id: string): Promise<AttachmentRow | undefined> =>
+            isId(id)
+              ? (
+                  await db
+                    .select({
+                      id: attachments.id,
+                      name: attachments.name,
+                      mediaType: attachments.mediaType,
+                      kind: attachments.kind,
+                      sizeBytes: attachments.sizeBytes,
+                      sentToModel: attachments.sentToModel,
+                      createdAt: attachments.createdAt,
+                    })
+                    .from(attachments)
+                    .where(and(eq(attachments.id, id), eq(attachments.userId, userId)))
+                    .limit(1)
+                )[0]
+              : undefined,
+          /** The user's own rows among `ids`, in upload order; foreign IDs are simply absent. */
+          getMany: async (ids: readonly string[]): Promise<AttachmentRow[]> =>
+            ids.length
+              ? db
+                  .select({
+                    id: attachments.id,
+                    name: attachments.name,
+                    mediaType: attachments.mediaType,
+                    kind: attachments.kind,
+                    sizeBytes: attachments.sizeBytes,
+                    sentToModel: attachments.sentToModel,
+                    createdAt: attachments.createdAt,
+                  })
+                  .from(attachments)
+                  .where(and(eq(attachments.userId, userId), inArray(attachments.id, [...ids])))
+                  .orderBy(attachments.createdAt)
+              : [],
+          /** Deletes the row and its object; `false` when it isn't the user's. */
+          remove: async (id: string) => {
+            if (!isId(id)) return false;
+            const gone = await db
+              .delete(attachments)
+              .where(and(eq(attachments.id, id), eq(attachments.userId, userId)))
+              .returning({ id: attachments.id });
+            if (!gone.length) return false;
+            await FILES.delete(attachmentKey(id));
             return true;
           },
         },

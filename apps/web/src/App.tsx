@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Heading, Link } from "react-aria-components";
+import {
+  type AttachmentConfig,
+  DEFAULT_CONFIG,
+  deleteAttachment,
+  fetchAttachmentConfig,
+  isRetryable,
+  MAX_FILES,
+  type PendingAttachment,
+  pickProblem,
+  UploadFailure,
+  uploadAttachment,
+  uploadProblem,
+  willRead,
+} from "./chat/attachments";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
 import { ModelChip } from "./chat/ModelChip";
@@ -12,7 +26,7 @@ import {
   initialState,
 } from "./chat/state";
 import { Thread } from "./chat/Thread";
-import type { ChatTransport } from "./chat/transport";
+import type { ChatTransport, StoredAttachment } from "./chat/transport";
 import {
   describePick,
   type ModelSettings,
@@ -95,6 +109,14 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       ? pick
       : null;
   const pinned = live(active.model);
+  // Files picked but not yet sent belong to a conversation, like its draft.
+  const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
+  const [config, setConfig] = useState<AttachmentConfig>(DEFAULT_CONFIG);
+  const uploads = useRef(new Map<string, { abort: () => void }>());
+  // A send pressed while uploads run: it goes once they finish (m3-ux §3.2).
+  const [queuedSend, setQueuedSend] = useState<{ conversationId: string; text: string } | null>(
+    null,
+  );
 
   // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
   useEffect(() => {
@@ -145,28 +167,181 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   useLoad(transport, active, dispatch);
   useLoad(transport, running === active ? undefined : running, dispatch);
 
-  // A send a limit refused goes back to the composer, unless something new was typed meanwhile.
+  // What may be attached, and what the model reads, follow the open chat's model: its own pick,
+  // asked for by name so a switch not yet saved counts, or else the Chat role, asked for again
+  // when Settings changes it.
+  const { provider: pinnedProvider, model: pinnedModel } = pinned ?? {};
+  const { provider: roleProvider, model: roleModel } = modelSettings?.roles.chat ?? {};
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the Chat role is what the server reads
+  useEffect(() => {
+    let current = true;
+    const named =
+      pinnedProvider && pinnedModel ? { provider: pinnedProvider, model: pinnedModel } : undefined;
+    fetchAttachmentConfig(named)
+      .then((next) => current && setConfig(next))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [pinnedProvider, pinnedModel, roleProvider, roleModel]);
+
+  // A send a limit refused goes back to the composer — its files too, still stored — unless
+  // something new was typed meanwhile. (Re-adding a file already back would double it.)
   const { limit } = state;
   useEffect(() => {
     if (!limit) return;
-    const { conversationId: id, text } = limit;
+    const { conversationId: id, text, attachments } = limit;
     setDrafts((d) => (d[id] ? d : { ...d, [id]: text }));
+    if (!attachments.length) return;
+    setPendingFiles((p) => {
+      const kept = new Set((p[id] ?? []).flatMap((f) => (f.uploaded ? [f.uploaded.id] : [])));
+      const back = attachments
+        .filter((a) => !kept.has(a.id))
+        .map(
+          (a): PendingAttachment => ({
+            key: newId(),
+            file: null,
+            name: a.name,
+            size: a.sizeBytes,
+            status: "ready",
+            progress: 1,
+            uploaded: a,
+          }),
+        );
+      return back.length ? { ...p, [id]: [...back, ...(p[id] ?? [])] } : p;
+    });
   }, [limit]);
+
+  const patchFile = (conversationId: string, key: string, patch: Partial<PendingAttachment>) =>
+    setPendingFiles((p) => ({
+      ...p,
+      [conversationId]: (p[conversationId] ?? []).map((f) =>
+        f.key === key ? { ...f, ...patch } : f,
+      ),
+    }));
+
+  const runUpload = (conversationId: string, entry: PendingAttachment) => {
+    if (!entry.file) return;
+    const { promise, abort } = uploadAttachment(entry.file, (progress) =>
+      patchFile(conversationId, entry.key, { progress }),
+    );
+    uploads.current.set(entry.key, { abort });
+    promise
+      .then((uploaded) =>
+        patchFile(conversationId, entry.key, { status: "ready", progress: 1, uploaded }),
+      )
+      .catch((err: unknown) => {
+        if (err instanceof UploadFailure && err.code === "aborted") return; // the chip is gone
+        const failure = err instanceof UploadFailure ? err : new UploadFailure("failed");
+        patchFile(conversationId, entry.key, {
+          status: "error",
+          error: uploadProblem(failure, entry.name, config),
+          retryable: isRetryable(failure),
+        });
+      })
+      .finally(() => uploads.current.delete(entry.key));
+  };
+
+  const pick = (picked: File[]) => {
+    const conversationId = active.id;
+    const room = MAX_FILES - (pendingFiles[conversationId]?.length ?? 0);
+    const added: PendingAttachment[] = picked.map((file, i) => {
+      const problem =
+        i >= room ? `You can attach up to ${MAX_FILES} files.` : pickProblem(file, config);
+      return {
+        key: newId(),
+        file,
+        name: file.name,
+        size: file.size,
+        status: problem ? "error" : "uploading",
+        progress: 0,
+        ...(problem ? { error: problem } : {}),
+      };
+    });
+    setPendingFiles((p) => ({ ...p, [conversationId]: [...(p[conversationId] ?? []), ...added] }));
+    for (const entry of added) if (entry.status === "uploading") runUpload(conversationId, entry);
+  };
+
+  const removeFile = (key: string) => {
+    const entry = (pendingFiles[active.id] ?? []).find((f) => f.key === key);
+    if (!entry) return;
+    uploads.current.get(key)?.abort();
+    // A stored file the user took back shouldn't linger in their storage.
+    if (entry.uploaded) void deleteAttachment(entry.uploaded.id).catch(() => {});
+    setPendingFiles((p) => ({
+      ...p,
+      [active.id]: (p[active.id] ?? []).filter((f) => f.key !== key),
+    }));
+  };
+
+  const retryFile = (key: string) => {
+    const entry = (pendingFiles[active.id] ?? []).find((f) => f.key === key);
+    if (!entry?.file) return;
+    patchFile(active.id, key, { status: "uploading", progress: 0, error: undefined });
+    runUpload(active.id, entry);
+  };
+
+  /** Sends now: the ready files go with the text; a failed chip stays for the next message. */
+  const doSend = (conversationId: string, text: string, ready: PendingAttachment[]) => {
+    const attachments: StoredAttachment[] = ready.flatMap((f) =>
+      f.uploaded ? [{ ...f.uploaded, sentToModel: willRead(f.uploaded.kind, config.model) }] : [],
+    );
+    dispatch({ type: "send", id: newId(), conversationId, text, attachments });
+    const ids = attachments.map((a) => a.id);
+    const go = () =>
+      transport.send(
+        conversationId,
+        text,
+        live(pendingPins.current.get(conversationId)) ?? undefined,
+        ids,
+      );
+    const saving = saves.current.get(conversationId);
+    if (saving) void saving.then(go);
+    else go();
+    const sent = new Set(ready.map((f) => f.key));
+    setPendingFiles((p) => ({
+      ...p,
+      [conversationId]: (p[conversationId] ?? []).filter((f) => !sent.has(f.key)),
+    }));
+  };
+
+  const send = (text: string): boolean => {
+    if (state.pending || queuedSend) return false;
+    const files = pendingFiles[active.id] ?? [];
+    if (files.some((f) => f.status === "uploading")) {
+      setQueuedSend({ conversationId: active.id, text });
+      return true;
+    }
+    const ready = files.filter((f) => f.status === "ready");
+    if (!text.trim() && !ready.length) return false;
+    doSend(active.id, text, ready);
+    return true;
+  };
+
+  // The queued send goes once its uploads settle. A failed upload holds it: sending past the
+  // failure would quietly leave that file behind, so the text goes back to the composer.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: doSend reads this render's config
+  useEffect(() => {
+    if (!queuedSend) return;
+    const { conversationId, text } = queuedSend;
+    const files = pendingFiles[conversationId] ?? [];
+    if (files.some((f) => f.status === "uploading")) return;
+    setQueuedSend(null);
+    const ready = files.filter((f) => f.status === "ready");
+    if (
+      state.pending ||
+      files.some((f) => f.status === "error") ||
+      (!text.trim() && !ready.length)
+    ) {
+      setDrafts((d) => (d[conversationId] ? d : { ...d, [conversationId]: text }));
+      return;
+    }
+    doSend(conversationId, text, ready);
+  }, [queuedSend, pendingFiles, state.pending]);
 
   const open = (action: ChatAction) => {
     dispatch(action);
     setThreadOpen(true);
-  };
-
-  const send = (text: string): boolean => {
-    if (state.pending || !text.trim()) return false;
-    dispatch({ type: "send", id: newId(), text });
-    const { id } = active;
-    const go = () => transport.send(id, text, live(pendingPins.current.get(id)) ?? undefined);
-    const saving = saves.current.get(id);
-    if (saving) void saving.then(go);
-    else go();
-    return true;
   };
 
   const goModels = () =>
@@ -287,6 +462,11 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
               />
             )
           }
+          config={config}
+          files={pendingFiles[active.id] ?? []}
+          onPick={pick}
+          onRemove={removeFile}
+          onRetry={retryFile}
         />
       </main>
       <div role="status" className="sr-only">
