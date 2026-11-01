@@ -132,10 +132,11 @@ export class Assistant extends Agent<Bindings> {
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }));
     // Every tab gets the reply, so first close those whose session has ended since they opened.
-    // A check that fails closes its tab too, rather than sending to it or failing the turn.
+    // A check that fails closes its tab too, but retryably (1011, not 4401): the tab reconnects
+    // and the upgrade rechecks its session. The turn itself goes on.
     await Promise.all(
       [...this.getConnections()].map((tab) =>
-        this.#sessionLive(tab).catch(() => tab.close(4401, "unauthenticated")),
+        this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
       ),
     );
     emit("turn.started", { messageId: turn.replyId });
