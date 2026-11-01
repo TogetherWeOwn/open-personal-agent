@@ -182,7 +182,10 @@ export function checkWorkflow(path, text) {
   return [...problems, ...checkPins(path, wf), ...checkImages(path, wf)];
 }
 
-/** Every job container and service image is pinned to a sha256 digest. */
+/**
+ * Every job container and service image is a literal name pinned to a sha256 digest. A `${{ }}`
+ * expression resolves at run time, so a digest after one pins nothing.
+ */
 export function checkImages(path, wf) {
   const images = Object.entries(wf.jobs ?? {}).flatMap(([name, job]) => [
     [`jobs.${name}.container`, job?.container],
@@ -190,7 +193,7 @@ export function checkImages(path, wf) {
   ]);
   return images
     .map(([at, v]) => [at, typeof v === "string" ? v : v?.image])
-    .filter(([, image]) => image != null && !/@sha256:[0-9a-f]{64}$/.test(String(image)))
+    .filter(([, image]) => image != null && !/^[^\s$]+@sha256:[0-9a-f]{64}$/.test(String(image)))
     .map(([at, image]) => `${path}: ${at} uses "${image}", which is not pinned to a sha256 digest`);
 }
 

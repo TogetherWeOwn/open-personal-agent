@@ -161,6 +161,10 @@ describe("supply chain", () => {
     expect(checkWorkflow("ci.yml", service)).toEqual([
       'ci.yml: jobs.a.services.db uses "postgres:17", which is not pinned to a sha256 digest',
     ]);
+    const expr = wf(`    container: \${{ matrix.image }}${digest}\n`);
+    expect(checkWorkflow("ci.yml", expr)).toEqual([
+      `ci.yml: jobs.a.container uses "\${{ matrix.image }}${digest}", which is not pinned to a sha256 digest`,
+    ]);
   });
 
   it("lists the packages in the Worker bundle and flags unreviewed ones", () => {
