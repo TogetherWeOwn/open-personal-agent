@@ -17,6 +17,7 @@ export const STARTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const CALLER = "model-settings";
 const PURPOSE = "model_api_key" as const;
 const TEST_TIMEOUT_MS = 20_000;
+const TEST_PROMPT = [{ role: "user" as const, content: "Reply with one word: ready" }];
 
 interface SettingsRow {
   display_name: string;
@@ -84,6 +85,12 @@ function view(row: SettingsRow) {
   };
 }
 
+/** Whether `text` contains any 8-character run of `key`. */
+function leaks(text: string, key: string) {
+  for (let i = 0; i + 8 <= key.length; i++) if (text.includes(key.slice(i, i + 8))) return true;
+  return false;
+}
+
 type Ctx = Context<AppEnv>;
 const fail = (c: Ctx, status: 400 | 404 | 409 | 503, error: string) => c.json({ error }, status);
 
@@ -119,12 +126,8 @@ settings.put("/model", async (c) => {
   const body = await c.req.json().catch(() => null);
   const { userId } = c.var.session;
   if (body?.kind === "workers-ai") {
-    await save(c.env.DB, userId, {
-      model_kind: "workers-ai",
-      provider_id: null,
-      base_url: null,
-      model: STARTER_MODEL,
-    });
+    // The provider and base URL stay: they bind the saved key, which is kept for switching back.
+    await save(c.env.DB, userId, { model_kind: "workers-ai", model: STARTER_MODEL });
     return c.json(view((await load(c.env.DB, userId)) as SettingsRow));
   }
   if (body?.kind !== "openai-chat") return fail(c, 400, "invalid_model");
@@ -137,8 +140,10 @@ settings.put("/model", async (c) => {
   }
   let binding: string;
   try {
-    // The Worker reaches public hosts only, so a key never travels over plain HTTP.
-    if (new URL(baseUrl).protocol !== "https:") throw new Error("https only");
+    // The Worker reaches public hosts only, so a key never travels over plain HTTP. The adapter
+    // refuses a query or fragment, so a URL with one could be saved but never tested.
+    const url = new URL(baseUrl);
+    if (url.protocol !== "https:" || url.search || url.hash) throw new Error("invalid URL");
     binding = credentialBinding(providerId, baseUrl);
   } catch {
     return fail(c, 400, "invalid_base_url");
@@ -175,6 +180,7 @@ settings.post("/model/test", async (c) => {
   const row = await load(c.env.DB, userId);
   if (!row?.model_kind || !row.model) return fail(c, 409, "no_model");
   let provider: ModelProvider;
+  let apiKey: string | null = null;
   if (row.model_kind === "workers-ai") {
     if (!c.env.AI) return fail(c, 503, "ai_unavailable");
     provider = createWorkersAIProvider(c.env.AI as unknown as WorkersAIBinding);
@@ -185,7 +191,7 @@ settings.post("/model/test", async (c) => {
     const binding = credentialBinding(providerId, baseUrl);
     const ref = { secretId, purpose: PURPOSE, binding, caller: CALLER } as const;
     // A lost master key makes saved keys unreadable; the user enters theirs again.
-    const apiKey = await decrypt(c.env.VAULT, scopeOf(c.var.session), ref).catch(() => null);
+    apiKey = await decrypt(c.env.VAULT, scopeOf(c.var.session), ref).catch(() => null);
     if (apiKey === null) return fail(c, 409, "key_required");
     provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey });
     await c.env.DB.prepare(
@@ -197,19 +203,34 @@ settings.post("/model/test", async (c) => {
   const started = Date.now();
   let firstTokenMs: number | null = null;
   let reply = "";
-  const events = provider.stream({
-    model: row.model,
-    messages: [{ role: "user", content: "Reply with one word: ready" }],
-    maxOutputTokens: 16,
-    signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
-  });
-  for await (const event of events) {
-    if (event.type === "text.delta") {
-      firstTokenMs ??= Date.now() - started;
-      reply += event.text;
-    } else if (event.type === "error") {
-      return c.json({ ok: false, error: { code: event.code, message: event.message } });
+  const signal = AbortSignal.timeout(TEST_TIMEOUT_MS);
+  const consume = async () => {
+    const request = { model: row.model as string, messages: TEST_PROMPT, maxOutputTokens: 16 };
+    for await (const event of provider.stream({ ...request, signal })) {
+      if (event.type === "text.delta") {
+        firstTokenMs ??= Date.now() - started;
+        reply += event.text;
+      } else if (event.type === "error") {
+        return { code: event.code, message: event.message };
+      }
     }
+    return null;
+  };
+  // Some providers never settle once they stall, so the deadline doesn't wait for the stream.
+  const timedOut = new Promise<{ code: string; message: string }>((resolve) =>
+    signal.addEventListener("abort", () =>
+      resolve({ code: "timeout", message: "The model didn't answer in 20 seconds." }),
+    ),
+  );
+  const failure = await Promise.race([consume(), timedOut]);
+  if (failure) {
+    // The provider writes this text. If it echoes any 8 characters of the key, drop it: a saved
+    // key never returns to the browser, even in part beyond its last 4 (ADR 0010 D4).
+    const echoed = apiKey !== null && leaks(failure.message, apiKey);
+    const message = echoed
+      ? "The provider rejected the request. Check the key and model."
+      : failure.message;
+    return c.json({ ok: false, error: { code: failure.code, message } });
   }
   return c.json({
     ok: true,
