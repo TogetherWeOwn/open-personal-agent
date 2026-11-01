@@ -54,10 +54,11 @@ jobs:
         run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=HEAD .' # this branch's history only
       - run: pnpm deploy:dry-run
       - name: gitleaks (built bundles)
-        # One path per run: given several, `gitleaks dir` silently scans `.` instead.
+        # One path per run: given several, `gitleaks dir` silently scans `.` instead. Without
+        # --config it looks for .gitleaks.toml inside the scanned directory, not the repo root.
         run: |
-          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner apps/web/dist
-          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner dist/worker
+          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner --config .gitleaks.toml apps/web/dist
+          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner --config .gitleaks.toml dist/worker
       - run: node scripts/check-bundles.mjs # server-only names in the client bundle
       - run: pnpm audit --prod --audit-level high
       - run: node scripts/check-supply-chain.mjs # build-script allowlist, release age, workflow lint

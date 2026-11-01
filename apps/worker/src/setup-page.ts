@@ -2,6 +2,7 @@
 import type { Health } from "./health";
 
 const MIGRATE = "npx wrangler d1 migrations apply DB --remote";
+const MIGRATE_LOCAL = "npx wrangler d1 migrations apply DB --local";
 
 /**
  * The Finish setup page (ADR 0001 #4): plain HTML with the exact commands to run, served while
@@ -14,7 +15,9 @@ export function finishSetupPage(health: Health): string {
   const steps: string[] = [];
   // An unreachable database also leaves the version unknown; that isn't a missing migration.
   if (health.checks.database && !health.schema.current) {
-    steps.push(`<li><p>Create the database tables:</p><pre><code>${MIGRATE}</code></pre></li>`);
+    steps.push(
+      `<li><p>Create the database tables:</p><pre><code>${MIGRATE}</code></pre><p>Locally, <code>pnpm dev</code> applies them on start; to apply them by hand, run <code>${MIGRATE_LOCAL}</code>.</p></li>`,
+    );
   }
   if (missing.length > 0) {
     const names = missing.map((name) => `<code>${name}</code>`).join(", ");

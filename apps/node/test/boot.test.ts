@@ -6,9 +6,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SoftPasskey } from "../../worker/test/helpers/softauthn";
 
 const SECRETS = {
-  OPA_MASTER_KEY: "boot-test-master-key-0123456789",
+  OPA_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
   OPA_SESSION_SECRET: "boot-test-session-secret-0123456789",
   OPA_SETUP_TOKEN: "boot-test-setup-token-0123456789",
 };
@@ -66,9 +67,49 @@ describe("apps/node", () => {
     }
   });
 
-  it("answers unknown API routes with the app's JSON 404", async () => {
-    const res = await fetch(`${base}/api/nope`);
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "not_found" });
+  it("refuses app routes until the deployment is claimed", async () => {
+    const res = await fetch(`${base}/api/me`);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "not_claimed" });
+  });
+
+  it("claims the deployment with a passkey, then knows the owner", async () => {
+    const cookies = new Map<string, string>();
+    const post = async (path: string, body: unknown) => {
+      const res = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: {
+          origin: base,
+          "content-type": "application/json",
+          cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; "),
+        },
+        body: JSON.stringify(body),
+      });
+      for (const cookie of res.headers.getSetCookie()) {
+        const [name = "", value = ""] = (cookie.split(";")[0] ?? "").split("=");
+        cookies.set(name, value);
+      }
+      return res;
+    };
+    const token = SECRETS.OPA_SETUP_TOKEN;
+    const optionsRes = await post("/setup/options", { token });
+    expect(optionsRes.status).toBe(200);
+    const { options } = (await optionsRes.json()) as { options: { challenge: string } };
+    const credential = await new SoftPasskey(new URL(base).hostname, base).create(options);
+    const res = await post("/setup", { token, credential });
+    expect(res.status).toBe(200);
+
+    const get = (path: string) =>
+      fetch(`${base}${path}`, {
+        headers: { cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; ") },
+      });
+    const me = await get("/api/me");
+    expect(me.status).toBe(200);
+    expect(await me.json()).toMatchObject({ role: "owner" });
+    const missing = await get("/api/nope");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "not_found" });
+    // The token is spent: a second claim is refused.
+    expect((await post("/setup/options", { token })).status).not.toBe(200);
   });
 });

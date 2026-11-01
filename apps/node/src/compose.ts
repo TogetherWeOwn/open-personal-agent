@@ -5,14 +5,18 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { app } from "@opa/worker/app";
-import type { Env } from "@opa/worker/env";
+import { compose, type WorkerEnv } from "@opa/worker/compose";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
+import { modelFetch } from "./egress";
+import "./workers-globals";
 import { migrate } from "./migrate";
 
 /** Paths the app answers before static assets: `assets.run_worker_first` in `wrangler.jsonc`. */
-export const APP_ROUTES = "/api /api/* /agents /agents/* /hooks /hooks/* /setup".split(" ");
+export const APP_ROUTES = "/api /api/* /agents /agents/* /hooks /hooks/* /setup /setup/*".split(
+  " ",
+);
 
 export interface NodeOptions {
   /** Holds `opa.sqlite` and `files/`. */
@@ -20,7 +24,10 @@ export interface NodeOptions {
   migrationsDir: string;
   /** The built SPA (`apps/web/dist`). */
   assetsDir: string;
-  /** Read for the three secrets in `.dev.vars.example`, usually `process.env`. */
+  /**
+   * Read for the secrets in `.dev.vars.example` and `OPA_ALLOW_PRIVATE_MODEL_HOSTS`, usually
+   * `process.env`.
+   */
   vars: Record<string, string | undefined>;
 }
 
@@ -43,19 +50,25 @@ export function createNodeApp({ dataDir, migrationsDir, assetsDir, vars }: NodeO
   const assets = new Hono()
     .use(serveStatic({ root: assetsDir }))
     .use(serveStatic({ root: assetsDir, path: "index.html" }));
-  const env = {
+  const raw = {
     DB: sqliteD1(db),
     FILES: localBlobStore(join(dataDir, "files")),
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
     // The per-user assistant, in process. It has no state until the chat transport lands.
     ASSISTANT: { idFromName: (name: string) => name, get: () => ({ ping: async () => "pong" }) },
+    MODEL_FETCH: modelFetch({ allowPrivate: vars.OPA_ALLOW_PRIVATE_MODEL_HOSTS === "1" }),
     OPA_MASTER_KEY: vars.OPA_MASTER_KEY,
+    OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,
     OPA_SETUP_TOKEN: vars.OPA_SETUP_TOKEN,
-  } as unknown as Env;
+  } as unknown as WorkerEnv;
+  // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
+  const env = compose(raw);
   return {
     fetch: async (request) =>
-      isAppRoute(new URL(request.url).pathname) ? app.fetch(request, env) : assets.fetch(request),
+      isAppRoute(new URL(request.url).pathname)
+        ? app.fetch(request, await env)
+        : assets.fetch(request),
     db,
   };
 }
