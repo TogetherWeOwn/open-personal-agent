@@ -357,7 +357,10 @@ describe("chat transport", () => {
       name: "chat-turn",
       snapshot: { ...turn, ...checkpoint, callRecorded: false, callUsage: null },
     };
-    const day = Date.now() - (Date.now() % 86_400_000);
+    // One clock read: two `Date.now()` calls in different milliseconds make a day 1ms
+    // before midnight, and the recovery recomputes the true boundary.
+    const now = Date.now();
+    const day = now - (now % 86_400_000);
     const spend = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
       state.storage.kv.put("spend", {
         day,
