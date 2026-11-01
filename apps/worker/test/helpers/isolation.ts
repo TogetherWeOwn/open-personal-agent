@@ -40,6 +40,8 @@ export interface Seeded {
   export: string;
   provider: string;
   secret: string;
+  /** A named passkey, for the routes that rename and remove one. */
+  passkey: string;
   grant: string;
   usage: string;
   /** A pending approval batch, for an irreversible call of the second task. */
@@ -125,18 +127,29 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   if (uploaded.status !== 201) throw new Error(`attachment: ${uploaded.status}`);
   const attachment = (await uploaded.json<{ id: string }>()).id;
 
-  const [conversation, message, memory, spareMemory, proposal, task, grant, usage, exportId] =
-    Array.from({ length: 9 }, () => crypto.randomUUID()) as [
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-    ];
+  const [
+    conversation,
+    message,
+    memory,
+    spareMemory,
+    proposal,
+    task,
+    grant,
+    usage,
+    passkey,
+    exportId,
+  ] = Array.from({ length: 10 }, () => crypto.randomUUID()) as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
   const run = (sql: string, ...values: unknown[]) => db.prepare(sql).bind(...values);
   await db.batch([
     run(
@@ -202,6 +215,14 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       grant,
       id,
       Date.now() + 3_600_000,
+    ),
+    run(
+      "INSERT INTO passkeys (id, user_id, webauthn_user_id, public_key, counter, device_type, name) VALUES (?, ?, ?, ?, 0, 'platform', ?)",
+      passkey,
+      id,
+      `webauthn-${tag}`,
+      new Uint8Array([1, 2, 3]),
+      `passkey of ${tag}`,
     ),
     run(
       "INSERT INTO tool_overrides (user_id, tool, decision) VALUES (?, 'isolation_probe', 'ask')",
@@ -282,6 +303,7 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     spareMemory,
     proposal,
     artifact,
+    passkey,
     grant,
     usage,
     export: exportId,

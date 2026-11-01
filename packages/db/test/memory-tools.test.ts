@@ -87,17 +87,35 @@ describe("the memory tool manifests (M3-08 AC5)", () => {
       ["memory:read"],
       ["memory:write"],
     ]);
-    const registered: MemoryTool[] = [];
-    registerMemoryTools({ register: (t) => registered.push(t) }, stubService(), () => untainted);
-    expect(registered.map((t) => t.manifest.name)).toEqual([...MEMORY_TOOL_NAMES]);
   });
 
   it("doesn't offer remember while Learn from our chats is off (M3-15 AC5)", () => {
-    const registered: MemoryTool[] = [];
-    registerMemoryTools({ register: (t) => registered.push(t) }, stubService(), () => untainted, {
-      learn: false,
-    });
-    expect(registered.map((t) => t.manifest.name)).toEqual(["recall", "forget"]);
+    const names = memoryTools(stubService(), () => untainted, { learn: false }).map(
+      (t) => t.manifest.name,
+    );
+    expect(names).toEqual(["recall", "forget"]);
+  });
+});
+
+describe("registerMemoryTools reads Learn from our chats (M3-15 AC5)", () => {
+  const userWith = (row: { learnFromChats: boolean | null } | undefined) => ({
+    memory: stubService(),
+    settings: { get: async () => row },
+  });
+  const registered = async (row: { learnFromChats: boolean | null } | undefined) => {
+    const tools: MemoryTool[] = [];
+    await registerMemoryTools({ register: (t) => tools.push(t) }, userWith(row), () => untainted);
+    return tools.map((t) => t.manifest.name);
+  };
+
+  it("offers remember while the setting is on, or the user has no settings row yet", async () => {
+    expect(await registered({ learnFromChats: true })).toEqual([...MEMORY_TOOL_NAMES]);
+    expect(await registered({ learnFromChats: null })).toEqual([...MEMORY_TOOL_NAMES]);
+    expect(await registered(undefined)).toEqual([...MEMORY_TOOL_NAMES]);
+  });
+
+  it("drops remember, keeping recall and forget, once the user turns it off", async () => {
+    expect(await registered({ learnFromChats: false })).toEqual(["recall", "forget"]);
   });
 });
 

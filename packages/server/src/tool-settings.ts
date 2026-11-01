@@ -3,7 +3,7 @@
 // decision override `{auto, ask, never}` the engine's floors still apply to. Loosening one needs
 // the 5-minute account step-up and, like every change, writes an audit row with both values.
 import { createRepository, isId } from "@opa/db/repository";
-import { loosens, type ToolManifest, type ToolOverride } from "@opa/policy";
+import { defaultChoice, loosens, type ToolManifest, type ToolOverride } from "@opa/policy";
 import { type Context, Hono } from "hono";
 import type { AppEnv } from "./env";
 import { hasAccountStepUp } from "./session";
@@ -19,6 +19,8 @@ const view = (m: ToolManifest, override: ToolOverride | null) => ({
   riskClass: m.riskClass,
   egress: m.destinations.some((d) => d.dataEgress),
   override,
+  // The choice an untouched tool behaves as, so the page can show the effective default.
+  default: defaultChoice(m.riskClass),
   // An irreversible tool always asks with a passkey (the AC2 floor), so `auto` isn't offered.
   locked: m.riskClass === "irreversible",
 });

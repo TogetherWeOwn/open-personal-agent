@@ -59,6 +59,9 @@ describe("the vault on Node", () => {
     const { app } = nodeApp({ OPA_MASTER_KEY: key2, OPA_MASTER_KEY_PREV: key1 });
     expect(await health(app)).toEqual({ rotation: "pending", orphanedRows: 0 });
     await app.scheduled();
+    // The same tick records the database's size (M3-18 AC2).
+    const d1 = app.db.prepare("SELECT amount FROM meters WHERE meter = 'd1_bytes'").get();
+    expect((d1 as { amount: number }).amount).toBeGreaterThan(0);
     expect(await health(app)).toEqual({
       rotation: "complete",
       orphanedRows: 0,

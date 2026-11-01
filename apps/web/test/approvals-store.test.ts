@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ApprovalDecision, HarnessEvent } from "@opa/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PendingBatch } from "../src/approvals/api";
+import type { DecidedBatch, PendingBatch } from "../src/approvals/api";
 
 const batch: PendingBatch = {
   batchId: "b1",
@@ -32,12 +32,20 @@ const resolved = {
   payload: { batchId: "b1", decisions },
 } as HarnessEvent;
 
+let decidedList: () => Promise<Response> = async () => Response.json({ batches: [] });
+/** Stubs `fetch`; the read of decided batches answers from `decidedList`, apart from `handler`. */
+function stubFetch(handler: (url: string, init?: RequestInit) => Promise<Response>) {
+  vi.stubGlobal("fetch", (url: string, init?: RequestInit) =>
+    url.includes("status=decided") ? decidedList() : handler(url, init),
+  );
+}
+
 /** A fresh store over a server that lists `batch` until the POST lands, then nothing. */
 async function load(post: (store: typeof import("../src/approvals/store")) => Promise<Response>) {
   vi.resetModules();
   const store = await import("../src/approvals/store");
   let decided = false;
-  vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+  stubFetch(async (_url: string, init?: RequestInit) => {
     if (init?.method === "POST") {
       const res = await post(store);
       decided = res.ok;
@@ -70,6 +78,7 @@ const pending = (expiresAt: number): PendingBatch => ({
 });
 
 afterEach(() => {
+  decidedList = async () => Response.json({ batches: [] });
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -105,7 +114,7 @@ describe("the expiry timer", () => {
     // The server still lists a batch that expired 30 s ago by this tab's clock.
     const listed = pending(Date.now() - 30_000);
     let reads = 0;
-    vi.stubGlobal("fetch", async () => {
+    stubFetch(async () => {
       reads++;
       return Response.json({ batches: [listed] });
     });
@@ -123,7 +132,7 @@ describe("the expiry timer", () => {
     vi.useFakeTimers({ now: 1_000_000 });
     const listed = pending(Date.now() - 30_000);
     const readAt: number[] = [];
-    vi.stubGlobal("fetch", async () => {
+    stubFetch(async () => {
       readAt.push(Date.now());
       // The first recheck fails; the load and every later read succeed.
       if (readAt.length === 2) return new Response(null, { status: 503 });
@@ -146,7 +155,7 @@ describe("the expiry timer", () => {
     vi.useFakeTimers({ now: 1_000_000 });
     let batches = [pending(Date.now() + 60_000)];
     let reads = 0;
-    vi.stubGlobal("fetch", async () => {
+    stubFetch(async () => {
       reads++;
       return Response.json({ batches });
     });
@@ -166,7 +175,7 @@ describe("a decision whose answer was lost", () => {
   it("reads the list again, and a batch it no longer holds leaves without claiming an answer", async () => {
     const listed = pending(Date.now() + 60_000);
     let decidedOnServer = false;
-    vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+    stubFetch(async (_path: string, init?: RequestInit) => {
       if (init?.method === "POST") {
         // The server records the decision, then the response never arrives.
         decidedOnServer = true;
@@ -185,7 +194,7 @@ describe("a decision whose answer was lost", () => {
 
   it("keeps the card to try again when the batch is still waiting", async () => {
     const listed = pending(Date.now() + 60_000);
-    vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+    stubFetch(async (_path: string, init?: RequestInit) => {
       if (init?.method === "POST") throw new TypeError("network");
       return Response.json({ batches: [listed] });
     });
@@ -198,7 +207,7 @@ describe("a decision whose answer was lost", () => {
 
   it("takes already_decided on a retry as handled, not as an error", async () => {
     const listed = pending(Date.now() + 60_000);
-    vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+    stubFetch(async (_path: string, init?: RequestInit) => {
       if (init?.method === "POST")
         return Response.json({ error: "already_decided" }, { status: 409 });
       return Response.json({ batches: [listed] });
@@ -208,5 +217,70 @@ describe("a decision whose answer was lost", () => {
     await store.refreshApprovals();
     expect(await store.submitDecision(listed, decisions)).toEqual({ kind: "handled" });
     expect(store.approvalsSnapshot().receipts[0]?.text).toMatch(/^Already answered: /);
+  });
+});
+
+describe("receipts after a reload", () => {
+  const today = new Date().setHours(10, 42, 0, 0);
+  const answered = (batchId: string, decidedAt: number): DecidedBatch => ({
+    ...batch,
+    batchId,
+    decidedAt,
+    decisions: [{ approvalId: "a1", decision: "approve", scope: "hour" }],
+  });
+  const settle = () => new Promise((resolve) => setTimeout(resolve));
+
+  it("reads today's decided batches from D1 as receipts, the latest first", async () => {
+    let since = "";
+    decidedList = async () =>
+      Response.json({ batches: [answered("b3", today + 60_000), answered("b2", today)] });
+    vi.stubGlobal("fetch", (url: string) => {
+      if (!url.includes("status=decided")) return Response.json({ batches: [] });
+      since = new URL(url, "http://x").searchParams.get("since") ?? "";
+      return decidedList();
+    });
+    vi.resetModules();
+    const store = await import("../src/approvals/store");
+    await store.refreshApprovals();
+    await settle();
+    expect(Number(since)).toBe(store.startOfToday());
+    const { receipts } = store.approvalsSnapshot();
+    expect(receipts.map((r) => [r.batch.batchId, r.at])).toEqual([
+      ["b3", today + 60_000],
+      ["b2", today],
+    ]);
+    expect(receipts[1]?.text).toMatch(/^You approved: Save a file \(for 1 hour\) · /);
+  });
+
+  it("reads them once, and again on the next list read only when that failed", async () => {
+    let reads = 0;
+    decidedList = async () => {
+      reads++;
+      return reads === 1
+        ? new Response(null, { status: 503 })
+        : Response.json({ batches: [answered("b2", today)] });
+    };
+    stubFetch(async () => Response.json({ batches: [] }));
+    vi.resetModules();
+    const store = await import("../src/approvals/store");
+    for (let i = 0; i < 3; i++) {
+      await store.refreshApprovals();
+      await settle();
+    }
+    expect(reads).toBe(2);
+    expect(store.approvalsSnapshot().receipts).toHaveLength(1);
+  });
+
+  it("keeps this tab's own receipt when D1 lists the same batch", async () => {
+    // D1's answer arrives only after this tab has decided the batch itself.
+    let answer: (r: Response) => void = () => {};
+    decidedList = () => new Promise((resolve) => (answer = resolve));
+    const store = await load(async () => Response.json({ status: "waiting" }));
+    await store.submitDecision(batch, decisions);
+    answer(Response.json({ batches: [answered("b1", Date.now())] }));
+    await settle();
+    const { receipts } = store.approvalsSnapshot();
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.text).toMatch(/It runs once the current reply finishes\.$/);
   });
 });

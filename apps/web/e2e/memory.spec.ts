@@ -230,6 +230,27 @@ test("holds a delete behind Undo with the backup line, then sends it", async ({ 
   expect(stub.deletes).toEqual([["n1"]]);
 });
 
+test("Recently learned's Forget is a held delete; only the toast says Undo", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.clock.install();
+  await page.goto("/memory");
+  const recent = page.getByRole("region", { name: "Recently learned" });
+  await expect(recent.getByRole("button", { name: /^Undo/ })).toHaveCount(0);
+  await recent.getByRole("button", { name: "Forget: Prefers trains to planes" }).click();
+  const toast = page.getByRole("region", { name: "Notifications" });
+  await expect(toast).toContainText(
+    "Forgot 'Prefers trains to planes'. A backup copy is kept for 30 days, then it's gone.",
+  );
+  await toast.getByRole("button", { name: "Undo" }).click();
+  await expect(toast).toBeHidden();
+  expect(stub.deletes).toEqual([]);
+  await recent.getByRole("button", { name: "Forget: Prefers trains to planes" }).click();
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(10_500);
+  await expect(recent).toBeHidden();
+  expect(stub.deletes).toEqual([["n2"]]);
+});
+
 test("bulk deletes after a confirmation that names the backup and the instructions", async ({
   page,
 }) => {

@@ -52,13 +52,8 @@ export const SETTINGS: {
   { id: "assistant", label: "Assistant" },
   { id: "models", label: "Models", shipped: true },
   { id: "agent-engine", label: "Agent engine", shipped: true },
-  {
-    id: "computer",
-    label: "Computer",
-    empty: "Not set up.",
-    body: "Your assistant works without one; it just can't browse like a person or run code.",
-  },
-  { id: "apps", label: "Apps & tools" },
+  { id: "computer", label: "Computer", shipped: true },
+  { id: "apps", label: "Apps & tools", shipped: true },
   { id: "memory", label: "Memory", shipped: true },
   { id: "spending", label: "Spending", shipped: true },
   { id: "privacy", label: "Privacy & security", shipped: true },
@@ -87,9 +82,9 @@ function SettingsList() {
 function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
-  // Models, Agent engine, Spending and Privacy & security already shipped with real
-  // screens; the table serves them instead of their placeholders, so the rebase keeps what
-  // `main` already gives those addresses.
+  // Models, Agent engine, Computer, Apps & tools, Memory, Spending and Privacy & security
+  // already shipped with real screens; the table serves them instead of their placeholders,
+  // so the rebase keeps what `main` already gives those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
   return (
     <Page title={page.label}>

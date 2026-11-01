@@ -32,10 +32,11 @@ interface Stub {
   batches: Record<string, unknown>[];
   fail: boolean;
   posts: string[];
+  decided: Record<string, unknown>[];
 }
 
 async function stub(page: Page, batches: Record<string, unknown>[]): Promise<Stub> {
-  const s: Stub = { batches, fail: false, posts: [] };
+  const s: Stub = { batches, fail: false, posts: [], decided: [] };
   await page.route("/api/health", (r) => r.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (r) => r.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings", (r) =>
@@ -44,9 +45,15 @@ async function stub(page: Page, batches: Record<string, unknown>[]): Promise<Stu
   await page.route("/api/approvals?status=pending", (r) =>
     s.fail ? r.fulfill({ status: 500, json: {} }) : r.fulfill({ json: { batches: s.batches } }),
   );
+  await page.route(/\/api\/approvals\?status=decided&since=\d+$/, (r) =>
+    r.fulfill({ json: { batches: s.decided } }),
+  );
   await page.route(/\/api\/approvals\/[^/?]+$/, (r) => {
     const id = new URL(r.request().url()).pathname.split("/").pop() ?? "";
     s.posts.push(id);
+    const { decisions } = r.request().postDataJSON() as { decisions: unknown[] };
+    const answered = s.batches.find((b) => b.batchId === id);
+    if (answered) s.decided.unshift({ ...answered, decisions, decidedAt: Date.now() });
     s.batches = s.batches.filter((b) => b.batchId !== id);
     return r.fulfill({ json: { status: "resumed" } });
   });
@@ -89,6 +96,11 @@ test("lists what waits across chats, badges it, and acts in place", async ({ pag
   await expect(page.getByRole("heading", { name: "Needs your OK (1)" })).toBeVisible();
   await expect(page).toHaveTitle("(1) Inbox · Open Personal Agent");
   expect(s.posts).toEqual(["batch_1"]);
+  await page.getByRole("button", { name: "Done today (1)" }).click();
+  await expect(page.getByText(/^You approved: Send email \(just this once\)/)).toBeVisible();
+  // The receipt is read back from the server, so a reload keeps it.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Needs your OK (1)" })).toBeVisible();
   await page.getByRole("button", { name: "Done today (1)" }).click();
   await expect(page.getByText(/^You approved: Send email \(just this once\)/)).toBeVisible();
 });

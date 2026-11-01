@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Settings › Agent engine (M3-06 AC6): the one place the harness is named in M3. There is a
-// single engine, so the page is read-only; it exists so the separation is visible. The engine
-// joins the composer's context chip when a second one ships (M5).
+// Settings › Agent engine (M3-06 AC6, M3-19 AC1): the one place the harness is named in M3.
+// There is a single engine, so the page is read-only; it exists so the separation is visible.
+// The engine joins the composer's context chip when a second one ships (M5).
 import { Heading } from "react-aria-components";
 
 export function AgentEngine() {
@@ -12,12 +12,13 @@ export function AgentEngine() {
       </Heading>
       <p>
         The engine does the work between your messages: reading, deciding what to do, and acting.
-        The model only writes the words. For now there is one engine, built in; when more arrive,
-        you'll choose between them here.
+        The model only writes the words. For now there is one engine, <code>builtin-loop</code>.
+        When more arrive, you&apos;ll choose between them here.
       </p>
       <div className="flex flex-col gap-2 rounded-xl border border-accent bg-surface-raised p-4 ring-2 ring-accent">
         <p className="font-semibold">
-          Built-in engine <span className="font-normal text-text-muted">(in use)</span>
+          Built-in engine (<code>builtin-loop</code>){" "}
+          <span className="font-normal text-text-muted">(in use)</span>
         </p>
         <ul className="flex list-disc flex-col gap-1 pl-6">
           <li>Uses tools</li>

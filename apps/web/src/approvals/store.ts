@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // The approvals every screen shows: the chat's inline cards, the Inbox and its badge read one list.
 // D1 is the source of truth (M3-07 AC9): socket events only say when to read it again, so a tab
-// that was closed, asleep or offline catches up on its next load, focus or reconnect.
+// that was closed, asleep or offline catches up on its next load, focus or reconnect. Today's
+// receipts are read from D1 too, once per tab, so a reload doesn't lose what the user answered.
 import type { ApprovalDecision, HarnessEvent } from "@opa/core";
 import { useSyncExternalStore } from "react";
-import { type DecideResult, decide, listPending, type PendingBatch } from "./api";
+import { type DecideResult, decide, listDecided, listPending, type PendingBatch } from "./api";
 import { actionOf, scopeLabel } from "./copy";
 
 /** A batch this tab saw decided, here or elsewhere: one line, with the card behind Details. */
@@ -131,12 +132,47 @@ export function receiptText(
 let generation = 0;
 const decidedHere = new Set<string>();
 
+export const startOfToday = () => new Date().setHours(0, 0, 0, 0);
+
+/** Receipts newest first, one per batch: one already shown keeps its text, which says more. */
+const withReceipts = (more: Receipt[]): Receipt[] => {
+  const known = new Set(state.receipts.map((r) => r.batch.batchId));
+  const fresh = more.filter((r) => !known.has(r.batch.batchId));
+  return fresh.length ? [...state.receipts, ...fresh].sort((a, b) => b.at - a.at) : state.receipts;
+};
+
+let seeded = false;
+/**
+ * The batches the user decided today, from D1, as receipts: read on the first list read, and on
+ * the next one again if it failed. After that this tab's own answers and `approval.resolved`
+ * keep them current.
+ */
+async function seedReceipts(): Promise<void> {
+  if (seeded) return;
+  seeded = true;
+  try {
+    const decided = await listDecided(startOfToday());
+    const receipts = withReceipts(
+      decided.map((batch) => ({
+        batch,
+        decisions: batch.decisions,
+        at: batch.decidedAt,
+        text: receiptText(batch, batch.decisions, batch.decidedAt),
+      })),
+    );
+    if (receipts !== state.receipts) set({ receipts });
+  } catch {
+    seeded = false;
+  }
+}
+
 /**
  * Reads the list again; the newest read wins, and a failed read keeps what was shown. True when
  * this read is the one now shown.
  */
 export async function refreshApprovals(): Promise<boolean> {
   const mine = ++generation;
+  void seedReceipts();
   try {
     const batches = await listPending();
     if (mine !== generation) return false;
@@ -214,10 +250,7 @@ export function approvalEvent(event: HarnessEvent): void {
     const at = Date.now();
     set({
       batches: state.batches.filter((b) => b.batchId !== batchId),
-      receipts: [
-        { batch, decisions, at, text: receiptText(batch, decisions, at) },
-        ...state.receipts,
-      ],
+      receipts: withReceipts([{ batch, decisions, at, text: receiptText(batch, decisions, at) }]),
       announcement: "1 item resolved elsewhere.",
     });
   }
