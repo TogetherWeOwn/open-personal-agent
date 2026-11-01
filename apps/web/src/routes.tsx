@@ -58,7 +58,7 @@ export const SETTINGS: {
     body: "Your assistant works without one; it just can't browse like a person or run code.",
   },
   { id: "apps", label: "Apps & tools" },
-  { id: "memory", label: "Memory" },
+  { id: "memory", label: "Memory", shipped: true },
   { id: "spending", label: "Spending", shipped: true },
   { id: "privacy", label: "Privacy & security", shipped: true },
   { id: "deployment", label: "Deployment" },
