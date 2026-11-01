@@ -46,8 +46,12 @@ export type SpendLimit = "task_budget" | "daily" | "monthly_hard";
 
 const MINUTE = 60_000;
 const DAY = 86_400_000;
-/** A task envelope untouched this long belongs to a task that can no longer be continued. */
-const TASK_TTL = 30 * DAY;
+/**
+ * A task envelope untouched this long belongs to a task that can no longer be continued. It
+ * outlasts the longest pause: a task paused at the hard cap on the 1st of a 31-day month waits
+ * until the next 1st, and its envelope must still be there to resume or Continue.
+ */
+const TASK_TTL = 40 * DAY;
 
 /** The Durable Object's synchronous storage, or a `Map` in tests. */
 export type Kv = Pick<SyncKvStorage, "get" | "put">;

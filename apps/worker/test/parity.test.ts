@@ -130,6 +130,9 @@ async function connectTaskContext(
     releaseTaskCall: async (key) => {
       budgetCalls.push(`release:${key}`);
     },
+    startTask: async (_taskId, budgetMicroUsd) => ({ budgetMicroUsd: budgetMicroUsd ?? 500_000 }),
+    endTask: async () => 0,
+    allowToolCall: async () => true,
     // Synchronous push: the adapter fires progress without awaiting it.
     taskProgress: (p) => {
       progressEvents.push({ seq: p.seq, type: p.type, payload: p.payload });
