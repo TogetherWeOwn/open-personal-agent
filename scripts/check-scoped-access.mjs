@@ -35,6 +35,12 @@ export const RULES = [
     "only the assistant scopes itself, by the name the session gave it (ADR 0010 D3)",
   ],
   [
+    "scope-minting",
+    /^(?:packages\/db\/|apps\/worker\/src\/task-workflow\.ts$)/,
+    /\bscopeForTask\b/g,
+    "only the Workflow entrypoint scopes a task, from its D1 row (M3-12 AC9)",
+  ],
+  [
     "master-key",
     /^(?:packages\/vault\/|apps\/(?:worker|node)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,

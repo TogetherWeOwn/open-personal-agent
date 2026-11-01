@@ -2,11 +2,11 @@
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
 import { estimate, findPrice } from "@opa/pricing";
-import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, notInArray, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
-import { conversations, messages, secrets, usage, userSettings, users } from "./schema";
+import { conversations, messages, secrets, tasks, usage, userSettings, users } from "./schema";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
@@ -69,6 +69,19 @@ function checkId(id: string): string {
 
 export type MessageStatus = "complete" | "streaming" | "interrupted" | "error";
 
+/** A task row (M3-12): the durable run's authority and state. */
+export type TaskRow = typeof tasks.$inferSelect;
+export type TaskStatus = TaskRow["status"];
+/** Statuses a task never leaves; a step that finds one does nothing (M3-12 AC3). */
+export const TASK_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "interrupted"] as const;
+/** Statuses from which a task may still be cancelled. */
+const TASK_CANCELLABLE_STATUSES = [
+  "queued",
+  "running",
+  "waiting_for_approval",
+  "budget_limited",
+] as const satisfies readonly TaskStatus[];
+
 /** A running chat turn: also its eviction checkpoint, so it is plain JSON. */
 export interface TurnRecord {
   conversationId: string;
@@ -98,6 +111,25 @@ function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
 export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBindings<Stub, Id>) {
   const db = openD1(DB);
   return {
+    /**
+     * For the Workflow entrypoint only (the lint enforces it): the scope of the user whose task
+     * row names this Workflow instance, with the row itself (M3-12 AC9). The Workflow's instance
+     * params are never consulted — they are data, not authority — so a parameter naming another
+     * user mints nothing. `null` when no task row claims the instance.
+     */
+    scopeForTask: async (
+      instanceId: string,
+    ): Promise<{ scope: UserScope; task: TaskRow } | null> => {
+      if (typeof instanceId !== "string" || instanceId.length < 1 || instanceId.length > 128) {
+        return null;
+      }
+      const [task] = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.workflowInstanceId, instanceId))
+        .limit(1);
+      return task ? { scope: issue(task.userId), task } : null;
+    },
     /** Deployment-level checks that read no user's data. */
     deployment: {
       schemaVersion: () => readSchemaVersion(db),
@@ -289,6 +321,145 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .set({ lastUsedAt: Date.now() })
               .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
           },
+        },
+        /**
+         * Durable task runs (M3-12). Every write is one conditional update on the row's current
+         * status, so a cancel that lands mid-step is never overwritten by the run it stops: the
+         * run's next write simply matches no row and reports `false`.
+         */
+        tasks: {
+          /** `false` when the conversation isn't the user's. The row starts `queued`. */
+          create: async (input: {
+            id: string;
+            conversationId: string;
+            workflowInstanceId: string;
+            kind: string;
+            mode: TaskRow["mode"];
+            title?: string | null;
+            state?: string | null;
+          }): Promise<boolean> => {
+            if (!(await getConversation(input.conversationId))) return false;
+            await db.insert(tasks).values({
+              id: checkId(input.id),
+              userId,
+              conversationId: input.conversationId,
+              workflowInstanceId: input.workflowInstanceId,
+              kind: input.kind,
+              mode: input.mode,
+              title: input.title ?? null,
+              state: input.state ?? null,
+            });
+            return true;
+          },
+          /** The user's task row; `undefined` when it is missing or someone else's. */
+          get: async (id: string) =>
+            (
+              await db
+                .select()
+                .from(tasks)
+                .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+                .limit(1)
+            )[0],
+          /**
+           * Moves a task to `running`, stamping `started_at` the first time. Returns the row as
+           * updated, or `undefined` when it was already terminal (a cancelled task never runs).
+           */
+          markRunning: async (id: string, now: number) =>
+            (
+              await db
+                .update(tasks)
+                .set({
+                  status: "running",
+                  startedAt: sql`coalesce(${tasks.startedAt}, ${now})`,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(tasks.id, id),
+                    eq(tasks.userId, userId),
+                    notInArray(tasks.status, [...TASK_TERMINAL_STATUSES]),
+                  ),
+                )
+                .returning()
+            )[0],
+          /**
+           * Persists the loop's state at a step boundary, with a status change when one is
+           * given. `false` when the task is cancelled or terminal: its steps write nothing.
+           */
+          saveState: async (id: string, state: string, status?: TaskStatus) =>
+            (
+              await db
+                .update(tasks)
+                .set({ state, updatedAt: Date.now(), ...(status ? { status } : {}) })
+                .where(
+                  and(
+                    eq(tasks.id, id),
+                    eq(tasks.userId, userId),
+                    notInArray(tasks.status, [...TASK_TERMINAL_STATUSES]),
+                  ),
+                )
+                .returning({ id: tasks.id })
+            ).length > 0,
+          /** Ends a task that is still active. `false` when it had already ended or was cancelled. */
+          finish: async (
+            id: string,
+            status: "succeeded" | "failed" | "budget_limited" | "interrupted",
+            error?: string,
+          ) => {
+            const now = Date.now();
+            return (
+              (
+                await db
+                  .update(tasks)
+                  .set({
+                    status,
+                    error: error ?? null,
+                    // A budget-limited task is paused, not finished: it may be continued.
+                    ...(status === "budget_limited" ? {} : { finishedAt: now }),
+                    updatedAt: now,
+                  })
+                  .where(
+                    and(
+                      eq(tasks.id, id),
+                      eq(tasks.userId, userId),
+                      notInArray(tasks.status, [...TASK_TERMINAL_STATUSES]),
+                    ),
+                  )
+                  .returning({ id: tasks.id })
+              ).length > 0
+            );
+          },
+          /** Sets `cancelled` on an active task. Terminating its Workflow is the caller's job. */
+          cancel: async (id: string) => {
+            const now = Date.now();
+            return (
+              (
+                await db
+                  .update(tasks)
+                  .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+                  .where(
+                    and(
+                      eq(tasks.id, id),
+                      eq(tasks.userId, userId),
+                      inArray(tasks.status, [...TASK_CANCELLABLE_STATUSES]),
+                    ),
+                  )
+                  .returning({ id: tasks.id })
+              ).length > 0
+            );
+          },
+        },
+        /**
+         * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they
+         * never appear among the user's files. IDs are content-free (a hash of the step's
+         * idempotency key), derived by the caller.
+         */
+        stepOutputs: {
+          put: (id: string, value: string) =>
+            FILES.put(`u/${userId}/task-outputs/${checkId(id)}`, value, {
+              httpMetadata: { contentType: "application/json" },
+            }),
+          get: (id: string) => FILES.get(`u/${userId}/task-outputs/${checkId(id)}`),
         },
         getFile: (id: string) => FILES.get(fileKey(id)),
         putFile: (id: string, value: string, contentType: string) =>

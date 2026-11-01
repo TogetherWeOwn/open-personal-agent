@@ -15,7 +15,7 @@ const SECRETS = {
   OPA_SETUP_TOKEN: "test-setup-token",
 };
 const TABLES = `audit_log conversations messages passkeys recovery_codes schema_version secrets
-  sessions setup_state usage used_setup_tokens user_keys user_settings users webauthn_challenges`.split(
+  sessions setup_state tasks usage used_setup_tokens user_keys user_settings users webauthn_challenges`.split(
   /\s+/,
 );
 

@@ -36,6 +36,13 @@
       "when": 1793503069968,
       "tag": "0004_usage_pricing",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793515463178,
+      "tag": "0005_tasks",
+      "breakpoints": true
     }
   ]
 }
