@@ -431,6 +431,12 @@ test("a note changed meanwhile refreshes the list and says so", async ({ page })
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("alert")).toContainText("That note changed or was deleted meanwhile");
   await expect(page.getByText("Sam lives in York")).toBeVisible();
+  // A save that works afterwards clears the warning.
+  await page.getByRole("button", { name: "Edit: Sam lives in York" }).click();
+  await page.getByLabel("Edit note").fill("Sam lives in Paris");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Sam lives in Paris")).toBeVisible();
+  await expect(page.getByRole("alert")).toBeHidden();
 });
 
 test("earlier versions load on a second try after a failure", async ({ page }) => {
