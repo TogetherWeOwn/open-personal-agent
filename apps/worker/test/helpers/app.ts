@@ -99,7 +99,10 @@ export async function claim() {
 
 /** Signs `userId` in without a passkey: a live `sessions` row, and the headers that carry it. */
 export async function sessionHeaders(userId: string) {
-  const { cookie, insert } = await newSession(db, userId);
-  await insert.run();
+  const { cookie, row } = await newSession(userId);
+  await db
+    .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
+    .bind(row.id, row.userId, row.tokenHash, row.expiresAt)
+    .run();
   return { cookie: `${SESSION_COOKIE}=${cookie}`, origin: ORIGIN };
 }

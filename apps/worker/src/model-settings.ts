@@ -2,15 +2,16 @@
 // Onboarding answers and model settings (M2-15). Keys arrive in a POST body, go straight into the
 // vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
 import type { ModelProvider } from "@opa/core";
+import { createRepository } from "@opa/db/repository";
 import {
   createOpenAIChatProvider,
   createWorkersAIProvider,
   credentialBinding,
   type WorkersAIBinding,
 } from "@opa/providers";
-import { decrypt, encrypt, type UserScope } from "@opa/vault";
+import { decrypt, encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
-import type { AppEnv, Session } from "./env";
+import type { AppEnv } from "./env";
 
 /** The "Try without a key" starter: metered Workers AI through the `AI` binding. */
 export const STARTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
@@ -19,69 +20,31 @@ const PURPOSE = "model_api_key" as const;
 const TEST_TIMEOUT_MS = 20_000;
 const TEST_PROMPT = [{ role: "user" as const, content: "Reply with one word: ready" }];
 
-interface SettingsRow {
-  display_name: string;
-  about: string | null;
-  model_kind: "openai-chat" | "workers-ai" | null;
-  provider_id: string | null;
-  base_url: string | null;
-  model: string | null;
-  model_key_secret_id: string | null;
-  onboarded_at: number | null;
-  last4: string | null;
-  key_updated_at: number | null;
-  key_last_used_at: number | null;
-}
+type Settings = NonNullable<Awaited<ReturnType<ReturnType<typeof settingsOf>["get"]>>>;
 
-// Moves into the scoped repository layer with M2-11, which also mints the scope.
-const scopeOf = (session: Session) => ({ userId: session.userId }) as UserScope;
-
-const load = (db: D1Database, userId: string) =>
-  db
-    .prepare(
-      `SELECT u.display_name, s.about, s.model_kind, s.provider_id, s.base_url, s.model,
-         s.model_key_secret_id, s.onboarded_at, k.last4, k.updated_at AS key_updated_at,
-         k.last_used_at AS key_last_used_at
-       FROM users u
-       LEFT JOIN user_settings s ON s.user_id = u.id
-       LEFT JOIN secrets k ON k.id = s.model_key_secret_id AND k.user_id = u.id
-       WHERE u.id = ?`,
-    )
-    .bind(userId)
-    .first<SettingsRow>();
-
-/** Upserts the named `user_settings` columns; the names come from this file, never the client. */
-function save(db: D1Database, userId: string, values: Record<string, string | number | null>) {
-  const cols = Object.keys(values);
-  const updates = cols.map((col) => `${col} = excluded.${col}`).join(", ");
-  return db
-    .prepare(
-      `INSERT INTO user_settings (user_id, ${cols.join(", ")}) VALUES (?${", ?".repeat(cols.length)})
-       ON CONFLICT (user_id) DO UPDATE SET ${updates}, updated_at = (unixepoch('subsec') * 1000)`,
-    )
-    .bind(userId, ...Object.values(values))
-    .run();
-}
+const settingsOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope).settings;
+// The vault takes the session's scope too; its own brand keeps it from importing `@opa/db`.
+const vaultScope = (c: Ctx) => c.var.session.scope as unknown as VaultScope;
 
 const text = (value: unknown, max: number): string | null =>
   typeof value === "string" && value.trim() !== "" && value.length <= max ? value.trim() : null;
 
-function view(row: SettingsRow) {
+function view(row: Settings) {
   // `last4` is null for keys shorter than 8 characters; the join still finds the row. The starter
   // keeps the key's binding for switching back, but reports none: it uses the AI binding only.
-  const starter = row.model_kind === "workers-ai";
-  const key = row.key_updated_at !== null && !starter;
+  const starter = row.modelKind === "workers-ai";
+  const key = row.keyUpdatedAt !== null && !starter;
   return {
-    displayName: row.display_name,
+    displayName: row.displayName,
     about: row.about ?? "",
-    onboarded: row.onboarded_at !== null,
-    model: row.model_kind && {
-      kind: row.model_kind,
-      providerId: starter ? null : row.provider_id,
-      baseUrl: starter ? null : row.base_url,
+    onboarded: row.onboardedAt !== null,
+    model: row.modelKind && {
+      kind: row.modelKind,
+      providerId: starter ? null : row.providerId,
+      baseUrl: starter ? null : row.baseUrl,
       model: row.model,
       key: key
-        ? { last4: row.last4, updatedAt: row.key_updated_at, lastUsedAt: row.key_last_used_at }
+        ? { last4: row.keyLast4, updatedAt: row.keyUpdatedAt, lastUsedAt: row.keyLastUsedAt }
         : null,
     },
   };
@@ -105,7 +68,7 @@ settings.use(async (c, next) => {
 });
 
 settings.get("/", async (c) => {
-  const row = await load(c.env.DB, c.var.session.userId);
+  const row = await settingsOf(c).get();
   return row ? c.json(view(row)) : fail(c, 404, "not_found");
 });
 
@@ -114,23 +77,18 @@ settings.put("/profile", async (c) => {
   const displayName = text(body?.displayName, 80);
   const about = typeof body?.about === "string" && body.about.length <= 2000 ? body.about : null;
   if (!displayName || about === null) return fail(c, 400, "invalid_profile");
-  const { userId } = c.var.session;
-  await c.env.DB.prepare(
-    "UPDATE users SET display_name = ?, updated_at = (unixepoch('subsec') * 1000) WHERE id = ?",
-  )
-    .bind(displayName, userId)
-    .run();
-  await save(c.env.DB, userId, { about: about.trim() });
+  await settingsOf(c).rename(displayName);
+  await settingsOf(c).save({ about: about.trim() });
   return c.body(null, 204);
 });
 
 settings.put("/model", async (c) => {
   const body = await c.req.json().catch(() => null);
-  const { userId } = c.var.session;
+  const store = settingsOf(c);
   if (body?.kind === "workers-ai") {
     // The provider and base URL stay: they bind the saved key, which is kept for switching back.
-    await save(c.env.DB, userId, { model_kind: "workers-ai", model: STARTER_MODEL });
-    return c.json(view((await load(c.env.DB, userId)) as SettingsRow));
+    await store.save({ modelKind: "workers-ai", model: STARTER_MODEL });
+    return c.json(view((await store.get()) as Settings));
   }
   if (body?.kind !== "openai-chat") return fail(c, 400, "invalid_model");
   const providerId = text(body.providerId, 63);
@@ -150,57 +108,53 @@ settings.put("/model", async (c) => {
   } catch {
     return fail(c, 400, "invalid_base_url");
   }
-  const current = await load(c.env.DB, userId);
+  const current = await store.get();
   if (!current) return fail(c, 404, "not_found");
-  let secretId = current.model_key_secret_id;
+  let secretId = current.keySecretId;
   if (apiKey) {
     if (!c.env.VAULT) return fail(c, 503, "vault_unavailable");
     secretId ??= crypto.randomUUID();
     const input = { secretId, purpose: PURPOSE, binding, plaintext: apiKey, caller: CALLER };
-    await encrypt(c.env.VAULT, scopeOf(c.var.session), input);
+    await encrypt(c.env.VAULT, vaultScope(c), input);
   } else {
     // A key is bound to its provider and origin: a change means entering it again (ADR 0006 #5).
-    const { provider_id: savedProvider, base_url: savedUrl } = current;
+    const { providerId: savedProvider, baseUrl: savedUrl } = current;
     if (!secretId || !savedProvider || !savedUrl) return fail(c, 400, "key_required");
     if (credentialBinding(savedProvider, savedUrl) !== binding) {
       return fail(c, 400, "key_required");
     }
   }
-  await save(c.env.DB, userId, {
-    model_kind: "openai-chat",
-    provider_id: providerId,
-    base_url: baseUrl,
+  await store.save({
+    modelKind: "openai-chat",
+    providerId,
+    baseUrl,
     model,
-    model_key_secret_id: secretId,
+    modelKeySecretId: secretId,
   });
-  return c.json(view((await load(c.env.DB, userId)) as SettingsRow));
+  return c.json(view((await store.get()) as Settings));
 });
 
 /** Sends one short prompt with the saved settings; reports latency and tool support. */
 settings.post("/model/test", async (c) => {
-  const { userId } = c.var.session;
-  const row = await load(c.env.DB, userId);
-  if (!row?.model_kind || !row.model) return fail(c, 409, "no_model");
+  const store = settingsOf(c);
+  const row = await store.get();
+  if (!row?.modelKind || !row.model) return fail(c, 409, "no_model");
   let provider: ModelProvider;
   let apiKey: string | null = null;
-  if (row.model_kind === "workers-ai") {
+  if (row.modelKind === "workers-ai") {
     if (!c.env.AI) return fail(c, 503, "ai_unavailable");
     provider = createWorkersAIProvider(c.env.AI as unknown as WorkersAIBinding);
   } else {
     if (!c.env.VAULT) return fail(c, 503, "vault_unavailable");
-    const { provider_id: providerId, base_url: baseUrl, model_key_secret_id: secretId } = row;
+    const { providerId, baseUrl, keySecretId: secretId } = row;
     if (!providerId || !baseUrl || !secretId) return fail(c, 409, "no_model");
     const binding = credentialBinding(providerId, baseUrl);
     const ref = { secretId, purpose: PURPOSE, binding, caller: CALLER } as const;
     // A lost master key makes saved keys unreadable; the user enters theirs again.
-    apiKey = await decrypt(c.env.VAULT, scopeOf(c.var.session), ref).catch(() => null);
+    apiKey = await decrypt(c.env.VAULT, vaultScope(c), ref).catch(() => null);
     if (apiKey === null) return fail(c, 409, "key_required");
     provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey });
-    await c.env.DB.prepare(
-      "UPDATE secrets SET last_used_at = (unixepoch('subsec') * 1000) WHERE id = ? AND user_id = ?",
-    )
-      .bind(secretId, userId)
-      .run();
+    await store.keyUsed(secretId);
   }
   const started = Date.now();
   let firstTokenMs: number | null = null;
@@ -244,8 +198,8 @@ settings.post("/model/test", async (c) => {
 });
 
 settings.post("/onboarded", async (c) => {
-  const row = await load(c.env.DB, c.var.session.userId);
-  if (!row?.model_kind) return fail(c, 409, "no_model");
-  await save(c.env.DB, c.var.session.userId, { onboarded_at: Date.now() });
+  const store = settingsOf(c);
+  if (!(await store.get())?.modelKind) return fail(c, 409, "no_model");
+  await store.save({ onboardedAt: Date.now() });
   return c.body(null, 204);
 });
