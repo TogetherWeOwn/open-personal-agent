@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useReducer, useRef, useState } from "react";
+import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Button, Heading } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
-import { type ChatAction, chatReducer, initialState } from "./chat/state";
+import { type ChatAction, type Conversation, chatReducer, initialState } from "./chat/state";
 import { Thread } from "./chat/Thread";
 import type { ChatTransport } from "./chat/transport";
 import { ThemeToggle } from "./ThemeToggle";
@@ -12,6 +12,26 @@ const newId = () => crypto.randomUUID();
 
 const buttonClass =
   "min-h-11 rounded-lg px-3 text-sm font-medium hover:bg-surface-raised data-pressed:bg-border data-selected:bg-surface-raised";
+
+/** Loads a stale chat's messages from the server. */
+function useLoad(
+  transport: ChatTransport,
+  chat: Conversation | undefined,
+  dispatch: Dispatch<ChatAction>,
+) {
+  const id = chat?.stale ? chat.id : null;
+  useEffect(() => {
+    if (!id) return;
+    let current = true;
+    transport
+      .messages(id)
+      .then((messages) => current && messages && dispatch({ type: "loaded", id, messages }))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [transport, id, dispatch]);
+}
 
 export function App({ transport }: { transport: ChatTransport }) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
@@ -45,25 +65,21 @@ export function App({ transport }: { transport: ChatTransport }) {
         .conversations()
         .then((conversations) => dispatch({ type: "listed", conversations }))
         .catch(() => {});
+    const connected = () => {
+      dispatch({ type: "connected" });
+      void list();
+    };
     return transport.connect((event) => {
       if (event.type === "turn.started" && !known.current.has(event.sessionId)) void list();
       dispatch({ type: "event", event });
-    }, list);
+    }, connected);
   }, [transport]);
 
-  useEffect(() => {
-    if (!active.stale) return;
-    let current = true;
-    transport
-      .messages(active.id)
-      .then(
-        (messages) => current && messages && dispatch({ type: "loaded", id: active.id, messages }),
-      )
-      .catch(() => {});
-    return () => {
-      current = false;
-    };
-  }, [transport, active.id, active.stale]);
+  // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
+  // whose last events were missed while disconnected.
+  const running = state.conversations.find((c) => c.id === state.pending?.conversationId);
+  useLoad(transport, active, dispatch);
+  useLoad(transport, running === active ? undefined : running, dispatch);
 
   const open = (action: ChatAction) => {
     dispatch(action);

@@ -25,6 +25,7 @@ export type ChatAction =
   | { type: "select"; id: string }
   | { type: "send"; id: string; text: string }
   | { type: "event"; event: HarnessEvent }
+  | { type: "connected" }
   | { type: "listed"; conversations: ConversationSummary[] }
   | { type: "loaded"; id: string; messages: StoredMessage[] };
 
@@ -57,7 +58,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         messageId: `${action.id}-reply`,
       };
       return {
-        ...update(state, pending.conversationId, (c) => ({
+        ...toTop(state, pending.conversationId, (c) => ({
           title: c.messages.length ? c.title : (text.split("\n", 1)[0]?.slice(0, 40) ?? text),
           messages: [
             ...c.messages,
@@ -67,6 +68,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         })),
         pending,
       };
+    }
+    case "connected": {
+      // A send whose `turn.started` was lost with the socket: the reload shows whether it ran.
+      const { pending } = state;
+      if (pending?.turnId !== null) return state;
+      const drop = (c: Conversation) => ({ messages: c.messages.slice(0, -2), stale: true });
+      return { ...update(state, pending.conversationId, drop), pending: null };
     }
     case "listed": {
       // Chats this tab made that the server hasn't seen yet stay on top; the server's are reloaded.
@@ -105,12 +113,8 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     if (pending) return state;
     // Another tab's turn. Its user message comes with the next load of the conversation.
     const reply: Message = { id: messageId, role: "assistant", text: "", status: "streaming" };
-    const chat =
-      state.conversations.find((c) => c.id === event.sessionId) ?? blank(event.sessionId);
-    const others = state.conversations.filter((c) => c !== chat);
     return {
-      ...state,
-      conversations: [{ ...chat, messages: [...chat.messages, reply], stale: true }, ...others],
+      ...toTop(state, event.sessionId, (c) => ({ messages: [...c.messages, reply], stale: true })),
       pending: turn,
       announcement: "Assistant is working.",
     };
@@ -197,6 +201,13 @@ function update(
     ...state,
     conversations: state.conversations.map((c) => (c.id === id ? { ...c, ...patch(c) } : c)),
   };
+}
+
+/** Updates a chat, adding it if it's new, and moves it to the top, as its new turn does in D1. */
+function toTop(state: ChatState, id: string, patch: (c: Conversation) => Partial<Conversation>) {
+  const chat = state.conversations.find((c) => c.id === id) ?? blank(id);
+  const rest = state.conversations.filter((c) => c !== chat);
+  return { ...state, conversations: [{ ...chat, ...patch(chat) }, ...rest] };
 }
 
 function updateMessage(
