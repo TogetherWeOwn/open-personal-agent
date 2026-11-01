@@ -48,6 +48,7 @@ const PAGES: [path: string, heading: string, url?: RegExp][] = [
   ["/settings/computer", "Settings"],
   ["/settings/apps", "Settings"],
   ["/settings/memory", "Settings"],
+  // M3-19 composes the Privacy & security screen (passkeys, sessions) with M3-20's export card.
   // Spending shipped with M3-17; Usage keeps its own address and Spending links to it.
   ["/settings/spending", "Settings"],
   ["/settings/privacy", "Settings"],

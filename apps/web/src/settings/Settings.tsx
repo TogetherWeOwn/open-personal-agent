@@ -12,6 +12,7 @@ import { AppsTools } from "./AppsTools";
 import { Computer } from "./Computer";
 import { MemorySettings } from "./MemorySettings";
 import { ModelsSettings } from "./ModelsSettings";
+import { PrivacySecurity } from "./PrivacySecurity";
 import { PrivacySettings } from "./PrivacySettings";
 import { SpendingSettings } from "./Spending";
 
@@ -82,7 +83,10 @@ export function Settings({ page }: { page: SettingsPage }) {
       ) : page === "memory" ? (
         <MemorySettings />
       ) : page === "privacy" ? (
-        <PrivacySettings />
+        <>
+          <PrivacySecurity />
+          <PrivacySettings />
+        </>
       ) : (
         <SpendingSettings />
       )}
