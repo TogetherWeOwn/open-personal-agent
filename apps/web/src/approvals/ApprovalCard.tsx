@@ -46,6 +46,13 @@ function Destinations({ items }: { items: readonly ApprovalItem[] }) {
   );
 }
 
+/** Why Allow is missing: a request saved damaged can only be declined, or removed from a batch. */
+function damagedText(damaged: readonly ApprovalItem[], multi: boolean): string {
+  const one = damaged.length === 1;
+  if (!multi) return "I can't let you allow this: part of what I saved for it is damaged.";
+  return `I can't let you allow ${damaged.map((i) => actionOf(i.tool)).join(", ")}: part of what I saved for ${one ? "it" : "them"} is damaged. Remove ${one ? "it" : "them"} to allow the rest.`;
+}
+
 /** True below 640 px, where a multi-action card opens only its first item. */
 function useNarrow() {
   const query = "(max-width: 639px)";
@@ -112,6 +119,9 @@ export function ApprovalCard({
   const multi = items.length > 1;
   const remaining = items.filter((i) => !removed.has(i.approvalId));
   const { scopes, because } = offered(remaining);
+  // A request saved damaged offers no scope: it can be declined (or removed), never allowed.
+  const damaged = remaining.filter((i) => !i.scopes.length);
+  const canAllow = remaining.length > 0 && !damaged.length;
   const chosen = scopes.includes(scope) ? scope : "once";
   const passkey = remaining.some(needsPasskey);
   const expired = batch.expiresAt <= now;
@@ -210,7 +220,8 @@ export function ApprovalCard({
       ) : items[0] ? (
         <ItemBody item={items[0]} />
       ) : null}
-      {!expired && remaining.length > 0 && (
+      {!expired && damaged.length > 0 && <p>{damagedText(damaged, multi)}</p>}
+      {!expired && canAllow && (
         <div className="flex flex-col gap-1">
           {scopes.length > 1 ? (
             <RadioGroup
@@ -255,7 +266,7 @@ export function ApprovalCard({
       )}
       {!expired && (
         <div className="flex flex-wrap gap-2">
-          {remaining.length > 0 && (
+          {canAllow && (
             <span className="contents" onKeyDownCapture={noEnter} onKeyUpCapture={noEnter}>
               <Button
                 variant="primary"

@@ -346,6 +346,30 @@ test.describe("the multi-action card (AC11)", () => {
     await expect(page.getByText(/^You declined all 3/)).toBeVisible();
   });
 
+  test("an item saved damaged can be declined or removed, never allowed", async ({ page }) => {
+    const s = await stub(page);
+    await page.goto("/");
+    await ask(page, s, [
+      email(),
+      email({ approvalId: "appr_2", tool: "create_artifact", scopes: [] }),
+    ]);
+    const c = card(page);
+    await expect(c).toContainText(
+      "I can't let you allow Save a file: part of what I saved for it is damaged. Remove it to allow the rest.",
+    );
+    await expect(c.getByRole("button", { name: /^Allow/ })).toHaveCount(0);
+    await c.getByRole("button", { name: "Don't do this one: Save a file" }).click();
+    await c.getByRole("button", { name: "Allow 1 action" }).click();
+    await expect
+      .poll(() => s.posts[0]?.body)
+      .toEqual({
+        decisions: [
+          { approvalId: "appr_1", decision: "approve", scope: "once" },
+          { approvalId: "appr_2", decision: "deny", scope: "once" },
+        ],
+      });
+  });
+
   test("a collapsed item still warns about a look-alike host", async ({ page }) => {
     const s = await stub(page);
     await page.setViewportSize({ width: 375, height: 800 });
