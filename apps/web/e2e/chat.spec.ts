@@ -103,7 +103,34 @@ test("Stop ends a reply", async ({ page }) => {
   await page.getByRole("textbox", { name: "Message" }).fill("Write an essay");
   await page.keyboard.press("Enter");
   await page.getByRole("button", { name: "Stop" }).click();
-  await expect(page.getByRole("log")).toContainText("Stopped before it finished.");
+  await expect(page.getByRole("log")).toContainText("Stopped. Nothing after that ran.");
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+});
+
+test("an interrupted reply says so and Retry sends its request again (M3-12 AC5)", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Message" }).fill("/mock interrupted");
+  await page.keyboard.press("Enter");
+  const log = page.getByRole("log", { name: "Messages" });
+  await expect(log).toContainText("I was interrupted before I finished.");
+  // The partial answer is kept.
+  await expect(log).toContainText("This is a placeholder");
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(log.getByText("/mock interrupted")).toHaveCount(2);
+});
+
+test("a promoted turn says it keeps going, then finishes in the same reply (M3-12 AC2)", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Message" }).fill("/mock promoted");
+  await page.keyboard.press("Enter");
+  const log = page.getByRole("log", { name: "Messages" });
+  await expect(log).toContainText("This keeps going if you close the tab.");
+  await expect(log).toContainText("a word at a time.");
+  await expect(log).not.toContainText("This keeps going if you close the tab.");
 });
 
 test("a refused send explains the limit and goes back to the composer", async ({ page }) => {

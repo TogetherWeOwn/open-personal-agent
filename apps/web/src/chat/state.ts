@@ -15,6 +15,13 @@ export type Message = {
   status: Status;
   /** Why a failed reply failed, when the fix is elsewhere (a vault reset in Settings). */
   failure?: TurnFailure;
+  /**
+   * How an `interrupted` reply ended, when this tab saw it: the user's Stop, or the server going
+   * away (m3-ux §6). D1 stores both as `interrupted`, so a reloaded reply has neither.
+   */
+  ended?: "stopped" | "interrupted";
+  /** The turn moved to a background task (M3-12 AC2): it keeps going if the tab closes. */
+  promoted?: true;
   attachments?: StoredAttachment[];
 };
 /** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
@@ -306,10 +313,16 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     case "turn.completed":
       return finish(seen, "complete", seen.announcement);
     // `turn.cancelled` is the user's Stop; `turn.interrupted` is the server going away
-    // mid-reply (M3-03 AC6). On screen both are the same cut-short reply.
+    // mid-reply (M3-03 AC6), which never fails silently: it says so and offers Retry (AC5).
     case "turn.cancelled":
+      return finish(seen, "interrupted", "Stopped.", { ended: "stopped" });
     case "turn.interrupted":
-      return finish(seen, "interrupted", "The reply stopped before it finished.");
+      return finish(seen, "interrupted", "I was interrupted before I finished.", {
+        ended: "interrupted",
+      });
+    // The turn goes on as a task; its events keep streaming into the same reply.
+    case "task.promoted":
+      return updateMessage(seen, pending, () => ({ promoted: true }));
     case "turn.failed": {
       const { message, code } = event.payload;
       return finish(seen, "error", `Something went wrong: ${message}`, code && { failure: code });
@@ -335,7 +348,6 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     case "tool.result":
     case "approval.resolved":
     case "context.tainted":
-    case "task.promoted":
     case "artifact.created":
     case "memory.proposed":
       return seen;

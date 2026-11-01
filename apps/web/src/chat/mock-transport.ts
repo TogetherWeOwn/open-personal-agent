@@ -32,6 +32,12 @@ export const MOCK_LIMITS = new Map<string, TurnLimit>([
 export const MOCK_VAULT_RESET = "/mock vault reset";
 /** Sending exactly this holds the turn's start for a second, as a slow server would. */
 export const MOCK_SLOW_START = "/mock slow start";
+/** Sending exactly this cuts the reply short as an eviction would (M3-12 AC5). */
+export const MOCK_INTERRUPTED = "/mock interrupted";
+/** Sending exactly this moves the turn to a background task partway (M3-12 AC2). */
+export const MOCK_PROMOTED = "/mock promoted";
+/** How many words stream before either of those happens. */
+const MOCK_AFTER_WORDS = 5;
 const LIMIT_MESSAGES: Record<TurnLimit, string> = {
   slow_down: "You're sending messages quickly. Wait a minute, then try again.",
   limit_reached: "You've reached today's spending limit. It resets at midnight UTC.",
@@ -74,14 +80,22 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       const reply = text === MOCK_HOSTILE ? HOSTILE_REPLY : REPLY;
       const words = reply.split(/(?<= )/);
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let sent = 0;
       const tick = () => {
-        const text = words.shift();
-        if (text === undefined) {
+        if (sent++ === MOCK_AFTER_WORDS) {
+          if (text === MOCK_INTERRUPTED) {
+            stop = null;
+            return emit("turn.interrupted", { message: "Retry?" });
+          }
+          if (text === MOCK_PROMOTED) emit("task.promoted", { taskId: `${turnId}-task` });
+        }
+        const word = words.shift();
+        if (word === undefined) {
           stop = null;
           emit("message.completed", { text: reply });
           return emit("turn.completed");
         }
-        emit("message.delta", { text });
+        emit("message.delta", { text: word });
         timer = setTimeout(tick, delayMs);
       };
       let started = false;
