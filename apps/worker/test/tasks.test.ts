@@ -175,7 +175,12 @@ describe("task rows", () => {
       taskId: "t11",
     }); // no price on file: counted, but missing from the subtotal
     await alice.usage.record(call); // a chat turn: no task, so no run may claim it
-    await bob.usage.record({ ...call, taskId: "t11" }); // another user's call: same
+    // Another user's call can't attach to the task at all (TWO-427 L-4): the owner
+    // trigger refuses the write (drizzle wraps the abort as a failed query), so no
+    // foreign spend can leak into the subtotal.
+    await expect(bob.usage.record({ ...call, taskId: "t11" })).rejects.toThrow(
+      /Failed query: insert into "usage"/,
+    );
     await expect(alice.usage.record({ ...call, taskId: "../x" })).rejects.toThrow(/invalid id/);
 
     const listed = await alice.tasks.list();
