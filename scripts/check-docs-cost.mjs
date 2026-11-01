@@ -54,10 +54,10 @@ export function checkDocsCost({ readme, config, permissions }) {
     );
   }
   // A cost row is a table row whose first cell is a backticked binding, followed by a filled-in
-  // service, included allowance and overage rate.
+  // service, included allowance and overage rate. `\|` is a literal pipe inside a cell.
   const costRows = new Set();
   for (const [, first, rest] of section.matchAll(/^\| `([^`]+)` +\|(.*)\|$/gm)) {
-    const cells = rest.split("|");
+    const cells = rest.split(/(?<!\\)\|/);
     if (cells.length === 3 && cells.every((cell) => cell.trim())) costRows.add(first);
   }
   const permitted = new Set(permissions.permissions.flatMap((p) => p.bindings ?? []));

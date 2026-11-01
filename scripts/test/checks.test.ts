@@ -153,6 +153,12 @@ describe("docs-cost-lint", () => {
     const short = repo();
     short.readme = short.readme.replace(/^\| `DB` .*$/m, "| `DB` | D1 |");
     expect(checkDocsCost(short)).toEqual(['DB: no cost row in the README "What this costs" table']);
+    const piped = repo();
+    piped.readme = piped.readme.replace(
+      /^\| `DB` .*$/m,
+      "| `DB` | D1 | 5 GB \\| 25B rows | $0.75/GB |",
+    );
+    expect(checkDocsCost(piped)).toEqual([]);
     const env = repo();
     env.config.env = {
       staging: { vars: { binding: "NOT_A_BINDING" }, queues: { producers: [{ binding: "JOBS" }] } },
