@@ -205,8 +205,9 @@ function Allowance({ allowance }: { allowance: UsageData["allowance"] }) {
         </div>
       </Meter>
       <p className="text-sm text-text-muted">
-        Neurons are how Cloudflare measures Workers AI work; longer messages use more. The allowance
-        is shared by your whole Cloudflare account and resets at {reset} your time.
+        Neurons are how Cloudflare measures Workers AI work; longer messages use more. The count
+        covers everyone on this assistant. The allowance is shared by your whole Cloudflare
+        account, other apps included, and resets at {reset} your time.
       </p>
     </section>
   );
