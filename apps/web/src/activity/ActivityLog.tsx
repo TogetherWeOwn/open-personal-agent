@@ -95,6 +95,9 @@ export function ActivityLog() {
   };
 
   const filtered = shown.kind !== "" || shown.q !== "";
+  // While a new filter or search waits to load, the rows on screen are the old one's: paging
+  // them then would mix the two, so "Show older entries" waits for the new rows.
+  const settled = kind === shown.kind && query.trim() === shown.q;
   const clear = () => {
     setKind("");
     setQuery("");
@@ -162,7 +165,7 @@ export function ActivityLog() {
           ))}
         </div>
       )}
-      {!failed && entries !== null && entries.length > 0 && next !== null && (
+      {!failed && entries !== null && entries.length > 0 && next !== null && settled && (
         <Button isPending={loadingMore} onPress={showOlder} className="self-start">
           {loadingMore ? "Loading older entries…" : "Show older entries"}
         </Button>
