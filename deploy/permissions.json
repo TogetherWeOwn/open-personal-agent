@@ -6,8 +6,15 @@
       "scope": "account",
       "group": "Workers Scripts Edit",
       "required": true,
-      "bindings": ["ASSETS", "ASSISTANT", "PUBLIC_LIMIT", "TASK_WORKFLOW", "triggers"],
-      "neededFor": "uploading the Worker with its Durable Object, Workflow, rate limit, cron and assets; setting secrets; the workers.dev URL",
+      "bindings": [
+        "ASSETS",
+        "ASSISTANT",
+        "EXPORT_WORKFLOW",
+        "PUBLIC_LIMIT",
+        "TASK_WORKFLOW",
+        "triggers"
+      ],
+      "neededFor": "uploading the Worker with its Durable Object, Workflows, rate limit, cron and assets; setting secrets; the workers.dev URL",
       "steps": ["preflight", "deploy", "secrets"],
       "check": "/accounts/{account_id}/workers/scripts",
       "status": "verified 2026-11-01 (M2-05 deploy-verify run 41260337408): Workers Scripts Edit covers Workflows; the reference lists no separate Workflows group"
