@@ -15,4 +15,4 @@ BEGIN
 	SELECT RAISE(ABORT, 'cross_user_reference');
 END;--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (18);
+INSERT INTO `schema_version` (`version`) VALUES (19);

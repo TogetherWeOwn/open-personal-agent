@@ -20,6 +20,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
@@ -27,6 +28,7 @@ import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
 import { RETENTION_DEFAULTS, type RetentionSettings, toSettings } from "./retention";
 import {
+  approvals,
   artifacts,
   attachments,
   auditLog,
@@ -383,6 +385,67 @@ export interface SavedTurn {
   status: TurnStatus;
   state: string;
 }
+
+/** An approval row (M3-07 AC9). Its `nonce` and `stepUp*` columns never leave the server. */
+export type ApprovalRow = typeof approvals.$inferSelect;
+/** An approval as the host writes it when its turn or task stops: pending, undecided. */
+export type NewApproval = Pick<
+  typeof approvals.$inferInsert,
+  | "batchId"
+  | "approvalId"
+  | "position"
+  | "conversationId"
+  | "turnId"
+  | "taskId"
+  | "tool"
+  | "toolCallId"
+  | "target"
+  | "risk"
+  | "rule"
+  | "stepUp"
+  | "scopes"
+  | "taint"
+  | "canonical"
+  | "bindingHash"
+  | "expiresAt"
+>;
+/** A step-up ceremony in progress on a batch (crypto review W3). */
+export type StepUpCeremony = {
+  nonce: string;
+  digest: string;
+  expiresAt: number;
+  sessionId: string;
+};
+/** How an approved call ended: it ran, it failed, or the re-check refused it (M3-07 AC12). */
+export type ApprovalOutcome =
+  | { status: "executed" | "failed" }
+  | { status: "denied" | "expired"; reason: string };
+
+/** The audit row for an approval change; `action` is NULL, breaking NOT NULL, unless `guard`. */
+const approvalAudit = (
+  userId: string,
+  action: string,
+  batchId: string,
+  approvalId: string | null,
+  result: "ok" | "denied" | "error",
+  detail: Record<string, unknown> | null,
+  guard?: SQL,
+) => ({
+  userId,
+  action: guard ? sql`CASE WHEN ${guard} THEN ${action} END` : action,
+  module: "approvals",
+  targetId: approvalId === null ? batchId : `${batchId}/${approvalId}`,
+  result,
+  detail: detail === null ? null : JSON.stringify(detail),
+});
+
+/** Whether a batch failed on an `approvalAudit` guard (nothing changed), not on D1 itself. */
+const guardRefused = (e: unknown): boolean => {
+  for (let at = e; at instanceof Error; at = at.cause) {
+    if (at.message.includes("NOT NULL constraint failed: audit_log.action")) return true;
+  }
+  return false;
+};
 
 /** A call's ledger values, priced from the table; the cost columns stay null without a price. */
 function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
@@ -918,11 +981,379 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .where(and(eq(turnStates.turnId, turnId), eq(turnStates.userId, userId)))
                 .limit(1)
             )[0],
+          /**
+           * Settles a stopped turn where it is and opens a new reply at the end of the chat, for
+           * a late approval (M3-07 AC14): the old reply keeps its text, its saved state goes,
+           * and a thread line names the original request before the new, streaming reply.
+           * All of it or none, and only for a stopped turn of this conversation with that reply.
+           */
+          supersede: async (s: {
+            old: { turnId: string; replyId: string; reply: string };
+            conversationId: string;
+            replyId: string;
+            line: { id: string; content: string };
+          }) => {
+            if (!(await getConversation(s.conversationId))) throw new Error("not found");
+            // A turn's conversation and reply never change, so this read can't go stale.
+            const [old] = await db
+              .select({ turnId: turnStates.turnId })
+              .from(turnStates)
+              .where(
+                and(
+                  eq(turnStates.turnId, s.old.turnId),
+                  eq(turnStates.userId, userId),
+                  eq(turnStates.conversationId, s.conversationId),
+                  eq(turnStates.replyId, s.old.replyId),
+                ),
+              )
+              .limit(1);
+            if (!old) throw new Error("not found");
+            await db.batch([
+              db
+                .update(messages)
+                .set({ status: "complete", content: s.old.reply })
+                .where(
+                  and(
+                    eq(messages.id, s.old.replyId),
+                    eq(messages.userId, userId),
+                    eq(messages.conversationId, s.conversationId),
+                  ),
+                ),
+              db
+                .delete(turnStates)
+                .where(
+                  and(
+                    eq(turnStates.turnId, s.old.turnId),
+                    eq(turnStates.userId, userId),
+                    eq(turnStates.conversationId, s.conversationId),
+                  ),
+                ),
+              message(s.conversationId, s.line.id, "system", s.line.content),
+              message(s.conversationId, s.replyId, "assistant", ""),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(s.conversationId)),
+            ]);
+          },
           /** Drops a turn's saved state as it settles. Another user's row is untouched. */
           remove: async (turnId: string) => {
             await db
               .delete(turnStates)
               .where(and(eq(turnStates.turnId, turnId), eq(turnStates.userId, userId)));
+          },
+        },
+        /**
+         * Approvals (M3-07 AC9). Every change is one conditional write with its audit row in
+         * the same batch (AC5): the audit insert names its action only when the write before it
+         * changed exactly the rows it should, and a NULL action breaks NOT NULL and rolls the
+         * whole batch back. So a second tab, a retried request or a replayed assertion that
+         * loses a race changes nothing and leaves no audit row claiming it did.
+         */
+        approvals: {
+          /**
+           * Writes a stopped turn's or task's batch, pending. `false` if the conversation (or
+           * the task) isn't the user's.
+           */
+          create: async (items: readonly NewApproval[]) => {
+            const [first] = items;
+            if (!first) return true;
+            // One batch, in one conversation: the ownership check below covers every item.
+            if (items.some((i) => i.batchId !== first.batchId)) throw new Error("one batch only");
+            if (items.some((i) => i.conversationId !== first.conversationId)) {
+              throw new Error("one conversation only");
+            }
+            if (!(await getConversation(first.conversationId))) return false;
+            for (const { taskId } of items) {
+              if (taskId === null || taskId === undefined) continue;
+              const own = await db
+                .select({ id: tasks.id })
+                .from(tasks)
+                .where(
+                  and(
+                    eq(tasks.id, taskId),
+                    eq(tasks.userId, userId),
+                    eq(tasks.conversationId, first.conversationId),
+                  ),
+                )
+                .limit(1);
+              if (!own.length) return false;
+            }
+            const rows = items.map((i) => ({ ...i, userId, status: "pending" as const }));
+            await db.insert(approvals).values(rows);
+            return true;
+          },
+          /** A batch's rows in their stored order; empty when it is missing or someone else's. */
+          batch: (batchId: string): Promise<ApprovalRow[]> =>
+            isId(batchId)
+              ? db
+                  .select()
+                  .from(approvals)
+                  .where(and(eq(approvals.batchId, batchId), eq(approvals.userId, userId)))
+                  .orderBy(approvals.position)
+              : Promise.resolve([]),
+          /**
+           * Starts a step-up ceremony over the batch's pending items (W3): the nonce, the digest
+           * it was issued for, its expiry and the session that asked, on every pending row,
+           * replacing any earlier ceremony. `false` unless exactly `pending` items are pending
+           * and unexpired, so a batch that changed since the caller read it starts nothing.
+           */
+          beginStepUp: async (batchId: string, pending: number, c: StepUpCeremony, now: number) => {
+            if (pending < 1) return false; // nothing to sign for
+            const live = and(
+              eq(approvals.batchId, batchId),
+              eq(approvals.userId, userId),
+              eq(approvals.status, "pending"),
+              gt(approvals.expiresAt, now),
+            );
+            const [update] = await db
+              .batch([
+                db
+                  .update(approvals)
+                  .set({
+                    nonce: c.nonce,
+                    stepUpDigest: c.digest,
+                    stepUpExpiresAt: c.expiresAt,
+                    stepUpSessionId: c.sessionId,
+                  })
+                  .where(
+                    and(
+                      live,
+                      sql`(SELECT count(*) FROM approvals WHERE batch_id = ${batchId} AND user_id = ${userId} AND status = 'pending' AND expires_at > ${now}) = ${pending}`,
+                    ),
+                  ),
+                db
+                  .insert(auditLog)
+                  .values(
+                    approvalAudit(
+                      userId,
+                      "approval.step_up_options",
+                      batchId,
+                      null,
+                      "ok",
+                      null,
+                      sql`changes() = ${pending}`,
+                    ),
+                  ),
+              ])
+              .catch(() => [{ meta: { changes: 0 } }]);
+            return update.meta.changes === pending;
+          },
+          /**
+           * Takes the batch's ceremony, burning it whatever happens next (W3): a verify that
+           * fails, a replay or a second tab finds nothing. The ceremony is returned only when
+           * every row taken carried the same one.
+           */
+          takeStepUp: async (batchId: string): Promise<StepUpCeremony | null> => {
+            const mine = and(eq(approvals.batchId, batchId), eq(approvals.userId, userId));
+            const held = await db
+              .select({
+                nonce: approvals.nonce,
+                digest: approvals.stepUpDigest,
+                expiresAt: approvals.stepUpExpiresAt,
+                sessionId: approvals.stepUpSessionId,
+              })
+              .from(approvals)
+              .where(and(mine, sql`${approvals.nonce} IS NOT NULL`));
+            const [first] = held;
+            if (!first?.nonce) return null;
+            // Burn it: of two takers that read the same nonce, only the one whose update
+            // clears it gets the ceremony, and a ceremony begun in between is not this one.
+            // (RETURNING shows values after the update, so the read comes first.)
+            const cleared = await db
+              .update(approvals)
+              .set({
+                nonce: null,
+                stepUpDigest: null,
+                stepUpExpiresAt: null,
+                stepUpSessionId: null,
+              })
+              .where(and(mine, eq(approvals.nonce, first.nonce)))
+              .returning({ nonce: approvals.nonce });
+            const same = held.every(
+              (t) =>
+                t.nonce === first.nonce &&
+                t.digest === first.digest &&
+                t.expiresAt === first.expiresAt &&
+                t.sessionId === first.sessionId,
+            );
+            if (!same || cleared.length !== held.length) return null;
+            const { nonce, digest, expiresAt, sessionId } = first;
+            return digest && expiresAt && sessionId
+              ? { nonce, digest, expiresAt, sessionId }
+              : null;
+          },
+          /**
+           * Records the user's decisions on pending, unexpired items, all of them or none, each
+           * with its audit row. An approval holds only a scope its row offered. Throws when any
+           * item was decided, expired or cancelled since the caller read the batch, or asks for
+           * a scope it wasn't offered; nothing is written then.
+           */
+          decide: async (
+            batchId: string,
+            decisions: readonly {
+              approvalId: string;
+              decision: "approve" | "deny";
+              scope: "once" | "task" | "hour" | "destination";
+              detail: Record<string, unknown>;
+            }[],
+            now: number,
+          ) => {
+            if (!decisions.length) throw new Error("no decisions");
+            const statements: BatchItem<"sqlite">[] = [];
+            for (const d of decisions) {
+              const approve = d.decision === "approve";
+              statements.push(
+                db
+                  .update(approvals)
+                  .set({
+                    status: approve ? "approved" : "denied",
+                    scope: approve ? d.scope : null,
+                    decidedAt: now,
+                    nonce: null,
+                    stepUpDigest: null,
+                    stepUpExpiresAt: null,
+                    stepUpSessionId: null,
+                  })
+                  .where(
+                    and(
+                      eq(approvals.batchId, batchId),
+                      eq(approvals.approvalId, d.approvalId),
+                      eq(approvals.userId, userId),
+                      eq(approvals.status, "pending"),
+                      gt(approvals.expiresAt, now),
+                      approve
+                        ? sql`EXISTS (SELECT 1 FROM json_each(${approvals.scopes}) WHERE value = ${d.scope})`
+                        : undefined,
+                    ),
+                  ),
+                db
+                  .insert(auditLog)
+                  .values(
+                    approvalAudit(
+                      userId,
+                      approve ? "approval.approve" : "approval.deny",
+                      batchId,
+                      d.approvalId,
+                      "ok",
+                      { ...d.detail, scope: approve ? d.scope : null },
+                      sql`changes() = 1`,
+                    ),
+                  ),
+              );
+            }
+            await db.batch(statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]]);
+          },
+          /** An audit row about the batch that changes no approval: a refused step-up. */
+          audit: async (
+            batchId: string,
+            action: string,
+            result: "ok" | "denied" | "error",
+            detail: Record<string, unknown> | null = null,
+          ) => {
+            await db
+              .insert(auditLog)
+              .values(approvalAudit(userId, action, batchId, null, result, detail));
+          },
+          /**
+           * Claims an approved call just before it runs (crypto review W3): `approved` to
+           * `executing`, while it is unexpired. The row as claimed, or `undefined` if another
+           * run claimed it, it was never approved, or it expired: then nothing runs. With its
+           * audit row, so a call that never reaches `finish` still shows when it began. Throws
+           * when D1 fails, leaving the row as it was.
+           */
+          claim: async (batchId: string, approvalId: string, now: number) => {
+            const [claimed] = await db
+              .batch([
+                db
+                  .update(approvals)
+                  .set({ status: "executing" })
+                  .where(
+                    and(
+                      eq(approvals.batchId, batchId),
+                      eq(approvals.approvalId, approvalId),
+                      eq(approvals.userId, userId),
+                      eq(approvals.status, "approved"),
+                      gt(approvals.expiresAt, now),
+                    ),
+                  )
+                  .returning(),
+                db
+                  .insert(auditLog)
+                  .values(
+                    approvalAudit(
+                      userId,
+                      "approval.claim",
+                      batchId,
+                      approvalId,
+                      "ok",
+                      null,
+                      sql`changes() = 1`,
+                    ),
+                  ),
+              ])
+              .catch((e: unknown) => {
+                // Only a lost claim reads as "nothing to run"; a D1 failure reaches the caller,
+                // whose claim step retries or reports that the approval couldn't be checked.
+                if (guardRefused(e)) return [[]];
+                throw e;
+              });
+            return claimed[0];
+          },
+          /**
+           * Ends an approval's life: a claimed call `executed` or `failed`; an approved call the
+           * re-check refused `denied` (AC12); an undecided one past its expiry `expired`. With
+           * its audit row; `false` (and nothing written) if the row wasn't in the state that
+           * outcome ends.
+           */
+          finish: async (batchId: string, approvalId: string, outcome: ApprovalOutcome) => {
+            const from =
+              outcome.status === "executed" || outcome.status === "failed"
+                ? "executing"
+                : outcome.status === "denied"
+                  ? "approved"
+                  : "pending";
+            const reason = "reason" in outcome ? outcome.reason : null;
+            const result =
+              outcome.status === "executed"
+                ? "ok"
+                : outcome.status === "failed"
+                  ? "error"
+                  : "denied";
+            const [update] = await db
+              .batch([
+                db
+                  .update(approvals)
+                  .set({
+                    status: outcome.status,
+                    reason,
+                    finishedAt: Date.now(),
+                    nonce: null,
+                    stepUpDigest: null,
+                    stepUpExpiresAt: null,
+                    stepUpSessionId: null,
+                  })
+                  .where(
+                    and(
+                      eq(approvals.batchId, batchId),
+                      eq(approvals.approvalId, approvalId),
+                      eq(approvals.userId, userId),
+                      eq(approvals.status, from),
+                    ),
+                  ),
+                db
+                  .insert(auditLog)
+                  .values(
+                    approvalAudit(
+                      userId,
+                      outcome.status === "expired" ? "approval.expire" : "approval.execute",
+                      batchId,
+                      approvalId,
+                      result,
+                      reason === null ? null : { reason },
+                      sql`changes() = 1`,
+                    ),
+                  ),
+              ])
+              .catch(() => [{ meta: { changes: 0 } }]);
+            return update.meta.changes === 1;
           },
         },
         /** The ledger the Usage page reads (PRD §17). */

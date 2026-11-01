@@ -209,6 +209,17 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       message,
       JSON.stringify({ tag }),
     ),
+    // A pending approval for one of the task's tool calls.
+    run(
+      `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, task_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+       VALUES (?, 'approval-1', 0, ?, ?, ?, 'web_fetch', 'call-1', 'external', 'ask', 0, '["once"]', ?, 'hash', ?)`,
+      `batch-${tag}`,
+      id,
+      conversation,
+      task,
+      JSON.stringify({ tag }),
+      Date.now() + 3_600_000,
+    ),
     // The task's run journal, keyed by its Workflow instance rather than by user.
     run(
       "INSERT INTO task_events (instance_id, type, payload) VALUES (?, 'isolation', ?)",
