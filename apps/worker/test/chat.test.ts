@@ -274,5 +274,10 @@ describe("chat transport", () => {
     const busy = { message: "Another reply is still being written." };
     await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }));
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    // The list holds the user's own conversations only.
+    const list = await (await browser.req("/api/conversations")).json<{ conversations: unknown }>();
+    expect(list.conversations).toEqual([
+      { id: "mine", title: "first", updatedAt: expect.any(Number) },
+    ]);
   });
 });

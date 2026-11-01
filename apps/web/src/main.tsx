@@ -6,6 +6,7 @@ import { App } from "./App";
 import { Setup } from "./auth/Setup";
 import { SignIn } from "./auth/SignIn";
 import { createMockTransport } from "./chat/mock-transport";
+import { createSocketTransport } from "./chat/socket-transport";
 import { Onboarding } from "./onboarding/Onboarding";
 
 const root = document.getElementById("root");
@@ -28,8 +29,9 @@ function fragmentToken(hash: string): string {
   }
 }
 
-// Mocked until the Assistant DO transport (M2-13) lands.
-const transport = createMockTransport();
+// The e2e tests and a `vite dev` without a Worker build with `VITE_MOCK_CHAT=1`.
+const transport =
+  import.meta.env.VITE_MOCK_CHAT === "1" ? createMockTransport() : createSocketTransport();
 
 type View = "setup" | "sign-in" | "onboarding" | "chat";
 

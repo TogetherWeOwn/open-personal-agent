@@ -17,7 +17,6 @@ export function App({ transport }: { transport: ChatTransport }) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
-  const cancel = useRef<(() => void) | null>(null);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
@@ -35,6 +34,37 @@ export function App({ transport }: { transport: ChatTransport }) {
       .catch(() => setHealthy(false));
   }, []);
 
+  const known = useRef(new Set<string>());
+  known.current = new Set(state.conversations.map((c) => c.id));
+
+  // Every tab streams every turn. On each (re)connect, and for a chat another tab started, reload
+  // the list; it marks the server's chats stale, so the open one reloads its messages below.
+  useEffect(() => {
+    const list = () =>
+      transport
+        .conversations()
+        .then((conversations) => dispatch({ type: "listed", conversations }))
+        .catch(() => {});
+    return transport.connect((event) => {
+      if (event.type === "turn.started" && !known.current.has(event.sessionId)) void list();
+      dispatch({ type: "event", event });
+    }, list);
+  }, [transport]);
+
+  useEffect(() => {
+    if (!active.stale) return;
+    let current = true;
+    transport
+      .messages(active.id)
+      .then(
+        (messages) => current && messages && dispatch({ type: "loaded", id: active.id, messages }),
+      )
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [transport, active.id, active.stale]);
+
   const open = (action: ChatAction) => {
     dispatch(action);
     setThreadOpen(true);
@@ -43,16 +73,8 @@ export function App({ transport }: { transport: ChatTransport }) {
   const send = (text: string): boolean => {
     if (state.pending || !text.trim()) return false;
     dispatch({ type: "send", id: newId(), text });
-    cancel.current = transport.send(active.id, text, (event) => {
-      dispatch({ type: "event", event });
-      if (event.type === "turn.completed" || event.type === "turn.failed") cancel.current = null;
-    });
+    transport.send(active.id, text);
     return true;
-  };
-
-  const stop = () => {
-    cancel.current?.();
-    dispatch({ type: "stop" });
   };
 
   return (
@@ -102,7 +124,7 @@ export function App({ transport }: { transport: ChatTransport }) {
           setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
           busy={state.pending !== null}
           onSend={send}
-          onStop={stop}
+          onStop={() => transport.cancel()}
         />
       </main>
       <div role="status" className="sr-only">
