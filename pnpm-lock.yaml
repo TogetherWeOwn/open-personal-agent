@@ -17,6 +17,12 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20261031.1
         version: 5.20261031.1
+      '@opa/core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@playwright/test':
+        specifier: 1.64.1
+        version: 1.64.1
       '@vitest/coverage-istanbul':
         specifier: 5.0.5
         version: 5.0.5(vitest@5.0.5)
