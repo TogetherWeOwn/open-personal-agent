@@ -319,7 +319,8 @@ describe("the Anthropic preset on Messages (M3-05 AC3)", () => {
     const [url, init] = fetch.mock.calls[0] ?? [];
     expect(url).toBe("https://api.anthropic.com/v1/messages");
     const headers = new Headers(init?.headers);
-    expect(headers.get("authorization")).toBe(`Bearer ${CANARY}`);
+    expect(headers.get("x-api-key")).toBe(CANARY);
+    expect(headers.get("authorization")).toBeNull();
     expect(headers.get("anthropic-version")).toBe("2026-10-21");
   });
 
