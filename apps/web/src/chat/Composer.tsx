@@ -28,6 +28,8 @@ interface Props {
   chip?: ReactNode | undefined;
   /** With no model set up there is nothing to send to: Send opens Settings › Models instead. */
   onNoModel?: (() => void) | undefined;
+  /** Whether the message box has focus, so the phone tab bar can make room for the keyboard. */
+  onFocusChange?: (focused: boolean) => void;
 }
 
 /**
@@ -49,6 +51,7 @@ export function Composer({
   onRetry,
   chip,
   onNoModel,
+  onFocusChange,
 }: Props) {
   const submit = () => {
     if (onNoModel) return onNoModel();
@@ -98,6 +101,8 @@ export function Composer({
             aria-label="Message"
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onFocus={() => onFocusChange?.(true)}
+            onBlur={() => onFocusChange?.(false)}
             rows={1}
             placeholder="Message your assistant"
             onKeyDown={(e) => {

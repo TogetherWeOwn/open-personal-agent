@@ -233,9 +233,6 @@ export function Usage() {
   const label = key === "today" ? "today" : "this month";
   return (
     <Page title="Usage">
-      <Link href="/" className={`${link} self-start`}>
-        <span aria-hidden="true">← </span>Chats
-      </Link>
       {failed && <p role="alert">Usage couldn't be loaded. Try again in a moment.</p>}
       {data && period && (
         <>

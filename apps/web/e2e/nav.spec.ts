@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// The route table (M3-00 AC3, AC4; m3-ux §1.2).
+// NavShell and the route table (M3-00 AC2–AC4; m3-ux §1.2).
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
@@ -69,18 +69,18 @@ test("navigation moves focus to the page heading; Back, Forward and reload keep 
   page,
 }) => {
   await page.goto("/");
+  const nav = page.getByRole("navigation", { name: "Main" });
   // Shipped Settings screens move focus like every other routed screen.
-  await page.getByRole("link", { name: "Settings", exact: true }).click();
-  await expect(page).toHaveURL(/\/settings\/models$/);
+  await nav.getByRole("link", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/\/settings$/);
   await expect(h1(page)).toHaveText("Settings");
   await expect(h1(page)).toBeFocused();
-  await page.getByRole("link", { name: "Chats" }).click();
+  await page.goBack();
   await expect(page).toHaveURL(/\/$/);
-  await page.getByRole("link", { name: "Usage" }).click();
-  await expect(h1(page)).toHaveText("Usage");
+  await nav.getByRole("link", { name: "Inbox" }).click();
   await expect(h1(page)).toBeFocused();
-  await page.goto("/inbox");
-  await page.getByRole("link", { name: "See Activity" }).click();
+  await expect(nav.getByRole("link", { name: "Inbox" })).toHaveAttribute("aria-current", "page");
+  await nav.getByRole("link", { name: "Activity" }).click();
   await expect(page).toHaveURL(/\/activity\/tasks$/);
   await expect(h1(page)).toHaveText("Tasks");
   await expect(h1(page)).toBeFocused();
@@ -90,34 +90,61 @@ test("navigation moves focus to the page heading; Back, Forward and reload keep 
   await expect(h1(page)).toHaveText("Tasks");
   await page.reload();
   await expect(h1(page)).toHaveText("Tasks");
-});
-
-test("going back to the chat names it in the title and focuses its heading", async ({ page }) => {
-  await page.goto("/");
-  await expect(page).toHaveTitle("Chat · Open Personal Agent");
-  await page.getByRole("link", { name: "Usage" }).click();
-  await page.getByRole("link", { name: "Chats" }).click();
+  await nav.getByRole("link", { name: "Chat" }).click();
   await expect(page).toHaveTitle("Chat · Open Personal Agent");
   await expect(h1(page)).toBeFocused();
 });
 
+test("on a phone the tab bar has Chat, Inbox, Activity and You, and hides while typing", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await page.goto("/");
+  const tabs = page.getByRole("navigation", { name: "Main" });
+  await expect(tabs.getByRole("link")).toHaveText(["Chat", "Inbox", "Activity"]);
+  await tabs.getByRole("button", { name: "You" }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await expect(h1(page)).toHaveText("Settings");
+  await tabs.getByRole("link", { name: "Chat" }).click();
+  await page.getByRole("option", { name: "New chat" }).click();
+  await page.getByRole("textbox", { name: "Message" }).focus();
+  await expect(tabs).toBeHidden();
+  await page.getByRole("textbox", { name: "Message" }).blur();
+  await expect(tabs).toBeVisible();
+});
+
+test("on a tablet the conversation list opens as a sheet", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Chats" }).click();
+  const sheet = page.getByRole("dialog", { name: "Chats" });
+  await sheet.getByRole("button", { name: "New chat" }).click();
+  await expect(sheet).toBeHidden();
+  await expect(page.getByRole("option")).toHaveCount(0);
+});
+
+test("the account menu switches the theme", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("menuitem", { name: "Switch to dark theme" }).click();
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+});
+
 for (const colorScheme of ["light", "dark"] as const) {
   for (const width of [375, 1280]) {
-    test(`placeholders, ${colorScheme}, ${width} px: axe clean`, async ({ page }) => {
+    test(`nav, ${colorScheme}, ${width} px: every destination is axe clean`, async ({ page }) => {
       await page.emulateMedia({ colorScheme });
       await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
-      for (const path of [
-        "/inbox",
-        "/activity/tasks",
-        "/memory",
-        "/settings",
-        "/settings/computer",
-        "/nope",
-      ]) {
+      // chat.spec covers the chat itself, with a conversation open, at every width.
+      for (const path of ["/inbox", "/activity/tasks", "/memory", "/settings", "/nope"]) {
         await page.goto(path);
-        await expect(h1(page)).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
         await axe(page, width);
       }
+      await page.getByRole("button", { name: width < 640 ? "You" : "Account" }).click();
+      await expect(page.getByRole("menu")).toBeVisible();
+      await axe(page, width);
     });
   }
 }
