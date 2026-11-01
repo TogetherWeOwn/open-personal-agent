@@ -16,7 +16,6 @@ import {
   decide,
   type PolicyDecision,
   type RegisteredTool,
-  type RiskClass,
   type StandingGrant,
   type TaintState,
   type ToolManifest,
@@ -29,6 +28,8 @@ import { canonical, parseInput } from "./schema";
 
 /** COST-1 per-turn limits (M3-03 AC7). They replace M2's one call a turn. */
 export const TURN_LIMITS = { calls: 8, tools: 20 } as const;
+/** Tool calls a user may make in any minute (COST-2); the host counts them, the loop names it. */
+export const TOOL_RATE = 60;
 /** How long an interactive approval waits (M3-07 AC1, ADR 0010 D9). */
 export const APPROVAL_TTL_MS = 24 * 3_600_000;
 /** What a gated call's result reads while it waits, so the history stays valid for every provider. */
@@ -44,6 +45,9 @@ export type ToolOutput = {
   // A file the call created (M3-08 AC3): the loop announces it with `artifact.created`, so the
   // transcript and Outputs learn about it from the event log, not from the tool's text.
   artifact?: { artifactId: string; name: string; type: string; bytes: number };
+  // The host refused to run the tool: the user made 60 tool calls in the last minute (COST-2).
+  // The loop stops with `limit.reached{tool_rate}` once the calls started with it have finished.
+  slowDown?: true;
 };
 
 export interface LoopTool extends RegisteredTool {
@@ -83,6 +87,21 @@ export type LoopHost = {
   now(): number;
   newId(): string; // step and batch ids
 };
+
+/**
+ * Thrown by a host's provider before it yields anything, when a spend limit refused the call
+ * (M3-17): the call never ran, so it isn't counted, and the turn stops resumably with
+ * `limit.reached` instead of failing.
+ */
+export class LimitStop extends Error {
+  constructor(
+    readonly kind: LimitKind,
+    readonly detail: string,
+  ) {
+    super(`limit reached (${kind}): ${detail}`);
+    this.name = "LimitStop";
+  }
+}
 
 export class ApprovalError extends Error {
   constructor(
@@ -175,6 +194,7 @@ export async function* runTurn(
 ): AsyncGenerator<LoopEvent, TurnOutcome> {
   const { messages } = state;
   let stepId = "";
+  let slowed = false; // a tool call was refused by the per-minute tool limit
 
   /** Records a call's result, replacing its placeholder if it has one. */
   function* result(call: ModelToolCall, ok: boolean, content: string): Generator<LoopEvent> {
@@ -256,6 +276,7 @@ export async function* runTurn(
       }
       for (const { run, id, began, out } of group) {
         const o = await out;
+        if (o.slowDown) slowed = true;
         stepId = id;
         yield* result(run.call, o.ok, o.content);
         if (o.ok && o.artifact) yield ev("artifact.created", o.artifact);
@@ -327,6 +348,7 @@ export async function* runTurn(
     }
     state.pending = null;
     yield* execute(runs, true);
+    if (slowed) return yield* limit("tool_rate", `${TOOL_RATE} tool calls a minute`);
   }
 
   for (;;) {
@@ -350,6 +372,7 @@ export async function* runTurn(
     let usage: ModelUsage | null = null;
     let failure: string | undefined;
     let finish: FinishReason | undefined;
+    let stop: LimitStop | undefined;
     try {
       for await (const event of host.provider.stream({
         model: host.model,
@@ -367,9 +390,15 @@ export async function* runTurn(
         else if (event.type === "error") failure = event.message;
       }
     } catch (e) {
-      failure = e instanceof Error ? e.message : "The model call failed.";
+      if (e instanceof LimitStop) stop = e;
+      else failure = e instanceof Error ? e.message : "The model call failed.";
     } finally {
       if (budget) host.budget?.settle(usage);
+    }
+    if (stop) {
+      state.counts.calls -= 1; // refused before it ran
+      yield ev("step.completed", { stepId, status: "error", durationMs: host.now() - began });
+      return yield* limit(stop.kind, stop.detail);
     }
     if (usage) {
       for (const k of Object.keys(ZERO) as (keyof ModelUsage)[]) state.usage[k] += usage[k] ?? 0;
@@ -433,6 +462,10 @@ export async function* runTurn(
     }
     const asks = yield* execute(runs);
     if (signal.aborted) return yield* cancelled();
+    if (slowed) {
+      yield* closeOpen("Not run: too many tool calls in the last minute.");
+      return yield* limit("tool_rate", `${TOOL_RATE} tool calls a minute`);
+    }
     if (asks.length > 0) {
       // One batch for the step; each gated call gets a placeholder result while it waits.
       const source = state.taint.sources[0];

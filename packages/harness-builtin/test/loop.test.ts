@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ApprovalError,
   continueTurn,
+  LimitStop,
   newTurn,
   resolveApprovals,
   type ToolOutput,
@@ -449,6 +450,57 @@ describe("per-turn limits (M3-03 AC7)", () => {
       kind: "daily",
       detail: "daily cap",
     });
+  });
+});
+
+describe("limits the host enforces (M3-17)", () => {
+  it("stops resumably when the provider refuses the call for a limit, without counting it", async () => {
+    let refuse = true;
+    const { provider: inner, requests } = scripted([{ text: "hello" }]);
+    const provider = {
+      ...inner,
+      stream: (req: Parameters<typeof inner.stream>[0]) =>
+        (async function* () {
+          if (refuse) throw new LimitStop("task_budget", "$0.10 task budget");
+          yield* inner.stream(req);
+        })(),
+    };
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, []), state);
+    expect(outcome).toBe("limit_reached");
+    expect(ofType(events, "limit.reached")[0]?.payload).toEqual({
+      kind: "task_budget",
+      detail: "$0.10 task budget",
+    });
+    expect(types(events)).not.toContain("turn.failed");
+    expect(state.counts.calls).toBe(0);
+    expect(state.messages).toEqual([]);
+    refuse = false; // Continue raised the budget
+    expect((await drain(host(provider, []), state)).outcome).toBe("completed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("stops with tool_rate after a call the host refused to run, and closes the rest", async () => {
+    let allowed = 1;
+    const look = tool("look", "read", () =>
+      allowed-- > 0
+        ? { ok: true, content: "page", context: { kind: "system" } }
+        : { ok: false, content: "slow down", slowDown: true },
+    );
+    const { provider } = scripted([
+      {
+        calls: [
+          ["look", { q: "a" }],
+          ["look", { q: "b" }],
+        ],
+      },
+    ]);
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, [look]), state);
+    expect(outcome).toBe("limit_reached");
+    expect(ofType(events, "limit.reached")[0]?.payload.kind).toBe("tool_rate");
+    const results = state.messages.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(results).toEqual(["page", "slow down"]);
   });
 });
 
