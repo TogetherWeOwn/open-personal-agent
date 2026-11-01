@@ -9,6 +9,7 @@ import { SignIn } from "./auth/SignIn";
 import { createMockTransport } from "./chat/mock-transport";
 import { createSocketTransport } from "./chat/socket-transport";
 import { Onboarding } from "./onboarding/Onboarding";
+import { Settings } from "./settings/Settings";
 import { Usage } from "./usage/Usage";
 
 const root = document.getElementById("root");
@@ -74,8 +75,8 @@ function Root() {
 }
 
 /**
- * The signed-in app. Links move between the chat and `/usage` without a reload, and the chat stays
- * mounted (hidden) meanwhile, so its conversations and drafts survive a look at Usage.
+ * The signed-in app. Links move between the chat, `/usage` and `/settings/*` without a reload, and
+ * the chat stays mounted (hidden) meanwhile, so its conversations and drafts survive the trip.
  */
 function Shell({ initialPath }: { initialPath: string }) {
   const [path, setPath] = useState(initialPath);
@@ -89,12 +90,18 @@ function Shell({ initialPath }: { initialPath: string }) {
     setPath(new URL(href, window.location.href).pathname);
   };
   const usage = path === "/usage";
+  const settings = path.startsWith("/settings")
+    ? path === "/settings/agent-engine"
+      ? ("agent-engine" as const)
+      : ("models" as const)
+    : null;
   return (
     <RouterProvider navigate={navigate}>
-      <div hidden={usage}>
-        <App transport={transport} />
+      <div hidden={usage || settings !== null}>
+        <App transport={transport} onNavigate={navigate} visible={!usage && settings === null} />
       </div>
       {usage && <Usage />}
+      {settings && <Settings page={settings} />}
     </RouterProvider>
   );
 }

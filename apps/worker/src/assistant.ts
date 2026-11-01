@@ -89,7 +89,7 @@ export class Assistant extends Agent<Bindings> {
       const running = new AbortController();
       this.#running = running;
       void this.runFiber("chat-turn", (fiber) =>
-        this.#turn(connection, msg.conversationId, text, running.signal, fiber.stash),
+        this.#turn(connection, msg.conversationId, text, msg.model, running.signal, fiber.stash),
       )
         // The model's failures are reported in the turn; this is D1 failing.
         .catch(() => reject(connection, msg.conversationId, "The reply couldn't be saved."))
@@ -103,13 +103,20 @@ export class Assistant extends Agent<Bindings> {
     connection: Connection,
     conversationId: string,
     text: string,
+    own: { provider: string; model: string } | undefined,
     signal: AbortSignal,
     stash: (data: TurnRecord) => void,
   ) {
     if (!(await this.#sessionLive(connection))) return;
     const chat = this.#chat;
-    // Picked before `open`, so a send that can't run never creates an empty conversation.
-    const pick = { conversationId };
+    // The model context comes from D1, never from memory, so it survives an eviction. A new
+    // conversation has none yet.
+    const history = await chat.listMessages(conversationId);
+    // Picked before `open`, so a send that can't run never creates an empty conversation. A send
+    // may name the chat's own model, for a chat picked before the server had it (M3-06 AC3); an
+    // existing chat keeps the pin it has, so a newer switch is never overwritten by a send.
+    const fresh = history === null ? own : undefined;
+    const pick = fresh ?? { conversationId };
     const picked = await this.resolveModel(await this.#composed, this.#scope, "chat", pick);
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
@@ -126,9 +133,7 @@ export class Assistant extends Agent<Bindings> {
       usage: null,
       called: false,
     };
-    // The model context comes from D1, never from memory, so it survives an eviction. A new
-    // conversation has none yet.
-    const messages = ((await chat.listMessages(conversationId)) ?? [])
+    const messages = (history ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }))
       .concat({ role: "user", content: text });
@@ -146,7 +151,7 @@ export class Assistant extends Agent<Bindings> {
     const emit = this.#emitter(conversationId, turn.turnId);
     const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
     try {
-      if (!(await chat.open(conversationId, title))) {
+      if (!(await chat.open(conversationId, title, fresh))) {
         this.limits.release(turn.turnId);
         return reject(connection, conversationId, "That conversation doesn't exist.");
       }
@@ -241,7 +246,10 @@ export class Assistant extends Agent<Bindings> {
   }
 }
 
-/** What a tab may send: `chat.send` or `turn.cancel`. Anything else is ignored. */
+/**
+ * What a tab may send: `chat.send`, with the chat's own model if it names one, or `turn.cancel`.
+ * Anything else is ignored.
+ */
 function parse(message: WSMessage) {
   if (typeof message !== "string") return null;
   try {
@@ -249,7 +257,12 @@ function parse(message: WSMessage) {
     if (msg.type === "turn.cancel") return { type: "turn.cancel" } as const;
     const conversationId = String(msg.conversationId);
     if (msg.type === "chat.send" && typeof msg.text === "string") {
-      return { type: "chat.send", conversationId, text: msg.text } as const;
+      const { provider, model } = (msg.model ?? {}) as Partial<Record<string, unknown>>;
+      const own =
+        typeof provider === "string" && typeof model === "string" && provider && model
+          ? { provider, model }
+          : undefined;
+      return { type: "chat.send", conversationId, text: msg.text, model: own } as const;
     }
   } catch {}
   return null;

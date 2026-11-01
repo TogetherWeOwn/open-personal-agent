@@ -13,7 +13,14 @@ chatRoutes.get("/conversations", async (c) => {
   const rows = await createRepository(c.env).forUser(c.var.session.scope).listConversations();
   c.header("Cache-Control", "no-store");
   return c.json({
-    conversations: rows.map(({ id, title, updatedAt }) => ({ id, title, updatedAt })),
+    conversations: rows.map(({ id, title, updatedAt, modelProvider, model }) => ({
+      id,
+      title,
+      updatedAt,
+      // The conversation's own model (M3-06 AC3); null follows the Chat role. The context chip
+      // reads it here so a reload still shows the model a chat will actually use.
+      model: modelProvider && model ? { provider: modelProvider, model } : null,
+    })),
   });
 });
 
