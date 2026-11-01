@@ -2,7 +2,7 @@
 // Response headers, the exact-Origin check and sandboxed user content (ADR 0010 D2, D5, D6).
 // Static assets get the same headers from apps/web/public/_headers; a test keeps the two equal.
 import { log } from "@opa/log";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 
 /** The web app: same-origin code only, and chat loads no remote resources (D6). */
 export const APP_CSP =
@@ -38,6 +38,9 @@ export const securityHeaders: MiddlewareHandler = async (c, next) => {
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+/** The request's Origin is exactly this deployment's: the one Origin check (D2). */
+export const sameOrigin = (c: Context) => c.req.header("Origin") === new URL(c.req.url).origin;
+
 /**
  * Every state change must come from this exact origin, or none is accepted (D2). Same-site isn't
  * enough: `evil.example.workers.dev` is same-site with `opa.example.workers.dev`. There is no
@@ -46,7 +49,7 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 export const exactOrigin: MiddlewareHandler = async (c, next) => {
   if (SAFE_METHODS.has(c.req.method)) return next();
   const site = c.req.header("Sec-Fetch-Site") ?? "same-origin";
-  if (c.req.header("Origin") === new URL(c.req.url).origin && site === "same-origin") return next();
+  if (sameOrigin(c) && site === "same-origin") return next();
   log.warn("request.rejected", { reason: "origin", method: c.req.method, route: c.req.routePath });
   return c.json({ error: "bad_origin" }, 403);
 };
