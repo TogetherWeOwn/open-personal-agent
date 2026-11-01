@@ -70,7 +70,7 @@ describe("scoped repository", () => {
   });
 
   it("keeps files under the user's prefix and names the assistant from the scope", async () => {
-    await alice?.putFile("f1", "hello", "text/plain");
+    await alice?.files({}).putFile("f1", "hello", "text/plain", "hello.txt");
     expect(await env.FILES.head("u/alice/files/f1")).not.toBeNull();
     expect(await bob?.getFile("f1")).toBeNull();
     expect(() => bob?.getFile("../../alice/files/f1")).toThrow(/invalid id/);
