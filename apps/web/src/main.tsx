@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import "./styles.css";
 import { StrictMode, useEffect, useState } from "react";
+import { RouterProvider } from "react-aria-components";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { Setup } from "./auth/Setup";
@@ -66,9 +67,34 @@ function Root() {
   if (view === "setup") return <Setup initialToken={setupToken} />;
   if (view === "sign-in") return <SignIn />;
   if (view === "onboarding") return <Onboarding />;
-  if (view === "chat") return <App transport={transport} />;
-  if (view === "usage") return <Usage />;
+  if (view === "chat" || view === "usage") return <Shell initialPath={window.location.pathname} />;
   return null;
+}
+
+/**
+ * The signed-in app. Links move between the chat and `/usage` without a reload, and the chat stays
+ * mounted (hidden) meanwhile, so its conversations and drafts survive a look at Usage.
+ */
+function Shell({ initialPath }: { initialPath: string }) {
+  const [path, setPath] = useState(initialPath);
+  useEffect(() => {
+    const back = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", back);
+    return () => window.removeEventListener("popstate", back);
+  }, []);
+  const navigate = (href: string) => {
+    window.history.pushState(null, "", href);
+    setPath(new URL(href, window.location.href).pathname);
+  };
+  const usage = path === "/usage";
+  return (
+    <RouterProvider navigate={navigate}>
+      <div hidden={usage}>
+        <App transport={transport} />
+      </div>
+      {usage && <Usage />}
+    </RouterProvider>
+  );
 }
 
 createRoot(root).render(

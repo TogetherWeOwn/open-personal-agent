@@ -77,6 +77,8 @@ const allowance = {
 
 async function open(page: Page, today: unknown, month: unknown, allowed: unknown = allowance) {
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  // The chat stays mounted behind Usage, so its health check runs too.
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/usage?*", (route) =>
     route.fulfill({ json: { currency: "USD", today, month, allowance: allowed } }),
   );
@@ -116,6 +118,24 @@ test("an empty period offers a chat instead of an empty table; a member has no m
   await expect(page.getByText("No usage yet.")).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Start a chat" })).toHaveAttribute("href", "/");
+});
+
+test("going to Usage and back keeps the chat and its unsent draft", async ({ page }) => {
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
+  await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/usage?*", (route) =>
+    route.fulfill({ json: { currency: "USD", today: empty, month: empty, allowance } }),
+  );
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Message" }).fill("Half a thought");
+  await page.getByRole("link", { name: "Usage" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
+  await expect(page).toHaveURL(/\/usage$/);
+  await page.getByRole("link", { name: "Chats" }).click();
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("Half a thought");
+  await page.goBack();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
 });
 
 for (const colorScheme of ["light", "dark"] as const) {
