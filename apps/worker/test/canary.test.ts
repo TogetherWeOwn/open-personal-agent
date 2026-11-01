@@ -5,6 +5,7 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { beforeAll, expect, it, vi } from "vitest";
+import { canaryForms } from "../../../scripts/canary-forms.mjs";
 import { app } from "../src/app";
 import { appEnv, type WorkerEnv } from "../src/compose";
 
@@ -39,7 +40,8 @@ const requests: [string, RequestInit][] = [
     },
   ],
 ];
-const leaks = (text: string) => text.includes(canary) || text.includes(btoa(canary));
+const forms = canaryForms(canary);
+const leaks = (text: string) => forms.some((f) => text.includes(f));
 const consoleSpies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
   vi.spyOn(console, m),
 );

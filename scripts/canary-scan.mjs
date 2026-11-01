@@ -5,10 +5,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { canaryForms } from "./canary-forms.mjs";
 
 export function findCanary(files, canary) {
   if (!canary || canary.length < 16) return ["OPA_CANARY is unset or shorter than 16 characters"];
-  const forms = [canary, btoa(canary).replace(/=+$/, "")];
+  const forms = canaryForms(canary);
   return files
     .filter(({ text }) => forms.some((f) => text.includes(f)))
     .map(({ path }) => `${path}: contains the canary`);
