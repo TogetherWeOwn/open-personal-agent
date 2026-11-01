@@ -111,6 +111,44 @@ export function ftsQuery(text: string): string | null {
   return words.length > 0 ? words.map((w) => `"${w}"*`).join(" ") : null;
 }
 
+/** RRF fusion constant (M3-14 AC4): each ranking contributes 1/(k + rank), ranks 1-based. */
+export const RECALL_RRF_K = 60;
+/** Candidates the FTS ranking contributes to the fusion. */
+export const RECALL_CANDIDATES = 100;
+/** Default token budget a recall packs to. */
+export const DEFAULT_RECALL_BUDGET_TOKENS = 2000;
+/** Most memories one recall returns, whatever the budget. */
+export const RECALL_MAX_MEMORIES = 25;
+
+/** Rough token weight for packing: four characters to the token, at least one. */
+export function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/**
+ * Fuse the FTS and recency orders with reciprocal rank fusion: every id scores 1/(k + rank)
+ * from each order it appears in, ranks 1-based. Pure, so the contract pins the SQL while the
+ * unit tests pin the math.
+ */
+export function fuseRanks(fts: string[], recency: string[], k = RECALL_RRF_K): Map<string, number> {
+  const scores = new Map<string, number>();
+  for (const order of [fts, recency]) {
+    for (const [i, id] of order.entries()) {
+      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + i + 1));
+    }
+  }
+  return scores;
+}
+
+/** What a recall returns. `tainted` tells the host to taint the context (M3-02 AC3). */
+export interface RecallResult {
+  memories: Memory[];
+  /** Any retrieved memory is below user trust (`inferred` or `external`). */
+  tainted: boolean;
+  /** The packed memories' estimated tokens, never over the budget. */
+  tokens: number;
+}
+
 /** `column IN ids` as one bound JSON array: D1 allows only 100 bound parameters a query. */
 const inIds = (column: SQLiteColumn, ids: string[]) =>
   sql`${column} IN (SELECT value FROM json_each(${JSON.stringify(ids)}))`;
@@ -339,6 +377,57 @@ export function memoryService(db: Db, userId: string) {
         ORDER BY bm25(memories_fts), m.n DESC LIMIT ${cap}`);
       const rows = new Map((await active(ids.map((r) => r.id))).map((r) => [r.id, r]));
       return ids.flatMap(({ id }) => rows.get(id) ?? []);
+    },
+    /**
+     * Recall (M3-14 AC4): FTS5 matches re-ranked by recency and fused with RRF (k=60), packed to
+     * a token budget, newest first on ties. Read-only with no model call on the path: two indexed
+     * queries and one fetch by id. Only FTS matches can surface; recency never promotes a memory
+     * the query didn't match. `tainted` is set when any retrieved memory is below user trust.
+     */
+    recall: async (
+      text: string,
+      opts?: { budget?: number; limit?: number },
+    ): Promise<RecallResult> => {
+      const empty: RecallResult = { memories: [], tainted: false, tokens: 0 };
+      const query = ftsQuery(text);
+      if (!query) return empty;
+      const budget = opts?.budget ?? DEFAULT_RECALL_BUDGET_TOKENS;
+      const limit = Math.min(
+        Math.max(Math.trunc(opts?.limit ?? RECALL_MAX_MEMORIES) || 1, 1),
+        RECALL_MAX_MEMORIES,
+      );
+      const ids = await db.all<{ id: string }>(sql`
+        SELECT m.id FROM memories_fts JOIN memories m ON m.n = memories_fts.rowid
+        WHERE memories_fts MATCH ${query} AND m.user_id = ${userId} AND m.status = 'active'
+        ORDER BY bm25(memories_fts), m.n DESC LIMIT ${RECALL_CANDIDATES}`);
+      const rows = await active(ids.map((r) => r.id));
+      if (rows.length === 0) return empty;
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const ftsOrder = ids.map((r) => r.id).filter((id) => byId.has(id));
+      const recencyOrder = [...rows]
+        .sort((a, b) => b.createdAt - a.createdAt || b.n - a.n)
+        .map((r) => r.id);
+      const scores = fuseRanks(ftsOrder, recencyOrder);
+      const fused = [...byId.values()].sort(
+        (a, b) =>
+          (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0) ||
+          b.createdAt - a.createdAt ||
+          b.n - a.n,
+      );
+      const memories: Memory[] = [];
+      let tokens = 0;
+      for (const m of fused) {
+        if (memories.length >= limit) break;
+        const cost = estimateTokens(m.text);
+        if (tokens + cost > budget) break;
+        memories.push(m);
+        tokens += cost;
+      }
+      return {
+        memories,
+        tainted: memories.some((m) => m.trust !== "system" && m.trust !== "user"),
+        tokens,
+      };
     },
     create: (actor: MemoryActor, text: string, kind: MemoryKind, from: MemorySource) =>
       gated(actor, "create", [], text, kind, from),

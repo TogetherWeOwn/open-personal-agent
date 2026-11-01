@@ -6,6 +6,7 @@ import {
   databaseContract,
   memoryContract,
   memoryGateContract,
+  memoryRecallContract,
   usageLedgerContract,
 } from "../../../test/contract/storage";
 import type { Env } from "../src/env";
@@ -23,6 +24,10 @@ memoryContract("D1", async () => {
   return env.DB;
 });
 memoryGateContract("D1", async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  return env.DB;
+});
+memoryRecallContract("D1", async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   return env.DB;
 });

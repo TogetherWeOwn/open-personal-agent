@@ -4,6 +4,7 @@
 // A relative path: this file sits outside every workspace package, and apps/node has no `@opa/db`.
 
 import { describe, expect, it } from "vitest";
+import { estimateTokens } from "../../packages/db/src/memory";
 import { createRepository, scopeFromSession } from "../../packages/db/src/repository";
 
 let tables = 0;
@@ -616,6 +617,88 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       });
       expect(await memory.list()).toEqual([]);
       expect(await memory.search("old")).toEqual([]);
+    });
+  });
+}
+
+/**
+ * `MemoryService`'s recall (M3-14b AC4), against a migrated database: FTS5 plus recency fused
+ * with RRF (k=60) and packed to a token budget, with no model call on the path and taint only
+ * below user trust. It runs on D1 and on Node's `node:sqlite`, so AC6 holds by construction.
+ */
+export function memoryRecallContract(name: string, migrated: () => Promise<D1Database>) {
+  describe(`${name}: memory recall contract`, () => {
+    async function user() {
+      const DB = await migrated();
+      const userId = `memory-${++tables}-${Date.now()}`;
+      await DB.prepare("INSERT INTO users (id, display_name, role) VALUES (?, 'M', 'owner')")
+        .bind(userId)
+        .run();
+      const stub = {} as never;
+      const repo = createRepository({ DB, FILES: stub, ASSISTANT: stub });
+      const scoped = repo.forUser(scopeFromSession({ userId }));
+      return { memory: scoped.memory };
+    }
+    const screen = { via: "user" } as const;
+    const inferred = { via: "assistant", tainted: false, userAsserted: false } as const;
+    const said = { source: "chat" } as const;
+    const saved = (outcome: { status: string; memory?: { id: string } }) => {
+      expect(outcome.status).toBe("saved");
+      return outcome.memory?.id ?? "";
+    };
+
+    it("fuses keyword rank with recency: neither order alone predicts the result", async () => {
+      const { memory } = await user();
+      // Same length, so BM25 ranks by mention count alone: triple, double, single. Recency says
+      // the reverse. The fusion ranks the double mention first — second in both orders — then
+      // the triple, then the single. The newest row doesn't match, so recency can never promote
+      // a row the query didn't match.
+      saved(await memory.create(screen, "tea tea tea one", "fact", said));
+      saved(await memory.create(screen, "tea tea one two", "fact", said));
+      saved(await memory.create(screen, "tea one two three", "fact", said));
+      saved(await memory.create(screen, "coffee four five six", "fact", said));
+      const result = await memory.recall("tea");
+      // FTS says triple, double, single; recency says the reverse. The triple and the single
+      // tie on fused score (mirror ranks always do), so recency breaks that tie, while the
+      // triple still beats the double on its first-place keyword rank. Neither order alone
+      // predicts this.
+      expect(result.memories.map((m) => m.text)).toEqual([
+        "tea one two three",
+        "tea tea tea one",
+        "tea tea one two",
+      ]);
+      expect(result.tainted).toBe(false);
+    });
+
+    it("packs fused order to the token budget and honors the limit", async () => {
+      const { memory } = await user();
+      for (const text of ["Note one", "Note two", "Note six"]) {
+        saved(await memory.create(screen, text, "fact", said));
+      }
+      const full = await memory.recall("note");
+      expect(full.memories.map((m) => m.text)).toEqual(["Note six", "Note two", "Note one"]);
+      const cost = (texts: string[]) => texts.reduce((sum, t) => sum + estimateTokens(t), 0);
+      expect(full.tokens).toBe(cost(full.memories.map((m) => m.text)));
+      const one = await memory.recall("note", { budget: estimateTokens("Note six") });
+      expect(one.memories.map((m) => m.text)).toEqual(["Note six"]);
+      expect(one.tokens).toBeLessThanOrEqual(estimateTokens("Note six"));
+      const two = await memory.recall("note", { limit: 2 });
+      expect(two.memories).toHaveLength(2);
+      expect(await memory.recall(" - ")).toEqual({ memories: [], tainted: false, tokens: 0 });
+    });
+
+    it("taints only below user trust and misses another user's rows", async () => {
+      const a = await user();
+      const b = await user();
+      saved(await a.memory.create(screen, "My favorite color is blue", "fact", said));
+      saved(await a.memory.create(inferred, "The user probably likes blue cheese", "fact", said));
+      const mixed = await a.memory.recall("blue");
+      expect(mixed.memories).toHaveLength(2);
+      expect(mixed.tainted).toBe(true);
+      const trusted = await a.memory.recall("color");
+      expect(trusted.memories.map((m) => m.text)).toEqual(["My favorite color is blue"]);
+      expect(trusted.tainted).toBe(false);
+      expect((await b.memory.recall("blue")).memories).toEqual([]);
     });
   });
 }
