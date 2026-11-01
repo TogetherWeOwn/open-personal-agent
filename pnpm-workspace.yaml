@@ -6,3 +6,8 @@ packages:
 onlyBuiltDependencies:
   - esbuild
   - workerd
+
+# Supply chain (ADR 0010 D12): pnpm resolves only versions published at least a day ago (minutes),
+# and fails the install if a dependency outside the allowlist above wants to run a build script.
+minimumReleaseAge: 1440
+strictDepBuilds: true
