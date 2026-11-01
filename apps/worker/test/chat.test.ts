@@ -242,13 +242,25 @@ describe("chat transport", () => {
     await useModel(owner, scripted([], never));
     const [stale, live] = [await openTab(browser), await openTab(other)];
     expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    stale.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    expect(await stale.closed).toBe(4401);
     live.send?.("conv-4", "Still there?");
     await live.until?.("message.delta");
-    stale.ws?.send(JSON.stringify({ type: "turn.cancel" })); // can't stop the live tab's turn
-    expect(await stale.closed).toBe(4401);
-    expect(live.events.map((e) => e.type)).not.toContain("turn.interrupted");
     live.ws?.send(JSON.stringify({ type: "turn.cancel" }));
     await live.until?.("turn.interrupted");
+  });
+
+  it("sends a turn to no tab whose session has ended", async () => {
+    const { browser, owner, key } = await claim();
+    const other = new Browser();
+    expect((await other.login(key)).status).toBe(200);
+    await useModel(owner, scripted());
+    const [stale, live] = [await openTab(browser), await openTab(other)];
+    expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    live.send?.("conv-5", "Only for live tabs");
+    await live.until?.("turn.completed");
+    expect(await stale.closed).toBe(4401);
+    expect(stale.events).toEqual([]);
   });
 
   it("refuses another user's conversation, bad input and a second concurrent turn", async () => {

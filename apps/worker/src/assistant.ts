@@ -131,6 +131,8 @@ export class Assistant extends Agent<Bindings> {
     const messages = ((await chat.listMessages(conversationId)) ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }));
+    // Every tab gets the reply, so first close those whose session has ended since they opened.
+    await Promise.all([...this.getConnections()].map((tab) => this.#sessionLive(tab)));
     emit("turn.started", { messageId: turn.replyId });
     turn.called = true;
     stash(turn);
