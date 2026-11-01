@@ -1,14 +1,105 @@
 // SPDX-License-Identifier: Apache-2.0
 // Supply-chain policy (ADR 0010 D12; R7 M2-9, M2-10): a reviewed build-script allowlist, a
 // minimum release age in pnpm and Renovate, and workflows that pin every action by commit SHA,
-// default to read-only permissions and never use `pull_request_target`.
+// default to read-only permissions and never use `pull_request_target`. Also ADR 0010 D4.1 #8:
+// every third-party package the Worker can bundle is on a reviewed list.
+
 import { readdirSync } from "node:fs";
+import { posix } from "node:path";
 import { parse } from "yaml";
 import { isMain, readText, report, repoTextFiles } from "./lib/repo.mjs";
 
 /** Packages whose install scripts were reviewed. Extend only with a reviewed PR. */
 export const REVIEWED_BUILDS = ["esbuild", "workerd"];
 export const MIN_RELEASE_AGE_MINUTES = 1440;
+
+/**
+ * Third-party packages in the Worker's runtime dependency closure (D4.1 #8). Any of them can read
+ * `OPA_MASTER_KEY` at runtime (D4 residual risk), so a PR that extends this list needs a Security
+ * Engineer review stage. Version bumps don't; a new package, direct or transitive, does.
+ */
+export const REVIEWED_RUNTIME = [
+  "@cloudflare/workers-types",
+  "drizzle-orm",
+  "hono",
+  // @simplewebauthn/server (M2-09) and its closure. No install scripts; only the library's MDS
+  // and CRL helpers call `fetch`, and nothing in the closure reads env or evals.
+  "@hexagon/base64",
+  "@levischuck/tiny-cbor",
+  "@peculiar/asn1-android",
+  "@peculiar/asn1-asym-key",
+  "@peculiar/asn1-cms",
+  "@peculiar/asn1-csr",
+  "@peculiar/asn1-ecc",
+  "@peculiar/asn1-pfx",
+  "@peculiar/asn1-pkcs8",
+  "@peculiar/asn1-pkcs9",
+  "@peculiar/asn1-rsa",
+  "@peculiar/asn1-schema",
+  "@peculiar/asn1-x509",
+  "@peculiar/asn1-x509-attr",
+  "@peculiar/asn1-x509-post-quantum",
+  "@peculiar/utils",
+  "@peculiar/x509",
+  "@simplewebauthn/server",
+  "asn1js",
+  "pvtsutils",
+  "pvutils",
+  "reflect-metadata",
+  "tslib",
+  "tsyringe",
+];
+export const WORKER_IMPORTER = "apps/worker";
+
+/** Every third-party package `apps/worker` reaches through `dependencies`, from pnpm-lock.yaml. */
+export function runtimeClosure(lockYaml, importer = WORKER_IMPORTER) {
+  const lock = parse(lockYaml) ?? {};
+  const seen = new Set();
+  const names = new Set();
+  // An alias (`npm:other@1`) is recorded as the full `other@1` key.
+  const keyOf = (name, version) =>
+    version.split("(")[0].includes("@") ? version : `${name}@${version}`;
+  const visitPackage = (key) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    names.add(key.slice(0, key.indexOf("@", 1)));
+    const snap = lock.snapshots?.[key] ?? {};
+    for (const [name, version] of Object.entries({
+      ...snap.dependencies,
+      ...snap.optionalDependencies,
+    })) {
+      visitPackage(keyOf(name, version));
+    }
+  };
+  const visitImporter = (dir) => {
+    if (seen.has(`link:${dir}`)) return;
+    seen.add(`link:${dir}`);
+    // Workspace packages are bundled too, so their dependencies count. Optional ones are installed.
+    const importerDeps = lock.importers?.[dir] ?? {};
+    for (const [name, { version }] of Object.entries({
+      ...importerDeps.dependencies,
+      ...importerDeps.optionalDependencies,
+    })) {
+      if (version.startsWith("link:")) visitImporter(posix.join(dir, version.slice(5)));
+      else visitPackage(keyOf(name, version));
+    }
+  };
+  visitImporter(importer);
+  return [...names].sort();
+}
+
+export function checkRuntimeDependencies(lockYaml) {
+  if (lockYaml == null) {
+    return ["pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked"];
+  }
+  return runtimeClosure(lockYaml)
+    .filter((name) => !REVIEWED_RUNTIME.includes(name))
+    .map(
+      (name) =>
+        `pnpm-lock.yaml: "${name}" is bundled into the Worker unreviewed; add it to ` +
+        "REVIEWED_RUNTIME with a Security Engineer review (ADR 0010 D4.1 #8)",
+    );
+}
 
 export function checkPnpmPolicy(workspaceYaml) {
   const ws = parse(workspaceYaml) ?? {};
@@ -79,6 +170,7 @@ if (isMain(import.meta.url)) {
   report("supply-chain", [
     ...checkPnpmPolicy(readText("pnpm-workspace.yaml") ?? ""),
     ...checkRenovatePolicy(readText("renovate.json")),
+    ...checkRuntimeDependencies(readText("pnpm-lock.yaml")),
     ...workflows.flatMap((f) => checkWorkflow(`${dir}/${f}`, readText(`${dir}/${f}`) ?? "")),
     ...actions.flatMap((f) => checkPins(f.path, parse(f.text))),
   ]);
