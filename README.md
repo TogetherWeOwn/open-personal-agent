@@ -18,6 +18,11 @@ pnpm dev                         # http://localhost:8787
 and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
 reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
 
+`pnpm dev` also starts a mock OpenAI-compatible model server at `http://127.0.0.1:8788/v1`
+(`pnpm dev:mock-model` starts it alone). It answers `GET /models` and streams an echo of your last
+message from `POST /chat/completions`, so chat works with no API key and no cost: choose the
+OpenAI-compatible option with that base URL.
+
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
 | `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
