@@ -445,7 +445,14 @@ describe("task workflow", () => {
   it("stores a priced tool's cost estimate on the task's approval row (M3-07 AC6)", async () => {
     const { taskId, instanceId } = await makeTask();
     const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
-    const priced: LoopTool = { ...send, estimateCost: () => 250_000 };
+    // A hook that reads its own tool, as a class-based tool's method would.
+    const priced = {
+      ...send,
+      price: 250_000,
+      estimateCost(this: { price: number }) {
+        return this.price;
+      },
+    };
     let cost: number | null | undefined;
     const deny = async () => {
       const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");

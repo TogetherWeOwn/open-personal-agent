@@ -301,8 +301,9 @@ async function driveLoop(
   for (const tool of taskTools) {
     registry.register({
       manifest: tool.manifest,
-      ...(tool.target ? { target: tool.target } : {}),
-      ...(tool.estimateCost ? { estimateCost: tool.estimateCost } : {}),
+      // Called through the tool, not copied off it: a class's hook keeps its `this`.
+      ...(tool.target ? { target: (input) => tool.target?.(input) } : {}),
+      ...(tool.estimateCost ? { estimateCost: (input) => tool.estimateCost?.(input) } : {}),
       // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
       ...(tool.author ? { author: tool.author } : {}),
       execute: async (input, _signal, call) => {
