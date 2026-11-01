@@ -227,14 +227,14 @@ export async function* replayResponses(
           : "other";
   // A reply cut off before it finished may hold a call with half its arguments: never run it.
   const complete = finishReason === "stop";
-  for (const call of complete ? calls : []) {
-    if (!call.id || !call.name) {
-      yield* usage;
-      yield error("bad_response", "The provider sent a tool call with no id or name");
-      return;
-    }
-    yield { type: "tool_call", toolCall: call };
+  const run = complete ? calls : [];
+  // One bad call rejects the reply before any call is emitted, so none of it runs.
+  if (run.some((call) => !call.id || !call.name)) {
+    yield* usage;
+    yield error("bad_response", "The provider sent a tool call with no id or name");
+    return;
   }
+  for (const toolCall of run) yield { type: "tool_call", toolCall };
   if (complete && calls.length) finishReason = "tool_calls";
   if (complete && reasoning.length) {
     const state: ModelReasoning = {
