@@ -227,6 +227,11 @@ describe("DELETE /api/account", () => {
     });
     const result = await deleteUserData({ DB: env.DB, FILES: racing }, owner);
     expect(result).toMatchObject({ unclaimed: true });
+    // Both active runs are named for best-effort termination: the running task snapshotted
+    // before the stop, and the running export — whose row goes terminal in the stop, so a
+    // post-stop read would find nothing left to terminate.
+    expect(result?.taskInstances).toEqual([`${owner}-inst-active`]);
+    expect(result?.exportInstances).toEqual([`${owner}-inst-e-run`]);
     expect(planted).toBe(true);
     expect(await userR2Keys(owner)).toEqual([]);
   });
