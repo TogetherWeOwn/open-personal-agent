@@ -4,10 +4,13 @@ import {
   BOUNDS,
   buildCorpus,
   CAMPAIGN_PATTERN,
+  checkTabCoverage,
+  deepEqual,
   isCampaignPrefix,
   newCampaignPrefix,
   redact,
   scoreTurn,
+  stubResult,
   waitReady,
 } from "../cf-verify-t3t4t7.mjs";
 import { teardownCloudflare } from "../teardown-cloudflare.mjs";
@@ -64,15 +67,87 @@ describe("t7 corpus and scoring", () => {
     expect(corpus.filter((t) => t.kind === "two-tool")).toHaveLength(300);
     expect(corpus.filter((t) => t.kind === "chat")).toHaveLength(200);
   });
-  it("scores exact tool choice and schema-valid args, never prose", () => {
-    expect(scoreTurn({ kind: "tool" }, [{ name: "add" }])).toBe("pass");
-    expect(scoreTurn({ kind: "tool" }, [])).toBe("fail");
-    expect(scoreTurn({ kind: "tool" }, [{ name: "liveTool" }])).toBe("fail");
-    expect(scoreTurn({ kind: "two-tool" }, [{ name: "lookupRecord" }, { name: "add" }])).toBe(
-      "pass",
+  it("carries an expected tool sequence and args every tool turn can actually run", () => {
+    for (const t of buildCorpus()) {
+      if (t.kind === "chat") {
+        expect(t.expect).toEqual([]);
+        continue;
+      }
+      expect(t.expect.length).toBeGreaterThan(0);
+      for (const e of t.expect) expect(() => stubResult(e.name, e.args)).not.toThrow();
+    }
+  });
+  it("passes exact name, args and stub result; fails wrong tool, wrong args, wrong result", () => {
+    const turn = { kind: "tool", expect: [{ name: "add", args: { a: 1, b: 2 } }] };
+    const good = [{ name: "add", arguments: { a: 1, b: 2 } }];
+    const exec = [{ name: "add", result: { sum: 3 } }];
+    expect(scoreTurn(turn, good, exec)).toBe("pass");
+    // Serialised arguments (some models serialise) with reordered keys still pass.
+    expect(scoreTurn(turn, [{ name: "add", arguments: '{"b":2,"a":1}' }], exec)).toBe("pass");
+    // A model that always calls add fails a lookupRecord turn.
+    const lookup = { kind: "tool", expect: [{ name: "lookupRecord", args: { id: "rec-3" } }] };
+    expect(
+      scoreTurn(
+        lookup,
+        [{ name: "add", arguments: { a: 1, b: 2 } }],
+        [{ name: "add", result: { sum: 3 } }],
+      ),
+    ).toBe("fail");
+    // Right name, wrong args.
+    expect(
+      scoreTurn(
+        turn,
+        [{ name: "add", arguments: { a: 1, b: 3 } }],
+        [{ name: "add", result: { sum: 4 } }],
+      ),
+    ).toBe("fail");
+    // Right call, wrong stub result.
+    expect(scoreTurn(turn, good, [{ name: "add", result: { sum: 99 } }])).toBe("fail");
+    // Errored executions and missing executions fail too.
+    expect(scoreTurn(turn, good, [{ name: "add", error: "add needs numeric a and b" }])).toBe(
+      "fail",
     );
-    expect(scoreTurn({ kind: "chat" }, [])).toBe("pass");
-    expect(scoreTurn({ kind: "chat" }, [{ name: "add" }])).toBe("fail");
+    expect(scoreTurn(turn, good, [])).toBe("fail");
+    // Chat passes only with no calls.
+    expect(scoreTurn({ kind: "chat", expect: [] }, [])).toBe("pass");
+    expect(scoreTurn({ kind: "chat", expect: [] }, good)).toBe("fail");
+  });
+  it("scores two-tool turns in order", () => {
+    const turn = {
+      kind: "two-tool",
+      expect: [
+        { name: "lookupRecord", args: { id: "rec-1" } },
+        { name: "add", args: { a: 1, b: 2 } },
+      ],
+    };
+    const emitted = [
+      { name: "lookupRecord", arguments: { id: "rec-1" } },
+      { name: "add", arguments: { a: 1, b: 2 } },
+    ];
+    const exec = [
+      { name: "lookupRecord", result: { id: "rec-1", value: 41 } },
+      { name: "add", result: { sum: 3 } },
+    ];
+    expect(scoreTurn(turn, emitted, exec)).toBe("pass");
+    expect(scoreTurn(turn, [...emitted].reverse(), [...exec].reverse())).toBe("fail");
+  });
+  it("rejects prototype names: constructor is not a stub", () => {
+    expect(() => stubResult("constructor", {})).toThrow(/not-a-stub/);
+    const turn = { kind: "tool", expect: [{ name: "add", args: { a: 1, b: 2 } }] };
+    expect(scoreTurn(turn, [{ name: "constructor", arguments: {} }], [])).toBe("fail");
+  });
+  it("compares args structurally, not by key order", () => {
+    expect(deepEqual({ a: 1, b: { c: 2 } }, { b: { c: 2 }, a: 1 })).toBe(true);
+    expect(deepEqual({ a: 1 }, { a: 2 })).toBe(false);
+    expect(deepEqual({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+  });
+});
+
+describe("t4 coverage", () => {
+  it("flags missed and duplicated seqs, not just missed", () => {
+    expect(checkTabCoverage(3, [0, 1, 2])).toEqual({ missing: [], duplicated: [] });
+    expect(checkTabCoverage(3, [0, 0, 2])).toEqual({ missing: [1], duplicated: [0] });
+    expect(checkTabCoverage(2, [])).toEqual({ missing: [0, 1], duplicated: [] });
   });
 });
 

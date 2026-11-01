@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Serial driver for the owner-approved T3/T4/T7 cf-verify window (TWO-669, plan TWO-573).
 // Subcommands: deploy, t3-sync, t3-wait-start, t4, t7, callback, collect, teardown. Live ones
-// need CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (the cf-verify environment); agents never
-// hold them. $0 incremental: any cap or unverifiable allowance stops inconclusive (exit 3).
-// Teardown deletes only manifest entries, then verifies nothing prefixed is left.
+// need CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID and CF_VERIFY_BEARER (the cf-verify
+// environment); agents never hold them. $0 incremental: any cap or unverifiable allowance
+// stops inconclusive (exit 3). Teardown deletes only manifest entries, then verifies nothing
+// prefixed is left. The full workers.dev URL is rebuilt at runtime per command and never
+// written to disk or logs: the manifest carries only the worker name.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -52,24 +54,158 @@ export const BOUNDS = {
     outTokens: 512,
   },
 };
-export const STUB_TOOLS = ["lookupRecord", "add", "artifactRef"];
+/** Real JSON schemas with descriptions, so the model knows which stub fits each turn. */
+export const TOOL_SCHEMAS = {
+  lookupRecord: {
+    description: "Look up a synthetic record by id.",
+    parameters: {
+      type: "object",
+      properties: { id: { type: "string", description: "Record id, e.g. rec-3." } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  add: {
+    description: "Add two numbers.",
+    parameters: {
+      type: "object",
+      properties: { a: { type: "number" }, b: { type: "number" } },
+      required: ["a", "b"],
+      additionalProperties: false,
+    },
+  },
+  artifactRef: {
+    description: "Return a reference to a synthetic artifact by tag.",
+    parameters: {
+      type: "object",
+      properties: { tag: { type: "string", description: "Artifact tag." } },
+      required: ["tag"],
+      additionalProperties: false,
+    },
+  },
+};
+export const STUB_TOOLS = Object.keys(TOOL_SCHEMAS);
+export const STUB_SCHEMA_LIST = STUB_TOOLS.map((name) => ({
+  function: {
+    name,
+    description: TOOL_SCHEMAS[name].description,
+    parameters: TOOL_SCHEMAS[name].parameters,
+  },
+}));
 
-/**Deterministic synthetic corpus: 500 one-tool, 300 two-tool, 200 no-tool turns.*/
+/**
+ * Mirror of the fixture's runStub: the expected result for expected args. Throws on
+ * schema-invalid args, so a scoring bug in the corpus surfaces instead of passing quietly.
+ */
+export function stubResult(name, args) {
+  const a = typeof args === "string" ? JSON.parse(args) : args;
+  if (name === "lookupRecord") {
+    if (typeof a?.id !== "string") throw new Error("lookupRecord needs a string id");
+    return { id: a.id, value: 41 };
+  }
+  if (name === "add") {
+    if (typeof a?.a !== "number" || typeof a?.b !== "number")
+      throw new Error("add needs numeric a and b");
+    return { sum: a.a + a.b };
+  }
+  if (name === "artifactRef") {
+    if (typeof a?.tag !== "string") throw new Error("artifactRef needs a string tag");
+    return { ref: `synthetic:${a.tag}` };
+  }
+  throw new Error(`not-a-stub: ${name}`);
+}
+
+/** Deterministic synthetic corpus: 500 one-tool, 300 ordered two-tool, 200 no-tool turns. */
 export function buildCorpus() {
   const turns = [];
-  for (let i = 0; i < 500; i++) turns.push({ kind: "tool", id: `rec-${i % 50}`, a: i, b: i + 1 });
-  for (let i = 0; i < 300; i++) turns.push({ kind: "two-tool", id: `rec-${i % 50}`, a: i, b: 2 });
-  for (let i = 0; i < 200; i++) turns.push({ kind: "chat", fact: `synthetic fact ${i % 20}` });
+  for (let i = 0; i < 500; i++) {
+    const name = STUB_TOOLS[i % STUB_TOOLS.length];
+    const args =
+      name === "lookupRecord"
+        ? { id: `rec-${i % 50}` }
+        : name === "add"
+          ? { a: i, b: i + 1 }
+          : { tag: `tag-${i % 20}` };
+    turns.push({
+      kind: "tool",
+      prompt: `Use ${name} with ${JSON.stringify(args)}.`,
+      expect: [{ name, args }],
+    });
+  }
+  for (let i = 0; i < 300; i++) {
+    const first = { name: "lookupRecord", args: { id: `rec-${i % 50}` } };
+    const second =
+      i % 2
+        ? { name: "artifactRef", args: { tag: `tag-${i % 20}` } }
+        : { name: "add", args: { a: i, b: 2 } };
+    turns.push({
+      kind: "two-tool",
+      prompt: `Use ${first.name} then ${second.name} with ${JSON.stringify({ first: first.args, second: second.args })}.`,
+      expect: [first, second],
+    });
+  }
+  for (let i = 0; i < 200; i++)
+    turns.push({ kind: "chat", prompt: `Say: synthetic fact ${i % 20}.`, expect: [] });
   return turns;
 }
 
-/** Score one T7 turn: exact tool choice, schema-valid args and final result, no prose pass. */
-export function scoreTurn(turn, emitted) {
+export function deepEqual(a, b) {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  return (
+    keysA.length === keysB.length &&
+    keysA.every((k) => Object.hasOwn(b, k) && deepEqual(a[k], b[k]))
+  );
+}
+
+/**
+ * Score one T7 turn: the exact expected tool sequence in order, schema-valid args that
+ * deep-equal the expected args, and stub results matching the expected computation. A model
+ * that always calls `add` fails every non-add turn; prose with no calls passes only chat.
+ */
+export function scoreTurn(turn, emitted, executions = []) {
   if (turn.kind === "chat") return emitted.length === 0 ? "pass" : "fail";
-  const names = emitted.map((c) => c.name);
-  if (turn.kind === "tool")
-    return names.length === 1 && STUB_TOOLS.includes(names[0]) ? "pass" : "fail";
-  return names.length === 2 && names.every((n) => STUB_TOOLS.includes(n)) ? "pass" : "fail";
+  if (emitted.length !== turn.expect.length) return "fail";
+  const ok = turn.expect.every((exp, i) => {
+    if (emitted[i]?.name !== exp.name) return false;
+    let args;
+    try {
+      args =
+        typeof emitted[i].arguments === "string"
+          ? JSON.parse(emitted[i].arguments)
+          : emitted[i].arguments;
+    } catch {
+      return false;
+    }
+    if (!deepEqual(args, exp.args)) return false;
+    const exec = executions[i];
+    if (!exec || exec.name !== exp.name || "error" in exec) return false;
+    let expected;
+    try {
+      expected = stubResult(exp.name, exp.args);
+    } catch {
+      return false;
+    }
+    return deepEqual(exec.result, expected);
+  });
+  return ok ? "pass" : "fail";
+}
+
+/** Per-tab seq coverage: duplicate delivery on replay is the bug T4 must catch. */
+export function checkTabCoverage(total, received) {
+  const counts = new Map();
+  for (const s of received) counts.set(s, (counts.get(s) ?? 0) + 1);
+  const missing = [];
+  const duplicated = [];
+  for (let s = 0; s < total; s++) {
+    const count = counts.get(s) ?? 0;
+    if (count === 0) missing.push(s);
+    else if (count > 1) duplicated.push(s);
+  }
+  return { missing, duplicated };
 }
 
 function outDir(prefix) {
@@ -92,7 +228,7 @@ function accountApi(env) {
   };
 }
 
-function run(cmd, args, { cwd, env }) {
+function run(cmd, args, { cwd, env, input }) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, env, stdio: "pipe" });
     let output = "";
@@ -100,11 +236,50 @@ function run(cmd, args, { cwd, env }) {
     child.stderr.on("data", (c) => (output += c));
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, output }));
+    if (input !== undefined) {
+      child.stdin.write(input);
+      child.stdin.end();
+    }
   });
 }
 
-async function deploy(prefix, deps) {
-  const config = fs.readFileSync(TEMPLATE, "utf8").replaceAll("__PREFIX__", prefix);
+/** Bearer plus every secret the redactor must scrub from recorded output. */
+function authOf(env) {
+  if (!env.CF_VERIFY_BEARER)
+    throw new Error(
+      "CF_VERIFY_BEARER is not set (operator: add it once to the cf-verify environment)",
+    );
+  return {
+    secrets: [env.CLOUDFLARE_API_TOKEN, env.CF_VERIFY_BEARER],
+    bearer: env.CF_VERIFY_BEARER,
+  };
+}
+
+function manifestOf(prefix) {
+  return JSON.parse(fs.readFileSync(path.join(outDir(prefix), "manifest.json"), "utf8"));
+}
+
+/**
+ * The full fixture URL, rebuilt at runtime from the stored worker name plus the live
+ * subdomain. Never persisted: the manifest on disk and in artifacts carries no subdomain.
+ */
+async function fixtureUrl(prefix, deps) {
+  const manifest = manifestOf(prefix);
+  const api = accountApi(deps.env);
+  const sub = await api(`/workers/subdomain`);
+  const domain = sub.body.result?.subdomain;
+  if (!domain) throw new Error("no workers.dev subdomain for the fixture URL");
+  return `https://${manifest.worker}.${domain}.workers.dev`;
+}
+
+async function deploy(prefix, deps, { model }) {
+  if (!model) throw new Error("deploy needs --model (the pinned starter under test)");
+  if (/["\\\n\r]/.test(model)) throw new Error("deploy: --model is not JSON-safe");
+  const { secrets, bearer } = authOf(deps.env);
+  const config = fs
+    .readFileSync(TEMPLATE, "utf8")
+    .replaceAll("__PREFIX__", prefix)
+    .replaceAll("__T7_MODEL__", model);
   const dir = path.join(ROOT, ".wrangler", "opa-t3t4t7", prefix);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "wrangler.json");
@@ -114,16 +289,21 @@ async function deploy(prefix, deps) {
     cwd: ROOT,
     env,
   });
-  if (res.code !== 0)
-    throw new Error(
-      `fixture deploy failed:\n${redact(res.output, [deps.env.CLOUDFLARE_API_TOKEN])}`,
-    );
-  const api = accountApi(deps.env);
-  const sub = await api(`/workers/subdomain`);
-  const domain = sub.body.result?.subdomain;
-  if (!domain) throw new Error("no workers.dev subdomain for the fixture URL");
-  const url = `https://${prefix}-t3t4t7.${domain}.workers.dev`;
-  const manifest = { prefix, url, workers: [`${prefix}-t3t4t7`], at: new Date().toISOString() };
+  if (res.code !== 0) throw new Error(`fixture deploy failed:\n${redact(res.output, secrets)}`);
+  // After deploy: the fixture fails closed (401) until this secret lands, so the gap is safe.
+  const put = await deps.run(
+    process.execPath,
+    [WRANGLER, "secret", "put", "CF_VERIFY_BEARER", "-c", file],
+    { cwd: ROOT, env, input: bearer },
+  );
+  if (put.code !== 0) throw new Error(`bearer secret put failed:\n${redact(put.output, secrets)}`);
+  // No `url` here: artifacts are public to signed-in users, and the URL embeds the subdomain.
+  const manifest = {
+    prefix,
+    worker: `${prefix}-t3t4t7`,
+    model,
+    at: new Date().toISOString(),
+  };
   fs.mkdirSync(outDir(prefix), { recursive: true });
   fs.writeFileSync(
     path.join(outDir(prefix), "manifest.json"),
@@ -137,8 +317,8 @@ async function collect(prefix, deps) {
   const manifestFile = path.join(dir, "manifest.json");
   const manifest = fs.existsSync(manifestFile)
     ? JSON.parse(fs.readFileSync(manifestFile, "utf8"))
-    : { workers: [`${prefix}-t3t4t7 (manifest missing: prefix fallback)`] };
-  const secrets = [deps.env.CLOUDFLARE_API_TOKEN];
+    : { worker: `${prefix}-t3t4t7 (manifest missing: prefix fallback)` };
+  const { secrets } = authOf(deps.env);
   for (const test of ["t3", "t4", "t7"]) {
     const obs = path.join(dir, `${test}.jsonl`);
     const lines = fs.existsSync(obs) ? fs.readFileSync(obs, "utf8") : "";
@@ -146,7 +326,8 @@ async function collect(prefix, deps) {
       `# ${prefix} ${test.toUpperCase()} evidence (redacted)`,
       ``,
       `- collected: ${new Date().toISOString()}`,
-      `- fixture: ${manifest.workers.join(", ")}`,
+      `- fixture: ${manifest.worker}`,
+      `- model: ${manifest.model ?? "unknown"}`,
       `- commit: ${deps.env.GITHUB_SHA ?? "local run"}`,
       ``,
       "```json",
@@ -156,6 +337,23 @@ async function collect(prefix, deps) {
     ].join("\n");
     fs.writeFileSync(path.join(dir, `${test}-evidence.md`), body);
   }
+  // Per-step exit outcomes, written by the workflow after each phase. A T3 assumption failure
+  // is a legitimate result: later phases still run, and the bundle says which failed.
+  const stepsFile = path.join(dir, "steps.txt");
+  const steps = fs.existsSync(stepsFile) ? fs.readFileSync(stepsFile, "utf8") : "";
+  fs.writeFileSync(
+    path.join(dir, "steps.md"),
+    [
+      `# ${prefix} step outcomes`,
+      ``,
+      `- collected: ${new Date().toISOString()}`,
+      ``,
+      "```",
+      redact(steps.trim() || "(no step outcomes recorded)", secrets),
+      "```",
+      ``,
+    ].join("\n"),
+  );
   return dir;
 }
 
@@ -165,21 +363,18 @@ async function teardown(prefix, deps) {
   const manifest = fs.existsSync(manifestFile)
     ? JSON.parse(fs.readFileSync(manifestFile, "utf8"))
     : { workers: [], fallback: "no manifest: scoped-prefix delete, never account-wide" };
+  const { secrets } = authOf(deps.env);
   await teardownCloudflare(["--name", prefix, "--confirm", prefix], {
     env: deps.env,
     fetch,
-    stdout: (t) => deps.stdout(redact(t, [deps.env.CLOUDFLARE_API_TOKEN])),
+    stdout: (t) => deps.stdout(redact(t, secrets)),
   });
   const api = accountApi(deps.env);
   const { found } = await listPrefixed(api, prefix);
-  const manifestNames = new Set(manifest.workers);
+  const manifestNames = new Set(manifest.workers ?? (manifest.worker ? [manifest.worker] : []));
   const left = found.filter((r) => manifestNames.has(r.name) || r.name.startsWith(`${prefix}-`));
   if (left.length) throw new Error(`teardown left: ${left.map((r) => r.name).join(", ")}`);
-  return { deleted: manifest.workers };
-}
-
-function manifestOf(prefix) {
-  return JSON.parse(fs.readFileSync(path.join(outDir(prefix), "manifest.json"), "utf8"));
+  return { deleted: [...manifestNames] };
 }
 
 function note(prefix, test, row) {
@@ -189,10 +384,14 @@ function note(prefix, test, row) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function call(url, method, body, secrets) {
+async function call(url, method, body, { secrets, bearer }) {
+  if (!bearer)
+    throw new Error(
+      "CF_VERIFY_BEARER is not set (operator: add it once to the cf-verify environment)",
+    );
   const res = await fetch(url, {
     method,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
@@ -202,11 +401,12 @@ async function call(url, method, body, secrets) {
 
 /** T3 sync cases: duplicate-ID creates (2 sequential + 2 concurrent of ≤8), cancel, offload ref. */
 async function t3sync(prefix, deps) {
-  const { url } = manifestOf(prefix);
-  const secrets = [deps.env.CLOUDFLARE_API_TOKEN];
+  const url = await fixtureUrl(prefix, deps);
+  const { secrets, bearer } = authOf(deps.env);
+  const auth = { secrets, bearer };
   const id = `${prefix}-t3-brief`;
   const mk = () =>
-    call(`${url}/t3/instance`, "POST", { id, kind: "briefing" }, secrets).then(
+    call(`${url}/t3/instance`, "POST", { id, kind: "briefing" }, auth).then(
       (r) => ({ ok: true, id: r.id }),
       (e) => ({ ok: false, error: redact(e.message, secrets) }),
     );
@@ -214,27 +414,27 @@ async function t3sync(prefix, deps) {
   note(prefix, "t3", { case: "dedupe", at: new Date().toISOString(), attempts });
   let status = {};
   for (let i = 0; i < 60; i++) {
-    status = await call(`${url}/t3/status?id=${id}`, "GET", undefined, secrets);
+    status = await call(`${url}/t3/status?id=${id}`, "GET", undefined, auth);
     if (status.status === "complete" || status.status === "error") break;
     await sleep(5000);
   }
-  const ledger = await call(`${url}/t3/ledger?instance=${id}`, "GET", undefined, secrets);
+  const ledger = await call(`${url}/t3/ledger?instance=${id}`, "GET", undefined, auth);
   const briefing = ledger.effects.filter((e) => e.step === "briefing");
   note(prefix, "t3", { case: "briefing-done", status, effects: ledger.effects.length });
   const cid = `${prefix}-t3-cancel`;
-  await call(`${url}/t3/instance`, "POST", { id: cid, kind: "cancel" }, secrets);
+  await call(`${url}/t3/instance`, "POST", { id: cid, kind: "cancel" }, auth);
   await sleep(15000);
-  await call(`${url}/t3/terminate`, "POST", { id: cid }, secrets);
+  await call(`${url}/t3/terminate`, "POST", { id: cid }, auth);
   const late = await call(
     `${url}/t3/event`,
     "POST",
     { id: cid, name: "late-event", payload: "x" },
-    secrets,
+    auth,
   ).then(
     (r) => ({ sent: r.sent }),
     (e) => ({ sent: false, note: redact(e.message, secrets) }),
   );
-  const after = await call(`${url}/t3/ledger?instance=${cid}`, "GET", undefined, secrets);
+  const after = await call(`${url}/t3/ledger?instance=${cid}`, "GET", undefined, auth);
   const steps = after.effects.map((e) => e.step);
   note(prefix, "t3", { case: "cancel", late, steps });
   const ok =
@@ -248,10 +448,11 @@ async function t3sync(prefix, deps) {
 
 /** T3 wait case: start the real ≥25 h wait; the +25 h callback is a separate operator dispatch. */
 async function t3waitstart(prefix, deps) {
-  const { url } = manifestOf(prefix);
-  const secrets = [deps.env.CLOUDFLARE_API_TOKEN];
+  const url = await fixtureUrl(prefix, deps);
+  const { secrets, bearer } = authOf(deps.env);
+  const auth = { secrets, bearer };
   const id = `${prefix}-t3-wait`;
-  await call(`${url}/t3/instance`, "POST", { id, kind: "wait" }, secrets);
+  await call(`${url}/t3/instance`, "POST", { id, kind: "wait" }, auth);
   const startUtc = new Date().toISOString();
   const wait = {
     id,
@@ -269,8 +470,9 @@ export function waitReady(startUtc, nowMs) {
 }
 
 async function callback(prefix, deps) {
-  const { url } = manifestOf(prefix);
-  const secrets = [deps.env.CLOUDFLARE_API_TOKEN];
+  const url = await fixtureUrl(prefix, deps);
+  const { secrets, bearer } = authOf(deps.env);
+  const auth = { secrets, bearer };
   const wait = JSON.parse(fs.readFileSync(path.join(outDir(prefix), "wait.json"), "utf8"));
   if (!waitReady(wait.startUtc, Date.now()))
     throw new Error(`T3 wait: callback before ${wait.earliestCallbackUtc}`);
@@ -279,15 +481,15 @@ async function callback(prefix, deps) {
     `${url}/t3/event`,
     "POST",
     { id: wait.id, name: "approval", payload: "synthetic-approval" },
-    secrets,
+    auth,
   );
   let status = {};
   for (let i = 0; i < 60; i++) {
-    status = await call(`${url}/t3/status?id=${wait.id}`, "GET", undefined, secrets);
+    status = await call(`${url}/t3/status?id=${wait.id}`, "GET", undefined, auth);
     if (status.status === "complete" || status.status === "error") break;
     await sleep(5000);
   }
-  const ledger = await call(`${url}/t3/ledger?instance=${wait.id}`, "GET", undefined, secrets);
+  const ledger = await call(`${url}/t3/ledger?instance=${wait.id}`, "GET", undefined, auth);
   const elapsedH = (Date.now() - Date.parse(wait.startUtc)) / 3600_000;
   const ok = status.status === "complete" && (Date.now() - sentAt) / 60_000 <= 5;
   note(prefix, "t3", {
@@ -300,10 +502,12 @@ async function callback(prefix, deps) {
   return { elapsedH: +elapsedH.toFixed(2) };
 }
 
-function openSocket(url, stream, since) {
+function openSocket(url, stream, since, bearer) {
   return new Promise((resolve, reject) => {
+    // Undici's WebSocket cannot set headers, so the bearer travels as a query param the
+    // fixture accepts on this route only. It lives in memory here, never on disk or in logs.
     const ws = new WebSocket(
-      `${url.replace(/^http/, "ws")}/t4/socket?stream=${stream}&since=${since}`,
+      `${url.replace(/^http/, "ws")}/t4/socket?stream=${stream}&since=${since}&bearer=${encodeURIComponent(bearer)}`,
     );
     const received = [];
     const timer = setTimeout(() => reject(new Error("socket open timeout")), 15000);
@@ -325,21 +529,23 @@ function openSocket(url, stream, since) {
 
 /** T4: three tabs on one DO for a real hour; reconnect at min 30 (one tab) and 45 (all). */
 async function t4run(prefix, deps) {
-  const { url } = manifestOf(prefix);
-  const secrets = [deps.env.CLOUDFLARE_API_TOKEN];
+  const url = await fixtureUrl(prefix, deps);
+  const { secrets, bearer } = authOf(deps.env);
+  const auth = { secrets, bearer };
   const sync = async () => {
-    const log = await call(`${url}/t4/log?stream=${prefix}-t4`, "GET", undefined, secrets);
+    const log = await call(`${url}/t4/log?stream=${prefix}-t4`, "GET", undefined, auth);
     return log.events.length;
   };
   const tabs = [];
-  for (let t = 0; t < BOUNDS.t4.sockets; t++) tabs.push(await openSocket(url, `${prefix}-t4`, -1));
+  for (let t = 0; t < BOUNDS.t4.sockets; t++)
+    tabs.push(await openSocket(url, `${prefix}-t4`, -1, bearer));
   note(prefix, "t4", { phase: "connected", at: new Date().toISOString() });
   await sleep(10 * 60_000);
   const reconnect = async (tab, at) => {
     const started = Date.now();
     tab.ws.close();
     const since = Math.max(-1, ...tab.received);
-    const fresh = await openSocket(url, `${prefix}-t4`, since);
+    const fresh = await openSocket(url, `${prefix}-t4`, since, bearer);
     tabs[at] = { ...fresh, received: [...tab.received, ...fresh.received] };
     const ms = Date.now() - started;
     note(prefix, "t4", { phase: "reconnect", tab: at, catchupMs: ms });
@@ -353,58 +559,64 @@ async function t4run(prefix, deps) {
   }
   await sleep(10 * 60_000);
   const total = await sync();
-  const full = Array.from({ length: total }, (_, i) => i);
-  const missing = tabs.map((t) => full.filter((s) => !t.received.includes(s)));
+  const coverage = tabs.map((t) => checkTabCoverage(total, t.received));
   for (const t of tabs) t.ws.close();
   note(prefix, "t4", {
     phase: "done",
     total,
-    missing,
+    coverage,
     metering: "unverified: isolated DO GB-s deltas need an operator read",
   });
-  if (missing.some((m) => m.length)) throw new Error("T4: a tab missed or duplicated events");
+  if (coverage.some((c) => c.missing.length || c.duplicated.length))
+    throw new Error("T4: a tab missed or duplicated events");
   return { total };
 }
-
-const STUB_SCHEMAS = STUB_TOOLS.map((name) => ({
-  function: { name, parameters: { type: "object" } },
-}));
 
 /** T7: 20-turn stratified pilot now; the corpus waits on verified neuron headroom (plan §stop). */
 async function t7run(prefix, deps, { model }) {
   if (!model) throw new Error("t7 needs --model (the pinned starter under test)");
-  const { url } = manifestOf(prefix);
-  const secrets = [deps.env.CLOUDFLARE_API_TOKEN];
+  const url = await fixtureUrl(prefix, deps);
+  const { secrets, bearer } = authOf(deps.env);
+  const auth = { secrets, bearer };
   const corpus = buildCorpus();
   const kinds = (k, n) => corpus.filter((t) => t.kind === k).slice(0, n);
   const pilot = [...kinds("tool", 8), ...kinds("two-tool", 8), ...kinds("chat", 4)];
   let pass = 0;
   for (const turn of pilot) {
     const started = Date.now();
-    const prompt =
-      turn.kind === "chat" ? `Say: ${turn.fact}` : `Use the stub tools for ${JSON.stringify(turn)}`;
-    if (prompt.length > BOUNDS.t7.inTokens * 4)
+    if (turn.prompt.length > BOUNDS.t7.inTokens * 4)
       throw new OverBudget("T7: prompt over the per-turn budget");
+    // A 400 here is a driver bug (wrong model, oversized prompt, non-stub tool): the fixture
+    // only executes allowlisted stubs with the model's own arguments, so model misbehavior
+    // arrives as 200 with errored executions and scores a fail, never a crash.
     const res = await call(
       `${url}/t7/turn`,
       "POST",
-      { model, messages: [{ role: "user", content: prompt }], tools: STUB_SCHEMAS },
-      secrets,
+      { model, messages: [{ role: "user", content: turn.prompt }], tools: STUB_SCHEMA_LIST },
+      auth,
     );
     const emitted = res.raw?.tool_calls ?? res.raw?.response?.tool_calls ?? [];
-    const verdict = scoreTurn(turn, emitted);
+    const verdict = scoreTurn(turn, emitted, res.executions ?? []);
     if (verdict === "pass") pass++;
-    note(prefix, "t7", {
-      kind: turn.kind,
-      verdict,
-      latencyMs: Date.now() - started,
-      rejected400: false,
-    });
+    note(
+      prefix,
+      "t7",
+      verdict === "pass"
+        ? { kind: turn.kind, verdict, latencyMs: Date.now() - started }
+        : {
+            kind: turn.kind,
+            verdict,
+            latencyMs: Date.now() - started,
+            expected: turn.expect.map((e) => e.name),
+            emitted: emitted.map((c) => c?.name),
+          },
+    );
   }
   note(prefix, "t7", { phase: "pilot-done", pass, of: pilot.length });
   throw new Inconclusive(
-    "T7 pilot complete; corpus paused: neuron headroom is unverifiable with the campaign " +
-      "permission set (no analytics scope), so the 1,000-turn target must wait for an authorized read",
+    "T7 pilot complete with no reservation: neuron headroom is unverifiable with the campaign " +
+      "permission set (no analytics scope), so the 20-turn pilot runs without one and the " +
+      "1,000-turn corpus stays paused per the plan's stop rules",
   );
 }
 
@@ -419,7 +631,7 @@ const LIVE = {
   callback,
 };
 export const HELP =
-  "usage: cf-verify-t3t4t7.mjs <deploy|t3-sync|t3-wait-start|t4|t7 --model M|callback|collect|teardown> --prefix <p>";
+  "usage: cf-verify-t3t4t7.mjs <deploy --model M|t3-sync|t3-wait-start|t4|t7 --model M|callback|collect|teardown> --prefix <p>";
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { values, positionals } = parseArgs({
@@ -435,10 +647,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       if (command === "deploy" && !prefix) prefix = newCampaignPrefix(new Date(), randomBytes);
       if (!isCampaignPrefix(prefix)) throw new Error(`"${prefix}" is not a campaign prefix`);
       const out = await LIVE[command](prefix, deps, { model: values.model });
-      // Actions logs are public: the workers.dev subdomain never reaches them.
-      deps.stdout(
-        `${command}: ${redact(JSON.stringify(out ?? "ok"), [deps.env.CLOUDFLARE_API_TOKEN])}\n`,
-      );
+      // Actions logs are public: the workers.dev subdomain and the bearer never reach them.
+      const { secrets } = authOf(deps.env);
+      deps.stdout(`${command}: ${redact(JSON.stringify(out ?? "ok"), secrets)}\n`);
     } else {
       deps.stdout(`${HELP}\n`);
       if (!command) process.exit(2);
