@@ -2,10 +2,10 @@
 // Onboarding answers and model settings (M2-15). Keys arrive in a POST body, go straight into the
 // vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
 import { createRepository } from "@opa/db/repository";
-import { credentialBinding, STARTER_MODEL } from "@opa/providers";
+import { credentialBinding, isLoopbackHost, STARTER_MODEL } from "@opa/providers";
 import { encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
-import { MODEL_KEY_PURPOSE as PURPOSE, resolveChatModel } from "./chat-model";
+import { MODEL_KEY_PURPOSE as PURPOSE, privateHttp, resolveChatModel } from "./chat-model";
 import type { AppEnv } from "./env";
 
 const CALLER = "model-settings";
@@ -92,10 +92,17 @@ settings.put("/model", async (c) => {
   }
   let binding: string;
   try {
-    // The Worker reaches public hosts only, so a key never travels over plain HTTP. The adapter
-    // refuses a query or fragment, so a URL with one could be saved but never tested.
+    // A key never crosses the internet over plain HTTP: HTTP is for a server on this machine
+    // (`pnpm dev`'s mock, Ollama), or on Node with private hosts allowed, whose fetch refuses
+    // plain HTTP to a public address. The adapter refuses a query or fragment, so a URL with one
+    // could be saved but never tested.
     const url = new URL(baseUrl);
-    if (url.protocol !== "https:" || url.search || url.hash) throw new Error("invalid URL");
+    // Node's guarded fetch refuses loopback unless private hosts are allowed.
+    const local = isLoopbackHost(url.hostname) && !c.env.MODEL_FETCH;
+    const plain = url.protocol === "http:" && (local || privateHttp(c.env));
+    if ((url.protocol !== "https:" && !plain) || url.search || url.hash) {
+      throw new Error("invalid URL");
+    }
     binding = credentialBinding(providerId, baseUrl);
   } catch {
     return fail(c, 400, "invalid_base_url");

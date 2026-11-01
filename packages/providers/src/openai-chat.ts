@@ -15,16 +15,25 @@ export interface OpenAIChatOptions {
   apiKey?: string;
   compat?: Partial<OpenAIChatCompat>;
   fetch?: typeof fetch;
+  /**
+   * The caller's `fetch` sends plain HTTP to private addresses only (Node's guard with
+   * `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`), so a key may go to any `http:` base URL.
+   */
+  privateHttp?: boolean;
 }
 
 const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/;
+
+/** Whether `hostname` (a `URL`'s, so IPv6 in brackets) names this machine. */
+export const isLoopbackHost = (hostname: string) => LOOPBACK.test(hostname);
 
 export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvider {
   canonicalOrigin(options.baseUrl);
   const url = new URL(options.baseUrl);
   if (url.search || url.hash) throw new Error("Base URL must not have a query or fragment");
   // Over plain HTTP a key is readable in transit, so only loopback servers may take one.
-  if (options.apiKey && url.protocol === "http:" && !LOOPBACK.test(url.hostname)) {
+  const plainOk = options.privateHttp || LOOPBACK.test(url.hostname);
+  if (options.apiKey && url.protocol === "http:" && !plainOk) {
     throw new Error("A base URL that takes an API key must use https");
   }
   let path = url.pathname;

@@ -51,6 +51,7 @@ export interface NodeApp {
 export function createNodeApp(options: NodeOptions): NodeApp {
   const { dataDir, migrationsDir, assetsDir, vars, publicOrigin } = options;
   const origin = publicOrigin && new URL(publicOrigin).origin; // throws if invalid
+  const allowPrivate = vars.OPA_ALLOW_PRIVATE_MODEL_HOSTS === "1";
   const db = openSqlite(join(dataDir, "opa.sqlite"));
   migrate(db, migrationsDir);
   // Static files, with the SPA's index.html for any other path, as Workers assets do.
@@ -63,7 +64,8 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
     // The per-user assistant, in process. It has no state until the chat transport lands.
     ASSISTANT: { idFromName: (name: string) => name, get: () => ({ ping: async () => "pong" }) },
-    MODEL_FETCH: modelFetch({ allowPrivate: vars.OPA_ALLOW_PRIVATE_MODEL_HOSTS === "1" }),
+    MODEL_FETCH: modelFetch({ allowPrivate }),
+    MODEL_PRIVATE_HOSTS: allowPrivate,
     UNAVAILABLE: ["workflow", "ai"],
     OPA_MASTER_KEY: vars.OPA_MASTER_KEY,
     OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,

@@ -23,6 +23,12 @@ export interface Bindings {
    */
   MODEL_FETCH?: typeof fetch;
   /**
+   * Set by Node's composition root when the operator allows private model hosts
+   * (`OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`). A base URL may then use plain HTTP to any host, and
+   * `MODEL_FETCH` refuses plain HTTP to a public address. Otherwise only loopback may use HTTP.
+   */
+  MODEL_PRIVATE_HOSTS?: boolean;
+  /**
    * Set by a composition root whose runtime lacks these (the Node root, for now). Health reports
    * them as false without degrading.
    */

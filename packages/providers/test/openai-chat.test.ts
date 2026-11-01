@@ -173,6 +173,9 @@ describe("openai-chat requests", () => {
     expect(make("http://models.example.test/v1")).not.toThrow();
     expect(make("http://127.0.0.1:8080/v1", KEY)).not.toThrow();
     expect(make("http://[::1]:8080/v1", KEY)).not.toThrow();
+    // The caller's fetch keeps plain HTTP on a private network (Node's guard).
+    const lan = { providerId: "x", baseUrl: "http://192.168.1.5:11434/v1", apiKey: KEY };
+    expect(() => createOpenAIChatProvider({ ...lan, privateHttp: true })).not.toThrow();
   });
 
   it("lists models", async () => {

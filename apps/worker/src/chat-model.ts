@@ -22,7 +22,18 @@ export interface ChatModel {
   used?: () => Promise<void>;
 }
 
-export type ChatModelError = "no_model" | "ai_unavailable" | "vault_unavailable" | "key_required";
+export type ChatModelError =
+  | "no_model"
+  | "ai_unavailable"
+  | "vault_unavailable"
+  | "key_required"
+  | "invalid_base_url";
+
+/**
+ * Whether a base URL may use plain HTTP to any host: only with Node's guarded fetch, which refuses
+ * plain HTTP to a public address. The flag alone never widens it.
+ */
+export const privateHttp = (env: Env) => env.MODEL_PRIVATE_HOSTS === true && !!env.MODEL_FETCH;
 
 export async function resolveChatModel(
   env: Env,
@@ -48,6 +59,13 @@ export async function resolveChatModel(
   if (apiKey === null) return { error: "key_required" };
   // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
   const fetch = env.MODEL_FETCH ? { fetch: env.MODEL_FETCH } : {};
-  const provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey, ...fetch });
+  let provider: ModelProvider;
+  try {
+    const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(env), ...fetch };
+    provider = createOpenAIChatProvider(options);
+  } catch {
+    // Saved as plain HTTP while private hosts were allowed, and they no longer are.
+    return { error: "invalid_base_url" };
+  }
   return { provider, model: row.model, apiKey, used: () => store.keyUsed(secretId) };
 }

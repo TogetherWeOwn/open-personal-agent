@@ -70,11 +70,61 @@ describe("model settings", () => {
     expect(await dump("secrets")).toBe("[]");
   });
 
-  it("rejects plain-HTTP base URLs, and ones the adapter can't call", async () => {
-    for (const baseUrl of ["http://x.test", "https://x.test/v1?a=1", "https://x.test/v1#f"]) {
+  it("rejects plain-HTTP public base URLs, and ones the adapter can't call", async () => {
+    const urls = [
+      "http://x.test",
+      "http://8.8.8.8/v1",
+      "https://x.test/v1?a=1",
+      "https://x.test/v1#f",
+    ];
+    for (const baseUrl of [...urls, "ftp://x.test/v1"]) {
       const res = await put("/model", { ...OPENAI, baseUrl, model: "m", apiKey: CANARY });
       expect(res).toEqual({ status: 400, text: '{"error":"invalid_base_url"}' });
     }
+    // The private-hosts flag widens plain HTTP only alongside the guarded fetch that enforces it.
+    const lan = { ...OPENAI, baseUrl: "http://192.168.1.5:11434/v1", model: "m", apiKey: CANARY };
+    const unguarded = await put("/model", lan, { MODEL_PRIVATE_HOSTS: true });
+    expect(unguarded).toEqual({ status: 400, text: '{"error":"invalid_base_url"}' });
+    // On Node without the flag, the guarded fetch refuses loopback, so it can't be saved there.
+    const local = { ...lan, baseUrl: "http://127.0.0.1:8788/v1" };
+    const guarded = await put("/model", local, { MODEL_FETCH: vi.fn() as typeof fetch });
+    expect(guarded).toEqual({ status: 400, text: '{"error":"invalid_base_url"}' });
+  });
+
+  it("takes plain HTTP for a model server on this machine, and Test reaches it", async () => {
+    const local = { ...OPENAI, providerId: "mock", model: "echo", apiKey: CANARY };
+    for (const baseUrl of ["http://localhost:11434/v1", "http://[::1]:8788/v1"]) {
+      expect((await put("/model", { ...local, baseUrl })).status).toBe(200);
+    }
+    const saved = await put("/model", { ...local, baseUrl: "http://127.0.0.1:8788/v1" });
+    expect(JSON.parse(saved.text).model).toMatchObject({ baseUrl: "http://127.0.0.1:8788/v1" });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      const chunk = JSON.stringify({ choices: [{ delta: { content: "ready" } }] });
+      return new Response(sse(chunk, "[DONE]"));
+    });
+    const body = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(body).toMatchObject({ ok: true, tools: true });
+    expect(body.latencyMs).toBeTypeOf("number");
+    expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8788/v1/chat/completions");
+  });
+
+  it("takes plain HTTP to a LAN host on Node with private hosts allowed", async () => {
+    const node = {
+      MODEL_PRIVATE_HOSTS: true,
+      MODEL_FETCH: vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({}),
+      ),
+    };
+    const lan = { ...OPENAI, providerId: "ollama", model: "llama3", apiKey: CANARY };
+    const saved = await put("/model", { ...lan, baseUrl: "http://192.168.1.5:11434/v1" }, node);
+    expect(saved.status).toBe(200);
+    await call("/model/test", { method: "POST" }, node);
+    expect(node.MODEL_FETCH.mock.calls[0]?.[0]).toBe(
+      "http://192.168.1.5:11434/v1/chat/completions",
+    );
+    // The operator turns the flag off again: Test refuses the saved URL instead of failing.
+    const off = await call("/model/test", { method: "POST" }, { MODEL_FETCH: node.MODEL_FETCH });
+    expect(off).toEqual({ status: 409, text: '{"error":"invalid_base_url"}' });
   });
 
   it("encrypts the key and only ever returns its last 4 characters", async () => {
