@@ -15,11 +15,13 @@
     },
     "openai": {
       "name": "OpenAI",
+      "origin": "https://api.openai.com",
       "billedBy": "provider",
       "billingUrl": "https://platform.openai.com/usage"
     },
     "openrouter": {
       "name": "OpenRouter",
+      "origin": "https://openrouter.ai",
       "billedBy": "provider",
       "billingUrl": "https://openrouter.ai/activity"
     }

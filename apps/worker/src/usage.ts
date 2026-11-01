@@ -69,11 +69,12 @@ usageRoutes.get("/", async (c) => {
   const utcMonth = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
   const today = since(c.req.query("today"), utcDay, now, DAY + 2 * 3_600_000);
   const month = since(c.req.query("month"), utcMonth, now, 32 * DAY);
-  const usage = createRepository(c.env).forUser(c.var.session.scope).usage;
+  const repo = createRepository(c.env);
+  const usage = repo.forUser(c.var.session.scope).usage;
   const [todayRows, monthRows, neuronsUsed] = await Promise.all([
     usage.totals(today),
     usage.totals(month),
-    usage.neurons(utcDay), // Cloudflare's allowance runs on UTC days
+    repo.deployment.workersAiNeurons(utcDay), // Cloudflare's allowance runs on UTC days
   ]);
   c.header("Cache-Control", "no-store");
   return c.json({

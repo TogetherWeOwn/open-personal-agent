@@ -8,6 +8,8 @@ export type BilledBy = "provider" | "cloudflare-workers-ai" | "included-workers-
 
 export interface ProviderInfo {
   name: string;
+  /** The API origin this provider bills for; Workers AI is a binding, so it has none. */
+  origin?: string;
   billedBy: BilledBy;
   billingUrl: string | null;
 }
@@ -44,6 +46,16 @@ const models: ModelPrice[] = table.models;
 /** A provider with no entry is still billed by itself; it just has no billing link. */
 export function providerInfo(providerId: string): ProviderInfo {
   return providers[providerId] ?? { name: providerId, billedBy: "provider", billingUrl: null };
+}
+
+/**
+ * Who bills calls to an OpenAI-compatible base URL: the provider whose origin it is, else its
+ * host. The endpoint decides, never the provider ID a user typed, so a key labelled "openai" that
+ * points at another host is never priced as OpenAI.
+ */
+export function billingProviderId(baseUrl: string): string {
+  const { origin, host } = new URL(baseUrl);
+  return Object.keys(providers).find((id) => providers[id]?.origin === origin) ?? host;
 }
 
 export function findPrice(providerId: string, model: string): ModelPrice | undefined {

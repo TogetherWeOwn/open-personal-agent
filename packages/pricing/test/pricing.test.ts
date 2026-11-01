@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { estimate, findPrice, isStale, providerInfo, workersAiAllowance } from "../src/index";
+import {
+  billingProviderId,
+  estimate,
+  findPrice,
+  isStale,
+  providerInfo,
+  workersAiAllowance,
+} from "../src/index";
 import table from "../src/prices.json";
 
 const usage = { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0 };
@@ -41,6 +48,12 @@ describe("price table", () => {
       billingUrl: null,
     });
     expect(providerInfo("workers-ai").billedBy).toBe("cloudflare-workers-ai");
+  });
+
+  it("names the biller from the endpoint, not from the provider ID", () => {
+    expect(billingProviderId("https://api.openai.com/v1")).toBe("openai");
+    expect(billingProviderId("https://openrouter.ai/api/v1")).toBe("openrouter");
+    expect(billingProviderId("http://127.0.0.1:8788/v1")).toBe("127.0.0.1:8788");
   });
 
   it("flags a price checked more than 90 days ago", () => {

@@ -189,9 +189,14 @@ describe("model settings", () => {
       { AI: undefined as unknown as Ai },
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
-    const AI = { run: async () => sse('{"response":"ready"}', "[DONE]") } as unknown as Ai;
+    const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
+    const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
     expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
+    // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
+    expect(JSON.parse(await dump("usage"))).toMatchObject([
+      { provider_id: "workers-ai", input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
+    ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
   });
