@@ -191,6 +191,26 @@ describe("several providers", () => {
     expect(limited.body.totalMs).toBeGreaterThanOrEqual(limited.body.latencyMs);
   });
 
+  it("never returns a key the provider echoes back, in a reply or an error", async () => {
+    // A gateway that reflects the Authorization header into its output (TWO-514 F1).
+    const echo = (fail: boolean) =>
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        const auth = new Headers(init?.headers).get("authorization") ?? "";
+        if (fail) {
+          return Response.json({ error: { message: `bad credential ${auth}` } }, { status: 400 });
+        }
+        return sse(JSON.stringify({ choices: [{ delta: { content: `hi ${auth}` } }] }), "[DONE]");
+      });
+    echo(false);
+    const tested = await call("u1", "POST", `/settings/providers/${first}/test`, {});
+    expect(tested.body).toMatchObject({ ok: true, reply: "" });
+    vi.restoreAllMocks();
+    echo(true);
+    const failed = await call("u1", "POST", `/settings/providers/${first}/test`, {});
+    expect(failed.body.ok).toBe(false);
+    expect(failed.body.error.message).not.toContain((KEYS[0] as string).slice(0, 8));
+  });
+
   it("pins a conversation to a model, and back to the Chat role", async () => {
     const pin = (id: string, body: unknown, user = "u1") =>
       call(user, "PUT", `/conversations/${id}/model`, body);
