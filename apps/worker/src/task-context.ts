@@ -18,7 +18,7 @@ import {
   type TaskStepper,
 } from "@opa/core";
 import type { TaskStatus } from "@opa/db/repository";
-import type { CallScope, Refusal, Reservation } from "./limits";
+import type { CallScope, Refusal, Reservation } from "@opa/server/limits";
 
 /** The assistant RPC surface a task may use, structural so tests can stand in for the stub. */
 export interface AssistantTaskRpc {

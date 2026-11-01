@@ -57,8 +57,15 @@ const DAY = 86_400_000;
  */
 const TASK_TTL = 40 * DAY;
 
-/** The Durable Object's synchronous storage, or a `Map` in tests. */
-export type Kv = Pick<SyncKvStorage, "get" | "put">;
+/**
+ * The synchronous key-value storage `Limits` counts in: the assistant's own on Workers (one per
+ * user, so the counts are exact), a SQLite table on Node, or a `Map` in tests. Structural on
+ * purpose: `@opa/server` names no runtime's types.
+ */
+export interface Kv {
+  get<T = unknown>(key: string): T | undefined;
+  put<T>(key: string, value: T): void;
+}
 
 interface Spend {
   /** The UTC day's start; a new day starts from zero. */

@@ -13,7 +13,7 @@ import {
   SPENDING_DEFAULTS,
   TOOL_CALLS_PER_MINUTE,
   TURNS_PER_MINUTE,
-} from "../src/limits";
+} from "@opa/server/limits";
 
 const DAY = 86_400_000;
 // $2 in and $8 out per million tokens: 2 and 8 micro-USD a token.

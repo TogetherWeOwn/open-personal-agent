@@ -12,7 +12,7 @@ import { resolveChatModel } from "@opa/server/chat-model";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { compose, type WorkerEnv } from "../src/compose";
-import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "../src/limits";
+import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "@opa/server/limits";
 import { workerApp } from "../src/worker-app";
 import { Browser, claim, count, db, env, freshDatabase, ORIGIN, SOCKET_WAIT } from "./helpers/app";
 
