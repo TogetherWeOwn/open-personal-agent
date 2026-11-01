@@ -24,14 +24,14 @@ import {
 } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import {
-  type ApprovalDecision,
+  applyStoredDecisions,
   type Budget,
+  bindBatch,
   continueTurn,
   type LoopEvent,
   type LoopHost,
   type LoopTool,
   newTurn,
-  resolveApprovals,
   runTurn,
   TURN_LIMITS,
   type TurnState,
@@ -77,6 +77,13 @@ const IMAGE_TOKENS = 2_500;
 const PDF_MAX_TOKENS = 100_000; // about 100 pages, the providers' usual page limit
 const TAB_RECHECK_MS = 30_000; // how often task progress rechecks the tabs' sessions
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
+/** Decided batches waiting for the running turn to end (M3-07 AC14, M3-09 AC4's FIFO). */
+const QUEUE_KEY = "approvals:queue";
+/** How much of the original request a late approval's label quotes. */
+const LABEL_CHARS = 80;
+
+/** What `resumeBatch` did with a decided batch. */
+export type ResumeResult = "resumed" | "waiting" | "queued" | "gone";
 
 type Emit = <T extends HarnessEvent["type"]>(
   type: T,
@@ -120,6 +127,21 @@ interface TurnCheckpoint {
   callUsage: CallUsage | null;
 }
 
+/** A resumed batch, for the loop's approval hooks. */
+type ApprovalRun = {
+  batchId: string;
+  /** Approved calls the stored rows already refuse, by tool call ID, with why. */
+  refused: Map<string, string>;
+};
+
+/** What the model reads for an approved call that can't run as bound. */
+const REFUSED: Record<string, string> = {
+  binding_mismatch: "The approval doesn't match this call, so it didn't run.",
+  tool_changed: "The tool changed after it was approved, so the call didn't run.",
+  tool_missing: "The tool is no longer available, so the call didn't run.",
+  already_claimed: "This approval was already used, so the call didn't run again.",
+};
+
 export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
   static override options = { sendIdentityOnConnect: false };
@@ -134,6 +156,8 @@ export class Assistant extends Agent<Bindings> {
     policy: () => ({}),
   });
   #running: AbortController | null = null;
+  /** Whether a `#drain` owns the resume queue: there is only ever one, so batches keep order. */
+  #draining = false;
   /** Turn rate and daily spend, in this DO's storage (M2-22). */
   readonly limits = new Limits(this.ctx.storage.kv);
   /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
@@ -383,9 +407,7 @@ export class Assistant extends Agent<Bindings> {
       )
         // The model's failures are reported in the turn; this is D1 failing.
         .catch(() => reject(connection, msg.conversationId, "The reply couldn't be saved."))
-        .finally(() => {
-          if (this.#running === running) this.#running = null;
-        });
+        .finally(() => this.#release(running));
     }
   }
 
@@ -556,46 +578,155 @@ export class Assistant extends Agent<Bindings> {
   }
 
   /**
-   * Resumes a turn stopped at an approval with the user's decisions (M3-03 AC5). Server routes
-   * (M3-07a) reach this through the scoped repository's `assistant()`: this DO is named from
-   * the caller's session and `turns.load` is scope-filtered, so a turn ID can only ever
-   * address this user's saved turns. Tabs can't call it — `onMessage` routes only `chat.send`,
+   * Resumes a turn stopped at an approval once its batch is decided (M3-03 AC5, M3-07 AC10).
+   * The decisions are read from the batch's rows in D1, never taken from the caller: the
+   * approvals route writes them there first, after its checks and any step-up. Server routes
+   * reach this through the scoped repository's `assistant()`: this DO is named from the
+   * caller's session and every read here is scope-filtered, so a batch ID can only ever
+   * address this user's turns. Tabs can't call it — `onMessage` routes only `chat.send`,
    * `turn.cancel` and `resume`.
    *
-   * `false` when a turn is already running, the saved turn is missing or not awaiting
-   * approval, or no model is available (the saved turn stays for a retry). A decision against
-   * an unknown, stale or decided approval throws `ApprovalError` before anything changes.
+   * `waiting` while an item is still undecided; `queued` while another turn runs (the batch
+   * resumes when it ends, AC14); `gone` when no stopped turn waits on the batch (a task's
+   * batch, a turn already resumed, a missing batch) or no model is available.
    */
-  async resumeWithDecisions(input: {
-    turnId: string;
-    batchId: string;
-    decisions: ApprovalDecision[];
-  }): Promise<boolean> {
+  async resumeBatch(batchId: string): Promise<ResumeResult> {
     // Claimed before the first await: D1 and vault I/O don't hold the DO's input gate, so two
-    // decision calls for one turn (a double-clicked Approve, two tabs, a retried 07a request)
-    // would otherwise both load the same `awaiting_approval` row and run its approved tools
-    // twice. A `chat.send` arriving mid-resume is rejected the same way.
-    if (this.#running) return false;
+    // calls for one batch (a double-clicked Approve, two tabs, a retried request) would
+    // otherwise both load the same `awaiting_approval` row. A `chat.send` arriving
+    // mid-resume is rejected the same way.
+    if (this.#running) return this.#enqueue(batchId);
     const running = new AbortController();
     this.#running = running;
     let started = false;
     try {
-      const saved = await this.#repo.turns.load(input.turnId);
-      if (saved?.status !== "awaiting_approval") return false;
+      const repo = this.#repo;
+      const rows = await repo.approvals.batch(batchId);
+      const turnId = rows[0]?.turnId;
+      if (!turnId) return "gone";
+      const saved = await repo.turns.load(turnId);
+      if (saved?.status !== "awaiting_approval") return "gone";
       const state = parseTurnState(saved.state);
       if (!state) {
         await this.#dropCorrupt(saved);
-        return false;
+        return "gone";
       }
-      resolveApprovals(state, input.batchId, input.decisions, Date.now());
-      started = await this.#resume(saved, state, running);
-      return started;
+      if (state.pending?.batchId !== batchId) return "gone";
+      const { tools } = this.resolveTools();
+      const context = { kind: "turn", id: turnId, conversationId: saved.conversationId } as const;
+      const applied = await applyStoredDecisions(
+        state,
+        rows,
+        { userId: this.#scope.userId, context, tools },
+        Date.now(),
+      );
+      if (applied.waiting) return "waiting";
+      started = await this.#resume(saved, state, running, {
+        batchId,
+        refused: applied.refused,
+      });
+      return started ? "resumed" : "gone";
     } finally {
-      // The fiber owns the claim once a drive starts; every other exit — `false`, an
-      // `ApprovalError`, a D1 failure — releases it here. (`#resume` releases the claim itself
-      // on its re-stop path, where it returns `true` without starting a fiber.)
-      if (!started && this.#running === running) this.#running = null;
+      // The fiber owns the claim once a drive starts; every other exit releases it here.
+      // (`#resume` releases the claim itself on its re-stop path, where it returns `true`
+      // without starting a fiber.)
+      if (!started) this.#release(running);
     }
+  }
+
+  /**
+   * Releases a claim on the turn slot, then resumes whatever queued behind it: a batch decided
+   * while this claim was held waits on that, whether or not a fiber ever started.
+   */
+  #release(running: AbortController): void {
+    if (this.#running !== running) return;
+    this.#running = null;
+    void this.#drain();
+  }
+
+  /** Holds a decided batch until the running turn ends; it resumes then, in order. */
+  #enqueue(batchId: string): ResumeResult {
+    const queue = this.ctx.storage.kv.get<string[]>(QUEUE_KEY) ?? [];
+    if (!queue.includes(batchId)) this.ctx.storage.kv.put(QUEUE_KEY, [...queue, batchId]);
+    return "queued";
+  }
+
+  /**
+   * Resumes the next queued batch, if no turn runs. Called as every turn's fiber ends. A resume
+   * that fails releases its claim before this drain puts its batch back, so a second drain then
+   * would run the next batch first; instead the one running re-checks the slot after each resume.
+   */
+  async #drain(): Promise<void> {
+    if (this.#draining) return;
+    this.#draining = true;
+    try {
+      await this.#drainQueue();
+    } finally {
+      this.#draining = false;
+    }
+  }
+
+  async #drainQueue(): Promise<void> {
+    while (!this.#running) {
+      const [next, ...rest] = this.ctx.storage.kv.get<string[]>(QUEUE_KEY) ?? [];
+      if (next === undefined) return;
+      this.ctx.storage.kv.put(QUEUE_KEY, rest);
+      const result = await this.resumeBatch(next).catch(() => "failed" as const);
+      if (result === "queued") return; // something else started first; it drains again
+      if (result === "failed") {
+        // D1 or the vault failed, not the batch: it goes back to the front, and the next
+        // turn's end or the route's retry tries it again, rather than spin on it here.
+        const now = this.ctx.storage.kv.get<string[]>(QUEUE_KEY) ?? [];
+        if (!now.includes(next)) this.ctx.storage.kv.put(QUEUE_KEY, [next, ...now]);
+        return;
+      }
+    }
+  }
+
+  /**
+   * A late approval appends; it never re-plans (M3-07 AC14). If the conversation moved on
+   * since the turn stopped, the stopped turn is settled where it is and the approved calls run
+   * in a new turn at the end of the chat: a new reply after a thread line naming the original
+   * request, and a model context that ends with that request's label, the calls and their
+   * results — so the model continues from the end of the conversation. `null` when nothing
+   * newer exists: the turn resumes in place.
+   */
+  async #late(saved: SavedTurn, state: TurnState): Promise<SavedTurn | null> {
+    const repo = this.#repo;
+    const thread = (await repo.chat.listMessages(saved.conversationId)) ?? [];
+    const at = thread.findIndex((m) => m.id === saved.replyId);
+    if (at < 0 || at === thread.length - 1) return null;
+    const asked = thread.slice(0, at).findLast((m) => m.role === "user")?.content ?? "";
+    const quote = asked.length > LABEL_CHARS ? `${asked.slice(0, LABEL_CHARS)}…` : asked;
+    const tools = [...new Set(state.pending?.items.map((i) => i.tool))].join(", ");
+    // The gated calls' assistant message and what follows it: the calls the user decided on,
+    // with any results already recorded beside them. Its text is in the old reply already.
+    const from = state.messages.findLastIndex((m) => m.role === "assistant");
+    const calls = state.messages
+      .slice(Math.max(from, 0))
+      .map((m) => (m.role === "assistant" ? { ...m, content: "" } : m));
+    state.messages = [
+      {
+        role: "user",
+        content:
+          `[Approved later] I approved ${tools} from my earlier request "${quote}". ` +
+          "Its result follows. Continue from here; don't redo that earlier request.",
+      },
+      ...calls,
+    ];
+    const next: SavedTurn = { ...saved, turnId: crypto.randomUUID(), replyId: crypto.randomUUID() };
+    const old = thread[at];
+    await repo.turns.supersede({
+      old: { turnId: saved.turnId, replyId: saved.replyId, reply: old?.content ?? "" },
+      conversationId: saved.conversationId,
+      replyId: next.replyId,
+      line: { id: crypto.randomUUID(), content: `Approved later: ${tools}, from "${quote}"` },
+    });
+    // The old turn is settled; tabs showing it learn so before the new one starts.
+    this.#emitter(saved.conversationId, saved.turnId)("turn.completed", {});
+    this.#events.trim(saved.conversationId, saved.turnId);
+    this.#emitter(saved.conversationId, next.turnId)("turn.started", { messageId: next.replyId });
+    return next;
   }
 
   /** Resumes a turn stopped at its call or tool limit, with a fresh allowance (its Continue). */
@@ -614,11 +745,13 @@ export class Assistant extends Agent<Bindings> {
         await this.#dropCorrupt(saved);
         return false;
       }
+      // Approved calls run only through their batch's rows (`resumeBatch`), never a Continue.
+      if (state.pending) return false;
       continueTurn(state);
       started = await this.#resume(saved, state, running);
       return started;
     } finally {
-      if (!started && this.#running === running) this.#running = null;
+      if (!started) this.#release(running);
     }
   }
 
@@ -627,51 +760,74 @@ export class Assistant extends Agent<Bindings> {
    * `running` is the caller's claim, held since before the first await; the fiber owns it once a
    * drive starts, and every path that starts no fiber releases it.
    */
-  async #resume(saved: SavedTurn, state: TurnState, running: AbortController): Promise<boolean> {
+  async #resume(
+    stopped: SavedTurn,
+    state: TurnState,
+    running: AbortController,
+    approvals?: ApprovalRun,
+  ): Promise<boolean> {
     const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
     if ("error" in picked) return false; // the saved turn stays for a retry once a model is set
     const { provider, model } = picked;
     const repo = this.#repo;
+    // History is D1's, as at the turn's start, minus the still-streaming reply: its text so
+    // far is inside `state`, where the loop left it.
+    const historyOf = async (replyId: string): Promise<ModelMessage[]> =>
+      ((await repo.chat.listMessages(stopped.conversationId)) ?? [])
+        .filter((m) => m.id !== replyId && m.content !== "")
+        .map(({ role, content }) => ({ role, content }));
+    let history = await historyOf(stopped.replyId);
+    const providerId = picked.billingId ?? provider.id;
+    const firstHold = `${stopped.turnId}:0`;
+    const chars = [...history, ...state.messages].reduce((sum, m) => sum + m.content.length, 0);
+    const reservation = this.limits.reserve(firstHold, providerId, model, chars);
+    if (!reservation) {
+      // Stops again at today's limit. No fiber starts, so the caller's claim is released here.
+      // A batch's decisions stay in its rows, so it stays waiting on them: resuming it again
+      // (the approvals route does on a retry) re-reads them. A Continue never runs approved
+      // calls without their rows' claims.
+      const restopped = await repo.turns.save({
+        ...stopped,
+        providerId,
+        model,
+        status: approvals ? "awaiting_approval" : "limit_reached",
+        state: JSON.stringify(state),
+      });
+      if (!restopped) throw new Error("the turn's conversation is gone");
+      this.#emitter(stopped.conversationId, stopped.turnId)("limit.reached", {
+        kind: "daily",
+        detail: "Today's spending limit",
+      });
+      this.#release(running);
+      return true;
+    }
+    // A late approval moves the turn to the end of the chat (AC14), once it is sure to run.
+    let saved = stopped;
+    if (approvals) {
+      try {
+        const late = await this.#late(stopped, state);
+        if (late) {
+          saved = late;
+          history = await historyOf(late.replyId);
+        }
+      } catch (err) {
+        this.limits.release(firstHold); // no call was made
+        throw err;
+      }
+    }
     const cp: TurnCheckpoint = {
       conversationId: saved.conversationId,
       turnId: saved.turnId,
       replyId: saved.replyId,
-      providerId: picked.billingId ?? provider.id,
+      providerId,
       model,
       reply: "",
       wrote: true,
-      holds: [],
+      holds: [firstHold],
       callStarted: false,
       callRecorded: false,
       callUsage: null,
     };
-    // History is D1's, as at the turn's start, minus the still-streaming reply: its text so
-    // far is inside `state`, where the loop left it.
-    const history: ModelMessage[] = ((await repo.chat.listMessages(saved.conversationId)) ?? [])
-      .filter((m) => m.id !== saved.replyId && m.content !== "")
-      .map(({ role, content }) => ({ role, content }));
-    const firstHold = `${saved.turnId}:0`;
-    const chars = [...history, ...state.messages].reduce((sum, m) => sum + m.content.length, 0);
-    const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars);
-    if (!reservation) {
-      // Stops again at today's limit. Decisions recorded on the state stay recorded. No fiber
-      // starts, so the caller's claim is released here.
-      const restopped = await repo.turns.save({
-        ...saved,
-        providerId: cp.providerId,
-        model,
-        status: "limit_reached",
-        state: JSON.stringify(state),
-      });
-      if (!restopped) throw new Error("the turn's conversation is gone");
-      this.#emitter(saved.conversationId, saved.turnId)("limit.reached", {
-        kind: "daily",
-        detail: "Today's spending limit",
-      });
-      if (this.#running === running) this.#running = null;
-      return true;
-    }
-    cp.holds = [firstHold];
     void this.runFiber("chat-turn", async (fiber) => {
       fiber.stash(cp);
       await this.#sweepTabs();
@@ -684,12 +840,11 @@ export class Assistant extends Agent<Bindings> {
         history,
         state,
         signal: running.signal,
+        ...(approvals ? { approvals } : {}),
       });
     })
       .catch(() => {}) // a D1 failure surfaces as the interrupted recovery, never silently
-      .finally(() => {
-        if (this.#running === running) this.#running = null;
-      });
+      .finally(() => this.#release(running));
     return true;
   }
 
@@ -719,6 +874,7 @@ export class Assistant extends Agent<Bindings> {
     history: ModelMessage[];
     state: TurnState;
     signal: AbortSignal;
+    approvals?: ApprovalRun;
   }): Promise<void> {
     const { checkpoint: cp, stash, state, signal } = run;
     const { conversationId, turnId, replyId } = cp;
@@ -770,6 +926,7 @@ export class Assistant extends Agent<Bindings> {
       budget,
       now: Date.now,
       newId: () => crypto.randomUUID(),
+      ...(run.approvals ? { approvals: this.#approvalHooks(run.approvals) } : {}),
     };
 
     // The reply's text: one segment per model call that spoke, joined as paragraphs. A resumed
@@ -863,8 +1020,18 @@ export class Assistant extends Agent<Bindings> {
         continue;
       }
       if (event.type === "approval.requested" || event.type === "limit.reached") {
-        // The state is complete at these events; save it before any tab can act on them.
+        // The state is complete at these events; save it before any tab can act on them. An
+        // approval's rows go first: the route reads its decisions from them (M3-07 AC9).
         try {
+          if (event.type === "approval.requested" && state.pending) {
+            const rows = await bindBatch({
+              userId: this.#scope.userId,
+              tools,
+              pending: state.pending,
+              context: { kind: "turn", id: turnId, conversationId },
+            });
+            if (!(await repo.approvals.create(rows))) throw new Error("the conversation is gone");
+          }
           await persistStop(
             event.type === "approval.requested" ? "awaiting_approval" : "limit_reached",
           );
@@ -916,6 +1083,35 @@ export class Assistant extends Agent<Bindings> {
       }
       emit(event);
     }
+  }
+
+  /**
+   * The loop's view of a resumed batch's rows (M3-07 AC12, crypto review W3). `claim` refuses a
+   * call whose row didn't open as bound or whose tool changed since, then moves the row from
+   * `approved` to `executing` — only one run ever gets it, and only before it expires. `finish`
+   * records how the call ended. Both write the audit row with the change.
+   */
+  #approvalHooks(run: ApprovalRun): NonNullable<LoopHost["approvals"]> {
+    const approvals = this.#repo.approvals;
+    const id = (toolCallId: string) => `appr_${toolCallId}`;
+    return {
+      claim: async (toolCallId) => {
+        const refused = run.refused.get(toolCallId);
+        if (refused) {
+          await approvals.finish(run.batchId, id(toolCallId), {
+            status: "denied",
+            reason: refused,
+          });
+          return REFUSED[refused] ?? (REFUSED.binding_mismatch as string);
+        }
+        // The row's envelope was opened and checked when the batch was read; `canonical` is
+        // never rewritten, so the claim only has to win the row before its expiry.
+        const row = await approvals.claim(run.batchId, id(toolCallId), Date.now());
+        return row ? null : "The approval is no longer valid, so the call didn't run.";
+      },
+      finish: (toolCallId, outcome) =>
+        approvals.finish(run.batchId, id(toolCallId), outcome).then(() => {}),
+    };
   }
 
   /**
