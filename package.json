@@ -32,7 +32,7 @@
     "test:worker": "vitest run --project worker",
     "test:harness": "vitest run --project harness",
     "test:node": "vitest run --project node",
-    "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs && node scripts/generate-verify-guide.mjs --check",
+    "check": "pnpm deploy:dry-run && node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs && node scripts/generate-verify-guide.mjs --check",
     "notices": "node scripts/generate-notices.mjs",
     "dev:mock-model": "node scripts/mock-openai.mjs"
   },
