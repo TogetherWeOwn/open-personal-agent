@@ -19,9 +19,9 @@ function useLoad(
   chat: Conversation | undefined,
   dispatch: Dispatch<ChatAction>,
 ) {
-  const id = chat?.stale ? chat.id : null;
+  const [id, stale] = [chat?.id, chat?.stale];
   useEffect(() => {
-    if (!id) return;
+    if (!id || !stale) return;
     let current = true;
     transport
       .messages(id)
@@ -30,7 +30,7 @@ function useLoad(
     return () => {
       current = false;
     };
-  }, [transport, id, dispatch]);
+  }, [transport, id, stale, dispatch]);
 }
 
 export function App({ transport }: { transport: ChatTransport }) {

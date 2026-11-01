@@ -5,8 +5,8 @@ import type { ConversationSummary, StoredMessage } from "./transport";
 /** The statuses D1 stores, so a loaded message keeps its own. */
 type Status = StoredMessage["status"];
 export type Message = { id: string; role: "user" | "assistant"; text: string; status: Status };
-/** `stale` until the server's copy of its messages has been loaded since the last (re)connect. */
-export type Conversation = { id: string; title: string; messages: Message[]; stale: boolean };
+/** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
+export type Conversation = { id: string; title: string; messages: Message[]; stale: number };
 
 export interface ChatState {
   conversations: Conversation[];
@@ -30,7 +30,7 @@ export type ChatAction =
   | { type: "loaded"; id: string; messages: StoredMessage[] };
 
 const NEW_TITLE = "New chat";
-const blank = (id: string): Conversation => ({ id, title: NEW_TITLE, messages: [], stale: false });
+const blank = (id: string): Conversation => ({ id, title: NEW_TITLE, messages: [], stale: 0 });
 
 export const initialState = (id: string): ChatState => ({
   conversations: [blank(id)],
@@ -73,7 +73,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // A send whose `turn.started` was lost with the socket: the reload shows whether it ran.
       const { pending } = state;
       if (pending?.turnId !== null) return state;
-      const drop = (c: Conversation) => ({ messages: c.messages.slice(0, -2), stale: true });
+      const drop = (c: Conversation) => ({ messages: c.messages.slice(0, -2), stale: c.stale + 1 });
       return { ...update(state, pending.conversationId, drop), pending: null };
     }
     case "listed": {
@@ -88,7 +88,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             id,
             title: title || NEW_TITLE,
             messages: known.get(id)?.messages ?? [],
-            stale: true,
+            stale: (known.get(id)?.stale ?? 0) + 1,
           })),
         ],
       };
@@ -114,7 +114,10 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     // Another tab's turn. Its user message comes with the next load of the conversation.
     const reply: Message = { id: messageId, role: "assistant", text: "", status: "streaming" };
     return {
-      ...toTop(state, event.sessionId, (c) => ({ messages: [...c.messages, reply], stale: true })),
+      ...toTop(state, event.sessionId, (c) => ({
+        messages: [...c.messages, reply],
+        stale: c.stale + 1,
+      })),
       pending: turn,
       announcement: "Assistant is working.",
     };
@@ -131,7 +134,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     }
     // A turn ended unseen: the next load of its conversation shows how.
     if (!pending && event.turnId && event.type.startsWith("turn.")) {
-      return update(state, event.sessionId, () => ({ stale: true }));
+      return update(state, event.sessionId, (c) => ({ stale: c.stale + 1 }));
     }
     return state;
   }
@@ -178,7 +181,7 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     if (sent?.role === "user" && !stored.some((s) => s.id === sent.id)) messages.push(sent);
     if (at >= 0) messages.push(current.messages[at] as Message);
   }
-  const next = update(state, id, () => ({ messages, stale: false }));
+  const next = update(state, id, () => ({ messages, stale: 0 }));
   // The turn ended while this tab was disconnected.
   return reply && reply.status !== "streaming" ? { ...next, pending: null } : next;
 }
