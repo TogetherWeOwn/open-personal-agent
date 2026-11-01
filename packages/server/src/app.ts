@@ -14,6 +14,7 @@ import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
+import { spendingRoutes } from "./spending";
 import { stepUpRoutes } from "./step-up";
 import { taskRoutes } from "./tasks";
 import { toolSettings } from "./tool-settings";
@@ -46,6 +47,7 @@ shared.use("/api/secrets/*", async (c, next) => {
 });
 
 shared.route("/api/settings/vault", vaultRoutes);
+shared.route("/api/settings/spending", spendingRoutes);
 shared.route("/api/settings", settings);
 shared.route("/api/settings", toolSettings);
 
