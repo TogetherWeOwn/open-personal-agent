@@ -16,6 +16,7 @@ export interface Bindings extends AppPorts {
   ASSETS: Fetcher;
   ASSISTANT: DurableObjectNamespace<Assistant>;
   TASK_WORKFLOW: Workflow;
+  EXPORT_WORKFLOW: Workflow;
   PUBLIC_LIMIT?: RateLimit;
 }
 
