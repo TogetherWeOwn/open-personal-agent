@@ -146,6 +146,17 @@ test("shows hidden characters in the host and in nested fields", async ({ page }
   await expect(c.getByText("Always for exa⟨U+200B⟩mple.com")).toBeVisible();
 });
 
+test("an empty object or list reads as text, never a blank value", async ({ page }) => {
+  const s = await stub(page);
+  await page.goto("/");
+  await ask(page, s, [
+    email({ args: JSON.stringify({ to: "sam@example.com", headers: {}, cc: [] }) }),
+  ]);
+  const c = card(page);
+  await expect(c.getByRole("definition").filter({ hasText: "(empty)" })).toBeVisible();
+  await expect(c.getByRole("definition").filter({ hasText: "(empty list)" })).toBeVisible();
+});
+
 test("counts down the last minute, then leaves once it expires", async ({ page }) => {
   const s = await stub(page);
   await page.goto("/");
