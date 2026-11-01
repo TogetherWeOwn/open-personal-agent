@@ -50,6 +50,9 @@ function leaks(text: string, key: string) {
 }
 
 type Ctx = Context<AppEnv>;
+/** A base URL's path without trailing slashes; `/v1` and `/v1/` are one endpoint. */
+const path = (url: string) => new URL(url).pathname.replace(/\/+$/, "");
+
 const fail = (c: Ctx, status: 400 | 404 | 409 | 503, error: string) => c.json({ error }, status);
 
 export const settings = new Hono<AppEnv>();
@@ -118,9 +121,13 @@ settings.put("/model", async (c) => {
     await encrypt(c.env.VAULT, vaultScope(c), input);
   } else {
     // A key is bound to its provider and origin: a change means entering it again (ADR 0006 #5).
+    // So does a new path, as one host can serve many accounts (an AI Gateway, for one).
     const { providerId: savedProvider, baseUrl: savedUrl } = current;
     if (!secretId || !savedProvider || !savedUrl) return fail(c, 400, "key_required");
-    if (credentialBinding(savedProvider, savedUrl) !== binding) {
+    if (
+      credentialBinding(savedProvider, savedUrl) !== binding ||
+      path(savedUrl) !== path(baseUrl)
+    ) {
       return fail(c, 400, "key_required");
     }
   }

@@ -142,10 +142,20 @@ describe("model settings", () => {
     }
   });
 
-  it("keeps the key for a new model, but asks again for a new origin", async () => {
+  it("keeps the key for a new model, but asks again for a new origin or path", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
     const moved = await put("/model", { ...OPENAI, baseUrl: "https://other.test/v1", model: "m" });
     expect(moved).toEqual({ status: 400, text: '{"error":"key_required"}' });
+    // Same origin, another path: on a shared gateway host that can be another account.
+    const path = await put("/model", {
+      ...OPENAI,
+      baseUrl: "https://api.example.com/x/v1",
+      model: "m",
+    });
+    expect(path).toEqual({ status: 400, text: '{"error":"key_required"}' });
+    // A trailing slash is the same endpoint.
+    const slash = await put("/model", { ...OPENAI, baseUrl: `${OPENAI.baseUrl}/`, model: "m" });
+    expect(slash.status).toBe(200);
   });
 
   it("tests the saved key against its own origin and reports latency and tools", async () => {
