@@ -15,4 +15,4 @@ CREATE TABLE `turn_states` (
 --> statement-breakpoint
 CREATE INDEX `turn_states_user_conversation_idx` ON `turn_states` (`user_id`,`conversation_id`);--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (11);
+INSERT INTO `schema_version` (`version`) VALUES (14);
