@@ -78,6 +78,17 @@ describe("the socket transport", () => {
     expect(sockets).toHaveLength(2);
   });
 
+  it("answers a send the server closed with 4401, and every later send, with a sign-in rejection", () => {
+    const { transport, events, open } = setup();
+    const ws = open();
+    transport.send("c1", "Hi");
+    ws.onclose?.({ code: 4401 });
+    transport.send("c1", "Again");
+    const signedOut = { message: "You're signed out. Reload the page to sign in again." };
+    const failed = { seq: 0, sessionId: "c1", turnId: "", type: "turn.failed", payload: signedOut };
+    expect(events).toMatchObject([failed, failed]);
+  });
+
   it("reads the conversation list and a conversation's messages; a 404 is null", async () => {
     const list = { conversations: [{ id: "c1", title: "Plan", updatedAt: 1 }] };
     const { transport } = setup({

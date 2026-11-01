@@ -6,6 +6,7 @@ import type { ChatTransport, ConversationSummary, StoredMessage } from "./transp
 const OPEN = 1; // WebSocket.OPEN
 const UNAUTHENTICATED = 4401; // the session ended: reconnecting can't help until sign-in
 const MAX_BACKOFF_MS = 30_000;
+const SIGNED_OUT = "You're signed out. Reload the page to sign in again.";
 
 type Socket = Pick<WebSocket, "send" | "close"> & {
   readyState: number;
@@ -27,6 +28,19 @@ export function createSocketTransport({
 }: SocketOptions = {}): ChatTransport {
   let socket: Socket | null = null;
   let onEvent: (event: HarnessEvent) => void = () => {};
+  let signedOut = false;
+  /** The conversation of the last send, which a 4401 close may leave without an answer. */
+  let lastSent = "";
+  /** A local rejection at `seq` 0, the same shape as the server's. */
+  const reject = (conversationId: string, message: string) =>
+    onEvent({
+      v: 1,
+      seq: 0,
+      sessionId: conversationId,
+      turnId: "",
+      type: "turn.failed",
+      payload: { message },
+    });
   /** A read under `/api/conversations`; `null` for a 404. */
   const json = async <T>(path: string): Promise<T | null> => {
     const res = await get(`/api/conversations${path}`);
@@ -59,7 +73,13 @@ export function createSocketTransport({
         };
         ws.onclose = ({ code }) => {
           if (socket === ws) socket = null;
-          if (stopped || code === UNAUTHENTICATED) return;
+          if (stopped) return;
+          if (code === UNAUTHENTICATED) {
+            // The server closes a send from an ended session without answering it.
+            signedOut = true;
+            if (lastSent) reject(lastSent, SIGNED_OUT);
+            return;
+          }
           timer = setTimeout(open, Math.min(MAX_BACKOFF_MS, 500 * 2 ** retries++));
         };
       };
@@ -72,18 +92,14 @@ export function createSocketTransport({
     },
     send(conversationId, text) {
       if (socket?.readyState === OPEN) {
+        lastSent = conversationId;
         socket.send(JSON.stringify({ type: "chat.send", conversationId, text }));
         return;
       }
-      const payload = { message: "Not connected to your assistant. Try again in a moment." };
-      onEvent({
-        v: 1,
-        seq: 0,
-        sessionId: conversationId,
-        turnId: "",
-        type: "turn.failed",
-        payload,
-      });
+      reject(
+        conversationId,
+        signedOut ? SIGNED_OUT : "Not connected to your assistant. Try again in a moment.",
+      );
     },
     cancel() {
       if (socket?.readyState === OPEN) socket.send(JSON.stringify({ type: "turn.cancel" }));
