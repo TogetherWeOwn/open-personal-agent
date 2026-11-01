@@ -391,6 +391,34 @@ export const taskEvents = sqliteTable(
 );
 
 /**
+ * A file a tool wrote (M3-11, F-3.13): the Outputs library. The bytes live in R2 under
+ * `u/{userId}/files/{id}` (the repository derives the key, and writes the row in the same call
+ * as the object, so no tool file is missing from Outputs). The source run is the conversation
+ * and turn it came from, and the task when a Workflow ran it; each is cleared, never cascaded,
+ * when its source goes, so the file outlives the chat that made it.
+ */
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    turnId: text("turn_id"),
+    name: text("name").notNull(),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("artifacts_user_created_idx").on(t.userId, t.createdAt),
+    index("artifacts_user_conversation_idx").on(t.userId, t.conversationId, t.createdAt),
+  ],
+);
+
+/**
  * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
  * a model; a null Background role means the cheapest configured one. Embedding has no column
  * until it has a user (ADR 0008).
