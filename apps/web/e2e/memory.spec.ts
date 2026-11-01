@@ -32,6 +32,23 @@ interface Stub {
   versionsFail?: boolean;
   /** The next add fails, once. */
   addFail?: boolean;
+  /** IDs the server reports it couldn't delete. */
+  keep?: string[];
+  /** A delete request with this many IDs fails with 500. */
+  failBatchOf?: number;
+}
+
+/** Records each delete request as it starts, with its keepalive flag, in `window.deletes`. */
+async function watchDeletes(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { deletes: boolean[] };
+    w.deletes = [];
+    const real = window.fetch;
+    window.fetch = (input, init) => {
+      if (String(input).endsWith("/api/memory/delete")) w.deletes.push(init?.keepalive === true);
+      return real(input, init);
+    };
+  });
 }
 
 async function stubMemory(page: Page): Promise<Stub> {
@@ -71,7 +88,8 @@ async function stubMemory(page: Page): Promise<Stub> {
     if (path === "/api/memory/delete") {
       const { ids } = route.request().postDataJSON() as { ids: string[] };
       stub.deletes.push(ids);
-      const failed = ids.filter((id) => id === "n1" && ids.length > 1);
+      if (ids.length === stub.failBatchOf) return route.fulfill({ status: 500, json: {} });
+      const failed = ids.filter((id) => (id === "n1" && ids.length > 1) || stub.keep?.includes(id));
       stub.notes = stub.notes.filter(
         (n) => !ids.includes(n.id as string) || failed.includes(n.id as string),
       );
@@ -307,6 +325,74 @@ test("Select all over 1,000 notes deletes them in batches", async ({ page }) => 
     .click();
   await expect.poll(() => stub.deletes.map((ids) => ids.length)).toEqual([1000, 1]);
   await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("a dismissed delete goes out with keepalive, so leaving at once can't cancel it", async ({
+  page,
+}) => {
+  await watchDeletes(page);
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Delete: Sam lives in Leeds" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { deletes: boolean[] }).deletes))
+    .toEqual([true]);
+});
+
+test("leaving the page starts every batch of a held delete at once", async ({ page }) => {
+  await watchDeletes(page);
+  const stub = await stubMemory(page);
+  stub.notes = Array.from({ length: 1001 }, (_, i) => note({ id: `m${i}`, text: `Note ${i}` }));
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 1001" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  // Counted in the same task as the event: a page that is really unloading runs nothing later.
+  const started = await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+    return (window as unknown as { deletes: boolean[] }).deletes.length;
+  });
+  expect(started).toBe(2);
+});
+
+test("a page restored from the back/forward cache shows what the server kept", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.keep = ["n1"];
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Delete: Sam lives in Leeds" }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+  );
+  await expect.poll(() => stub.deletes).toEqual([["n1"]]);
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
+  );
+  await expect(page.getByText("Sam lives in Leeds", { exact: true })).toBeVisible();
+});
+
+test("a failed later batch keeps what the first batch deleted gone", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes = Array.from({ length: 1001 }, (_, i) => note({ id: `m${i}`, text: `Note ${i}` }));
+  stub.failBatchOf = 1;
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 1001" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Deleted 1000 of 1001. I couldn't delete 'Note 1000'.",
+  );
+  await expect(page.getByText("Note 0", { exact: true })).toBeHidden();
+  await expect(page.getByRole("region", { name: "Selection" })).toContainText("1 selected");
 });
 
 test("Esc on a note's checkbox leaves selection mode", async ({ page }) => {
