@@ -47,13 +47,15 @@ function setup({ deployedTag = null, existingSecrets = [], forbidden = [], ...op
       if (p.endsWith("/workers/subdomain")) return ok({ subdomain: "me" });
       if (p.endsWith("/deployments")) {
         if (!deployedTag) return reply(404, { success: false });
-        return ok({ deployments: [{ versions: [{ version_id: "v2", percentage: 100 }] }] });
+        const deployment = (id) => ({ versions: [{ version_id: id, percentage: 100 }] });
+        return ok({ deployments: [deployment("v3"), deployment("v1")] });
       }
       if (p.endsWith("/versions")) {
         const later = { "workers/triggered_by": opts.laterTrigger ?? "secret" };
         return ok({
           items: [
-            { id: "v2", number: 2, annotations: later },
+            { id: "v3", number: 3, annotations: later },
+            { id: "v2", number: 2, annotations: { "workers/triggered_by": "upload" } }, // a draft
             { id: "v1", number: 1, annotations: { "workers/tag": deployedTag } },
           ],
         });

@@ -116,11 +116,7 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
   });
   // Every value in `secrets` is scrubbed from anything this script prints.
   const secrets = new Set();
-  const scrub = (text) => {
-    let out = text;
-    for (const s of secrets) out = out.replaceAll(s, "[redacted]");
-    return out;
-  };
+  const scrub = (text) => [...secrets].reduce((t, s) => t.replaceAll(s, "[redacted]"), text);
   const log = (line = "") => deps.stdout(`${scrub(line)}\n`);
   const name = values.name ?? deps.env.OPA_PREFIX ?? "opa";
   const dryRun = values["dry-run"];
@@ -325,21 +321,23 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
   return { name, tag, changed, dryRun };
 }
 
-/**
- * The tag of the newest tagged version, if the active deployment runs it or a newer version
- * reached only through secret changes (step 7). Anything else means drift, so redeploy.
- */
+// The newest version tag, if the active version is that one or was reached from it only through
+// deployed secret changes (step 7). Undeployed drafts don't count; anything else is drift.
 async function deployedTag(api, accountId, name) {
   const base = `/accounts/${accountId}/workers/scripts/${name}`;
   const deployments = await api(`${base}/deployments`);
   if (deployments.status === 404) return null;
-  const active = deployments.body.result?.deployments?.[0]?.versions ?? [];
+  const history = deployments.body.result?.deployments ?? [];
+  const deployed = new Set(history.flatMap((d) => d.versions.map((v) => v.version_id)));
+  const active = history[0]?.versions ?? [];
   const versions = (await api(`${base}/versions`)).body.result?.items ?? [];
   versions.sort((a, b) => b.number - a.number);
   const tagged = versions.find((v) => v.annotations?.["workers/tag"]);
   const running = versions.filter((v) => active.some((a) => a.version_id === v.id));
   if (!tagged || running.length !== 1 || running[0].number < tagged.number) return null;
-  const between = versions.filter((v) => v.number > tagged.number && v.number <= running[0].number);
+  const between = versions.filter(
+    (v) => deployed.has(v.id) && v.number > tagged.number && v.number <= running[0].number,
+  );
   if (between.some((v) => v.annotations?.["workers/triggered_by"] !== "secret")) return null;
   return tagged.annotations["workers/tag"];
 }
