@@ -307,7 +307,7 @@ async function driveLoop(
             // An approved call counts towards the minute but isn't refused by it: the user's
             // approval already gates it, and its row is claimed by now, so a refusal here would
             // end the approved call without running it.
-            if (!(await ctx.budget.allowToolCall(key)) && !under) {
+            if (!(await ctx.budget.allowToolCall(key, under !== null))) {
               return { ok: false, content: SLOW_DOWN, slowDown: true };
             }
             if (

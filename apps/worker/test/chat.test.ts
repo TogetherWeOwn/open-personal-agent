@@ -520,6 +520,21 @@ describe("chat transport", () => {
     expect(seqs).toEqual(seqs.map((_, i) => i + 1));
   });
 
+  it("sends a resuming tab the end of a turn that settled before its replay", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const a = await openTab(browser);
+    const b = await openTab(browser, "/api/chat?resume=1");
+    a.send?.("conv-9b", "Hi!");
+    await a.until?.("turn.completed");
+    expect(b.events).toEqual([]);
+    // The turn settled and left the log: the replay is empty, the held frames are not.
+    const turnId = a.events[0]?.turnId;
+    b.ws?.send(JSON.stringify({ type: "resume", conversationId: "conv-9b", turnId, afterSeq: 0 }));
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+  });
+
   it("sends live frames again to a tab that said resume but sent something else", async () => {
     const { browser, owner } = await claim();
     await useModel(owner, scripted());
@@ -1073,12 +1088,130 @@ describe("approvals in the DO host (M3-07a)", () => {
           callRecorded: false,
           callUsage: null,
           resumed: true,
-          stopping: true,
+          // It began saving before the row's save stamped it: the row is the new stop.
+          stopping: Date.now() - 60_000,
         },
       } as never),
     );
     expect(await count("turn_states", "1")).toBe(1);
     expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+  });
+
+  it("interrupts a resumed turn evicted before its new stop saved, and drops the old one", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict3", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict3",
+          turnId: started?.turnId ?? "",
+          replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+          // The new stop's save never landed: the row is older than the attempt.
+          stopping: Date.now() + 60_000,
+        },
+      } as never),
+    );
+    await tab.until?.("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict3")).at(-1)).toMatchObject({
+      content: "Sending.",
+      status: "interrupted",
+    });
+  });
+
+  it("keeps a resumed reply's text when it is evicted before its drive starts", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict4", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    const { batchId, items } = asked?.payload ?? { batchId: "", items: [] };
+    await decideInD1(batchId, items[0]?.approvalId ?? "", "approved");
+    let snapshot: unknown = null;
+    await runInDurableObject(assistantOf(owner), async (i: Assistant) => {
+      // The process dies right after the resumed fiber's first stash.
+      const fiber = {
+        stash: (cp: unknown) => {
+          snapshot = structuredClone(cp);
+          throw new Error("evicted");
+        },
+      };
+      const run = (_: string, fn: (f: typeof fiber) => Promise<void>) => fn(fiber);
+      Object.assign(i, { runFiber: run });
+      expect(await i.resumeBatch(batchId)).toBe("resumed");
+      await vi.waitFor(() => expect(snapshot).not.toBeNull());
+      await i.onFiberRecovered({ name: "chat-turn", snapshot } as never);
+    });
+    expect(send.inputs).toEqual([]);
+    expect((await stored(browser, "conv-evict4")).at(-1)).toMatchObject({
+      content: "Sending.",
+      status: "interrupted",
+    });
+  });
+
+  it("keeps a resumed reply that settled before the eviction, and sends its end", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict5", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    const replyId = (started?.payload as { messageId?: string } | undefined)?.messageId ?? "";
+    // The resumed run settled its reply, then died before removing its old stop.
+    await db
+      .prepare("UPDATE messages SET status = 'complete', content = 'Sending.\n\nSent' WHERE id = ?")
+      .bind(replyId)
+      .run();
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict5",
+          turnId: started?.turnId ?? "",
+          replyId,
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+        },
+      } as never),
+    );
+    await tab.until?.("turn.completed");
+    expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict5")).at(-1)).toMatchObject({
+      content: "Sending.\n\nSent",
+      status: "complete",
+    });
   });
 
   it("waits in the FIFO behind a running turn, then appends a late approval at the end (AC14)", async () => {

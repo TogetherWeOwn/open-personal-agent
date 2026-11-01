@@ -38,7 +38,7 @@ export interface AssistantTaskRpc {
   releaseTaskCall(key: string): Promise<void>;
   startTask(taskId: string, budgetMicroUsd?: number): Promise<{ budgetMicroUsd: number }>;
   endTask(taskId: string): Promise<number>;
-  allowToolCall(callKey: string): Promise<boolean>;
+  allowToolCall(callKey: string, approved?: boolean): Promise<boolean>;
   taskProgress(progress: {
     conversationId: string;
     turnId: string;
@@ -153,7 +153,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
       deps.assistant.settleTaskCall(key, providerId, model, usage),
     release: (key) => deps.assistant.releaseTaskCall(key),
     end: () => deps.assistant.endTask(deps.taskId),
-    allowToolCall: (key) => deps.assistant.allowToolCall(key),
+    allowToolCall: (key, approved) => deps.assistant.allowToolCall(key, approved),
   };
 
   return {

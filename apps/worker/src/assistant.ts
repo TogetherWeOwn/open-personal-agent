@@ -76,6 +76,15 @@ export const TURN_FILE_BYTES = 16 * 1024 * 1024;
 const IMAGE_TOKENS = 2_500;
 const PDF_MAX_TOKENS = 100_000; // about 100 pages, the providers' usual page limit
 const TAB_RECHECK_MS = 30_000; // how often task progress rechecks the tabs' sessions
+/** A live frame held back from a replaying tab, with what its replay may already have sent. */
+interface HeldFrame {
+  conversationId: string;
+  seq: number;
+  frame: string;
+}
+
+/** Live frames held back from one replaying tab, at most: far beyond a turn's, as REPLAY_LIMIT. */
+const MAX_HELD_FRAMES = 100_000;
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
 /** Decided batches waiting for the running turn to end (M3-07 AC14, M3-09 AC4's FIFO). */
 const QUEUE_KEY = "approvals:queue";
@@ -138,9 +147,16 @@ interface TurnCheckpoint {
    * no longer shows that the turn stopped cleanly.
    */
   resumed?: boolean;
-  /** It is saving a stop (approval, limit) now: a row found on recovery is that stop's. */
-  stopping?: boolean;
+  /**
+   * When it began saving a stop (approval, limit): a row saved since then is that stop's. A
+   * resumed turn's older row is the stop it resumed from.
+   */
+  stopping?: number;
 }
+
+/** A turn's reply text in its saved state: one segment per model call that spoke. */
+const replySegments = (state: TurnState) =>
+  state.messages.flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []));
 
 /** A resumed batch, for the loop's approval hooks. */
 type ApprovalRun = {
@@ -177,6 +193,8 @@ export class Assistant extends Agent<Bindings> {
   readonly limits = new Limits(this.ctx.storage.kv);
   /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
   readonly #events = new EventLog(this.ctx.storage.sql);
+  /** Live frames each replaying tab hasn't been sent yet, by connection ID (see `#endReplay`). */
+  readonly #held = new Map<string, HeldFrame[]>();
   /** The env with the vault: `compose` stays the only reader of the master keys. */
   readonly #composed: Promise<Env>;
 
@@ -253,10 +271,11 @@ export class Assistant extends Agent<Bindings> {
 
   /**
    * Counts a tool call against 60 a minute (COST-2); `false` means the tool must not run. The
-   * key (the step's idempotency key) keeps a retried step from counting the same call twice.
+   * key (the step's idempotency key) keeps a retried step from counting the same call twice. An
+   * approved call is counted but always allowed.
    */
-  allowToolCall(callKey?: string): boolean {
-    return this.limits.toolCall(callKey);
+  allowToolCall(callKey?: string, approved = false): boolean {
+    return this.limits.toolCall(callKey, { approved });
   }
 
   /** The Spending settings and what they limit so far, for Settings › Spending (M3-17 AC5). */
@@ -376,10 +395,29 @@ export class Assistant extends Agent<Bindings> {
     connection.setState({ sessionId: ctx.request.headers.get(SESSION_HEADER), replaying });
   }
 
-  /** Lets live frames reach a tab again once its replay is sent, or it isn't resuming after all. */
-  #endReplay(connection: Connection): void {
+  /**
+   * Lets live frames reach a tab again once its replay is sent, or it isn't resuming after all.
+   * The frames held back meanwhile go first: a turn that settled during the replay has left the
+   * log, so they are its only copy. `upTo` is how far the tab now has the replayed conversation
+   * (`seq` never restarts there), so those frames aren't sent twice.
+   */
+  #endReplay(connection: Connection, upTo?: { conversationId: string; seq: number }): void {
     const state = (connection.state ?? {}) as { sessionId?: string | null; replaying?: boolean };
     if (state.replaying) connection.setState({ ...state, replaying: false });
+    const held = this.#held.get(connection.id) ?? [];
+    this.#held.delete(connection.id);
+    try {
+      for (const h of held) {
+        if (h.conversationId === upTo?.conversationId && h.seq <= upTo.seq) continue;
+        connection.send(h.frame);
+      }
+    } catch {
+      // The tab went away; it will resume again on its next connect.
+    }
+  }
+
+  override onClose(connection: Connection): void {
+    this.#held.delete(connection.id);
   }
 
   override onMessage(connection: Connection, message: WSMessage): void {
@@ -395,15 +433,19 @@ export class Assistant extends Agent<Bindings> {
       void this.#sessionLive(connection)
         .then((ok) => {
           if (!ok) return;
+          const frames = this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq);
           try {
-            for (const frame of this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq)) {
-              connection.send(frame);
-            }
+            for (const frame of frames) connection.send(frame);
           } catch {
             // The tab went away mid-replay; it will resume again on its next connect.
           }
           // Synchronous since the replay read the log, so no live frame can fall in between.
-          this.#endReplay(connection);
+          const last = frames.at(-1);
+          const seq = last ? (JSON.parse(last) as { seq: number }).seq : 0;
+          this.#endReplay(connection, {
+            conversationId: msg.conversationId,
+            seq: Math.max(seq, msg.afterSeq),
+          });
         })
         .catch(() => connection.close(1011, "session check failed"));
     }
@@ -821,7 +863,8 @@ export class Assistant extends Agent<Bindings> {
       replyId: saved.replyId,
       providerId,
       model,
-      reply: "",
+      // The text so far, as D1 holds it, so a recovery before the drive starts keeps it.
+      reply: replySegments(state).join("\n\n"),
       wrote: true,
       holds: [firstHold],
       callStarted: false,
@@ -935,9 +978,7 @@ export class Assistant extends Agent<Bindings> {
 
     // The reply's text: one segment per model call that spoke, joined as paragraphs. A resumed
     // turn's earlier segments come back from its saved state.
-    const segments = state.messages.flatMap((m) =>
-      m.role === "assistant" && m.content ? [m.content] : [],
-    );
+    const segments = replySegments(state);
     let current = "";
     const syncReply = () => {
       cp.reply = [...segments, current].filter((s) => s !== "").join("\n\n");
@@ -964,7 +1005,7 @@ export class Assistant extends Agent<Bindings> {
 
     let persisted = false;
     const persistStop = async (status: TurnStatus) => {
-      cp.stopping = true;
+      cp.stopping = Date.now();
       stash(cp);
       const saved = await repo.turns.save({
         turnId,
@@ -1257,11 +1298,15 @@ export class Assistant extends Agent<Bindings> {
     const repo = this.#repo;
     // A turn that stopped cleanly saved its state to D1 before its fiber ended; if the process
     // died between that save and the fiber's end, the turn is waiting, not interrupted. A resumed
-    // turn's row is the stop it resumed from, unless it was saving a new one: evicted mid-run, it
-    // is interrupted like any other, and its stale row goes, so the stop can't be resumed again.
-    if ((!cp.resumed || cp.stopping) && (await repo.turns.load(cp.turnId))) {
-      for (const hold of cp.holds) this.limits.release(hold);
-      return;
+    // turn's row is the stop it resumed from until a new stop saves over it (the save stamps
+    // `updatedAt` after `stopping`): otherwise it is interrupted like any other, and its stale
+    // row goes, so the stop can't be resumed again.
+    if (!cp.resumed || cp.stopping !== undefined) {
+      const row = await repo.turns.load(cp.turnId);
+      if (row && (!cp.resumed || row.updatedAt >= (cp.stopping ?? 0))) {
+        for (const hold of cp.holds) this.limits.release(hold);
+        return;
+      }
     }
     if (!cp.wrote) {
       // Evicted before its first write: no messages exist, and no call was made.
@@ -1280,20 +1325,41 @@ export class Assistant extends Agent<Bindings> {
         messageId: cp.replyId,
       });
     }
-    await repo.chat.settle({ replyId: cp.replyId, reply: cp.reply }, "interrupted");
+    // Only a reply still streaming is cut: the turn may have settled before the process died,
+    // its row and its end frame not yet done, and then that end stands and is sent now.
+    const status = await repo.chat.interrupt({ replyId: cp.replyId, reply: cp.reply });
     await repo.turns.remove(cp.turnId);
-    this.#emitter(cp.conversationId, cp.turnId)("turn.interrupted", { message: "Retry?" });
+    const emit = this.#emitter(cp.conversationId, cp.turnId);
+    if (status === "complete") emit("turn.completed", {});
+    else if (status === "error") emit("turn.failed", { message: "The reply couldn't be saved." });
+    else emit("turn.interrupted", { message: "Retry?" });
     this.#events.trim(cp.conversationId, cp.turnId);
   }
 
   #send(sessionId: string, turnId: string, type: HarnessEvent["type"], payload: unknown): void {
-    const frame = this.#events.append(sessionId, turnId, (seq) =>
-      JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
-    );
+    let seq = 0;
+    const frame = this.#events.append(sessionId, turnId, (n) => {
+      seq = n;
+      return JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload });
+    });
     const replaying = [...this.getConnections()].flatMap((tab) =>
-      (tab.state as { replaying?: boolean } | null)?.replaying ? [tab.id] : [],
+      (tab.state as { replaying?: boolean } | null)?.replaying ? [tab] : [],
     );
-    this.broadcast(frame, replaying);
+    for (const tab of replaying) {
+      const held = this.#held.get(tab.id) ?? [];
+      this.#held.set(tab.id, held);
+      // A tab that never sends its `resume` can't hold frames forever: it reconnects instead.
+      if (held.length >= MAX_HELD_FRAMES) {
+        this.#held.delete(tab.id);
+        tab.close(1011, "replay backlog");
+        continue;
+      }
+      held.push({ conversationId: sessionId, seq, frame });
+    }
+    this.broadcast(
+      frame,
+      replaying.map((tab) => tab.id),
+    );
   }
 
   #emitter(sessionId: string, turnId: string): Emit {

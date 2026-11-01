@@ -889,6 +889,22 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .set({ status, content: reply.reply })
               .where(and(eq(messages.id, reply.replyId), eq(messages.userId, userId)));
           },
+          /**
+           * Settles a reply `interrupted` only while it is still `streaming`, for a recovery that
+           * can't tell whether its turn settled first. Returns the reply's status afterwards:
+           * `interrupted` if it cut the reply, else the end the turn already gave it.
+           */
+          interrupt: async (reply: { replyId: string; reply: string }) => {
+            const mine = and(eq(messages.id, reply.replyId), eq(messages.userId, userId));
+            const [, rows] = await db.batch([
+              db
+                .update(messages)
+                .set({ status: "interrupted", content: reply.reply })
+                .where(and(mine, eq(messages.status, "streaming"))),
+              db.select({ status: messages.status }).from(messages).where(mine).limit(1),
+            ]);
+            return rows[0]?.status;
+          },
         },
         /**
          * Stopped turns' resumable state (M3-03 AC5). A row exists only while its turn waits
@@ -927,6 +943,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   model: turnStates.model,
                   status: turnStates.status,
                   state: turnStates.state,
+                  updatedAt: turnStates.updatedAt,
                 })
                 .from(turnStates)
                 .where(and(eq(turnStates.turnId, turnId), eq(turnStates.userId, userId)))
