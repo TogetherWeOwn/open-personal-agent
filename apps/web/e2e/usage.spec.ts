@@ -77,6 +77,7 @@ const allowance = {
 
 async function open(page: Page, today: unknown, month: unknown, allowed: unknown = allowance) {
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
   // The chat stays mounted behind Usage, so its health check runs too.
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/usage?*", (route) =>

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { HarnessEvent } from "@opa/core";
 import { describe, expect, it } from "vitest";
-import { createMockTransport } from "../src/chat/mock-transport";
+import { createMockTransport, MOCK_SLOW_START } from "../src/chat/mock-transport";
 
 describe("createMockTransport", () => {
   it("refuses only its exact limit commands, not a name an object inherits", async () => {
@@ -21,5 +21,21 @@ describe("createMockTransport", () => {
       ["turn.interrupted", false],
     ]);
     expect(events[1]?.payload).toMatchObject({ reason: "slow_down" });
+  });
+
+  it("starts a slow-start turn stopped before its start, then interrupts it", () => {
+    const events: HarnessEvent[] = [];
+    const transport = createMockTransport(60_000);
+    transport.connect(
+      (e) => events.push(e),
+      () => {},
+    );
+    transport.send("c1", MOCK_SLOW_START);
+    expect(events).toEqual([]);
+    transport.cancel();
+    expect(events.map((e) => [e.type, e.turnId])).toEqual([
+      ["turn.started", "mock-1"],
+      ["turn.interrupted", "mock-1"],
+    ]);
   });
 });

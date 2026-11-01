@@ -11,6 +11,7 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from "react-aria-components";
+import { Page } from "../ui";
 
 interface Line {
   model: string;
@@ -231,13 +232,10 @@ export function Usage() {
   const period = data?.[key];
   const label = key === "today" ? "today" : "this month";
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-8">
+    <Page title="Usage">
       <Link href="/" className={`${link} self-start`}>
         <span aria-hidden="true">← </span>Chats
       </Link>
-      <Heading level={1} className="text-2xl font-semibold">
-        Usage
-      </Heading>
       {failed && <p role="alert">Usage couldn't be loaded. Try again in a moment.</p>}
       {data && period && (
         <>
@@ -293,6 +291,6 @@ export function Usage() {
           )}
         </>
       )}
-    </main>
+    </Page>
   );
 }

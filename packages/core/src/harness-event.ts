@@ -9,6 +9,12 @@ import type { ModelUsage } from "./model-provider";
  */
 export type TurnLimit = "slow_down" | "limit_reached";
 
+/**
+ * A refusal the user fixes somewhere else, so the tab can link there: `vault_reset_required` when
+ * their saved keys no longer open and Settings › Models offers the reset (TWO-650).
+ */
+export type TurnFailure = "vault_reset_required";
+
 type Envelope<T extends string, P> = {
   v: 1; // the envelope's version: persisted events keep theirs (ADR 0005)
   seq: number; // increases by one per event within a turn, from 1; 0 is a rejection outside any turn
@@ -22,7 +28,7 @@ export type HarnessEvent =
   | Envelope<"turn.started", { messageId: string }>
   | Envelope<"turn.completed", Record<string, never>>
   | Envelope<"turn.interrupted", { message: string }>
-  | Envelope<"turn.failed", { message: string; reason?: TurnLimit }>
+  | Envelope<"turn.failed", { message: string; reason?: TurnLimit; code?: TurnFailure }>
   | Envelope<"message.delta", { text: string }>
   | Envelope<"message.completed", { text: string }>
   | Envelope<"usage.updated", { usage: ModelUsage; providerId: string; model: string }>
