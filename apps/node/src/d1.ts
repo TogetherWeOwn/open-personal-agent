@@ -36,15 +36,25 @@ class Statement {
   execute() {
     const stmt = this.db.prepare(this.sql);
     if (stmt.columns().length > 0) {
+      // A read or a write with RETURNING: only a write moves total_changes().
+      const before = this.counts().total;
       const rows = stmt.all(...this.params) as Row[];
       const results = rows.map((r) =>
         Object.fromEntries(Object.entries(r).map(([k, v]) => [k, fromOutput(v)])),
       );
-      return { success: true, results, meta: { changes: 0, last_row_id: 0, duration: 0 } };
+      const after = this.counts();
+      const wrote = after.total !== before;
+      const meta = { changes: wrote ? after.changes : 0, last_row_id: wrote ? after.id : 0 };
+      return { success: true, results, meta: { ...meta, duration: 0 } };
     }
     const { changes, lastInsertRowid } = stmt.run(...this.params);
     const meta = { changes: Number(changes), last_row_id: Number(lastInsertRowid), duration: 0 };
     return { success: true, results: [] as Row[], meta };
+  }
+
+  private counts() {
+    const sql = "SELECT total_changes() AS total, changes() AS changes, last_insert_rowid() AS id";
+    return this.db.prepare(sql).get() as { total: number; changes: number; id: number };
   }
 
   all = async () => this.execute();

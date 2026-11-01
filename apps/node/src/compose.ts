@@ -25,6 +25,11 @@ export interface NodeOptions {
   assetsDir: string;
   /** Read for the secrets in `.dev.vars.example`, usually `process.env`. */
   vars: Record<string, string | undefined>;
+  /**
+   * The address browsers use, e.g. `https://agent.example` behind a TLS-terminating proxy. The
+   * origin checks and passkeys compare against the request URL, so it is rewritten to this.
+   */
+  publicOrigin?: string | undefined;
 }
 
 const isAppRoute = (path: string) =>
@@ -39,7 +44,9 @@ export interface NodeApp {
  * Opens the database, applies pending migrations and wires the bindings. Workers AI and
  * Workflows have no Node adapter yet, so `/api/health` reports them as unavailable.
  */
-export function createNodeApp({ dataDir, migrationsDir, assetsDir, vars }: NodeOptions): NodeApp {
+export function createNodeApp(options: NodeOptions): NodeApp {
+  const { dataDir, migrationsDir, assetsDir, vars, publicOrigin } = options;
+  const origin = publicOrigin && new URL(publicOrigin).origin; // throws if invalid
   const db = openSqlite(join(dataDir, "opa.sqlite"));
   migrate(db, migrationsDir);
   // Static files, with the SPA's index.html for any other path, as Workers assets do.
@@ -60,10 +67,13 @@ export function createNodeApp({ dataDir, migrationsDir, assetsDir, vars }: NodeO
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
   const env = compose(raw);
   return {
-    fetch: async (request) =>
-      isAppRoute(new URL(request.url).pathname)
-        ? app.fetch(request, await env)
-        : assets.fetch(request),
+    fetch: async (request) => {
+      const url = new URL(request.url);
+      if (!isAppRoute(url.pathname)) return assets.fetch(request);
+      // Not from X-Forwarded-* headers: any client could set those.
+      const external = origin ? new URL(url.pathname + url.search, origin) : url;
+      return app.fetch(new Request(external, request), await env);
+    },
     db,
   };
 }

@@ -4,6 +4,7 @@
 // `sha256(token)` from claim time. Once that matches the secret, `/setup` is closed for good. If
 // the operator rotates the secret, `/setup` reopens in recovery mode for the new token only. Every
 // token that claimed or recovered is recorded, so putting an old one back never reopens `/setup`.
+import { systemStore } from "@opa/db/system";
 import {
   generateRegistrationOptions,
   type RegistrationResponseJSON,
@@ -38,14 +39,11 @@ const encoder = new TextEncoder();
 /** 403 on every route except the public list until the deployment is claimed (R7 M2-2). */
 export const claimGuard: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   if (PUBLIC_BEFORE_CLAIM.includes(c.req.path)) return next();
-  // An unmigrated or unreachable database counts as unclaimed: fail closed. `prepare` itself can
-  // throw, so it sits inside the try as well.
-  let claimed: unknown = null;
-  try {
-    claimed = await c.env.DB.prepare("SELECT 1 FROM setup_state WHERE id = 1").first();
-  } catch {
-    claimed = null;
-  }
+  // An unmigrated or unreachable database counts as unclaimed: fail closed. `isClaimed` is async,
+  // so even a throwing `prepare` arrives here as a rejection.
+  const claimed = await systemStore(c.env)
+    .setup.isClaimed()
+    .catch(() => false);
   if (!claimed) return c.json({ error: "not_claimed" }, 403);
   return next();
 };
@@ -60,11 +58,7 @@ function weakToken(secret: string): "setup_token_too_short" | "setup_token_weak"
 /** The mode follows from the stored claim hash and the secret the Worker holds now. */
 async function readState(env: Env): Promise<SetupState> {
   const hash = await auth.sha256(env.OPA_SETUP_TOKEN ?? "");
-  const row = await env.DB.prepare(
-    "SELECT claim_token_hash, claimed_by_user_id, EXISTS (SELECT 1 FROM used_setup_tokens WHERE token_hash = ?1) AS used FROM setup_state WHERE id = 1",
-  )
-    .bind(hash)
-    .first<{ claim_token_hash: string | null; claimed_by_user_id: string | null; used: number }>();
+  const row = await systemStore(env).setup.state(hash);
   if (!row) return { mode: "claim", ownerId: null, hash };
   // A claimed row with no owner has nothing to recover, and a used token never opens recovery.
   if (row.claim_token_hash === hash || row.used || !row.claimed_by_user_id) {
@@ -98,9 +92,7 @@ async function authorize(
   if (weak) return c.json({ error: weak }, 503);
   const body = await c.req.json().catch(() => null);
   if (!(await auth.secretsEqual(typeof body?.token === "string" ? body.token : "", secret))) {
-    await c.env.DB.prepare(
-      "INSERT INTO audit_log (action, module, result) VALUES ('setup.token', 'setup', 'denied')",
-    ).run();
+    await systemStore(c.env).audit(null, "setup.token", "setup", "denied");
     return c.json({ error: "invalid_token" }, 403);
   }
   const state = await readState(c.env);
@@ -125,7 +117,13 @@ setup.post("/options", async (c) => {
     attestationType: "none",
     authenticatorSelection: { residentKey: "required", userVerification: "required" },
   });
-  const cookie = await auth.putChallenge(c.env.DB, mode, options.challenge, userId, state.hash);
+  const cookie = await auth.putChallenge(
+    systemStore(c.env),
+    mode,
+    options.challenge,
+    userId,
+    state.hash,
+  );
   const maxAge = auth.CHALLENGE_TTL_MS / 1000;
   setCookie(c, auth.CHALLENGE_COOKIE, cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
@@ -137,10 +135,10 @@ setup.post("/", async (c) => {
   const state = await authorize(c);
   if (state instanceof Response) return state;
   const mode = state.mode as "claim" | "recovery";
-  const db = c.env.DB;
+  const store = systemStore(c.env);
   // A challenge issued under an earlier token is void: the token must not change mid-ceremony.
   const cookie = getCookie(c, auth.CHALLENGE_COOKIE);
-  const challenge = await auth.takeChallenge(db, cookie, mode, state.hash);
+  const challenge = await auth.takeChallenge(store, cookie, mode, state.hash);
   deleteCookie(c, auth.CHALLENGE_COOKIE, auth.COOKIE_OPTIONS);
   const userId = challenge?.user_id;
   if (!challenge || !userId) return c.json({ error: "no_challenge" }, 400);
@@ -155,73 +153,28 @@ setup.post("/", async (c) => {
   }).catch(() => null);
   if (!verification?.verified) return c.json({ error: "not_verified" }, 400);
 
-  const now = Date.now();
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
   const codes = Array.from({ length: auth.RECOVERY_CODE_COUNT }, auth.newRecoveryCode);
   const codeHashes = await Promise.all(codes.map(auth.hashRecoveryCode));
-  const session = await auth.newSession(db, userId);
-  const credentials = [
-    db
-      .prepare(
-        "INSERT INTO passkeys (id, user_id, webauthn_user_id, public_key, counter, transports, device_type, backed_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .bind(
-        credential.id,
-        userId,
-        auth.base64url(encoder.encode(userId)),
-        credential.publicKey,
-        credential.counter,
-        (credential.transports ?? []).join(","),
-        credentialDeviceType,
-        credentialBackedUp ? 1 : 0,
-      ),
-    ...codeHashes.map((hash) =>
-      db
-        .prepare("INSERT INTO recovery_codes (id, user_id, code_hash) VALUES (?, ?, ?)")
-        .bind(auth.randomId(), userId, hash),
-    ),
-    session.insert,
-    // Primary key: a token that is already recorded fails here and rolls back the batch.
-    db.prepare("INSERT INTO used_setup_tokens (token_hash) VALUES (?)").bind(state.hash),
-    db
-      .prepare(
-        "INSERT INTO audit_log (user_id, action, module, result) VALUES (?, ?, 'setup', 'ok')",
-      )
-      .bind(userId, `setup.${mode}`),
-  ];
-
-  // Onboarding asks for the owner's name after the claim (M2-15).
-  const statements =
-    mode === "claim"
-      ? [
-          db
-            .prepare("INSERT INTO users (id, display_name, role) VALUES (?, 'Owner', 'owner')")
-            .bind(userId),
-          // The primary key makes this fail if another claim won, which rolls back the batch.
-          db
-            .prepare(
-              "INSERT INTO setup_state (id, claim_token_hash, claimed_by_user_id, claimed_at) VALUES (1, ?, ?, ?)",
-            )
-            .bind(state.hash, userId, now),
-          ...credentials,
-        ]
-      : [
-          db
-            .prepare(
-              "UPDATE setup_state SET claim_token_hash = ?, updated_at = ? WHERE id = 1 AND claim_token_hash IS NOT ?",
-            )
-            .bind(state.hash, now, state.hash),
-          // If a concurrent recovery already stored this hash, the update changed nothing: break
-          // the single-row CHECK so the whole batch rolls back.
-          db.prepare("INSERT INTO setup_state (id) SELECT 0 WHERE changes() = 0"),
-          // Replace the owner's credentials and end every session. Data stays untouched.
-          db.prepare("DELETE FROM passkeys WHERE user_id = ?").bind(userId),
-          db.prepare("DELETE FROM recovery_codes WHERE user_id = ?").bind(userId),
-          db.prepare("UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL").bind(now),
-          ...credentials,
-        ];
+  const session = await auth.newSession(userId);
+  const owner = {
+    userId,
+    tokenHash: state.hash,
+    passkey: {
+      id: credential.id,
+      webauthnUserId: auth.base64url(encoder.encode(userId)),
+      publicKey: credential.publicKey,
+      counter: credential.counter,
+      transports: (credential.transports ?? []).join(","),
+      deviceType: credentialDeviceType,
+      backedUp: credentialBackedUp,
+    },
+    recoveryCodes: codeHashes.map((hash) => ({ id: auth.randomId(), hash })),
+    session: session.row,
+    now: Date.now(),
+  };
   try {
-    await db.batch(statements);
+    await (mode === "claim" ? store.setup.claim(owner) : store.setup.recover(owner));
   } catch {
     return c.json({ error: "setup_conflict" }, 409);
   }

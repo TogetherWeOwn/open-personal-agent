@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SoftPasskey } from "../../worker/test/helpers/softauthn";
 
+// Behind a TLS-terminating proxy, as in production: browsers use this, the test connects directly.
+const PUBLIC = "https://agent.example";
 const SECRETS = {
   OPA_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
   OPA_SESSION_SECRET: "boot-test-session-secret-0123456789",
@@ -26,6 +28,7 @@ beforeAll(async () => {
       HOME: process.env.HOME,
       PORT: "0",
       OPA_DATA_DIR: dataDir,
+      OPA_PUBLIC_ORIGIN: PUBLIC,
       ...SECRETS,
     },
     stdio: ["ignore", "pipe", "inherit"],
@@ -41,8 +44,11 @@ beforeAll(async () => {
   });
 }, 60_000);
 
-afterAll(() => {
+afterAll(async () => {
+  // SIGTERM drains the server, closes the database and lets the process end on its own.
+  const exited = new Promise((resolve) => child?.once("exit", resolve));
   child?.kill("SIGTERM");
+  expect(await exited).toBe(0);
   rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -78,7 +84,7 @@ describe("apps/node", () => {
     const req = async (path: string, body?: unknown) => {
       const cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
       const init = body === undefined ? {} : { method: "POST", body: JSON.stringify(body) };
-      const res = await fetch(`${base}${path}`, { ...init, headers: { origin: base, cookie } });
+      const res = await fetch(`${base}${path}`, { ...init, headers: { origin: PUBLIC, cookie } });
       for (const c of res.headers.getSetCookie()) {
         const [name = "", value = ""] = (c.split(";")[0] ?? "").split("=");
         cookies.set(name, value);
@@ -89,7 +95,7 @@ describe("apps/node", () => {
     const optionsRes = await req("/setup/options", { token });
     expect(optionsRes.status).toBe(200);
     const { options } = (await optionsRes.json()) as { options: { challenge: string } };
-    const credential = await new SoftPasskey(new URL(base).hostname, base).create(options);
+    const credential = await new SoftPasskey(new URL(PUBLIC).hostname, PUBLIC).create(options);
     expect((await req("/setup", { token, credential })).status).toBe(200);
 
     expect(await (await req("/api/me")).json()).toMatchObject({ role: "owner" });
