@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The data export's item walk and finish (M3-20 AC1), shared with the deletion walk (M3-20b):
-// one staged file per item type, each a Workflow step, then the staged files stream into the
+// one staged file per item type (one per conversation for messages, so threads never share
+// Worker memory), each a Workflow step, then the staged files stream into the
 // final ZIP in one multipart upload. Staged keys are deterministic and R2 puts overwrite
 // atomically, so a step rerun writes identical bytes — replay-safe. Item metadata goes out as
 // single JSON files (its lists are already materialized from D1); only attachment bytes and
@@ -54,13 +55,13 @@ export async function stageExportItem(
       await put("conversations.json", await user.listConversations());
       return;
     case "messages": {
-      const all: { conversationId: string; thread: unknown }[] = [];
+      // One staged file per conversation, not one array of every thread: a large account's
+      // threads never sit in Worker memory together — each thread streams out on its own.
+      // The full thread, model-switch lines included: the export is the user's record.
       for (const conversation of await user.listConversations()) {
-        // The full thread, model-switch lines included: the export is the user's record.
         const thread = await user.chat.listThread(conversation.id);
-        if (thread) all.push({ conversationId: conversation.id, thread });
+        if (thread) await put(`messages/${conversation.id}.json`, { thread });
       }
-      await put("messages.json", all);
       return;
     }
     case "memories":

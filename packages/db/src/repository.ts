@@ -210,6 +210,20 @@ async function putStreamed(
 export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
 
+/**
+ * Whether `error` is a uniqueness refusal from the store. D1 reports the violated constraint
+ * in the cause, under drizzle's "Failed query" wrapper — so a racing insert that loses a
+ * partial unique index reads as one, and the caller can answer what the check would have.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  while (current instanceof Error) {
+    if (/unique constraint failed/i.test(current.message)) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 /** The bound `scopeForTask` accepts, so a row it could never resolve is never written. */
 const isInstanceId = (id: unknown): id is string =>
   typeof id === "string" && id.length >= 1 && id.length <= 128;

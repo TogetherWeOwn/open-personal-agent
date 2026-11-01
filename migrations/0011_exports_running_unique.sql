@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `exports_running_user_unique` ON `exports` (`user_id`) WHERE "exports"."status" = 'running';
