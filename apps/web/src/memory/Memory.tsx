@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Memory (m3-ux §3.7, M3-15): what the assistant remembers, in sections — About you (standing
 // instructions) and Notes — with search, Edit (saved as a new version) and Add.
+
+import { Check } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Heading, Input, Label, SearchField, TextArea, TextField } from "react-aria-components";
+import {
+  Checkbox,
+  Heading,
+  Input,
+  Label,
+  SearchField,
+  TextArea,
+  TextField,
+} from "react-aria-components";
 import { Banner, Button, EmptyState, Page, Skeleton } from "../ui";
-import { addNote, listNotes, memoryError, type Note } from "./api";
+import { addNote, listNotes, memoryError, type Note, SEARCH_LIMIT } from "./api";
 import { NoteRow } from "./NoteRow";
 
 export function Memory() {
@@ -15,16 +25,20 @@ export function Memory() {
   const [problem, setProblem] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [draft, setDraft] = useState("");
+  const [standing, setStanding] = useState(false);
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
   const keys = useRef(new Map<string, string>());
 
   const load = useCallback(async (q: string) => {
     try {
-      setNotes(await listNotes(q));
+      const loaded = await listNotes(q);
+      setNotes(loaded);
       setShown(q);
       setFailed(false);
+      return loaded;
     } catch {
       setFailed(true);
+      return null;
     }
   }, []);
   useEffect(() => {
@@ -36,13 +50,28 @@ export function Memory() {
     keys.current.set(next.id, keys.current.get(old.id) ?? old.id);
     setNotes((all) => all?.map((n) => (n.id === old.id ? next : n)) ?? null);
     setAnnouncement("Saved.");
+    // The new text may not match the search any more: ask the server again.
+    if (shown) {
+      void load(shown).then((found) => {
+        if (found && !found.some((n) => n.id === next.id)) {
+          setAnnouncement("Saved. It no longer matches your search.");
+        }
+      });
+    }
+  };
+
+  const stale = (message: string) => {
+    setProblem(message);
+    void load(shown);
   };
 
   const add = async () => {
     try {
-      const note = await addNote(draft);
+      const note = await addNote(draft, standing ? "instruction" : "fact");
       setNotes((all) => [note, ...(all ?? [])]);
       setDraft("");
+      setStanding(false);
+      setProblem(null);
       setAnnouncement("Added.");
     } catch (e) {
       setProblem(memoryError(e));
@@ -54,6 +83,7 @@ export function Memory() {
       key={keys.current.get(note.id) ?? note.id}
       note={note}
       onSaved={(next) => saved(note, next)}
+      onStale={stale}
     />
   );
 
@@ -92,6 +122,11 @@ export function Memory() {
         </EmptyState>
       ) : (
         <>
+          {shown && all.length >= SEARCH_LIMIT && (
+            <p className="text-sm text-text-muted">
+              Showing the first {SEARCH_LIMIT} matches. Add a word to narrow it.
+            </p>
+          )}
           {instructions.length > 0 && (
             <section aria-labelledby="about" className="flex flex-col gap-3">
               <Heading id="about" level={2} className="text-lg font-semibold">
@@ -126,6 +161,16 @@ export function Memory() {
         >
           <Label className="font-medium">Add a note</Label>
           <TextArea rows={2} className="rounded-lg border border-border-strong bg-surface p-2" />
+          <Checkbox
+            isSelected={standing}
+            onChange={setStanding}
+            className="group flex min-h-11 items-center gap-2"
+          >
+            <span className="flex size-5 items-center justify-center rounded border border-border-strong group-data-selected:bg-accent group-data-selected:text-accent-contrast group-data-focus-visible:outline-2 group-data-focus-visible:outline-focus-ring">
+              {standing && <Check aria-hidden="true" size={14} />}
+            </span>
+            Make it a standing instruction
+          </Checkbox>
           <Button className="mt-1 self-start" onPress={add} isDisabled={draft.trim() === ""}>
             Add
           </Button>

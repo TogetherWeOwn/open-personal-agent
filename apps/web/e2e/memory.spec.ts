@@ -27,6 +27,10 @@ const note = (over: Record<string, unknown>) => ({
 
 interface Stub {
   notes: Record<string, unknown>[];
+  /** The next versions request fails, once. */
+  versionsFail?: boolean;
+  /** The next add fails, once. */
+  addFail?: boolean;
 }
 
 async function stubMemory(page: Page): Promise<Stub> {
@@ -63,12 +67,19 @@ async function stubMemory(page: Page): Promise<Stub> {
     const method = route.request().method();
     const path = url.pathname;
     if (path.endsWith("/versions")) {
+      if (stub.versionsFail) {
+        stub.versionsFail = false;
+        return route.fulfill({ status: 500, json: { error: "internal_error" } });
+      }
       return route.fulfill({ json: { versions: [note({ id: "old", text: "Likes tea" })] } });
     }
     if (method === "PUT") {
       const { text } = route.request().postDataJSON() as { text: string };
       if (text === "fail") return route.fulfill({ status: 500, json: { error: "internal_error" } });
       const id = path.split("/").at(-1);
+      if (!stub.notes.some((n) => n.id === id)) {
+        return route.fulfill({ status: 404, json: { error: "not_found" } });
+      }
       const next = note({
         id: `${id}-v2`,
         text,
@@ -80,9 +91,14 @@ async function stubMemory(page: Page): Promise<Stub> {
       return route.fulfill({ json: { memory: next } });
     }
     if (method === "POST") {
-      const { text } = route.request().postDataJSON() as { text: string };
+      if (stub.addFail) {
+        stub.addFail = false;
+        return route.fulfill({ status: 500, json: { error: "internal_error" } });
+      }
+      const { text, kind } = route.request().postDataJSON() as { text: string; kind?: string };
       const added = note({
         id: "n9",
+        kind: kind ?? "fact",
         text,
         source: "memory_screen",
         conversation: null,
@@ -162,6 +178,85 @@ test("adds a note typed on the screen", async ({ page }) => {
   await page.getByLabel("Add a note").fill("Allergic to peanuts");
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await expect(page.getByRole("region", { name: "Notes" })).toContainText("Allergic to peanuts");
+});
+
+test("a malformed source link doesn't stop the screen opening", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes.push(note({ id: "n5", text: "Odd link", source: "web", sourceRef: "https://[bad" }));
+  await page.goto("/memory");
+  await expect(page.getByText("Odd link")).toBeVisible();
+  await expect(page.getByText("Sam lives in Leeds")).toBeVisible();
+});
+
+test("a note changed meanwhile refreshes the list and says so", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Edit: Sam lives in Leeds" }).click();
+  stub.notes = stub.notes.map((n) =>
+    n.id === "n1" ? note({ id: "n1-v9", text: "Sam lives in York", op: "update" }) : n,
+  );
+  await page.getByLabel("Edit note").fill("Sam lives in Paris");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("alert")).toContainText("That note changed or was deleted meanwhile");
+  await expect(page.getByText("Sam lives in York")).toBeVisible();
+});
+
+test("earlier versions load on a second try after a failure", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.versionsFail = true;
+  await page.goto("/memory");
+  const versions = page.getByRole("button", { name: "Earlier versions" });
+  await versions.click();
+  await expect(page.getByText("I couldn't load the earlier versions.")).toBeVisible();
+  await versions.click();
+  await versions.click();
+  await expect(page.getByRole("region", { name: "Notes" })).toContainText("Likes tea");
+  await expect(page.getByText("I couldn't load the earlier versions.")).toBeHidden();
+});
+
+test("a failed add clears its error once a retry works", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.addFail = true;
+  await page.goto("/memory");
+  await page.getByLabel("Add a note").fill("Allergic to peanuts");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveText("That didn't work. Try again.");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Notes" })).toContainText("Allergic to peanuts");
+  await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("an edit that no longer matches the search leaves the results", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByLabel("Search notes").fill("leeds");
+  await expect(page.getByText("Prefers trains to planes")).toBeHidden();
+  await page.getByRole("button", { name: "Edit: Sam lives in Leeds" }).click();
+  await page.getByLabel("Edit note").fill("Sam lives in Paris");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: 'Nothing matches "leeds".' })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("Saved. It no longer matches your search.");
+});
+
+test("adds a standing instruction to About you", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByLabel("Add a note").fill("Keep replies short");
+  await page.getByText("Make it a standing instruction").click();
+  await expect(page.getByRole("checkbox", { name: "Make it a standing instruction" })).toBeChecked();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("region", { name: "About you" })).toContainText("Keep replies short");
+});
+
+test("says when search shows only the first 100 matches", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes = Array.from({ length: 100 }, (_, i) => note({ id: `m${i}`, text: `Tea ${i}` }));
+  await page.goto("/memory");
+  await expect(page.getByText(/first 100/)).toBeHidden();
+  await page.getByLabel("Search notes").fill("tea");
+  await expect(
+    page.getByText("Showing the first 100 matches. Add a word to narrow it."),
+  ).toBeVisible();
 });
 
 test("shows the empty state", async ({ page }) => {

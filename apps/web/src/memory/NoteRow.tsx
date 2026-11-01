@@ -9,10 +9,21 @@ import { ago, editNote, memoryError, type Note, noteVersions, sourceLabel } from
 
 const link = "font-medium text-accent underline underline-offset-2";
 
+/** The host of a web source, or null when it isn't a well-formed http(s) URL. */
+function webHost(ref: string | null) {
+  if (!ref || !/^https?:\/\//.test(ref)) return null;
+  try {
+    return new URL(ref).host;
+  } catch {
+    return null;
+  }
+}
+
 /** Where it came from and when, as one muted line. */
 export function NoteMeta({ note, learned = false }: { note: Note; learned?: boolean }) {
   const href = note.conversation ? `/c/${note.conversation.id}` : null;
   const from = sourceLabel(note);
+  const host = webHost(note.sourceRef);
   return (
     <p className="text-sm text-text-muted">
       {learned ? `Learned ${ago(note.createdAt)}` : `Added ${ago(note.createdAt)}`}
@@ -24,11 +35,11 @@ export function NoteMeta({ note, learned = false }: { note: Note; learned?: bool
       ) : (
         from
       )}
-      {note.sourceRef && /^https?:\/\//.test(note.sourceRef) && (
+      {host && (
         <>
           {" · "}
-          <a href={note.sourceRef} target="_blank" rel="noopener noreferrer" className={link}>
-            {new URL(note.sourceRef).host}
+          <a href={note.sourceRef ?? ""} target="_blank" rel="noopener noreferrer" className={link}>
+            {host}
             <span className="sr-only"> (opens in a new tab)</span>
           </a>
         </>
@@ -43,6 +54,7 @@ function EarlierVersions({ id }: { id: string }) {
   const [failed, setFailed] = useState(false);
   const load = () => {
     if (versions) return;
+    setFailed(false);
     noteVersions(id).then(setVersions, () => setFailed(true));
   };
   return (
@@ -71,10 +83,13 @@ function EarlierVersions({ id }: { id: string }) {
 export function NoteRow({
   note,
   onSaved,
+  onStale,
 }: {
   note: Note;
   /** The edit was saved as `next`, which replaces `note`. */
   onSaved: (next: Note) => void;
+  /** The note changed or went away meanwhile: refresh the list and say `message`. */
+  onStale: (message: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note.text);
@@ -93,7 +108,10 @@ export function NoteRow({
       onSaved(await editNote(note.id, draft));
       stopEditing();
     } catch (e) {
-      setError(memoryError(e));
+      if ((e as Error).message === "not_found") {
+        stopEditing();
+        onStale(memoryError(e));
+      } else setError(memoryError(e));
     } finally {
       setSaving(false);
     }
