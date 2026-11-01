@@ -108,6 +108,28 @@ class FakeStepper implements TaskStepper {
   }
 }
 
+/** A stepper whose engine dies right after the named step's body ran, before it is recorded. */
+class CrashingStepper extends FakeStepper {
+  #dead = false;
+  constructor(
+    private readonly crashAt: string,
+    onWait: ((n: number) => Promise<JsonValue>)[] = [],
+  ) {
+    super(onWait);
+  }
+  override async do<T extends JsonValue>(
+    name: string,
+    config: unknown,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (this.#dead) throw new Error("the engine is down");
+    if (name !== this.crashAt) return super.do(name, config, fn);
+    await fn();
+    this.#dead = true;
+    throw new Error("the engine crashed mid-step");
+  }
+}
+
 let seq = 0;
 async function makeTask(user = alice, conversationId = "ca", kind = "turn") {
   seq += 1;
@@ -277,6 +299,38 @@ describe("task workflow", () => {
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
     // The claim and the call's end are on the row (M3-07 AC12).
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
+  });
+
+  it("never runs an approved call twice when a crash reruns its step (crypto review W3)", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    let batchId = "";
+    const approve = async () => {
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    // The first run claims the approval, sends, and the engine dies before the step is recorded.
+    const crashed = new CrashingStepper("tool:1", [approve]);
+    const first = await run([{ calls: [["send", { q: "x" }]] }], instanceId, crashed, [send]);
+    await first.promise.catch(() => {});
+    expect(send.calls).toBe(1);
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("dispatched");
+    // The engine replays the instance: every recorded step returns its record, and the tool
+    // step's body runs a second time.
+    const replay = new FakeStepper();
+    for (const [name, value] of crashed.persisted) replay.persisted.set(name, value);
+    const second = await run([{ text: "done" }], instanceId, replay, [send]);
+    await second.promise;
+    expect(send.calls).toBe(1); // not sent again
+    const toolResult = JSON.stringify(JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}"));
+    expect(toolResult).toContain("its outcome is unknown");
+    const [row] = await alice.approvals.batch(batchId);
+    expect(row).toMatchObject({ status: "failed", reason: "outcome_unknown" });
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
   });
 
   it("bookkeeping that fails after the hold never repeats the model call", async () => {

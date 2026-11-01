@@ -35,7 +35,7 @@ export type BoundApproval = {
 };
 
 /** Statuses of a row some run already claimed: it ran, or may have. */
-const CLAIMED = new Set(["executing", "executed", "failed"]);
+const CLAIMED = new Set(["executing", "dispatched", "executed", "failed"]);
 
 /** The parts of a stored row the resume reads. */
 export type StoredApproval = {
@@ -113,10 +113,12 @@ export async function bindingProblem(
   ) {
     return "binding_mismatch";
   }
-  const manifest = expect.tools.get(row.tool)?.manifest;
-  if (!manifest) return "tool_missing";
+  const entry = expect.tools.get(row.tool);
+  if (!entry) return "tool_missing";
   // The tool changed since it was approved: the approval covered another definition.
-  if ((await toolDefinitionHash(manifest)) !== envelope.toolDefSha256) return "tool_changed";
+  if ((await toolDefinitionHash(entry.manifest)) !== envelope.toolDefSha256) return "tool_changed";
+  // `target` is code, not manifest: derived again, it must still be what the user approved.
+  if ((entry.tool.target?.(envelope.args) ?? null) !== envelope.target) return "target_changed";
   return null;
 }
 

@@ -115,6 +115,16 @@ describe("applyStoredDecisions", () => {
     expect([...theirs.refused.values()]).toEqual(["binding_mismatch", "binding_mismatch"]);
   });
 
+  it("refuses a row whose tool now derives another target from the same arguments", async () => {
+    const { state, rows } = await stopped();
+    const [a, b] = rows as [BoundApproval, BoundApproval];
+    const moved = new ToolRegistry<LoopTool>();
+    const send = tool("send", "consequential");
+    moved.register({ ...send, target: () => "elsewhere.example" });
+    const out = await applyStoredDecisions(state, [stored(a), stored(b)], expect_(moved), NOW);
+    expect([...out.refused.values()]).toEqual(["target_changed", "target_changed"]);
+  });
+
   it("counts an item expired early by a compromise signal as expired (AC13)", async () => {
     const { h, state, rows, send } = await stopped();
     const [a, b] = rows as [BoundApproval, BoundApproval];

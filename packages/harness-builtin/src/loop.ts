@@ -48,7 +48,15 @@ export type ToolOutput = {
 export interface LoopTool extends RegisteredTool {
   /** What the call reaches, e.g. a URL's host: shown on the card and matched by grants. */
   target?(input: Record<string, unknown>): string | undefined;
-  execute(input: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput>;
+  /**
+   * `call` names the model's call; `approved` when it runs under an approval the host claimed,
+   * so a durable host can keep it to one run (crypto review W3).
+   */
+  execute(
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    call?: { toolCallId: string; approved: boolean },
+  ): Promise<ToolOutput>;
 }
 
 /** A gated call as the turn keeps it. `stepUp`: approving needs a passkey (M3-07 AC4). */
@@ -296,7 +304,8 @@ export async function* runTurn(
           const id = host.newId();
           const began = host.now();
           // Through an async function, so a tool that throws before its promise yields an error.
-          const out = (async () => run.tool.execute(run.input, signal))()
+          const out = (async () =>
+            run.tool.execute(run.input, signal, { toolCallId: run.call.id, approved }))()
             .catch(failed)
             .then((o) => ({ ...o, ended: host.now() }));
           group.push({ run, id, began, out });
