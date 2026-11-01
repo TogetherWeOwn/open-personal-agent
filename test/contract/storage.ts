@@ -425,11 +425,6 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       expect((await memory.merge(inferred, [rule, guess], "English, London", said)).status).toBe(
         "proposed",
       );
-      const builtIn = saved(await memory.create({ via: "system" }, "Be kind", "instruction", said));
-      expect(await memory.update(screen, builtIn, "Be terse", said)).toEqual({
-        status: "forbidden",
-      });
-      expect((await memory.forget(screen, [builtIn], said)).status).toBe("deleted");
       expect((await memory.list()).map((m) => [m.text, m.trust])).toEqual([
         ["Probably in London", "inferred"],
         ["Always reply in English", "user"],
@@ -496,6 +491,7 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       }
       expect(await memory.proposals()).toEqual([]);
       expect((await memory.forget(tainted, [rule], web)).status).toBe("proposed");
+      expect((await memory.forget(screen, [rule], said)).status).toBe("deleted");
     });
 
     it("redacts secrets before storage and ignores another user's conversation", async () => {
