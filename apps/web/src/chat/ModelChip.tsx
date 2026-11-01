@@ -5,9 +5,11 @@
 // `\uFE0E` keeps the ⚠ glyph as text, not colour emoji.
 import {
   Button,
+  Header,
   Link,
   Menu,
   MenuItem,
+  MenuSection,
   MenuTrigger,
   Popover,
   Separator,
@@ -29,9 +31,14 @@ interface Props {
   /** This conversation's own pick; null follows the Chat role. */
   pinned: RolePick | null;
   onSwitch: (pick: RolePick | null) => void;
+  /**
+   * A new chat's first message is on its way and its reply hasn't started: the chat doesn't exist
+   * on the server yet, so a switch now waits until it does.
+   */
+  starting?: boolean;
 }
 
-export function ModelChip({ settings, pinned, onSwitch }: Props) {
+export function ModelChip({ settings, pinned, onSwitch, starting = false }: Props) {
   const effective = pinned ?? settings.roles.chat;
   if (!effective) {
     return (
@@ -60,33 +67,41 @@ export function ModelChip({ settings, pinned, onSwitch }: Props) {
         <Popover className="min-w-64 rounded-xl border border-border-strong bg-surface-raised p-1 shadow-lg">
           <Menu
             aria-label="Model for this chat"
+            disabledKeys={starting ? [...settings.providers.map((p) => p.id), "default"] : []}
             onAction={(key) => {
               if (key === "default") return onSwitch(null);
               const picked = settings.providers.find((p) => p.id === key);
               if (picked?.model) onSwitch({ provider: picked.id, model: picked.model });
             }}
           >
-            {settings.providers.map((p) => {
-              const current = effective.provider === p.id && effective.model === p.model;
-              const hint = per100Messages(p.price);
-              return (
-                <MenuItem
-                  key={p.id}
-                  id={p.id}
-                  textValue={`${p.modelName ?? p.model} · ${p.providerName}`}
-                  aria-label={`${p.modelName ?? p.model} · ${p.providerName}${current ? ", in use in this chat" : ""}`}
-                  className={`${itemClass} ${current ? "font-semibold" : ""}`}
-                >
-                  <span className="block">
-                    {current && <span aria-hidden="true">✓ </span>}
-                    {p.modelName ?? p.model} · {p.providerName}
-                  </span>
-                  {hint && (
-                    <span className="block text-sm font-normal text-text-muted">{hint}</span>
-                  )}
-                </MenuItem>
-              );
-            })}
+            <MenuSection aria-label="Models">
+              {starting && (
+                <Header className="px-3 py-2 text-sm text-text-muted">
+                  You can switch models once the reply starts.
+                </Header>
+              )}
+              {settings.providers.map((p) => {
+                const current = effective.provider === p.id && effective.model === p.model;
+                const hint = per100Messages(p.price);
+                return (
+                  <MenuItem
+                    key={p.id}
+                    id={p.id}
+                    textValue={`${p.modelName ?? p.model} · ${p.providerName}`}
+                    className={`${itemClass} ${current ? "font-semibold" : ""}`}
+                  >
+                    <span className="block">
+                      {current && <span aria-hidden="true">✓ </span>}
+                      {p.modelName ?? p.model} · {p.providerName}
+                      {current && <span className="sr-only">, in use in this chat</span>}
+                    </span>
+                    {hint && (
+                      <span className="block text-sm font-normal text-text-muted">{hint}</span>
+                    )}
+                  </MenuItem>
+                );
+              })}
+            </MenuSection>
             {pinned && chat && (
               <>
                 <Separator className="my-1 border-t border-border" />

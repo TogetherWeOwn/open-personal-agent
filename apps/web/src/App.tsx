@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { type Dispatch, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Button, Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
@@ -82,22 +82,14 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   }, [visible]);
 
   // The chats the server has: listed, or one whose turn has started. A switch in any other chat
-  // waits in `pendingPins`, and the chat's sends carry it, so its first reply already uses it and
-  // the server saves it with the new chat. `sentPins` is what the last send carried: a switch made
-  // after it is saved once the chat's turn starts.
+  // waits in `pendingPins`, and the chat's first send carries it, so its first reply already uses
+  // it and the server saves it with the new chat. Between that send and its turn starting, the
+  // chip doesn't switch (`starting`), so nothing can change behind the send.
   const onServer = useRef(new Set<string>());
   const pendingPins = useRef(new Map<string, RolePick | null>());
-  const sentPins = useRef(new Map<string, RolePick | null | undefined>());
   // Each chat's saved switches go in order, and a send waits for them, so a reply always uses the
   // latest switch.
   const saves = useRef(new Map<string, Promise<void>>());
-  const savePin = useCallback((id: string, pick: RolePick | null, failed: () => void) => {
-    const chain = (saves.current.get(id) ?? Promise.resolve()).then(() =>
-      setConversationModel(id, pick).catch(failed),
-    );
-    saves.current.set(id, chain);
-    void chain.then(() => saves.current.get(id) === chain && saves.current.delete(id));
-  }, []);
   // Removing a provider in Settings clears the server's pins on it, so a pin naming one that is
   // gone follows the Chat role here too.
   const live = (pick: RolePick | null | undefined) =>
@@ -127,11 +119,9 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       transport
         .conversations()
         .then((conversations) => {
-          // The server's pin wins from here, as it does in the chip.
           for (const { id } of conversations) {
             onServer.current.add(id);
             pendingPins.current.delete(id);
-            sentPins.current.delete(id);
           }
           dispatch({ type: "listed", conversations });
         })
@@ -143,28 +133,13 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     return transport.connect((event) => {
       if (event.type === "turn.started") {
         if (!known.current.has(event.sessionId)) void list();
-        const id = event.sessionId;
-        onServer.current.add(id);
-        const pick = pendingPins.current.get(id);
-        const sent = sentPins.current.get(id) ?? null;
-        pendingPins.current.delete(id);
-        sentPins.current.delete(id);
-        // The send saved its pick with the new chat; a later switch is saved now the chat exists.
-        if (pick !== undefined && pick !== sent) {
-          savePin(id, pick, () =>
-            dispatch({
-              type: "model",
-              id,
-              noticeId: newId(),
-              pick: sent,
-              notice: "Couldn't switch the model, so nothing changed.",
-            }),
-          );
-        }
+        // The send that started it saved the chat's pick with the new chat.
+        onServer.current.add(event.sessionId);
+        pendingPins.current.delete(event.sessionId);
       }
       dispatch({ type: "event", event });
     }, connected);
-  }, [transport, savePin]);
+  }, [transport]);
 
   // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
   // whose last events were missed while disconnected.
@@ -189,11 +164,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     if (state.pending || !text.trim()) return false;
     dispatch({ type: "send", id: newId(), text });
     const { id } = active;
-    const go = () => {
-      const pick = pendingPins.current.get(id);
-      if (pick !== undefined) sentPins.current.set(id, pick);
-      transport.send(id, text, live(pick) ?? undefined);
-    };
+    const go = () => transport.send(id, text, live(pendingPins.current.get(id)) ?? undefined);
     const saving = saves.current.get(id);
     if (saving) void saving.then(go);
     else go();
@@ -203,9 +174,15 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   const goModels = () =>
     onNavigate ? onNavigate("/settings/models") : window.location.assign("/settings/models");
 
+  // A new chat's first message is on its way, so the chat isn't on the server yet.
+  const starting =
+    state.pending?.conversationId === active.id &&
+    state.pending.turnId === null &&
+    !onServer.current.has(active.id);
+
   /** Switches the open chat's model (M3-06 AC3); the thread records it, history is kept. */
   const switchModel = (pick: RolePick | null) => {
-    if (!modelSettings) return;
+    if (!modelSettings || starting) return;
     const effective = pick ?? modelSettings.roles.chat;
     if (!effective) return;
     const { modelName, providerName } = describePick(modelSettings, effective);
@@ -223,16 +200,20 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       pendingPins.current.set(id, pick);
       return;
     }
-    // The failure line takes the place of the optimistic "Switched to" line.
-    savePin(id, pick, () =>
-      dispatch({
-        type: "model",
-        id,
-        noticeId,
-        pick: previous,
-        notice: "Couldn't switch the model, so nothing changed.",
-      }),
+    const save = (saves.current.get(id) ?? Promise.resolve()).then(() =>
+      setConversationModel(id, pick).catch(() =>
+        // The failure line takes the place of the optimistic "Switched to" line.
+        dispatch({
+          type: "model",
+          id,
+          noticeId,
+          pick: previous,
+          notice: "Couldn't switch the model, so nothing changed.",
+        }),
+      ),
     );
+    saves.current.set(id, save);
+    void save.then(() => saves.current.get(id) === save && saves.current.delete(id));
   };
 
   const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
@@ -295,7 +276,12 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
           onNoModel={noModel ? goModels : undefined}
           chip={
             modelSettings && (
-              <ModelChip settings={modelSettings} pinned={pinned} onSwitch={switchModel} />
+              <ModelChip
+                settings={modelSettings}
+                pinned={pinned}
+                onSwitch={switchModel}
+                starting={starting}
+              />
             )
           }
         />

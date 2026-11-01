@@ -175,6 +175,22 @@ test("a send right after a switch waits for the switch to save, so the reply use
   await expect(page.getByRole("status")).toContainText("Assistant replied");
 });
 
+test("a new chat's model can't switch while its first message is on its way", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Message" }).fill("/mock slow start");
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: /model for this chat/ }).click();
+  await expect(page.getByText("You can switch models once the reply starts.")).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /some\/model · OpenRouter/ })).toBeDisabled();
+  const { violations } = await new AxeBuilder({ page }).analyze();
+  expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("status")).toContainText("Assistant is working.");
+  await page.getByRole("button", { name: /model for this chat/ }).click();
+  await expect(page.getByRole("menuitem", { name: /some\/model · OpenRouter/ })).toBeEnabled();
+  await expect(page.getByText("You can switch models once the reply starts.")).toHaveCount(0);
+});
+
 test("with no model set up, the chip says so and Send opens Settings › Models", async ({
   page,
 }) => {
