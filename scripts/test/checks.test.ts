@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { findDependencyViolations, findPortViolations } from "../check-boundaries.mjs";
+import {
+  findAppImports,
+  findDependencyViolations,
+  findPortViolations,
+} from "../check-boundaries.mjs";
 import { findViolations } from "../check-builder-independence.mjs";
 import { checkBudget, findLeakedNames, serverOnlyNames } from "../check-bundles.mjs";
 import { bindingNames, checkDocsCost } from "../check-docs-cost.mjs";
@@ -52,26 +56,39 @@ describe("boundaries", () => {
     expect(ports("packages/db/src/a.ts", 'import { z } from "zod";')).toBe(0);
   });
 
-  it("applies to the Worker modules @opa/worker exports to apps/node", () => {
-    const worker = (app: string) => [
-      { path: "apps/worker/package.json", text: '{ "exports": { "./app": "./src/app.ts" } }' },
-      { path: "apps/worker/src/app.ts", text: app },
-      {
-        path: "apps/worker/src/chat/index.tsx",
-        text: 'import { DurableObject } from "cloudflare:workers";',
-      },
-      { path: "apps/worker/src/index.ts", text: 'import { env } from "cloudflare:workers";' },
+  it("covers the shared HTTP app in packages/server, types included", () => {
+    expect(ports("packages/server/src/app.ts", 'import { env } from "cloudflare:workers";')).toBe(
+      1,
+    );
+    expect(ports("packages/server/src/env.ts", 'import type { Agent } from "agents";')).toBe(1);
+  });
+
+  it("rejects one app importing or depending on another", () => {
+    const pkg = (name: string, deps = {}) => JSON.stringify({ name, dependencies: deps });
+    const apps = (path: string, text: string) => [
+      { path: "apps/worker/package.json", text: pkg("@opa/worker") },
+      { path: "apps/web/package.json", text: pkg("@opa/web") },
+      { path, text },
     ];
-    expect(findPortViolations(worker('import { chat } from "./chat";'))).toEqual([
-      'apps/worker/src/chat/index.tsx:1: imports "cloudflare:workers" (ports rule, ADR 0011 #4)',
+    const appImports = (path: string, text: string) => findAppImports(apps(path, text));
+    expect(appImports("apps/node/src/a.ts", 'import { app } from "@opa/worker/app";')).toEqual([
+      'apps/node/src/a.ts:1: "@opa/worker/app" is apps/worker; share it from packages/*',
     ]);
-    expect(findPortViolations(worker('import type { Chat } from "./chat";'))).toEqual([]);
-    // Types from a runtime module are erased too; a runtime import after them keeps its line.
-    const typed =
-      'import type {\n  DurableObjectState,\n} from "cloudflare:workers";\nimport "node:fs";';
-    expect(findPortViolations(worker(typed))).toEqual([
-      'apps/worker/src/app.ts:4: imports "node:fs" (ports rule, ADR 0011 #4)',
+    expect(
+      appImports("apps/node/src/a.ts", 'import type { Env } from "@opa/worker";'),
+    ).toHaveLength(1);
+    expect(appImports("apps/node/test/a.test.ts", 'import "../../worker/test/x";')).toHaveLength(1);
+    expect(appImports("apps/node/package.json", pkg("@opa/node", { "@opa/worker": "*" }))).toEqual([
+      'apps/node/package.json: "@opa/worker" is apps/worker; share it from packages/*',
     ]);
+    // An app's own modules, shared packages and file text read with `?raw` are fine.
+    expect(appImports("apps/worker/src/a.ts", 'import "./b";\nimport "@opa/worker/c";')).toEqual(
+      [],
+    );
+    expect(appImports("apps/node/src/a.ts", 'import { app } from "@opa/server/app";')).toEqual([]);
+    expect(
+      appImports("apps/worker/test/a.ts", 'import h from "../../web/public/_headers?raw";'),
+    ).toEqual([]);
   });
 
   it("rejects tooling in dependencies but allows it in devDependencies", () => {

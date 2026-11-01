@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Node composition root (ADR 0011 #3): the Worker's Hono app over Node adapters for its
-// bindings, so a self-hosted deployment runs the same routes, claim and migrations.
+// The Node composition root (ADR 0011 #3): the shared app (`@opa/server`) over Node adapters for
+// its ports, so a self-hosted deployment runs the same routes, claim and migrations.
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { app } from "@opa/worker/app";
-import { compose, type WorkerEnv } from "@opa/worker/compose";
+import { app } from "@opa/server/app";
+import { compose, type MasterKeys } from "@opa/server/compose";
+import type { AppPorts } from "@opa/server/env";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
@@ -68,7 +69,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   const assets = new Hono()
     .use(serveStatic({ root: assetsDir }))
     .use(serveStatic({ root: assetsDir, path: "index.html" }));
-  const raw = {
+  const raw: AppPorts & MasterKeys = {
     DB: sqliteD1(db),
     FILES: localBlobStore(join(dataDir, "files")),
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
@@ -85,7 +86,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     // sends, such as CF-Connecting-IP, which only Cloudflare sets.
     OPA_CLIENT_IP_HEADER: proxyHeader || SOCKET_ADDRESS_HEADER,
     PUBLIC_LIMIT: memoryRateLimit(30, 60_000), // the Worker's `ratelimits` in wrangler.jsonc
-  } as unknown as WorkerEnv;
+  };
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
   const env = compose(raw);
   return {

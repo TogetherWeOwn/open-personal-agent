@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Two lint rules tsc and Biome do not cover:
+// Three lint rules tsc and Biome do not cover:
 // - Ports rule (ADR 0011 #4): only the composition roots (apps/worker, apps/node) may import
-//   Cloudflare runtime modules, the Agents SDK or Node built-ins. Shared packages, the web app and
-//   the Worker modules apps/node loads through `@opa/worker` stay runtime-agnostic.
+//   Cloudflare runtime modules, the Agents SDK or Node built-ins. Shared packages, the HTTP app in
+//   packages/server included, and the web app stay runtime-agnostic, even in types.
+// - App-to-app rule (TWO-435 A9): no app imports another app's code or depends on its package.
+//   Code two apps share belongs in packages/*.
 // - Dependency guard: test, build and agent tooling belongs in devDependencies, never in the
 //   `dependencies` that ship.
 import { builtinModules } from "node:module";
@@ -11,50 +13,66 @@ import { isMain, report, repoTextFiles } from "./lib/repo.mjs";
 
 const PORTABLE_SOURCES = /^(?:packages\/[^/]+|apps\/web)\/src\/.*\.(?:[cm]?[jt]sx?)$/;
 const NODE_BUILTINS = new Set(builtinModules);
-const TYPE_ONLY = /\b(?:import|export)\s+type\s[^;]*?\bfrom\s*["'][^"']+["']/g;
-// `import type` is erased at runtime; blanked out keeping newlines, so line numbers hold.
-const eraseTypes = (text) => text.replace(TYPE_ONLY, (m) => m.replace(/[^\n]/g, ""));
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g;
 
 export const isRuntimeSpecific = (specifier) =>
   /^(?:cloudflare:|node:|agents(?:\/|$))/.test(specifier) ||
   NODE_BUILTINS.has(specifier.split("/")[0]);
 
-/** The Worker modules `@opa/worker`'s exports load, following relative imports. */
-export function sharedWorkerSources(files) {
-  const byPath = new Map(files.map((f) => [f.path, f.text]));
-  const exports = JSON.parse(byPath.get("apps/worker/package.json") ?? "{}").exports ?? {};
-  const pending = Object.values(exports).map((p) => join("apps/worker", p));
-  const seen = new Set();
-  for (let path = pending.pop(); path !== undefined; path = pending.pop()) {
-    if (seen.has(path)) continue;
-    seen.add(path);
-    for (const { 1: specifier } of eraseTypes(byPath.get(path) ?? "").matchAll(SPECIFIER)) {
-      if (!specifier.startsWith(".")) continue;
-      const base = normalize(join(dirname(path), specifier)).replace(/\.js$/, "");
-      const found = ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]
-        .map((suffix) => base + suffix)
-        .find((c) => byPath.has(c));
-      if (found) pending.push(found);
-    }
-  }
-  return seen;
-}
-
 /** Imports of runtime-specific modules from portable sources. */
 export function findPortViolations(files) {
-  const shared = sharedWorkerSources(files);
   const problems = [];
-  for (const { path, text: source } of files) {
-    const portable = PORTABLE_SOURCES.test(path);
-    if (!portable && !shared.has(path)) continue;
-    // Packages and the web app stay runtime-agnostic even in types; for the Worker modules only
-    // what Node loads matters.
-    const text = portable ? source : eraseTypes(source);
+  for (const { path, text } of files) {
+    if (!PORTABLE_SOURCES.test(path)) continue;
     for (const { 1: specifier, index } of text.matchAll(SPECIFIER)) {
       if (!isRuntimeSpecific(specifier)) continue;
       const line = text.slice(0, index).split("\n").length; // whole-text match: multi-line imports
       problems.push(`${path}:${line}: imports "${specifier}" (ports rule, ADR 0011 #4)`);
+    }
+  }
+  return problems;
+}
+
+const APP_PATH = /^apps\/([^/]+)\//;
+const SOURCE = /\.(?:[cm]?[jt]sx?)$/;
+const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "peerDependencies"];
+const packageOf = (specifier) =>
+  specifier
+    .split("/")
+    .slice(0, specifier.startsWith("@") ? 2 : 1)
+    .join("/");
+
+/** Imports (types too) and dependencies from one app on another, in sources and tests. */
+export function findAppImports(files) {
+  const apps = new Map(); // package name -> its directory under apps/
+  for (const { path, text } of files) {
+    const dir = /^apps\/([^/]+)\/package\.json$/.exec(path)?.[1];
+    if (dir) apps.set(JSON.parse(text).name, dir);
+  }
+  const problems = [];
+  const flag = (where, specifier, own, target) => {
+    if (target && target !== own) {
+      problems.push(`${where}: "${specifier}" is apps/${target}; share it from packages/*`);
+    }
+  };
+  for (const { path, text } of files) {
+    const own = APP_PATH.exec(path)?.[1];
+    if (!own) continue;
+    if (path === `apps/${own}/package.json`) {
+      const pkg = JSON.parse(text);
+      for (const field of DEPENDENCY_FIELDS) {
+        for (const name of Object.keys(pkg[field] ?? {})) flag(path, name, own, apps.get(name));
+      }
+      continue;
+    }
+    if (!SOURCE.test(path)) continue;
+    for (const { 1: specifier, index } of text.matchAll(SPECIFIER)) {
+      // `?raw` reads a file's text, such as the SPA's `_headers` a test checks; it loads no code.
+      if (specifier.endsWith("?raw")) continue;
+      const target = specifier.startsWith(".")
+        ? APP_PATH.exec(normalize(join(dirname(path), specifier)))?.[1]
+        : apps.get(packageOf(specifier));
+      flag(`${path}:${text.slice(0, index).split("\n").length}`, specifier, own, target);
     }
   }
   return problems;
@@ -80,5 +98,6 @@ if (isMain(import.meta.url)) {
   const files = repoTextFiles();
   const manifests = files.filter(({ path }) => /(?:^|\/)package\.json$/.test(path));
   report("ports-rule", findPortViolations(files));
+  report("app-to-app", findAppImports(files));
   report("dependency-guard", findDependencyViolations(manifests));
 }

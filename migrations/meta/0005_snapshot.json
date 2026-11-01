@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "3d91785c-a62c-4e50-a272-18aefadccfcf",
+  "id": "6a71cb54-4b8e-43de-92cc-a44d9d58e25c",
   "prevId": "d9a1be81-b0c8-48d9-a7d0-244a44e69ea2",
   "tables": {
     "audit_log": {
@@ -111,6 +111,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "model_provider": {
+          "name": "model_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -151,238 +165,18 @@
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "memories": {
-      "name": "memories",
-      "columns": {
-        "n": {
-          "name": "n",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
         },
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "text": {
-          "name": "text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "trust": {
-          "name": "trust",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "op": {
-          "name": "op",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "source_ref": {
-          "name": "source_ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "source_excerpt": {
-          "name": "source_excerpt",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "conversation_id": {
-          "name": "conversation_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        },
-        "last_used_at": {
-          "name": "last_used_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "memories_id_unique": {
-          "name": "memories_id_unique",
-          "columns": ["id"],
-          "isUnique": true
-        },
-        "memories_id_user_idx": {
-          "name": "memories_id_user_idx",
-          "columns": ["id", "user_id"],
-          "isUnique": true
-        },
-        "memories_user_idx": {
-          "name": "memories_user_idx",
-          "columns": ["user_id", "status", "created_at"],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "memories_user_id_users_id_fk": {
-          "name": "memories_user_id_users_id_fk",
-          "tableFrom": "memories",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memories_conversation_id_conversations_id_fk": {
-          "name": "memories_conversation_id_conversations_id_fk",
-          "tableFrom": "memories",
-          "tableTo": "conversations",
-          "columnsFrom": ["conversation_id"],
+        "conversations_model_provider_model_providers_id_fk": {
+          "name": "conversations_model_provider_model_providers_id_fk",
+          "tableFrom": "conversations",
+          "tableTo": "model_providers",
+          "columnsFrom": ["model_provider"],
           "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "memory_links": {
-      "name": "memory_links",
-      "columns": {
-        "memory_id": {
-          "name": "memory_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "target_id": {
-          "name": "target_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "memory_links_target_idx": {
-          "name": "memory_links_target_idx",
-          "columns": ["user_id", "target_id"],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "memory_links_user_id_users_id_fk": {
-          "name": "memory_links_user_id_users_id_fk",
-          "tableFrom": "memory_links",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_links_memory_id_user_id_memories_id_user_id_fk": {
-          "name": "memory_links_memory_id_user_id_memories_id_user_id_fk",
-          "tableFrom": "memory_links",
-          "tableTo": "memories",
-          "columnsFrom": ["memory_id", "user_id"],
-          "columnsTo": ["id", "user_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "memory_links_target_id_user_id_memories_id_user_id_fk": {
-          "name": "memory_links_target_id_user_id_memories_id_user_id_fk",
-          "tableFrom": "memory_links",
-          "tableTo": "memories",
-          "columnsFrom": ["target_id", "user_id"],
-          "columnsTo": ["id", "user_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "memory_links_memory_id_target_id_pk": {
-          "columns": ["memory_id", "target_id"],
-          "name": "memory_links_memory_id_target_id_pk"
-        }
-      },
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
@@ -472,6 +266,111 @@
           "columnsFrom": ["conversation_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "model_providers": {
+      "name": "model_providers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "base_url": {
+          "name": "base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "key_secret_id": {
+          "name": "key_secret_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {
+        "model_providers_user_idx": {
+          "name": "model_providers_user_idx",
+          "columns": ["user_id", "created_at"],
+          "isUnique": false
+        },
+        "model_providers_key_idx": {
+          "name": "model_providers_key_idx",
+          "columns": ["key_secret_id"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "model_providers_user_id_users_id_fk": {
+          "name": "model_providers_user_id_users_id_fk",
+          "tableFrom": "model_providers",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "model_providers_key_secret_id_secrets_id_fk": {
+          "name": "model_providers_key_secret_id_secrets_id_fk",
+          "tableFrom": "model_providers",
+          "tableTo": "secrets",
+          "columnsFrom": ["key_secret_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -1170,36 +1069,29 @@
           "notNull": false,
           "autoincrement": false
         },
-        "model_kind": {
-          "name": "model_kind",
+        "chat_provider": {
+          "name": "chat_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "provider_id": {
-          "name": "provider_id",
+        "chat_model": {
+          "name": "chat_model",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "base_url": {
-          "name": "base_url",
+        "background_provider": {
+          "name": "background_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "model_key_secret_id": {
-          "name": "model_key_secret_id",
+        "background_model": {
+          "name": "background_model",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1232,11 +1124,20 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "user_settings_model_key_secret_id_secrets_id_fk": {
-          "name": "user_settings_model_key_secret_id_secrets_id_fk",
+        "user_settings_chat_provider_model_providers_id_fk": {
+          "name": "user_settings_chat_provider_model_providers_id_fk",
           "tableFrom": "user_settings",
-          "tableTo": "secrets",
-          "columnsFrom": ["model_key_secret_id"],
+          "tableTo": "model_providers",
+          "columnsFrom": ["chat_provider"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "user_settings_background_provider_model_providers_id_fk": {
+          "name": "user_settings_background_provider_model_providers_id_fk",
+          "tableFrom": "user_settings",
+          "tableTo": "model_providers",
+          "columnsFrom": ["background_provider"],
           "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Redeeming a recovery code (M2-10b): single use, no oracle, rate limit, no lockout, audit.
+
+import { ADDRESS_LIMIT } from "@opa/server/recover";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
-import { ADDRESS_LIMIT } from "../src/recover";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();

@@ -55,4 +55,4 @@ CREATE TRIGGER `memories_fts_update` AFTER UPDATE OF `text` ON `memories` BEGIN
 	INSERT INTO `memories_fts` (rowid, `text`) VALUES (new.`n`, new.`text`);
 END;--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (5);
+INSERT INTO `schema_version` (`version`) VALUES (6);
