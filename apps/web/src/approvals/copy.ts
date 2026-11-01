@@ -93,6 +93,13 @@ export function costText(item: ApprovalItem): string | null {
   return `This will cost about $${(micro / 1_000_000).toFixed(2)} (estimate).`;
 }
 
+/** What an empty list or object argument reads as, so it never shows as a blank value. */
+export function emptyText(value: unknown): string | null {
+  if (Array.isArray(value)) return value.length ? null : "(empty list)";
+  if (value && typeof value === "object") return Object.keys(value).length ? null : "(empty)";
+  return null;
+}
+
 /**
  * Characters that render as nothing (zero-width, direction marks and overrides, fillers, variation
  * selectors and tags) that a body or a host could hide; the card shows them as chips.

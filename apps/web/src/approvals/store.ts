@@ -32,32 +32,40 @@ const set = (next: Partial<ApprovalsState>) => {
 };
 
 let expiry: ReturnType<typeof setTimeout> | undefined;
+/** How long to wait before asking again about a batch the server listed but this clock calls expired. */
+export const SKEW_RECHECK_MS = 5_000;
 /**
  * One timer for the whole list: when the soonest batch expires it leaves, and the list is read
  * again, so neither the badge nor "1 approval waiting" outlives what the server still accepts.
+ * A batch that looks expired already when it arrives means this clock runs ahead of the server's:
+ * the server decides, so it stays and the list is read again after a pause, not in a loop.
  */
 function watchExpiry() {
   clearTimeout(expiry);
   const soonest = Math.min(...state.batches.map((b) => b.expiresAt));
   if (!Number.isFinite(soonest)) return;
+  const wait = soonest - Date.now();
+  if (wait <= 0) {
+    expiry = setTimeout(() => void refreshApprovals(), SKEW_RECHECK_MS);
+    return;
+  }
   expiry = setTimeout(
     () => {
       const now = Date.now();
       set({ batches: state.batches.filter((b) => b.expiresAt > now) });
       void refreshApprovals();
     },
-    Math.min(Math.max(soonest - Date.now(), 0), 2 ** 31 - 1),
+    Math.min(wait, 2 ** 31 - 1),
   );
 }
 
+export const approvalsSnapshot = (): ApprovalsState => state;
+
 export function useApprovals(): ApprovalsState {
-  return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => state,
-  );
+  return useSyncExternalStore((listener) => {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }, approvalsSnapshot);
 }
 
 const time = (at: number) =>

@@ -6,7 +6,15 @@ import type { ApprovalItem } from "@opa/core";
 import { TriangleAlert } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { Button, Disclosure } from "../ui";
-import { actionOf, costText, INVISIBLE, looksLikeAnother, ruleText, taintText } from "./copy";
+import {
+  actionOf,
+  costText,
+  emptyText,
+  INVISIBLE,
+  looksLikeAnother,
+  ruleText,
+  taintText,
+} from "./copy";
 import type { Receipt } from "./store";
 
 /** Text exactly as it would be sent, with invisible characters made visible. */
@@ -30,6 +38,8 @@ export function Visible({ text }: { text: string }) {
 
 function Value({ value }: { value: unknown }) {
   if (typeof value === "string") return <Visible text={value} />;
+  const none = emptyText(value);
+  if (none) return <span className="text-text-muted italic">{none}</span>;
   if (Array.isArray(value)) {
     return (
       <ul className="flex flex-col">

@@ -2,7 +2,7 @@
 import type { ApprovalItem } from "@opa/core";
 import { describe, expect, it } from "vitest";
 import type { PendingBatch } from "../src/approvals/api";
-import { INVISIBLE } from "../src/approvals/copy";
+import { emptyText, INVISIBLE } from "../src/approvals/copy";
 import { receiptText } from "../src/approvals/store";
 
 const item = (approvalId: string, tool: string): ApprovalItem => ({
@@ -42,6 +42,17 @@ describe("INVISIBLE", () => {
 
   it("leaves ordinary text alone", () => {
     expect("friend@example.com, Ünïcødé 漢字".match(INVISIBLE)).toBeNull();
+  });
+});
+
+describe("emptyText", () => {
+  it("names an empty object and an empty list", () => {
+    expect(emptyText({})).toBe("(empty)");
+    expect(emptyText([])).toBe("(empty list)");
+  });
+
+  it("leaves values with content, and scalars, to their own rendering", () => {
+    for (const v of [{ a: 1 }, [0], "", 0, false, null]) expect(emptyText(v)).toBeNull();
   });
 });
 
