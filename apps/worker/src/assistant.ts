@@ -1006,10 +1006,14 @@ export class Assistant extends Agent<Bindings> {
       claim: async (toolCallId) => {
         const refused = run.refused.get(toolCallId);
         if (refused) {
-          await approvals.finish(run.batchId, id(toolCallId), {
-            status: "denied",
-            reason: refused,
-          });
+          // A row an earlier run claimed (left `executing` by a restart) may have acted: it
+          // ends failed with an unknown outcome, as on the Workflow path. Any other refusal
+          // ends an `approved` row denied.
+          const outcome =
+            refused === "already_claimed"
+              ? ({ status: "failed", reason: "outcome_unknown" } as const)
+              : ({ status: "denied", reason: refused } as const);
+          await approvals.finish(run.batchId, id(toolCallId), outcome);
           return REFUSED[refused] ?? (REFUSED.binding_mismatch as string);
         }
         // The row's envelope was opened and checked when the batch was read; `canonical` is

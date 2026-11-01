@@ -395,6 +395,30 @@ describe("task workflow", () => {
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
   });
 
+  it("a replay after the expiry takes the early wake's recorded branch, back to waiting", async () => {
+    const { instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    // An early wake (no decision yet) reads the batch as pending and goes back to waiting; the
+    // engine dies as the next wake starts.
+    const first = new CrashingStepper("task:load:2");
+    const replies: Reply[] = [{ calls: [["send", { q: "x" }]] }, { text: "done" }];
+    const crashed = await run(replies, instanceId, first, [send]);
+    await crashed.promise.catch(() => {});
+    expect(first.waits).toBe(2);
+    // Replayed a day later, past the approval's expiry: the cached pending rows were read at
+    // the early wake, so the replay must wait again there, not expire the batch.
+    const replay = new FakeStepper();
+    for (const [name, value] of first.persisted) replay.persisted.set(name, value);
+    const day = 86_400_000;
+    // Started as late, so the task's own run-time limit isn't what stops the replay.
+    const start = replay.persisted.get("task:start") as { startedAt: number };
+    replay.persisted.set("task:start", { ...start, startedAt: start.startedAt + day });
+    const later = await run(replies, instanceId, replay, [send], { now: () => Date.now() + day });
+    await later.promise.catch(() => {});
+    expect(replay.waits).toBe(2);
+    expect(send.calls).toBe(0);
+  });
+
   it("a task that runs out of time mid-turn ends budget-limited, not failed", async () => {
     const { taskId, instanceId } = await makeTask();
     let skew = 0;

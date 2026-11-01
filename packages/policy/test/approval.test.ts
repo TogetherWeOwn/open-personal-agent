@@ -117,6 +117,8 @@ describe("fitsApproval", () => {
     expect(fitsApproval(near, "example.com")).toBe(true);
     await expect(hashOf({ args: near })).resolves.toMatch(/^[\w-]{43}$/);
     expect(fitsApproval(near, "example.com.")).toBe(false);
+    // A target counts escaped, as the envelope holds it: two control characters are 12 bytes.
+    expect(fitsApproval(near, "\u0001\u0001")).toBe(false);
     const over = { body: "x".repeat(CANONICAL_LIMITS.bytes) };
     expect(fitsApproval(over, null)).toBe(false);
     await expect(hashOf({ args: over })).rejects.toThrow(/too large to approve/);

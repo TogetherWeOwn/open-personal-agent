@@ -148,10 +148,11 @@ export const isId = (id: unknown): id is string =>
 
 /**
  * A batch ID: the assistant's are `batch_<uuid>`, a task's carry its Workflow instance ID, which
- * can be longer than `isId` allows. Printable ASCII without a slash, so it stays one path segment.
+ * can be longer than `isId` allows. Letters, digits, `_` and `-` (a Workflow instance ID's
+ * alphabet), so it stays one path segment: no `.`, `..` or percent-escape.
  */
 export const isBatchId = (id: unknown): id is string =>
-  typeof id === "string" && /^[\x21-\x2e\x30-\x7e]{1,200}$/.test(id);
+  typeof id === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(id);
 
 /** The bound `scopeForTask` accepts, so a row it could never resolve is never written. */
 const isInstanceId = (id: unknown): id is string =>

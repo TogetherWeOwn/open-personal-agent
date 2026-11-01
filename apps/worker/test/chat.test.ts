@@ -1023,6 +1023,31 @@ describe("approvals in the DO host (M3-07a)", () => {
     expect(send.inputs).toEqual([]);
   });
 
+  it("ends a row a restart left executing as failed with an unknown outcome", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ calls: [["send", { q: "hi" }]] }, { text: "Not sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-claimed", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    // A run claimed the row and then the DO restarted: whether the call acted is unknown.
+    await decideInD1(batchId, approvalId, "approved");
+    await db
+      .prepare("UPDATE approvals SET status = 'executing' WHERE batch_id = ?")
+      .bind(batchId)
+      .run();
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(batchId));
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([]);
+    const row = await db
+      .prepare("SELECT status, reason FROM approvals WHERE batch_id = ?")
+      .bind(batchId)
+      .first();
+    expect(row).toEqual({ status: "failed", reason: "outcome_unknown" });
+  });
+
   it("refuses an approved call whose tool changed since it was approved (AC12)", async () => {
     const { browser, owner } = await claim();
     const send = loopTool("send", "consequential");
