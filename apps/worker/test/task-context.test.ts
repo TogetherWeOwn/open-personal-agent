@@ -271,4 +271,31 @@ describe("budget and progress over DO RPC (AC8)", () => {
       });
     });
   });
+
+  it("broadcasts progress in arrival order while a tab recheck is pending", async () => {
+    await runInDurableObject(alice.assistant(), async (instance: Assistant) => {
+      const sent: string[] = [];
+      const raw = instance as unknown as {
+        broadcast: (m: string) => void;
+        getConnections: () => Iterable<unknown>;
+      };
+      raw.broadcast = (m) => sent.push(m);
+      raw.getConnections = () => [{ state: { sessionId: "sess-ended" }, close: vi.fn() }];
+      const event = (seq: number, type: string) => ({
+        conversationId: "ca",
+        turnId: "turn1",
+        taskId: "taskY",
+        seq,
+        type,
+        payload: { stepId: "s1" },
+      });
+      // The first call rechecks the tabs (a D1 read); the second, inside the 30s window, doesn't.
+      await Promise.all([
+        instance.taskProgress(event(1, "step.started")),
+        instance.taskProgress(event(2, "step.completed")),
+      ]);
+      const ours = sent.map((m) => JSON.parse(m)).filter((m) => m.taskId === "taskY");
+      expect(ours.map((m) => m.seq)).toEqual([1, 2]);
+    });
+  });
 });

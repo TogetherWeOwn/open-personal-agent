@@ -119,7 +119,14 @@ export class Assistant extends Agent<Bindings> {
    * progress event, never invent one. Like a chat turn, it first closes tabs whose session has
    * ended; a task streams for longer than a turn, so the check repeats every 30 seconds.
    */
-  async taskProgress(progress: TaskProgress): Promise<void> {
+  taskProgress(progress: TaskProgress): Promise<void> {
+    // Chained, so a call that skips the recheck can't broadcast ahead of one still awaiting it.
+    const sent = this.#progress.then(() => this.#sendProgress(progress));
+    this.#progress = sent.catch(() => {});
+    return sent;
+  }
+
+  async #sendProgress(progress: TaskProgress): Promise<void> {
     if (Date.now() - this.#tabsCheckedAt >= TAB_RECHECK_MS) {
       this.#tabsCheckedAt = Date.now();
       await Promise.all(
@@ -143,6 +150,8 @@ export class Assistant extends Agent<Bindings> {
 
   /** When task progress last rechecked the tabs' sessions. */
   #tabsCheckedAt = 0;
+  /** The last progress broadcast, so the next waits for it. */
+  #progress: Promise<void> = Promise.resolve();
 
   /** The user's scope, from this DO's own name, which only the server sets. */
   get #scope() {
