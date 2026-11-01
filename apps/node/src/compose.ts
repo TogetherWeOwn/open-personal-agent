@@ -7,6 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { app } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
+import { runRetention } from "@opa/server/retention";
 import { runRotation } from "@opa/server/vault-rotation";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
@@ -108,7 +109,11 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       }
       return app.fetch(forwarded, await env);
     },
-    scheduled: async () => runRotation(await env),
+    scheduled: async () => {
+      const app = await env;
+      await runRotation(app);
+      await runRetention(app);
+    },
     db,
   };
 }
