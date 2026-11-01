@@ -35,6 +35,7 @@ export type DecideResult =
   | { kind: "not_confirmed" } // the passkey prompt was dismissed or failed: nothing was done
   | { kind: "changed" } // the request changed: reload and look again
   | { kind: "handled" } // already decided: by an earlier try whose answer was lost, or elsewhere
+  | { kind: "left" } // the answer was lost and the batch no longer waits, for a reason not known here
   | { kind: "expired" }
   | { kind: "cancelled" } // the task was stopped, or the batch is gone
   | { kind: "offline" }; // it never reached the server, or the server failed

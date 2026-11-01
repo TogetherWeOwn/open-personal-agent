@@ -91,7 +91,7 @@ describe("the expiry timer", () => {
 describe("a decision whose answer was lost", () => {
   const decisions = [{ approvalId: "a1", decision: "approve" as const, scope: "once" as const }];
 
-  it("reads the list again, and a batch it no longer holds is already handled", async () => {
+  it("reads the list again, and a batch it no longer holds leaves without claiming an answer", async () => {
     const listed = batch(Date.now() + 60_000);
     let decidedOnServer = false;
     vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
@@ -105,10 +105,10 @@ describe("a decision whose answer was lost", () => {
     vi.resetModules();
     const store = await import("../src/approvals/store");
     await store.refreshApprovals();
-    expect(await store.submitDecision(listed, decisions)).toEqual({ kind: "handled" });
+    expect(await store.submitDecision(listed, decisions)).toEqual({ kind: "left" });
     const { batches, receipts } = store.approvalsSnapshot();
     expect(batches).toEqual([]);
-    expect(receipts[0]?.text).toMatch(/^Already answered: /);
+    expect(receipts[0]?.text).toMatch(/^No longer waiting: Save a file · .*check the chat\.$/);
   });
 
   it("keeps the card to try again when the batch is still waiting", async () => {

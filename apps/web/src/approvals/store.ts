@@ -87,9 +87,11 @@ export function receiptText(
   const [only] = scopes;
   const scope = scopes.size === 1 && only ? scopeLabel(only).toLowerCase() : "";
   const when = time(at);
-  // Decided before this answer counted: which answer won isn't known here, so it isn't claimed.
-  if (result?.kind === "handled") {
-    return `Already answered: ${batch.items.map((i) => actionOf(i.tool)).join(", ")} · ${when}.`;
+  // Which answer counted isn't known here, so it isn't claimed.
+  const names = batch.items.map((i) => actionOf(i.tool)).join(", ");
+  if (result?.kind === "handled") return `Already answered: ${names} · ${when}.`;
+  if (result?.kind === "left") {
+    return `No longer waiting: ${names} · ${when}. I couldn't confirm your answer reached me, so check the chat.`;
   }
   let text: string;
   if (decisions.length <= 1) {
@@ -171,8 +173,9 @@ export function decided(
  * Sends this tab's answer. The batch counts as decided here before the request goes out: the run
  * it wakes can send `approval.resolved` before the response arrives, and that isn't "elsewhere".
  * The server records a decision before it wakes the run, so a lost response may still have
- * decided it: the list is read again, and a batch it no longer holds is already handled, not an
- * error to retry into `already_decided`.
+ * decided it: the list is read again, and a batch it no longer holds isn't offered for a retry
+ * into `already_decided`. Absence alone doesn't say why (decided, cancelled or expired), so its
+ * receipt claims no answer.
  */
 export async function submitDecision(
   batch: PendingBatch,
@@ -182,10 +185,11 @@ export async function submitDecision(
   let result = await decide(batch.batchId, batch.items, decisions);
   if (result.kind === "offline" && (await refreshApprovals())) {
     const listed = state.batches.some((b) => b.batchId === batch.batchId);
-    if (!listed) result = batch.expiresAt > Date.now() ? { kind: "handled" } : { kind: "expired" };
+    if (!listed) result = batch.expiresAt > Date.now() ? { kind: "left" } : { kind: "expired" };
   }
-  if (result.kind === "done" || result.kind === "handled") decided(batch, decisions, result);
-  else decidedHere.delete(batch.batchId);
+  if (result.kind === "done" || result.kind === "handled" || result.kind === "left") {
+    decided(batch, decisions, result);
+  } else decidedHere.delete(batch.batchId);
   return result;
 }
 
