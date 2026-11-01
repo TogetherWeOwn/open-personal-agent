@@ -46,6 +46,9 @@ export const editNote = (id: string, text: string) =>
 export const noteVersions = (id: string) =>
   memoryApi<{ versions: Note[] }>(`/${id}/versions`).then((r) => r.versions);
 
+/** The line every delete carries (M3-15 AC3): D1 Time Travel keeps deleted data 30 days. */
+export const BACKUP_LINE = "A backup copy is kept for 30 days, then it's gone.";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

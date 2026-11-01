@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Memory (m3-ux §3.7, M3-15): what the assistant remembers, in sections — About you (standing
-// instructions) and Notes — with search, Edit (saved as a new version) and Add.
-
+// Memory (m3-ux §3.7, M3-15): what the assistant remembers, in sections — Recently learned, About
+// you (standing instructions) and Notes — with search, Edit, Delete and bulk delete.
+//
+// Every delete says a backup is kept for 30 days (AC3). A delete is held while its Undo toast is
+// open and sent when the toast closes, the screen goes away or the page unloads, so the server's
+// forget stays a true hard delete and Undo never needs a restore.
 import { Check } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -13,17 +16,76 @@ import {
   TextArea,
   TextField,
 } from "react-aria-components";
-import { Banner, Button, EmptyState, Page, Skeleton } from "../ui";
-import { addNote, listNotes, memoryError, type Note, SEARCH_LIMIT } from "./api";
-import { NoteRow } from "./NoteRow";
+import { Banner, Button, ConfirmDialog, EmptyState, Page, Skeleton, Toast } from "../ui";
+import { addNote, BACKUP_LINE, listNotes, memoryError, type Note, SEARCH_LIMIT } from "./api";
+import { NoteMeta, NoteRow } from "./NoteRow";
+
+const WEEK = 7 * 86_400_000;
+const RECENT = 5;
+
+const quote = (text: string) => `'${text.length > 60 ? `${text.slice(0, 57)}…` : text}'`;
+
+interface Held {
+  ids: string[];
+  message: string;
+  /** From the selection: a failure puts the notes back in it. */
+  bulk: boolean;
+}
+
+/** The most IDs one delete request takes (the server's limit). */
+const BATCH = 1000;
+/** What browsers let keepalive requests carry in flight at once (64 KiB), with some to spare. */
+const KEEPALIVE_BYTES = 60_000;
+
+/**
+ * Sends a delete in batches the server accepts, all started at once so a page that is going away
+ * still sends every one. Each goes with `keepalive` while the browser's allowance lasts, so it
+ * finishes if the page unloads. Returns the IDs that weren't deleted and whether any batch failed
+ * outright; a failed batch never hides what the others deleted.
+ */
+async function send(ids: string[]) {
+  let allowance = KEEPALIVE_BYTES;
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += BATCH) batches.push(ids.slice(i, i + BATCH));
+  const results = await Promise.allSettled(
+    batches.map(async (batch) => {
+      const body = JSON.stringify({ ids: batch });
+      const keepalive = body.length <= allowance;
+      if (keepalive) allowance -= body.length;
+      const res = await fetch("/api/memory/delete", {
+        method: "POST",
+        keepalive,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      return ((await res.json()) as { failed: string[] }).failed;
+    }),
+  );
+  const missed = results.flatMap((r, i) =>
+    r.status === "fulfilled" ? r.value : (batches[i] ?? []),
+  );
+  return { missed, offline: results.some((r) => r.status === "rejected") };
+}
+
+/** "'A', 'B' and 3 more": a few names, then a count. */
+function names(texts: string[]) {
+  const shown = texts.slice(0, 3).map(quote).join(", ");
+  return texts.length > 3 ? `${shown} and ${texts.length - 3} more` : shown;
+}
 
 export function Memory() {
   const [notes, setNotes] = useState<Note[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [query, setQuery] = useState("");
   const [shown, setShown] = useState("");
+  const [held, setHeld] = useState<Held | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+  const [allRecent, setAllRecent] = useState(false);
   const [draft, setDraft] = useState("");
   const [standing, setStanding] = useState(false);
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
@@ -46,6 +108,63 @@ export function Memory() {
     return () => clearTimeout(timer);
   }, [query, load]);
 
+  // The held delete goes out when the toast closes, and also if the screen or page goes away.
+  // The toast closes with it, so a page restored from the back/forward cache can't send it twice;
+  // the restored page asks the server again, so a delete that failed on the way out shows.
+  const heldRef = useRef<Held | null>(null);
+  heldRef.current = held;
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
+  useEffect(() => {
+    const flush = () => {
+      const h = heldRef.current;
+      if (!h) return;
+      heldRef.current = null;
+      void send(h.ids);
+      setHeld(null);
+      setNotes((all) => all?.filter((n) => !h.ids.includes(n.id)) ?? null);
+    };
+    const restored = (e: PageTransitionEvent) => {
+      if (e.persisted) void load(shownRef.current);
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("pageshow", restored);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pageshow", restored);
+      flush();
+    };
+  }, [load]);
+
+  const commit = async (h: Held) => {
+    setHeld(null);
+    heldRef.current = null;
+    const { missed, offline } = await send(h.ids);
+    setNotes((all) => all?.filter((n) => !h.ids.includes(n.id) || missed.includes(n.id)) ?? null);
+    if (missed.length === 0) return;
+    const none = offline && missed.length === h.ids.length;
+    const kept = (notes ?? []).filter((n) => missed.includes(n.id)).map((n) => n.text);
+    setProblem(
+      none
+        ? "I couldn't delete that. Check your connection and try again."
+        : `Deleted ${h.ids.length - missed.length} of ${h.ids.length}. I couldn't delete ${names(kept)}.`,
+    );
+    if (h.bulk || !none) {
+      setSelected(new Set(missed));
+      setSelecting(true);
+    }
+  };
+
+  /** Holds the delete behind an Undo toast; a delete already held goes out first. */
+  const hold = (ids: string[], message: string, bulk = false) => {
+    if (heldRef.current) commit(heldRef.current);
+    setProblem(null);
+    setHeld({ ids, message, bulk });
+    setAnnouncement(message);
+    setSelecting(false);
+    setSelected(new Set());
+  };
+
   const saved = (old: Note, next: Note) => {
     keys.current.set(next.id, keys.current.get(old.id) ?? old.id);
     setNotes((all) => all?.map((n) => (n.id === old.id ? next : n)) ?? null);
@@ -60,6 +179,18 @@ export function Memory() {
       });
     }
   };
+
+  // Esc leaves selection mode wherever focus is, a note's checkbox included; the dialog has its own.
+  useEffect(() => {
+    if (!selecting || confirming) return;
+    const leave = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      setSelecting(false);
+      setSelected(new Set());
+    };
+    window.addEventListener("keydown", leave);
+    return () => window.removeEventListener("keydown", leave);
+  }, [selecting, confirming]);
 
   const stale = (message: string) => {
     setProblem(message);
@@ -79,11 +210,23 @@ export function Memory() {
     }
   };
 
+  const deleting = new Set(held?.ids ?? []);
   const row = (note: Note) => (
     <NoteRow
       key={keys.current.get(note.id) ?? note.id}
       note={note}
+      deleting={deleting.has(note.id)}
+      selecting={selecting}
+      selected={selected.has(note.id)}
+      onSelect={(on) => {
+        const next = new Set(selected);
+        if (on) next.add(note.id);
+        else next.delete(note.id);
+        setSelected(next);
+        setAnnouncement(`${selectable.filter((n) => next.has(n.id)).length} selected`);
+      }}
       onSaved={(next) => saved(note, next)}
+      onDelete={() => hold([note.id], `Deleted ${quote(note.text)}. ${BACKUP_LINE}`)}
       onStale={stale}
     />
   );
@@ -91,6 +234,14 @@ export function Memory() {
   const all = notes ?? [];
   const instructions = all.filter((n) => n.kind === "instruction");
   const facts = all.filter((n) => n.kind === "fact");
+  const recent = shown
+    ? []
+    : all.filter((n) => Date.now() - n.createdAt < WEEK && n.trust !== "system");
+  // Only notes on screen count: a search can hide selected ones, and held ones are on their way out.
+  const selectable = all.filter((n) => !deleting.has(n.id));
+  const picked = selectable.filter((n) => selected.has(n.id));
+  const pickedInstructions = picked.filter((n) => n.kind === "instruction").length;
+
   return (
     <Page title="Memory">
       <p role="status" className="sr-only">
@@ -128,6 +279,40 @@ export function Memory() {
               Showing the first {SEARCH_LIMIT} matches. Add a word to narrow it.
             </p>
           )}
+          {recent.length > 0 && (
+            <section aria-labelledby="recent" className="flex flex-col gap-3">
+              <Heading id="recent" level={2} className="text-lg font-semibold">
+                Recently learned
+              </Heading>
+              <ul className="flex flex-col gap-2">
+                {recent.slice(0, allRecent ? undefined : RECENT).map((n) => (
+                  <li
+                    key={n.id}
+                    className={`flex flex-wrap items-start justify-between gap-2 rounded-xl border border-border p-3 ${deleting.has(n.id) ? "opacity-60" : ""}`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="break-words">{n.text}</p>
+                      <NoteMeta note={n} learned />
+                    </div>
+                    {!deleting.has(n.id) && (
+                      <Button
+                        variant="quiet"
+                        aria-label={`Undo: ${n.text}`}
+                        onPress={() => hold([n.id], `Forgot ${quote(n.text)}. ${BACKUP_LINE}`)}
+                      >
+                        Undo
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {recent.length > RECENT && !allRecent && (
+                <Button variant="quiet" className="self-start" onPress={() => setAllRecent(true)}>
+                  Show all {recent.length}
+                </Button>
+              )}
+            </section>
+          )}
           {instructions.length > 0 && (
             <section aria-labelledby="about" className="flex flex-col gap-3">
               <Heading id="about" level={2} className="text-lg font-semibold">
@@ -144,6 +329,11 @@ export function Memory() {
               <Heading id="notes" level={2} className="text-lg font-semibold">
                 Notes
               </Heading>
+              {!selecting && (
+                <Button variant="quiet" onPress={() => setSelecting(true)}>
+                  Select
+                </Button>
+              )}
             </div>
             {facts.length > 0 ? (
               <ul className="flex flex-col gap-2">{facts.map(row)}</ul>
@@ -153,7 +343,7 @@ export function Memory() {
           </section>
         </>
       )}
-      {!shown && notes !== null && (
+      {!shown && notes !== null && !selecting && (
         <TextField
           value={draft}
           onChange={setDraft}
@@ -176,6 +366,69 @@ export function Memory() {
             Add
           </Button>
         </TextField>
+      )}
+      {selecting && (
+        <section
+          aria-label="Selection"
+          className="sticky bottom-20 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-border-strong bg-surface-raised p-3 shadow-lg sm:bottom-4"
+        >
+          <p className="flex-1">{picked.length} selected</p>
+          <Button onPress={() => setSelected(new Set(selectable.map((n) => n.id)))}>
+            Select all {selectable.length}
+          </Button>
+          <Button
+            variant="danger"
+            isDisabled={picked.length === 0}
+            onPress={() => setConfirming(true)}
+          >
+            Delete…
+          </Button>
+          <Button
+            variant="quiet"
+            onPress={() => {
+              setSelecting(false);
+              setSelected(new Set());
+            }}
+          >
+            Cancel
+          </Button>
+        </section>
+      )}
+      <ConfirmDialog
+        isOpen={confirming}
+        onOpenChange={setConfirming}
+        title={`Delete ${picked.length} ${picked.length === 1 ? "note" : "notes"}?`}
+        confirm="Delete"
+        danger
+        onConfirm={() =>
+          hold(
+            picked.map((n) => n.id),
+            `Deleted ${picked.length} ${picked.length === 1 ? "note" : "notes"}. ${BACKUP_LINE}`,
+            true,
+          )
+        }
+      >
+        <p>{BACKUP_LINE}</p>
+        {pickedInstructions > 0 && (
+          <p>
+            This includes {pickedInstructions} standing{" "}
+            {pickedInstructions === 1 ? "instruction" : "instructions"}.
+          </p>
+        )}
+      </ConfirmDialog>
+      {held && (
+        <Toast
+          key={held.ids.join()}
+          action="Undo"
+          onAction={() => {
+            setHeld(null);
+            heldRef.current = null;
+            setAnnouncement("Undone. Nothing was deleted.");
+          }}
+          onClose={() => commit(held)}
+        >
+          {held.message}
+        </Toast>
       )}
     </Page>
   );
