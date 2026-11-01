@@ -121,7 +121,8 @@ export function createMockTransport(delayMs = 30): ChatTransport {
           sessionId,
           turnId,
           type: "turn.dequeued",
-          payload: { messageId },
+          // Logged under the running turn like the server's, naming the send's conversation.
+          payload: { messageId, conversationId: sessionId },
         } as HarnessEvent),
       );
     },

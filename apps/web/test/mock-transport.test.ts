@@ -37,7 +37,7 @@ describe("createMockTransport", () => {
     await Promise.resolve();
     expect(events.map((e) => [e.type, e.payload])).toEqual([
       ["turn.started", { messageId: "mock-1-reply" }],
-      ["turn.dequeued", { messageId: "queued-1" }],
+      ["turn.dequeued", { messageId: "queued-1", conversationId: "c1" }],
     ]);
     expect(events[1]?.turnId).toBe("mock-1");
   });

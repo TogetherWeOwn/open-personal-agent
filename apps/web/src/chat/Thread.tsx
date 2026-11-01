@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { type ReactNode, useLayoutEffect, useRef } from "react";
+import { Fragment, type ReactNode, useLayoutEffect, useRef } from "react";
 import { Link } from "react-aria-components";
+import { Button } from "../ui";
 import { type AttachmentKind, cannotReadCopy, formatBytes } from "./attachments";
 import { Markdown } from "./Markdown";
 import type { ShowWork } from "./show-work";
-import type { Conversation, Message } from "./state";
+import type { Conversation, Message, QueuedSend } from "./state";
 import { TurnView } from "./Turn";
 import type { StoredAttachment } from "./transport";
 import type { PriceTable } from "./turn-summary";
@@ -33,17 +34,22 @@ export function Thread({
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const last = conversation.messages.at(-1)?.text;
+  // A queued send's arrival and departure move nothing above, so the thread watches the
+  // queue's length too: a bubble appearing still scrolls into view (M3-09 AC4).
+  const queuedCount = conversation.queued.length;
 
   // Follow the stream only while the reader is at the bottom (the app remounts this per chat).
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-runs as messages grow
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
-  }, [conversation.messages.length, last, afterCount]);
+  }, [conversation.messages.length, last, afterCount, queuedCount]);
 
-  // A queued send that the server stored also arrives as a user message on load; the turn's
-  // bubble hides for those, so the thread never shows one twice (M3-09 AC4).
+  // A queued send that the server stored also arrives as a user message on load; its thread
+  // row stays slim then, so the thread never shows its text twice (M3-09 AC4).
   const seenMessageIds = new Set(conversation.messages.map((m) => m.id));
+  const byMessage = new Map(conversation.queued.map((q) => [q.messageId, q]));
+  const upcoming = conversation.queued.filter((q) => !seenMessageIds.has(q.messageId));
 
   return (
     <div
@@ -69,22 +75,74 @@ export function Thread({
             const turn = conversation.turns.find((t) => t.messageId === m.id);
             if (turn) {
               return (
-                <TurnView
-                  key={m.id}
-                  turn={turn}
-                  showWork={showWork}
-                  prices={prices}
-                  seenMessageIds={seenMessageIds}
-                  onDequeue={(messageId) => onDequeue(conversation.id, messageId)}
-                >
+                <TurnView key={m.id} turn={turn} showWork={showWork} prices={prices}>
                   <MessageView message={m} />
                 </TurnView>
               );
             }
           }
+          if (m.role === "user") {
+            const queued = byMessage.get(m.id);
+            return (
+              <Fragment key={m.id}>
+                <MessageView message={m} />
+                {queued && (
+                  <QueuedRow
+                    queued={queued}
+                    slim
+                    onDequeue={() => onDequeue(conversation.id, queued.messageId)}
+                  />
+                )}
+              </Fragment>
+            );
+          }
           return <MessageView key={m.id} message={m} />;
         })}
         {after}
+        {upcoming.map((q) => (
+          <QueuedRow
+            key={q.messageId}
+            queued={q}
+            onDequeue={() => onDequeue(conversation.id, q.messageId)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A waiting send's bubble (M3-09 AC4). A send the thread already shows as a user message
+ * stays slim — its text is just above — so the row only keeps its Cancel working.
+ */
+function QueuedRow({
+  queued: q,
+  slim = false,
+  onDequeue,
+}: {
+  queued: QueuedSend;
+  slim?: boolean;
+  onDequeue: () => void;
+}) {
+  const label = q.text ? `Cancel: ${q.text.slice(0, 80)}` : "Cancel queued message";
+  if (slim) {
+    return (
+      <div className="-mt-4 flex items-center gap-2 text-sm text-text-muted">
+        <p>Waiting to send</p>
+        <Button variant="quiet" aria-label={label} onPress={onDequeue}>
+          Cancel
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-2xl border border-border px-4 py-2">
+      {q.text && <p className="break-words whitespace-pre-wrap">{q.text}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm text-text-muted">Sends when this task finishes</p>
+        <Button variant="quiet" aria-label={label} onPress={onDequeue}>
+          Cancel
+        </Button>
       </div>
     </div>
   );

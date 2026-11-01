@@ -55,7 +55,12 @@ type Envelope<T extends string, P> = {
 };
 
 export type HarnessEvent =
-  | Envelope<"turn.started", { messageId: string }>
+  /**
+   * The turn's reply started. `sendMessageId` names the admitted send this turn answers,
+   * so the thread takes back exactly its waiting bubble (M3-09 AC4). Absent for fresh
+   * sends and moved resumes, which answer no queued send.
+   */
+  | Envelope<"turn.started", { messageId: string; sendMessageId?: string }>
   | Envelope<"turn.completed", Record<string, never>>
   | Envelope<"turn.cancelled", Record<string, never>>
   | Envelope<"turn.interrupted", { message: string }>
@@ -63,17 +68,26 @@ export type HarnessEvent =
   /**
    * A send that arrived mid-run and waits in the conversation's FIFO (M3-09 AC4): the sending
    * tab's message row is already in D1, and `position` is its place in the queue (1-based).
-   * Logged under the running turn, so it trims with it and replays to a reconnected tab.
+   * Logged under the running turn, so it trims with it and replays to a reconnected tab —
+   * and that turn may belong to another conversation, so the payload names the queued
+   * send's own conversation for the thread it bubbles in.
    */
-  | Envelope<"turn.queued", { messageId: string; text: string; position: number }>
+  | Envelope<
+      "turn.queued",
+      { messageId: string; text: string; position: number; conversationId: string }
+    >
   /**
    * A steer that joined the running turn (M3-09 AC4): the text is a user message in D1 and in
    * the turn's next step. Yielded by the loop when the text enters the turn, so the timeline
    * shows it exactly where the model reads it.
    */
   | Envelope<"turn.steered", { messageId: string; text: string }>
-  /** A queued send the user cancelled before it started (M3-09 AC4); its D1 row is gone. */
-  | Envelope<"turn.dequeued", { messageId: string }>
+  /**
+   * A queued send the user cancelled before it started (M3-09 AC4); its D1 row is gone.
+   * Logged under the running turn like `turn.queued`, so the payload again names the
+   * queued send's own conversation.
+   */
+  | Envelope<"turn.dequeued", { messageId: string; conversationId: string }>
   | Envelope<"message.delta", { text: string }>
   | Envelope<"message.completed", { text: string }>
   | Envelope<"usage.updated", { usage: ModelUsage; providerId: string; model: string }>

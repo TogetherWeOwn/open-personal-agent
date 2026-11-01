@@ -961,10 +961,12 @@ describe("run queue and steer (M3-09)", () => {
     await tab.until?.("message.delta");
     tab.send?.("conv-b", "about B");
     await tab.until?.("turn.queued");
-    // Logged under the running turn: a tab replaying A sees where B's send stands.
-    expect(tab.events.find((e) => e.type === "turn.queued")).toMatchObject({
+    // Logged under the running turn: a tab replaying A sees where B's send stands, while the
+    // payload names B's conversation for the thread it bubbles in.
+    const parked = tab.events.find((e) => e.type === "turn.queued");
+    expect(parked).toMatchObject({
       sessionId: "conv-a",
-      payload: { text: "about B", position: 1 },
+      payload: { text: "about B", position: 1, conversationId: "conv-b" },
     });
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
     await tab.until?.("turn.cancelled");
@@ -979,6 +981,11 @@ describe("run queue and steer (M3-09)", () => {
       [{ role: "user", content: "about A" }],
       [{ role: "user", content: "about B" }],
     ]);
+    // B's turn names the send it answers, so B's thread takes back exactly its bubble.
+    const messageId = (parked?.payload as { messageId?: unknown } | undefined)?.messageId;
+    const starts = tab.events.filter((e) => e.type === "turn.started");
+    expect(starts).toHaveLength(2);
+    expect(starts[1]).toMatchObject({ payload: { sendMessageId: messageId } });
   });
 
   it("holds ten sends per conversation, then refuses with the count", async () => {
@@ -1111,7 +1118,7 @@ describe("run queue and steer (M3-09)", () => {
     tab.dequeue?.("conv-drop", messageId as string);
     await tab.until?.("turn.dequeued");
     expect(tab.events.find((e) => e.type === "turn.dequeued")).toMatchObject({
-      payload: { messageId },
+      payload: { messageId, conversationId: "conv-drop" },
     });
     // The taken-back send never runs: the first turn is the only turn.
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
