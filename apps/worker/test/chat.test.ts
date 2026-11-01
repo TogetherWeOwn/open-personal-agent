@@ -980,6 +980,76 @@ describe("approvals in the DO host (M3-07a)", () => {
     expect(again?.[0]).toEqual(first?.[0]);
   });
 
+  it("interrupts a resumed turn evicted mid-run, and drops its stale stop", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    const turn = {
+      conversationId: "conv-evict",
+      turnId: started?.turnId ?? "",
+      replyId: (started?.payload as { messageId: string }).messageId,
+      providerId: "scripted",
+      model: "test-model",
+    };
+    const checkpoint = {
+      reply: "Sending.",
+      wrote: true,
+      holds: [],
+      callStarted: false,
+      callRecorded: false,
+      callUsage: null,
+    };
+    expect(await count("turn_states", "1")).toBe(1);
+    // The resumed run's fiber dies with the old stop still in D1: that row is not a clean stop.
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: { ...turn, ...checkpoint, resumed: true },
+      } as never),
+    );
+    await tab.until?.("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict")).at(-1)?.status).toBe("interrupted");
+  });
+
+  it("keeps a resumed turn's new stop when it was evicted while saving it", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict2", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict2",
+          turnId: started?.turnId ?? "",
+          replyId: (started?.payload as { messageId: string }).messageId,
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+          stopping: true,
+        },
+      } as never),
+    );
+    expect(await count("turn_states", "1")).toBe(1);
+    expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+  });
+
   it("waits in the FIFO behind a running turn, then appends a late approval at the end (AC14)", async () => {
     const { browser, owner } = await claim();
     const send = loopTool("send", "consequential");

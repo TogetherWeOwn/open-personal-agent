@@ -130,6 +130,13 @@ interface TurnCheckpoint {
   /** This call's ledger row is written. */
   callRecorded: boolean;
   callUsage: CallUsage | null;
+  /**
+   * It runs again from a saved stop, so its `turn_states` row predates this run: the row alone
+   * no longer shows that the turn stopped cleanly.
+   */
+  resumed?: boolean;
+  /** It is saving a stop (approval, limit) now: a row found on recovery is that stop's. */
+  stopping?: boolean;
 }
 
 /** A resumed batch, for the loop's approval hooks. */
@@ -810,6 +817,7 @@ export class Assistant extends Agent<Bindings> {
       callStarted: false,
       callRecorded: false,
       callUsage: null,
+      resumed: true,
     };
     void this.runFiber("chat-turn", async (fiber) => {
       fiber.stash(cp);
@@ -945,6 +953,8 @@ export class Assistant extends Agent<Bindings> {
 
     let persisted = false;
     const persistStop = async (status: TurnStatus) => {
+      cp.stopping = true;
+      stash(cp);
       const saved = await repo.turns.save({
         turnId,
         conversationId,
@@ -1234,8 +1244,10 @@ export class Assistant extends Agent<Bindings> {
     if (!cp) return;
     const repo = this.#repo;
     // A turn that stopped cleanly saved its state to D1 before its fiber ended; if the process
-    // died between that save and the fiber's end, the turn is waiting, not interrupted.
-    if (await repo.turns.load(cp.turnId)) {
+    // died between that save and the fiber's end, the turn is waiting, not interrupted. A resumed
+    // turn's row is the stop it resumed from, unless it was saving a new one: evicted mid-run, it
+    // is interrupted like any other, and its stale row goes, so the stop can't be resumed again.
+    if ((!cp.resumed || cp.stopping) && (await repo.turns.load(cp.turnId))) {
       for (const hold of cp.holds) this.limits.release(hold);
       return;
     }
