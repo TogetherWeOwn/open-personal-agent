@@ -73,6 +73,8 @@ export interface Session {
   userId: string;
   /** For the scoped repository (ADR 0010 D3). */
   scope: UserScope;
+  /** When this session last confirmed a passkey (`POST /api/auth/step-up/session`), or `null`. */
+  stepUpAt: number | null;
 }
 
 /** Hono's environment for the app: bindings, plus the session the guard resolved. */

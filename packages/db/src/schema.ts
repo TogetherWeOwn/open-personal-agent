@@ -69,6 +69,8 @@ export const sessions = sqliteTable(
     lastSeenAt: integer("last_seen_at").notNull().default(now),
     expiresAt: integer("expires_at").notNull(),
     revokedAt: integer("revoked_at"),
+    /** The last passkey step-up in this session; account actions need one in the last 5 minutes. */
+    stepUpAt: integer("step_up_at"),
   },
   (t) => [index("sessions_user_idx").on(t.userId, t.expiresAt)],
 );
@@ -102,7 +104,9 @@ export const webauthnChallenges = sqliteTable(
   "webauthn_challenges",
   {
     idHash: text("id_hash").primaryKey(),
-    kind: text("kind", { enum: ["claim", "recovery", "login"] }).notNull(),
+    kind: text("kind", {
+      enum: ["claim", "recovery", "recovery_code", "login", "step_up", "step_up_vault_reset"],
+    }).notNull(),
     challenge: text("challenge").notNull(),
     userId: text("user_id"),
     tokenHash: text("token_hash"),
@@ -289,6 +293,50 @@ export const userSettings = sqliteTable("user_settings", {
   onboardedAt: integer("onboarded_at"),
   updatedAt: integer("updated_at").notNull().default(now),
 });
+
+/**
+ * The user's per-tool decision override (M3-02 AC2, EL fix 9). No row means the SEC-4 default for
+ * the tool's risk class. The policy engine enforces its floors whatever the row says.
+ */
+export const toolOverrides = sqliteTable(
+  "tool_overrides",
+  {
+    userId: userId(),
+    tool: text("tool").notNull(),
+    decision: text("decision", { enum: ["auto", "ask", "never"] }).notNull(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.tool] }),
+    check("tool_overrides_decision", sql`${t.decision} IN ('auto', 'ask', 'never')`),
+  ],
+);
+
+/**
+ * Standing approvals (M3-02 AC2, M3-07 AC3): this task, an hour, or always for one destination.
+ * Created only from an untainted context. A revoked row stays until the user is deleted.
+ */
+export const grants = sqliteTable(
+  "grants",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    tool: text("tool").notNull(),
+    scope: text("scope", { enum: ["task", "hour", "destination"] }).notNull(),
+    taskId: text("task_id"),
+    destination: text("destination"),
+    expiresAt: integer("expires_at"),
+    createdAt: createdAt(),
+    revokedAt: integer("revoked_at"),
+  },
+  (t) => [
+    index("grants_user_tool_idx").on(t.userId, t.tool),
+    check(
+      "grants_scope_target",
+      sql`(${t.scope} = 'task' AND ${t.taskId} IS NOT NULL) OR (${t.scope} = 'hour' AND ${t.expiresAt} IS NOT NULL) OR (${t.scope} = 'destination' AND ${t.destination} IS NOT NULL)`,
+    ),
+  ],
+);
 
 /**
  * Memory (ADR 0008). Only `MemoryService` (`./memory.ts`) reads or writes these tables; the

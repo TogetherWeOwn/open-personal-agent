@@ -26,6 +26,7 @@ export type ChallengeKind =
   | "recovery"
   | "recovery_code"
   | "login"
+  | "step_up"
   | "step_up_vault_reset";
 
 /** A session row to insert. The cookie value never reaches the store, only its hash. */
@@ -314,11 +315,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       find: async (tokenHash: string, now: number, idleSince: number) => {
         const row = await db
           .prepare(
-            `SELECT id, user_id, last_seen_at FROM sessions
+            `SELECT id, user_id, last_seen_at, step_up_at FROM sessions
              WHERE token_hash = ? AND ${LIVE}`,
           )
           .bind(tokenHash, now, idleSince)
-          .first<{ id: string; user_id: string; last_seen_at: number }>();
+          .first<{
+            id: string;
+            user_id: string;
+            last_seen_at: number;
+            step_up_at: number | null;
+          }>();
         return row && { ...row, scope: scopeFromSession({ userId: row.user_id }) };
       },
       /** Whether the user's session `id` is still live by `find`'s rules: a socket rechecks it. */
@@ -349,6 +355,26 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             .bind(l.now, l.previousTokenHash),
           insertSession(l.session),
           audit(l.session.userId, "auth.login", "auth", "ok"),
+        ]);
+      },
+      /** Records a passkey step-up in the user's session `id`: the counter, the time, the audit row. */
+      stepUp: async (s: {
+        id: string;
+        userId: string;
+        passkeyId: string;
+        counter: number;
+        now: number;
+      }) => {
+        await db.batch([
+          db
+            .prepare(
+              "UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ? AND user_id = ?",
+            )
+            .bind(s.counter, s.now, s.passkeyId, s.userId),
+          db
+            .prepare("UPDATE sessions SET step_up_at = ? WHERE id = ? AND user_id = ?")
+            .bind(s.now, s.id, s.userId),
+          audit(s.userId, "auth.step_up", "auth", "ok"),
         ]);
       },
       /** The user's live sessions, newest first. */

@@ -14,6 +14,7 @@ import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./sessi
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
 import { stepUpRoutes } from "./step-up";
+import { toolSettings } from "./tool-settings";
 import { usageRoutes } from "./usage";
 import { vaultRoutes } from "./vault-reset";
 
@@ -44,6 +45,7 @@ shared.use("/api/secrets/*", async (c, next) => {
 
 shared.route("/api/settings/vault", vaultRoutes);
 shared.route("/api/settings", settings);
+shared.route("/api/settings", toolSettings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 shared.get("/setup", async (c) => {
