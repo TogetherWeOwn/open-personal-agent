@@ -8,6 +8,7 @@ import { systemStore } from "@opa/db/system";
 import { Hono } from "hono";
 import { type AllowanceWarnings, WARNINGS_TTL_MS } from "./allowances";
 import type { AppEnv } from "./env";
+import { finishSetup } from "./model-settings";
 
 interface Limits {
   taskBudgetMicroUsd: number;
@@ -117,5 +118,7 @@ spendingRoutes.put("/", async (c) => {
       return c.json({ error: "not_saved" }, 500);
     }
   }
+  // Saving the limits finishes onboarding's "Costs and limits" if it was skipped (M3-24 AC1).
+  await finishSetup(user.settings, "costs");
   return c.json({ settings: after });
 });

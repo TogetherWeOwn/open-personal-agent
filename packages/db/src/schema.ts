@@ -614,6 +614,13 @@ export const userSettings = sqliteTable("user_settings", {
   learnFromChats: integer("learn_from_chats", { mode: "boolean" }).notNull().default(true),
   /** Settings › Assistant › "Show work": how much of a turn's timeline the thread shows (M3-09). */
   showWork: text("show_work").notNull().default("collapsed"),
+  /**
+   * Onboarding's skipped steps not finished since, the setup checklist (M3-24 AC1, A-O2). Null
+   * means nothing was ever skipped; an empty list means every skipped step was finished later.
+   */
+  setupSkipped: text("setup_skipped", { mode: "json" }).$type<string[]>(),
+  /** The checklist's Hide: it leaves the chat's empty state, never Settings › Assistant. */
+  setupHidden: integer("setup_hidden", { mode: "boolean" }).notNull().default(false),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 

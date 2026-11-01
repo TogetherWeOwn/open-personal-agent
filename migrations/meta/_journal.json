@@ -162,6 +162,13 @@
       "when": 1793563185185,
       "tag": "0022_show_work",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1793565302517,
+      "tag": "0023_setup_checklist",
+      "breakpoints": true
     }
   ]
 }

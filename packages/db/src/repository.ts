@@ -1836,6 +1836,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   onboardedAt: userSettings.onboardedAt,
                   learnFromChats: userSettings.learnFromChats,
                   showWork: userSettings.showWork,
+                  setupSkipped: userSettings.setupSkipped,
+                  setupHidden: userSettings.setupHidden,
                 })
                 .from(users)
                 .leftJoin(userSettings, eq(userSettings.userId, users.id))
