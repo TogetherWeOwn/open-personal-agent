@@ -544,6 +544,7 @@ describe("rotation status and per-user reset (crypto review C-1)", () => {
     expect(await vaultStatus(vault)).toEqual({
       rotation: "none",
       previousEpoch: null,
+      remaining: 0,
       orphanedRows: 0,
     });
     await put(vault);
@@ -556,11 +557,24 @@ describe("rotation status and per-user reset (crypto review C-1)", () => {
     expect(await vaultStatus(migrating)).toEqual({
       rotation: "complete",
       previousEpoch: 1,
+      remaining: 0,
       orphanedRows: 0,
     });
     // Retiring the epoch doesn't make the rotation look unconfigured: PREV is still set.
     await retireEpoch(migrating, 1, { caller });
     expect((await vaultStatus(migrating)).rotation).toBe("complete");
+  });
+
+  it("stays pending on an empty deployment until a DEK under the new epoch blocks old enrolment", async () => {
+    // A rolling deploy: an epoch-1 instance can still enrol a first user, so PREV isn't done.
+    const migrating = await rotated();
+    expect(await vaultStatus(migrating)).toMatchObject({ rotation: "pending", remaining: 0 });
+    await put(vault);
+    expect(await vaultStatus(migrating)).toMatchObject({ rotation: "pending", remaining: 1 });
+    await rewrap(migrating, { caller });
+    expect(await vaultStatus(migrating)).toMatchObject({ rotation: "complete", remaining: 0 });
+    // Now epoch 1 can't enrol anyone, so nothing more lands under PREV.
+    await expect(put(vault, { userId: "u2" })).rejects.toThrow("encrypt_failed");
   });
 
   it("counts the rows of users no held epoch can open, and their state", async () => {

@@ -224,4 +224,23 @@ describe("the rotation runner", () => {
       orphanedRows: 0,
     });
   });
+
+  it("keeps PREV on a deployment with no DEK yet, writing nothing, until one lands", async () => {
+    const { browser } = await claim();
+    const raw: WorkerEnv = {
+      ...env,
+      OPA_MASTER_KEY: `2:${newKey()}`,
+      OPA_MASTER_KEY_PREV: newKey(),
+    };
+    const ctx = createExecutionContext();
+    await worker.scheduled({} as ScheduledController, raw, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(await count("audit_log", "action LIKE 'vault.%'")).toBe(0);
+    const res = await as(browser, await compose(raw)).req("/api/health");
+    // An old instance of the rolling deploy could still enrol a first user under PREV.
+    expect((await res.json<{ vault: unknown }>()).vault).toEqual({
+      rotation: "pending",
+      orphanedRows: 0,
+    });
+  });
 });

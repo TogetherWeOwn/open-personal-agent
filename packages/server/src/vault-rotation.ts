@@ -14,17 +14,15 @@ export async function runRotation(env: Pick<Env, "VAULT">): Promise<void> {
   const vault = env.VAULT;
   if (!vault) return;
   try {
+    const before = await vaultStatus(vault);
+    if (before.rotation !== "pending" || before.remaining === 0) return;
+    const { rewrapped } = await rewrap(vault, { caller: CALLER, limit: ROTATION_BATCH });
+    // Retired only once a DEK under the new epoch stops old instances enrolling under PREV.
     const { rotation, previousEpoch } = await vaultStatus(vault);
-    if (rotation !== "pending" || previousEpoch === null) return;
-    const { rewrapped, remaining } = await rewrap(vault, {
-      caller: CALLER,
-      limit: ROTATION_BATCH,
-    });
-    if (remaining === 0) await retireEpoch(vault, previousEpoch, { caller: CALLER });
-    log.info("vault.rotation", {
-      count: rewrapped,
-      status: remaining === 0 ? "complete" : "pending",
-    });
+    if (rotation === "complete" && previousEpoch !== null) {
+      await retireEpoch(vault, previousEpoch, { caller: CALLER });
+    }
+    log.info("vault.rotation", { count: rewrapped, status: rotation });
   } catch (error) {
     // The next tick tries again; health keeps saying `pending` meanwhile. A vault error's code is
     // fixed text, such as `rewrap_conflict`.

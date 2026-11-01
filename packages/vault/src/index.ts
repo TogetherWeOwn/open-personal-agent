@@ -255,20 +255,31 @@ export async function retireEpoch(
 
 /** A rotation's progress, and how many rows no held epoch can open. Counts only, no ids. */
 export interface VaultStatus {
-  /** `none`: no PREV. `pending`: DEKs remain under PREV. `complete`: PREV can be deleted. */
+  /**
+   * `none`: no PREV. `complete`: PREV can be deleted, as no DEK is under it and one is under the
+   * current epoch, which stops an instance still on PREV enrolling anyone (`insertUserKey`).
+   * Otherwise `pending`, even with nothing to re-key: on a deployment with no DEK yet, an old
+   * instance of a rolling deploy could still enrol a first user under PREV.
+   */
   rotation: "none" | "pending" | "complete";
   /** PREV's epoch, while it is configured. */
   previousEpoch: number | null;
+  /** DEKs still under PREV. */
+  remaining: number;
   /** `user_keys` and `secrets` rows of users with no DEK under an epoch this vault holds. */
   orphanedRows: number;
 }
 
 export async function vaultStatus(vault: Vault): Promise<VaultStatus> {
-  const { previous, keks, store } = stateOf(vault);
+  const { current, previous, keks, store } = stateOf(vault);
   const orphanedRows = await store.countOrphans([...keks.keys()]);
-  if (previous === null) return { rotation: "none", previousEpoch: null, orphanedRows };
-  const left = await store.countUserKeys(previous);
-  return { rotation: left > 0 ? "pending" : "complete", previousEpoch: previous, orphanedRows };
+  if (previous === null) {
+    return { rotation: "none", previousEpoch: null, remaining: 0, orphanedRows };
+  }
+  const remaining = await store.countUserKeys(previous);
+  const barrier = remaining === 0 && (await store.countUserKeys(current.version)) > 0;
+  const rotation = barrier ? "complete" : "pending";
+  return { rotation, previousEpoch: previous, remaining, orphanedRows };
 }
 
 /**
