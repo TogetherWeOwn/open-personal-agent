@@ -134,7 +134,11 @@ export async function refreshApprovals(): Promise<void> {
         : {}),
     });
   } catch {
-    if (mine === generation && state.status !== "ready") set({ status: "error" });
+    if (mine !== generation) return;
+    // Nothing new to set, so arm the timer again here: a batch this clock calls expired is
+    // asked about once more after the same pause, not left on screen until focus or reconnect.
+    watchExpiry();
+    if (state.status !== "ready") set({ status: "error" });
   }
 }
 
