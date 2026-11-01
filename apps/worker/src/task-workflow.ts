@@ -53,8 +53,11 @@ export interface TaskTurnState {
   turnId: string;
   /** The task's own budget (COST-3, A-Co2), when its creator set one; else the user's default. */
   budgetMicroUsd?: number;
-  /** Why the task is paused as `budget_limited`, so Continue knows what to lift (M3-17 AC1). */
-  paused?: { kind: LimitKind; detail: string };
+  /**
+   * Why the task is paused as `budget_limited`, so Continue knows what to lift (M3-17 AC1).
+   * `final`: the run ended at an execution limit (steps, duration) and can't be continued.
+   */
+  paused?: { kind: LimitKind | "steps" | "duration"; detail: string; final?: boolean };
 }
 
 /** How long a task paused by a limit waits for Continue before its run ends (it stays paused). */
@@ -172,6 +175,12 @@ export async function executeTask(
     const message = redactSecrets(messageOf(err), secrets).slice(0, 500);
     await stepper
       .do("task:finish:error", {}, async () => {
+        if (limit) {
+          // The run ends here, so this stop can't be continued: say so where Continue looks.
+          const state = parseState((await user.tasks.get(task.id))?.state ?? null);
+          const paused = { kind: limit.kind, detail: limit.detail, final: true };
+          if (state) await user.tasks.saveState(task.id, JSON.stringify({ ...state, paused }));
+        }
         await user.tasks.finish(task.id, limit ? "budget_limited" : "failed", message);
         return null;
       })
@@ -269,8 +278,8 @@ async function driveLoop(
         // a refused call doesn't run, and the loop stops with `tool_rate` (COST-2).
         const out = await ctx.step(
           `tool:${toolSeq}`,
-          async (): Promise<ToolOutput> =>
-            (await ctx.budget.allowToolCall())
+          async (key): Promise<ToolOutput> =>
+            (await ctx.budget.allowToolCall(key))
               ? tool.execute(input, new AbortController().signal)
               : { ok: false, content: SLOW_DOWN, slowDown: true },
           tool.manifest.riskClass === "read" ? undefined : { retries: { limit: 0, delayMs: 0 } },
@@ -376,25 +385,31 @@ async function pause(
       resets: kind === "daily" ? nextUtcDay(at) : kind === "monthly_hard" ? nextUtcMonth(at) : null,
     };
   });
-  const wait = Math.min(PAUSE_WAIT_MS, (resets ?? Number.POSITIVE_INFINITY) - now());
-  await ctx
-    .waitForEvent(`task:continue:${cycle}`, { type: "continue", timeoutMs: Math.max(1_000, wait) })
-    .catch(() => ({ payload: null }));
-  // The wake step's own guard must not count the pause either; once the step has recorded how
-  // long it was, that record (which a replay returns) is what counts.
   const before = paused.ms;
-  paused.ms = before + Math.max(0, now() - at);
-  // A cancelled (stopped) task's step throws here, which ends the run as cancelled.
-  const woke = await ctx.step(`task:wake:${cycle}`, async () => {
-    const pausedMs = Math.max(0, now() - at);
-    const status = (await user.tasks.get(taskId))?.status;
-    // Continue moved it back before waking the run; else a daily or hard cap may have lifted.
-    if (status === "running") return { resume: true, pausedMs };
-    const lifted = resets !== null && now() >= resets && (await user.tasks.resume(taskId));
-    return { resume: lifted, pausedMs };
-  });
-  paused.ms = before + woke.pausedMs;
-  return woke.resume;
+  // A wait is at most 7 days; a cap that lifts later (the hard cap, at the next month) is waited
+  // for in turns, each recorded, until it lifts or Continue comes.
+  for (let turn = 0; ; turn += 1) {
+    const name = turn === 0 ? `${cycle}` : `${cycle}:${turn}`;
+    const wait = Math.min(PAUSE_WAIT_MS, (resets ?? Number.POSITIVE_INFINITY) - now());
+    await ctx
+      .waitForEvent(`task:continue:${name}`, { type: "continue", timeoutMs: Math.max(1_000, wait) })
+      .catch(() => ({ payload: null }));
+    // The wake step's own guard must not count the pause either; once the step has recorded
+    // how long it was, that record (which a replay returns) is what counts.
+    paused.ms = before + Math.max(0, now() - at);
+    // A cancelled (stopped) task's step throws here, which ends the run as cancelled.
+    const woke = await ctx.step(`task:wake:${name}`, async () => {
+      const pausedMs = Math.max(0, now() - at);
+      const status = (await user.tasks.get(taskId))?.status;
+      // Continue moved it back before waking the run; else a daily or hard cap may have lifted.
+      if (status === "running") return { resume: true, again: false, pausedMs };
+      if (resets === null) return { resume: false, again: false, pausedMs };
+      if (now() < resets) return { resume: false, again: status === "budget_limited", pausedMs };
+      return { resume: await user.tasks.resume(taskId), again: false, pausedMs };
+    });
+    paused.ms = before + woke.pausedMs;
+    if (!woke.again) return woke.resume;
+  }
 }
 
 const nextUtcDay = (t: number) => t - (t % 86_400_000) + 86_400_000;

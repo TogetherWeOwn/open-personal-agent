@@ -16,6 +16,7 @@ interface TaskWorkflows {
 /** The assistant's task-budget RPC (apps/worker's `Assistant`). */
 interface BudgetRpc {
   raiseTask(taskId: string): Promise<boolean>;
+  unraiseTask(taskId: string): Promise<void>;
   taskBudget(taskId: string): Promise<unknown>;
 }
 
@@ -33,11 +34,11 @@ async function pausedTask(c: Ctx) {
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const task = await user.tasks.get(id);
   if (!task) return null;
-  let kind: string | undefined;
+  let paused: { kind?: string; final?: boolean } | undefined;
   try {
-    kind = (JSON.parse(task.state ?? "{}") as { paused?: { kind?: string } }).paused?.kind;
+    paused = (JSON.parse(task.state ?? "{}") as { paused?: typeof paused }).paused;
   } catch {}
-  return { user, task, kind };
+  return { user, task, kind: paused?.kind, final: paused?.final === true };
 }
 
 /** Wakes the run; a Workflow that has ended (its pause ran out) can't be continued. */
@@ -60,10 +61,13 @@ async function wake(c: Ctx, instanceId: string | null): Promise<boolean> {
 taskRoutes.post("/:id/continue", async (c) => {
   const found = await pausedTask(c);
   if (!found) return c.json({ error: "not_found" }, 404);
-  const { user, task, kind } = found;
+  const { user, task, kind, final } = found;
   if (task.status !== "budget_limited") return c.json({ error: "not_paused" }, 409);
-  if (kind === "task_budget") {
-    const assistant = user.assistant() as unknown as Partial<BudgetRpc>;
+  // A steps or duration stop ended the run; only a new task can go on from there.
+  if (final) return c.json({ error: "not_continuable" }, 409);
+  const assistant = user.assistant() as unknown as Partial<BudgetRpc>;
+  const raise = kind === "task_budget";
+  if (raise) {
     if (typeof assistant.raiseTask !== "function") return c.json({ error: "unavailable" }, 503);
     if (!(await assistant.raiseTask(task.id))) {
       // No budget left to raise means the run settled it and ended: nothing can continue.
@@ -71,10 +75,16 @@ taskRoutes.post("/:id/continue", async (c) => {
       return c.json({ error: ended ? "ended" : "already_raised" }, 409);
     }
   }
-  if (!(await user.tasks.resume(task.id))) return c.json({ error: "not_paused" }, 409);
+  // Whatever stops the Continue from here undoes the raise, so the one raise isn't spent.
+  const undo = () => (raise ? assistant.unraiseTask?.(task.id) : undefined);
+  if (!(await user.tasks.resume(task.id))) {
+    await undo();
+    return c.json({ error: "not_paused" }, 409);
+  }
   if (!(await wake(c, task.workflowInstanceId))) {
-    // Nothing is left to run it: put the row back as it was.
+    // Nothing woke the run: put the row back as it was.
     await user.tasks.finish(task.id, "budget_limited");
+    await undo();
     return c.json({ error: "ended" }, 409);
   }
   return c.json({ status: "running" });
