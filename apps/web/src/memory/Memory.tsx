@@ -6,8 +6,10 @@
 // Every delete says a backup is kept for 30 days (AC3). A delete is held while its Undo toast is
 // open and sent when the toast closes, the screen goes away or the page unloads, so the server's
 // forget stays a true hard delete and Undo never needs a restore.
+import { Check } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Checkbox,
   Heading,
   Input,
   Label,
@@ -36,6 +38,7 @@ import {
   listNotes,
   memoryError,
   type Note,
+  SEARCH_LIMIT,
 } from "./api";
 import { Knows } from "./Knows";
 import { NoteMeta, NoteRow } from "./NoteRow";
@@ -49,16 +52,28 @@ const quote = (text: string) => `'${text.length > 60 ? `${text.slice(0, 57)}…`
 interface Held {
   ids: string[];
   message: string;
+  /** From the selection: a failure puts the notes back in it. */
+  bulk: boolean;
 }
 
-/** Sends a held delete even while the page unloads. */
-const send = (ids: string[]) =>
-  fetch("/api/memory/delete", {
-    method: "POST",
-    keepalive: true,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ids }),
-  });
+/** The most IDs one delete request takes (the server's limit). */
+const BATCH = 1000;
+
+/** Sends a delete in batches the server accepts; `keepalive` lets it finish as the page unloads. */
+async function send(ids: string[], keepalive = false) {
+  const missed: string[] = [];
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const res = await fetch("/api/memory/delete", {
+      method: "POST",
+      keepalive,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids: ids.slice(i, i + BATCH) }),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    missed.push(...((await res.json()) as { failed: string[] }).failed);
+  }
+  return missed;
+}
 
 export function Memory() {
   const [notes, setNotes] = useState<Note[] | null>(null);
@@ -75,16 +90,20 @@ export function Memory() {
   const [draft, setDraft] = useState("");
   const [learning, setLearning] = useState(true);
   const [knows, setKnows] = useState(false);
+  const [standing, setStanding] = useState(false);
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
   const keys = useRef(new Map<string, string>());
 
   const load = useCallback(async (q: string) => {
     try {
-      setNotes(await listNotes(q));
+      const loaded = await listNotes(q);
+      setNotes(loaded);
       setShown(q);
       setFailed(false);
+      return loaded;
     } catch {
       setFailed(true);
+      return null;
     }
   }, []);
   useEffect(() => {
@@ -96,12 +115,17 @@ export function Memory() {
   }, [query, load]);
 
   // The held delete goes out when the toast closes, and also if the screen or page goes away.
+  // The toast closes with it, so a page restored from the back/forward cache can't send it twice.
   const heldRef = useRef<Held | null>(null);
   heldRef.current = held;
   useEffect(() => {
     const flush = () => {
-      if (heldRef.current) send(heldRef.current.ids);
+      const h = heldRef.current;
+      if (!h) return;
       heldRef.current = null;
+      send(h.ids, true).catch(() => {});
+      setHeld(null);
+      setNotes((all) => all?.filter((n) => !h.ids.includes(n.id)) ?? null);
     };
     window.addEventListener("pagehide", flush);
     return () => {
@@ -114,9 +138,7 @@ export function Memory() {
     setHeld(null);
     heldRef.current = null;
     try {
-      const res = await send(h.ids);
-      if (!res.ok) throw new Error(String(res.status));
-      const { failed: missed } = (await res.json()) as { failed: string[] };
+      const missed = await send(h.ids);
       setNotes((all) => all?.filter((n) => !h.ids.includes(n.id) || missed.includes(n.id)) ?? null);
       if (missed.length > 0) {
         const names = (notes ?? []).filter((n) => missed.includes(n.id)).map((n) => quote(n.text));
@@ -128,14 +150,18 @@ export function Memory() {
       }
     } catch {
       setProblem("I couldn't delete that. Check your connection and try again.");
+      if (h.bulk) {
+        setSelected(new Set(h.ids));
+        setSelecting(true);
+      }
     }
   };
 
   /** Holds the delete behind an Undo toast; a delete already held goes out first. */
-  const hold = (ids: string[], message: string) => {
+  const hold = (ids: string[], message: string, bulk = false) => {
     if (heldRef.current) commit(heldRef.current);
     setProblem(null);
-    setHeld({ ids, message });
+    setHeld({ ids, message, bulk });
     setAnnouncement(message);
     setSelecting(false);
     setSelected(new Set());
@@ -145,13 +171,40 @@ export function Memory() {
     keys.current.set(next.id, keys.current.get(old.id) ?? old.id);
     setNotes((all) => all?.map((n) => (n.id === old.id ? next : n)) ?? null);
     setAnnouncement("Saved.");
+    // The new text may not match the search any more: ask the server again.
+    if (shown) {
+      void load(shown).then((found) => {
+        if (found && !found.some((n) => n.id === next.id)) {
+          setAnnouncement("Saved. It no longer matches your search.");
+        }
+      });
+    }
+  };
+
+  // Esc leaves selection mode wherever focus is, a note's checkbox included; the dialog has its own.
+  useEffect(() => {
+    if (!selecting || confirming) return;
+    const leave = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      setSelecting(false);
+      setSelected(new Set());
+    };
+    window.addEventListener("keydown", leave);
+    return () => window.removeEventListener("keydown", leave);
+  }, [selecting, confirming]);
+
+  const stale = (message: string) => {
+    setProblem(message);
+    void load(shown);
   };
 
   const add = async () => {
     try {
-      const note = await addNote(draft);
+      const note = await addNote(draft, standing ? "instruction" : "fact");
       setNotes((all) => [note, ...(all ?? [])]);
       setDraft("");
+      setStanding(false);
+      setProblem(null);
       setAnnouncement("Added.");
     } catch (e) {
       setProblem(memoryError(e));
@@ -171,10 +224,11 @@ export function Memory() {
         if (on) next.add(note.id);
         else next.delete(note.id);
         setSelected(next);
-        setAnnouncement(`${next.size} selected`);
+        setAnnouncement(`${selectable.filter((n) => next.has(n.id)).length} selected`);
       }}
       onSaved={(next) => saved(note, next)}
       onDelete={() => hold([note.id], `Deleted ${quote(note.text)}. ${BACKUP_LINE}`)}
+      onStale={stale}
     />
   );
 
@@ -184,7 +238,9 @@ export function Memory() {
   const recent = shown
     ? []
     : all.filter((n) => Date.now() - n.createdAt < WEEK && n.trust !== "system");
-  const picked = all.filter((n) => selected.has(n.id));
+  // Only notes on screen count: a search can hide selected ones, and held ones are on their way out.
+  const selectable = all.filter((n) => !deleting.has(n.id));
+  const picked = selectable.filter((n) => selected.has(n.id));
   const pickedInstructions = picked.filter((n) => n.kind === "instruction").length;
 
   return (
@@ -242,6 +298,11 @@ export function Memory() {
         </EmptyState>
       ) : (
         <>
+          {shown && all.length >= SEARCH_LIMIT && (
+            <p className="text-sm text-text-muted">
+              Showing the first {SEARCH_LIMIT} matches. Add a word to narrow it.
+            </p>
+          )}
           {recent.length > 0 && (
             <section aria-labelledby="recent" className="flex flex-col gap-3">
               <Heading id="recent" level={2} className="text-lg font-semibold">
@@ -315,6 +376,16 @@ export function Memory() {
         >
           <Label className="font-medium">Add a note</Label>
           <TextArea rows={2} className="rounded-lg border border-border-strong bg-surface p-2" />
+          <Checkbox
+            isSelected={standing}
+            onChange={setStanding}
+            className="group flex min-h-11 items-center gap-2"
+          >
+            <span className="flex size-5 items-center justify-center rounded border border-border-strong group-data-selected:bg-accent group-data-selected:text-accent-contrast group-data-focus-visible:outline-2 group-data-focus-visible:outline-focus-ring">
+              {standing && <Check aria-hidden="true" size={14} />}
+            </span>
+            Make it a standing instruction
+          </Checkbox>
           <Button className="mt-1 self-start" onPress={add} isDisabled={draft.trim() === ""}>
             Add
           </Button>
@@ -323,16 +394,15 @@ export function Memory() {
       {selecting && (
         <section
           aria-label="Selection"
-          onKeyDown={(e) => e.key === "Escape" && setSelecting(false)}
           className="sticky bottom-20 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-border-strong bg-surface-raised p-3 shadow-lg sm:bottom-4"
         >
-          <p className="flex-1">{selected.size} selected</p>
-          <Button onPress={() => setSelected(new Set(all.map((n) => n.id)))}>
-            Select all {all.length}
+          <p className="flex-1">{picked.length} selected</p>
+          <Button onPress={() => setSelected(new Set(selectable.map((n) => n.id)))}>
+            Select all {selectable.length}
           </Button>
           <Button
             variant="danger"
-            isDisabled={selected.size === 0}
+            isDisabled={picked.length === 0}
             onPress={() => setConfirming(true)}
           >
             Delete…
@@ -358,6 +428,7 @@ export function Memory() {
           hold(
             picked.map((n) => n.id),
             `Deleted ${picked.length} ${picked.length === 1 ? "note" : "notes"}. ${BACKUP_LINE}`,
+            true,
           )
         }
       >

@@ -28,6 +28,10 @@ const note = (over: Record<string, unknown>) => ({
 interface Stub {
   notes: Record<string, unknown>[];
   deletes: string[][];
+  /** The next versions request fails, once. */
+  versionsFail?: boolean;
+  /** The next add fails, once. */
+  addFail?: boolean;
 }
 
 async function stubMemory(page: Page): Promise<Stub> {
@@ -74,12 +78,19 @@ async function stubMemory(page: Page): Promise<Stub> {
       return route.fulfill({ json: { deleted: ids.filter((id) => !failed.includes(id)), failed } });
     }
     if (path.endsWith("/versions")) {
+      if (stub.versionsFail) {
+        stub.versionsFail = false;
+        return route.fulfill({ status: 500, json: { error: "internal_error" } });
+      }
       return route.fulfill({ json: { versions: [note({ id: "old", text: "Likes tea" })] } });
     }
     if (method === "PUT") {
       const { text } = route.request().postDataJSON() as { text: string };
       if (text === "fail") return route.fulfill({ status: 500, json: { error: "internal_error" } });
       const id = path.split("/").at(-1);
+      if (!stub.notes.some((n) => n.id === id)) {
+        return route.fulfill({ status: 404, json: { error: "not_found" } });
+      }
       const next = note({
         id: `${id}-v2`,
         text,
@@ -91,9 +102,14 @@ async function stubMemory(page: Page): Promise<Stub> {
       return route.fulfill({ json: { memory: next } });
     }
     if (method === "POST") {
-      const { text } = route.request().postDataJSON() as { text: string };
+      if (stub.addFail) {
+        stub.addFail = false;
+        return route.fulfill({ status: 500, json: { error: "internal_error" } });
+      }
+      const { text, kind } = route.request().postDataJSON() as { text: string; kind?: string };
       const added = note({
         id: "n9",
+        kind: kind ?? "fact",
         text,
         source: "memory_screen",
         conversation: null,
@@ -217,12 +233,178 @@ test("bulk deletes after a confirmation that names the backup and the instructio
   await expect(page.getByRole("region", { name: "Selection" })).toContainText("1 selected");
 });
 
+test("a search keeps the selection to the notes it shows", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Sam lives in Leeds" }).click({ force: true });
+  const bar = page.getByRole("region", { name: "Selection" });
+  await expect(bar).toContainText("1 selected");
+  await page.getByLabel("Search notes").fill("tea");
+  await expect(page.getByText("Sam lives in Leeds")).toBeHidden();
+  await expect(bar).toContainText("0 selected");
+  await expect(bar.getByRole("button", { name: "Delete…" })).toBeDisabled();
+});
+
+test("Select all leaves out a note waiting behind Undo", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.clock.install();
+  await page.goto("/memory");
+  await expect(page.getByText("Likes green tea")).toBeVisible();
+  // The Undo window stays open for the whole test.
+  await page.clock.pauseAt(Date.now() + 1_000);
+  await page.getByRole("button", { name: "Delete: Likes green tea" }).click();
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 3" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect.poll(() => stub.deletes).toEqual([["n4"], ["n1", "n2", "n3"]]);
+});
+
+test("a failed bulk delete keeps the notes selected", async ({ page }) => {
+  await stubMemory(page);
+  await page.route("/api/memory/delete", (route) => route.fulfill({ status: 500, json: {} }));
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 4" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("I couldn't delete that.");
+  await expect(page.getByRole("region", { name: "Selection" })).toContainText("4 selected");
+});
+
+test("leaving the page sends a held delete and closes its toast", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Delete: Sam lives in Leeds" }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+  );
+  await expect.poll(() => stub.deletes).toEqual([["n1"]]);
+  await expect(page.getByRole("region", { name: "Notifications" })).toBeHidden();
+  await expect(page.getByText("Sam lives in Leeds", { exact: true })).toBeHidden();
+});
+
+test("Select all over 1,000 notes deletes them in batches", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes = Array.from({ length: 1001 }, (_, i) => note({ id: `m${i}`, text: `Note ${i}` }));
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("button", { name: "Select all 1001" }).click();
+  await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("region", { name: "Notifications" })
+    .getByRole("button", { name: "Dismiss" })
+    .click();
+  await expect.poll(() => stub.deletes.map((ids) => ids.length)).toEqual([1000, 1]);
+  await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("Esc on a note's checkbox leaves selection mode", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Sam lives in Leeds" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Selection" })).toBeHidden();
+});
+
 test("adds a note typed on the screen", async ({ page }) => {
   await stubMemory(page);
   await page.goto("/memory");
   await page.getByLabel("Add a note").fill("Allergic to peanuts");
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await expect(page.getByRole("region", { name: "Notes" })).toContainText("Allergic to peanuts");
+});
+
+test("a malformed source link doesn't stop the screen opening", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes.push(note({ id: "n5", text: "Odd link", source: "web", sourceRef: "https://[bad" }));
+  await page.goto("/memory");
+  await expect(page.getByText("Odd link")).toBeVisible();
+  await expect(page.getByText("Sam lives in Leeds")).toBeVisible();
+});
+
+test("a note changed meanwhile refreshes the list and says so", async ({ page }) => {
+  const stub = await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Edit: Sam lives in Leeds" }).click();
+  stub.notes = stub.notes.map((n) =>
+    n.id === "n1" ? note({ id: "n1-v9", text: "Sam lives in York", op: "update" }) : n,
+  );
+  await page.getByLabel("Edit note").fill("Sam lives in Paris");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("alert")).toContainText("That note changed or was deleted meanwhile");
+  await expect(page.getByText("Sam lives in York")).toBeVisible();
+});
+
+test("earlier versions load on a second try after a failure", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.versionsFail = true;
+  await page.goto("/memory");
+  const versions = page.getByRole("button", { name: "Earlier versions" });
+  await versions.click();
+  await expect(page.getByText("I couldn't load the earlier versions.")).toBeVisible();
+  await versions.click();
+  await versions.click();
+  await expect(page.getByRole("region", { name: "Notes" })).toContainText("Likes tea");
+  await expect(page.getByText("I couldn't load the earlier versions.")).toBeHidden();
+});
+
+test("a failed add clears its error once a retry works", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.addFail = true;
+  await page.goto("/memory");
+  await page.getByLabel("Add a note").fill("Allergic to peanuts");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveText("That didn't work. Try again.");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Notes" })).toContainText("Allergic to peanuts");
+  await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("an edit that no longer matches the search leaves the results", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByLabel("Search notes").fill("leeds");
+  await expect(page.getByText("Likes green tea")).toBeHidden();
+  await page.getByRole("button", { name: "Edit: Sam lives in Leeds" }).click();
+  await page.getByLabel("Edit note").fill("Sam lives in Paris");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: 'Nothing matches "leeds".' })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("Saved. It no longer matches your search.");
+});
+
+test("adds a standing instruction to About you", async ({ page }) => {
+  await stubMemory(page);
+  await page.goto("/memory");
+  await page.getByLabel("Add a note").fill("Keep replies short");
+  await page.getByText("Make it a standing instruction").click();
+  await expect(
+    page.getByRole("checkbox", { name: "Make it a standing instruction" }),
+  ).toBeChecked();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("region", { name: "About you" })).toContainText("Keep replies short");
+});
+
+test("says when search shows only the first 100 matches", async ({ page }) => {
+  const stub = await stubMemory(page);
+  stub.notes = Array.from({ length: 100 }, (_, i) => note({ id: `m${i}`, text: `Tea ${i}` }));
+  await page.goto("/memory");
+  await expect(page.getByText(/first 100/)).toBeHidden();
+  await page.getByLabel("Search notes").fill("tea");
+  await expect(
+    page.getByText("Showing the first 100 matches. Add a word to narrow it."),
+  ).toBeVisible();
 });
 
 test("shows the empty state", async ({ page }) => {
