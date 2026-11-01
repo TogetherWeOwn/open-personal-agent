@@ -69,6 +69,13 @@ test("navigation moves focus to the page heading; Back, Forward and reload keep 
   page,
 }) => {
   await page.goto("/");
+  // Shipped Settings screens move focus like every other routed screen.
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/models$/);
+  await expect(h1(page)).toHaveText("Settings");
+  await expect(h1(page)).toBeFocused();
+  await page.getByRole("link", { name: "Chats" }).click();
+  await expect(page).toHaveURL(/\/$/);
   await page.getByRole("link", { name: "Usage" }).click();
   await expect(h1(page)).toHaveText("Usage");
   await expect(h1(page)).toBeFocused();
