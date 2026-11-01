@@ -121,7 +121,8 @@ describe("model settings", () => {
 
   it("starts on Workers AI without a key, then finishes onboarding", async () => {
     const saved = JSON.parse((await put("/model", { kind: "workers-ai" })).text);
-    expect(saved.model).toMatchObject({ kind: "workers-ai", model: STARTER_MODEL });
+    const starter = { kind: "workers-ai", model: STARTER_MODEL, providerId: null, key: null };
+    expect(saved.model).toMatchObject({ ...starter, baseUrl: null });
     const missing = await call(
       "/model/test",
       { method: "POST" },
