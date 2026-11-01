@@ -345,6 +345,44 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         await db.batch(expireApprovals(userId, now, signal));
       },
       expireAllStatements: expireApprovals,
+      /**
+       * The reconciler's expiry (M3-07 AC1, M3-18 AC2): every user's undecided approvals past
+       * `expires_at` move to `expired`, each with its audit row, and every task waiting on one
+       * is cancelled as on a compromise signal (AC13). D1 only, so no Durable Object wakes.
+       * `decided_at = now` with the reason marks this tick's rows for the two statements after
+       * the update. Up to `limit` approvals a tick; returns how many expired.
+       */
+      expireDue: async (now: number, limit = 500) => {
+        const mine = `status = 'expired' AND reason = 'expired' AND decided_at = ?`;
+        const [expired] = await db.batch([
+          db
+            .prepare(
+              `UPDATE approvals SET status = 'expired', reason = 'expired', decided_at = ?,
+                 nonce = NULL, step_up_digest = NULL, step_up_expires_at = NULL,
+                 step_up_session_id = NULL
+               WHERE rowid IN (SELECT rowid FROM approvals
+                 WHERE status = 'pending' AND expires_at <= ? LIMIT ?)`,
+            )
+            .bind(now, now, limit),
+          db
+            .prepare(
+              `INSERT INTO audit_log (user_id, action, module, target_id, result, detail)
+               SELECT user_id, 'approval.expire', 'approvals', batch_id || '/' || approval_id,
+                 'denied', '{"reason":"expired"}'
+               FROM approvals WHERE ${mine}`,
+            )
+            .bind(now),
+          db
+            .prepare(
+              `UPDATE tasks SET status = 'cancelled', finished_at = ?, updated_at = ?
+               WHERE status = 'waiting_for_approval' AND id IN (
+                 SELECT task_id FROM approvals WHERE ${mine} AND task_id IS NOT NULL
+                   AND user_id = tasks.user_id)`,
+            )
+            .bind(now, now, now),
+        ]);
+        return expired?.meta.changes ?? 0;
+      },
     },
 
     sessions: {

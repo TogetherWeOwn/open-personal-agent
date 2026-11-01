@@ -247,6 +247,37 @@ describe("the daily sweep", () => {
     expect(await count("turn_states", "turn_id = 'turn-waiting'")).toBe(1);
   });
 
+  it("keeps a chat with an approval still waiting for the user, which has no task row (AC3)", async () => {
+    await user("u1");
+    await setRetention("u1", 30);
+    // Both look abandoned: an old stopped turn, its reply still streaming. One's approval still
+    // waits (a decision resumes it); the other's expired and no reconciler tick has marked it.
+    for (const [id, expiresAt] of [
+      ["pending", NOW + DAY_MS],
+      ["lapsed", NOW - 1],
+    ] as const) {
+      await chat("u1", id, OLD);
+      await db.batch([
+        db.prepare("UPDATE messages SET status = 'streaming' WHERE id = ?").bind(`${id}-m`),
+        db
+          .prepare(
+            "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state, updated_at) VALUES (?, 'u1', ?, ?, 'p', 'm', 'awaiting_approval', '{}', ?)",
+          )
+          .bind(`turn-${id}`, id, `${id}-m`, OLD),
+        db
+          .prepare(
+            `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+             VALUES (?, 'appr_c1', 0, 'u1', ?, ?, 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?)`,
+          )
+          .bind(`b-${id}`, id, `turn-${id}`, expiresAt),
+      ]);
+    }
+
+    expect(await store().sweep(NOW)).toMatchObject({ conversations: 1, failed: 0 });
+    const left = await db.prepare("SELECT id FROM conversations").all<{ id: string }>();
+    expect(left.results.map((r) => r.id)).toEqual(["pending"]);
+  });
+
   it("removes tool outputs from tasks that ended past the setting, once", async () => {
     await user("u1");
     await setRetention("u1", 0, 7);

@@ -7,8 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { app } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
-import { runRetention } from "@opa/server/retention";
-import { runRotation } from "@opa/server/vault-rotation";
+import { reconcile, reconcilerParts } from "@opa/server/reconciler";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
@@ -109,10 +108,11 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       }
       return app.fetch(forwarded, await env);
     },
+    // The Worker's reconciler without the parts that need its bindings: the owner's assistant
+    // and the export Workflow.
     scheduled: async () => {
-      const app = await env;
-      await runRotation(app);
-      await runRetention(app);
+      const { rotation, retention, approvals } = reconcilerParts;
+      await Promise.all(reconcile(env, Date.now(), { rotation, retention, approvals }));
     },
     db,
   };
