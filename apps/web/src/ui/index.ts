@@ -5,4 +5,6 @@
 export { Button, buttonClass, type Variant } from "./Button";
 export { Card, CardHeader } from "./Card";
 export { type Status, StatusChip, type Trust, TrustChip } from "./chips";
+export { Disclosure, Menu, MenuItem, Tabs } from "./controls";
 export { Banner, EmptyState, Skeleton } from "./feedback";
+export { ConfirmDialog, Dialog, Sheet } from "./overlays";
