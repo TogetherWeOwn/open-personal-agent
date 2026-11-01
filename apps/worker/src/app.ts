@@ -27,7 +27,7 @@ shared.use("/api/secrets/*", async (c, next) => {
   return c.json({ error: "vault_unavailable" }, 503);
 });
 
-app.route("/api/settings", settings);
+shared.route("/api/settings", settings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 shared.get("/setup", async (c) => {
