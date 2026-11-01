@@ -4,6 +4,7 @@
 // which stays mounted behind the others so drafts and streams survive.
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
+import { Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { EmptyState, Page } from "./ui";
@@ -147,14 +148,7 @@ export const routes: Route[] = [
       go("/activity/tasks", "See all tasks"),
     ),
   },
-  {
-    path: "/activity/outputs",
-    nav: "activity",
-    screen: placeholder(
-      "Outputs",
-      "Files I make for you show up here, like summaries and reports.",
-    ),
-  },
+  { path: "/activity/outputs", nav: "activity", screen: Outputs },
   {
     path: "/activity/outputs/:outputId",
     nav: "activity",

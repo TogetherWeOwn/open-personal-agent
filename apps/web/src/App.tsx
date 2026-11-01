@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+
+import { Ellipsis } from "lucide-react";
 import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Heading, Link } from "react-aria-components";
 import {
@@ -38,7 +40,7 @@ import { NavShell } from "./NavShell";
 import { hasNavigated, match, navigate, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { SpendingBanners } from "./settings/SpendingBanners";
-import { APP_NAME, Banner, Button, pageTitle, Sheet } from "./ui";
+import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -464,6 +466,20 @@ export function App({ transport }: AppProps) {
             <Heading level={2} className="truncate px-1 font-semibold">
               {active.title}
             </Heading>
+            <span className="ms-auto">
+              <Menu
+                label={
+                  <>
+                    <Ellipsis aria-hidden="true" size={20} />
+                    <span className="sr-only">Chat options</span>
+                  </>
+                }
+              >
+                <MenuItem href={`/activity/outputs?conversation=${encodeURIComponent(active.id)}`}>
+                  Files in this chat
+                </MenuItem>
+              </Menu>
+            </span>
           </header>
           {!healthy && (
             <Banner tone="danger" alert>

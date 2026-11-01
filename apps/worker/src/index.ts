@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { reconcileAllowances } from "@opa/server/allowances";
 import { runRetention } from "@opa/server/retention";
 import { runRotation } from "@opa/server/vault-rotation";
 import { compose, type WorkerEnv } from "./compose";
@@ -18,11 +19,13 @@ export default {
   async fetch(request, env, ctx) {
     return workerApp.fetch(request, await compose(env), ctx);
   },
-  // The */10 reconciler (ADR 0003 #4): a pending key rotation (crypto review C-1) and retention
-  // (M3-18). Each part logs its own failure, so one never stops the other.
+  // The */10 reconciler (ADR 0003 #4): a pending key rotation (crypto review C-1), the 70%
+  // allowance warnings (COST-5) and retention (M3-18). Each part logs its own failure, so one
+  // never stops the others.
   async scheduled(_controller, env, ctx) {
     const composed = compose(env);
     ctx.waitUntil(composed.then(runRotation));
+    ctx.waitUntil(composed.then((e) => reconcileAllowances(e)));
     ctx.waitUntil(composed.then((e) => runRetention(e)));
   },
 } satisfies ExportedHandler<WorkerEnv>;

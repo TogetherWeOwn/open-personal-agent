@@ -7,8 +7,11 @@
 import type { LoopTool, ToolOutput } from "@opa/harness-builtin";
 
 export type FilePorts = {
-  /** Stored under the caller's `u/{userId}/` prefix; `id` must be a single safe segment. */
-  putFile(id: string, content: string, contentType: string): Promise<unknown>;
+  /**
+   * Stored under the caller's `u/{userId}/` prefix; `id` must be a single safe segment. The host
+   * records it in Outputs under `name`, with the run that wrote it as its source (M3-11).
+   */
+  putFile(id: string, content: string, contentType: string, name: string): Promise<unknown>;
   /** The caller's file with this id, or `null` when there is none (or it isn't theirs). */
   getFile(id: string): Promise<{ text(): Promise<string> } | null>;
   /** Mints artifact ids (single safe segments). */
@@ -100,7 +103,7 @@ export function createArtifactTool(ports: FilePorts): LoopTool {
           : (BY_EXTENSION[extension] ?? "text/plain");
       const artifactId = ports.newId();
       try {
-        await ports.putFile(artifactId, content, type);
+        await ports.putFile(artifactId, content, type, name);
       } catch {
         return failed("The file couldn't be saved.");
       }
