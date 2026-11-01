@@ -33,8 +33,11 @@ export async function memoryApi<T>(path = "", method = "GET", body?: unknown): P
 export const listNotes = (q = "") =>
   memoryApi<{ memories: Note[] }>(q ? `?q=${encodeURIComponent(q)}` : "").then((r) => r.memories);
 
-export const addNote = (text: string) =>
-  memoryApi<{ memory: Note }>("", "POST", { text }).then((r) => r.memory);
+export const addNote = (text: string, kind: Note["kind"] = "fact") =>
+  memoryApi<{ memory: Note }>("", "POST", { text, kind }).then((r) => r.memory);
+
+/** The server returns at most this many search matches. */
+export const SEARCH_LIMIT = 100;
 
 /** Saves an edit as a new version; the server supersedes the old one. */
 export const editNote = (id: string, text: string) =>

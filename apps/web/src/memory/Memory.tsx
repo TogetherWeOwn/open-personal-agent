@@ -5,10 +5,19 @@
 // Every delete says a backup is kept for 30 days (AC3). A delete is held while its Undo toast is
 // open and sent when the toast closes, the screen goes away or the page unloads, so the server's
 // forget stays a true hard delete and Undo never needs a restore.
+import { Check } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Heading, Input, Label, SearchField, TextArea, TextField } from "react-aria-components";
+import {
+  Checkbox,
+  Heading,
+  Input,
+  Label,
+  SearchField,
+  TextArea,
+  TextField,
+} from "react-aria-components";
 import { Banner, Button, ConfirmDialog, EmptyState, Page, Skeleton, Toast } from "../ui";
-import { addNote, BACKUP_LINE, listNotes, memoryError, type Note } from "./api";
+import { addNote, BACKUP_LINE, listNotes, memoryError, type Note, SEARCH_LIMIT } from "./api";
 import { NoteMeta, NoteRow } from "./NoteRow";
 
 const WEEK = 7 * 86_400_000;
@@ -43,16 +52,20 @@ export function Memory() {
   const [confirming, setConfirming] = useState(false);
   const [allRecent, setAllRecent] = useState(false);
   const [draft, setDraft] = useState("");
+  const [standing, setStanding] = useState(false);
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
   const keys = useRef(new Map<string, string>());
 
   const load = useCallback(async (q: string) => {
     try {
-      setNotes(await listNotes(q));
+      const loaded = await listNotes(q);
+      setNotes(loaded);
       setShown(q);
       setFailed(false);
+      return loaded;
     } catch {
       setFailed(true);
+      return null;
     }
   }, []);
   useEffect(() => {
@@ -110,13 +123,28 @@ export function Memory() {
     keys.current.set(next.id, keys.current.get(old.id) ?? old.id);
     setNotes((all) => all?.map((n) => (n.id === old.id ? next : n)) ?? null);
     setAnnouncement("Saved.");
+    // The new text may not match the search any more: ask the server again.
+    if (shown) {
+      void load(shown).then((found) => {
+        if (found && !found.some((n) => n.id === next.id)) {
+          setAnnouncement("Saved. It no longer matches your search.");
+        }
+      });
+    }
+  };
+
+  const stale = (message: string) => {
+    setProblem(message);
+    void load(shown);
   };
 
   const add = async () => {
     try {
-      const note = await addNote(draft);
+      const note = await addNote(draft, standing ? "instruction" : "fact");
       setNotes((all) => [note, ...(all ?? [])]);
       setDraft("");
+      setStanding(false);
+      setProblem(null);
       setAnnouncement("Added.");
     } catch (e) {
       setProblem(memoryError(e));
@@ -140,6 +168,7 @@ export function Memory() {
       }}
       onSaved={(next) => saved(note, next)}
       onDelete={() => hold([note.id], `Deleted ${quote(note.text)}. ${BACKUP_LINE}`)}
+      onStale={stale}
     />
   );
 
@@ -184,6 +213,11 @@ export function Memory() {
         </EmptyState>
       ) : (
         <>
+          {shown && all.length >= SEARCH_LIMIT && (
+            <p className="text-sm text-text-muted">
+              Showing the first {SEARCH_LIMIT} matches. Add a word to narrow it.
+            </p>
+          )}
           {recent.length > 0 && (
             <section aria-labelledby="recent" className="flex flex-col gap-3">
               <Heading id="recent" level={2} className="text-lg font-semibold">
@@ -257,6 +291,16 @@ export function Memory() {
         >
           <Label className="font-medium">Add a note</Label>
           <TextArea rows={2} className="rounded-lg border border-border-strong bg-surface p-2" />
+          <Checkbox
+            isSelected={standing}
+            onChange={setStanding}
+            className="group flex min-h-11 items-center gap-2"
+          >
+            <span className="flex size-5 items-center justify-center rounded border border-border-strong group-data-selected:bg-accent group-data-selected:text-accent-contrast group-data-focus-visible:outline-2 group-data-focus-visible:outline-focus-ring">
+              {standing && <Check aria-hidden="true" size={14} />}
+            </span>
+            Make it a standing instruction
+          </Checkbox>
           <Button className="mt-1 self-start" onPress={add} isDisabled={draft.trim() === ""}>
             Add
           </Button>
