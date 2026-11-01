@@ -28,6 +28,7 @@ interface SpendingRpc {
     allowance?: AllowanceWarnings | null;
   }>;
   setSpending(body: unknown): Promise<{ before: Limits; after: Limits } | null>;
+  revertSpending(before: Limits, after: Limits): Promise<void>;
 }
 
 /** The soft cap's thresholds (COST-4): 50% on Usage and Spending, 80% and 100% app-wide. */
@@ -42,7 +43,9 @@ spendingRoutes.use(async (c, next) => {
 
 const rpcOf = (assistant: unknown) => {
   const rpc = assistant as Partial<SpendingRpc>;
-  return typeof rpc.spending === "function" && typeof rpc.setSpending === "function"
+  return typeof rpc.spending === "function" &&
+    typeof rpc.setSpending === "function" &&
+    typeof rpc.revertSpending === "function"
     ? (rpc as SpendingRpc)
     : null;
 };
@@ -92,7 +95,8 @@ spendingRoutes.put("/", async (c) => {
   const { before, after } = saved;
   // Settings changes are in the Activity log (M3-19 AC3), with the old and new values. The
   // limits live in the assistant and the log in D1, so the two can't commit together: a change
-  // whose audit row can't be written is put back, and the request fails.
+  // whose audit row can't be written is put back (unless a later change replaced it since), and
+  // the request fails.
   const changed = Object.keys(after).filter(
     (k) => before[k as keyof Limits] !== after[k as keyof Limits],
   ) as (keyof Limits)[];
@@ -109,7 +113,7 @@ spendingRoutes.put("/", async (c) => {
         detail,
       );
     } catch {
-      await rpc.setSpending(Object.fromEntries(changed.map((k) => [k, before[k]])));
+      await rpc.revertSpending(before, after);
       return c.json({ error: "not_saved" }, 500);
     }
   }

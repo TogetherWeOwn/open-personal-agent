@@ -313,7 +313,7 @@ async function driveLoop(
     const turn = state.turn;
     // Continued after an execution limit: a fresh allowance of calls and tools for the turn.
     if (state.paused?.kind === "calls" || state.paused?.kind === "tools") continueTurn(turn);
-    let limit: TaskTurnState["paused"];
+    let limit: { kind: LimitKind; detail: string } | undefined;
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
     for (;;) {
