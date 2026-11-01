@@ -6,21 +6,44 @@ import type { ApprovalDecision, ApprovalItem } from "@opa/core";
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useState } from "react";
 import { Label, Radio, RadioGroup } from "react-aria-components";
 import { Button, Card, CardHeader } from "../ui";
-import { decide, type PendingBatch } from "./api";
+import type { PendingBatch } from "./api";
 import { actionOf, expiresIn, needsPasskey, STANDING_NOTE, scopeLabel } from "./copy";
-import { ItemBody } from "./ItemBody";
-import { decided, refreshApprovals } from "./store";
+import { ItemBody, Visible } from "./ItemBody";
+import { refreshApprovals, submitDecision } from "./store";
 
 type Scope = ApprovalItem["scopes"][number];
 
-/** The current time, re-read once a minute: the expiry line never ticks every second. */
-function useMinute() {
+/**
+ * The current time, re-read when the expiry line would change: each hour, then each minute, and
+ * each second only in the last minute (m3-ux §3.3), and once more as it expires.
+ */
+function useExpiryClock(expiresAt: number) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(timer);
-  }, []);
+    const left = expiresAt - now;
+    if (left <= 0) return;
+    const unit = left > 3_600_000 ? 3_600_000 : left > 60_000 ? 60_000 : 1000;
+    const timer = setTimeout(() => setNow(Date.now()), left % unit || unit);
+    return () => clearTimeout(timer);
+  }, [expiresAt, now]);
   return now;
+}
+
+/** "Always for a.com and b.org": every host a destination grant would cover, as it reads. */
+function Destinations({ items }: { items: readonly ApprovalItem[] }) {
+  const hosts = [...new Set(items.flatMap((i) => (i.target ? [i.target] : [])))];
+  if (!hosts.length) return <>{scopeLabel("destination")}</>;
+  return (
+    <span>
+      Always for{" "}
+      {hosts.map((h, n) => (
+        <span key={h}>
+          {n > 0 && (n === hosts.length - 1 ? " and " : ", ")}
+          <Visible text={h} />
+        </span>
+      ))}
+    </span>
+  );
 }
 
 /** True below 640 px, where a multi-action card opens only its first item. */
@@ -66,14 +89,17 @@ export function ApprovalCard({
   batch,
   level = 3,
   context,
+  idPrefix = "approval",
 }: {
   batch: PendingBatch;
   level?: number;
   /** The conversation or task it belongs to, as a link, in the Inbox. */
   context?: ReactNode;
+  /** Its ids' prefix: the Inbox's own, so its card and the hidden chat's never share one. */
+  idPrefix?: string;
 }) {
-  const headingId = `approval-${batch.batchId}`;
-  const now = useMinute();
+  const headingId = `${idPrefix}-${batch.batchId}`;
+  const now = useExpiryClock(batch.expiresAt);
   const narrow = useNarrow();
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
   const [shown, setShown] = useState<ReadonlySet<string>>(new Set());
@@ -101,9 +127,9 @@ export function ApprovalCard({
     });
     setSending(true);
     setFailure(null);
-    const result = await decide(batch.batchId, items, decisions);
+    const result = await submitDecision(batch, decisions);
     setSending(false);
-    if (result.kind === "done") return decided(batch, decisions, result);
+    if (result.kind === "done") return;
     setFailure(FAILURES[result.kind]);
     if (result.kind !== "not_confirmed" && result.kind !== "offline") void refreshApprovals();
   };
@@ -128,7 +154,7 @@ export function ApprovalCard({
       </p>
       {multi ? (
         items.map((item, n) => {
-          const id = `approval-item-${item.approvalId}`;
+          const id = `${idPrefix}-item-${item.approvalId}`;
           const name = actionOf(item.tool);
           if (removed.has(item.approvalId)) {
             return (
@@ -167,7 +193,11 @@ export function ApprovalCard({
                 <ItemBody item={item} />
               ) : (
                 <>
-                  {item.target && <p className="break-all">To: {item.target}</p>}
+                  {item.target && (
+                    <p className="break-all">
+                      To: <Visible text={item.target} />
+                    </p>
+                  )}
                   <Button
                     variant="quiet"
                     className="self-start"
@@ -200,7 +230,7 @@ export function ApprovalCard({
                   value={s}
                   className="flex min-h-11 cursor-default items-center gap-2 rounded-lg px-2 before:size-4 before:shrink-0 before:rounded-full before:border-2 before:border-border-strong data-focus-visible:outline-2 data-selected:before:border-[5px] data-selected:before:border-accent"
                 >
-                  {scopeLabel(s, remaining[0]?.target)}
+                  {s === "destination" ? <Destinations items={remaining} /> : scopeLabel(s)}
                 </Radio>
               ))}
             </RadioGroup>

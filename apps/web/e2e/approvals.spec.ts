@@ -38,8 +38,9 @@ async function stub(page: Page): Promise<Stub> {
   await page.route("/api/settings", (r) =>
     r.fulfill({ json: { onboarded: true, providers: [], roles: { chat: null } } }),
   );
+  // The server leaves out what has expired.
   await page.route("/api/approvals?status=pending", (r) =>
-    r.fulfill({ json: { batches: s.batches } }),
+    r.fulfill({ json: { batches: s.batches.filter((b) => (b.expiresAt as number) > Date.now()) } }),
   );
   await page.route(
     /\/api\/approvals\/[^/?]+(\/options)?$/,
@@ -126,6 +127,34 @@ test("shows the whole request, its rule and why to be careful (AC6)", async ({ p
   // Tainted egress offers "once" only.
   await expect(c).toContainText("Allow: Just this once");
   await expect(c.getByRole("radio")).toHaveCount(0);
+});
+
+test("shows hidden characters in the host and in nested fields", async ({ page }) => {
+  const s = await stub(page);
+  await page.goto("/");
+  await ask(page, s, [
+    email({
+      target: "exa\u200bmple.com",
+      args: JSON.stringify({ to: { name: "Sam", address: "sam@exa\u202emple.com" } }),
+    }),
+  ]);
+  const c = card(page);
+  await expect(c).toContainText("To: exa⟨U+200B⟩mple.com");
+  await expect(c.getByRole("definition").filter({ hasText: "Address" })).toContainText(
+    "sam@exa⟨U+202E⟩mple.com",
+  );
+  await expect(c.getByText("Always for exa⟨U+200B⟩mple.com")).toBeVisible();
+});
+
+test("counts down the last minute, then leaves once it expires", async ({ page }) => {
+  const s = await stub(page);
+  await page.goto("/");
+  await ask(page, s, [email({ expiresAt: Date.now() + 4_000 })]);
+  const c = card(page);
+  await expect(c).toContainText(/Expires in [34] s/);
+  await expect(c).toContainText(/Expires in [12] s/);
+  await expect(c).toHaveCount(0, { timeout: 6_000 });
+  await expect(page.getByText("1 approval waiting")).toHaveCount(0);
 });
 
 test("never has focus on Allow, and Enter alone does nothing (AC7, UX-04)", async ({ page }) => {
@@ -265,6 +294,32 @@ test.describe("the multi-action card (AC11)", () => {
         },
       },
     ]);
+  });
+
+  test("Always for names every host it would cover", async ({ page }) => {
+    const s = await stub(page);
+    await page.goto("/");
+    await ask(page, s, [
+      email(),
+      email({
+        approvalId: "appr_2",
+        tool: "post_webhook",
+        args: JSON.stringify({ url: "https://hooks.example/x" }),
+        target: "hooks.example",
+      }),
+    ]);
+    const c = card(page);
+    await expect(c.getByRole("radio", { name: "Always for example.com" })).toHaveCount(0);
+    await c.getByText("Always for example.com and hooks.example").click();
+    await c.getByRole("button", { name: "Allow 2 actions" }).click();
+    await expect
+      .poll(() => s.posts[0]?.body)
+      .toEqual({
+        decisions: [
+          { approvalId: "appr_1", decision: "approve", scope: "destination" },
+          { approvalId: "appr_2", decision: "approve", scope: "destination" },
+        ],
+      });
   });
 
   test("with everything removed, only Done: allow none is left", async ({ page }) => {

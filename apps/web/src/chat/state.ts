@@ -317,9 +317,9 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     // The turn stopped without settling: it waits in D1 for a decision or a Continue, and its
     // reply stays `streaming`, so its later deltas stream into the same message. The approval
     // card reads D1, not this event, and announces itself (approvals/store.ts); the composer
-    // frees up either way.
+    // frees up either way, and "working" is no longer true.
     case "approval.requested":
-      return { ...seen, pending: null };
+      return { ...seen, pending: null, announcement: "" };
     case "limit.reached":
       return { ...seen, pending: null, announcement: "The assistant stopped at a limit." };
     case "usage.updated":
