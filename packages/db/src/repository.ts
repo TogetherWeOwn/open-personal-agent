@@ -95,6 +95,15 @@ export interface DataBindings<Stub, Id> {
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
     /**
+     * R2's listing, a page at a time with each object's size: the allowance meter (COST-5) sums
+     * the whole bucket with it. Absent where the store has none (Node).
+     */
+    list?(options: { cursor?: string; limit?: number }): Promise<{
+      objects: { size: number }[];
+      truncated: boolean;
+      cursor?: string;
+    }>;
+    /**
      * R2's multipart upload, for streaming a body whose length is not known up front: `put`
      * there takes only a known-length stream. Absent where the store streams any body (Node).
      */
@@ -260,6 +269,59 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(usage)
             .where(gte(usage.createdAt, since))
         )[0]?.n ?? 0,
+      /**
+       * The database's size in bytes (M3-16 AC3): D1 reports it with every result as
+       * `meta.size_after`; Node's SQLite doesn't, so there it is pages × page size.
+       */
+      databaseBytes: async () => {
+        const raw = DB as unknown as {
+          prepare(sql: string): {
+            run(): Promise<{ meta: { size_after?: number } }>;
+            first<T>(column: string): Promise<T | null>;
+          };
+        };
+        const { meta } = await raw.prepare("SELECT 1").run();
+        if (typeof meta.size_after === "number") return meta.size_after;
+        const pages = (await raw.prepare("PRAGMA page_count").first<number>("page_count")) ?? 0;
+        const size = (await raw.prepare("PRAGMA page_size").first<number>("page_size")) ?? 0;
+        return pages * size;
+      },
+      /**
+       * What the file store holds, in bytes: every object, whoever wrote it (uploads, saved
+       * outputs, offloaded step outputs, exports). Where the store can't list (Node), the sum of
+       * the attachment rows' sizes stands in.
+       */
+      fileBytes: async () => {
+        if (FILES.list) {
+          let bytes = 0;
+          let cursor: string | undefined;
+          do {
+            const page = await FILES.list({ limit: 1000, ...(cursor ? { cursor } : {}) });
+            for (const object of page.objects) bytes += object.size;
+            cursor = page.truncated ? page.cursor : undefined;
+          } while (cursor);
+          return bytes;
+        }
+        return (
+          (
+            await db
+              .select({
+                n: sql<number>`coalesce(sum(${attachments.sizeBytes}), 0)`.mapWith(Number),
+              })
+              .from(attachments)
+          )[0]?.n ?? 0
+        );
+      },
+      /**
+       * The owner's assistant, for deployment-wide notices only the owner sees (the allowance
+       * warnings, COST-5); `null` before the claim.
+       */
+      ownerAssistant: async () => {
+        const owner = (
+          await db.select({ id: users.id }).from(users).where(eq(users.role, "owner")).limit(1)
+        )[0];
+        return owner ? ASSISTANT.get(ASSISTANT.idFromName(`u:${owner.id}`)) : null;
+      },
     },
 
     forUser(scope: UserScope) {
@@ -1087,6 +1149,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ).length > 0
             );
           },
+          /**
+           * Continue on a task paused by a limit (M3-17 AC1): `budget_limited` back to `running`.
+           * `false` when it isn't paused. Waking its Workflow is the caller's job.
+           */
+          resume: async (id: string) =>
+            (
+              await db
+                .update(tasks)
+                .set({ status: "running", updatedAt: Date.now() })
+                .where(
+                  and(
+                    eq(tasks.id, id),
+                    eq(tasks.userId, userId),
+                    eq(tasks.status, "budget_limited"),
+                  ),
+                )
+                .returning({ id: tasks.id })
+            ).length > 0,
           /** Sets `cancelled` on an active task. Terminating its Workflow is the caller's job. */
           cancel: async (id: string) => {
             const now = Date.now();
