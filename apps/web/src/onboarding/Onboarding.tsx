@@ -289,8 +289,8 @@ export function Onboarding() {
       <ul className="list-disc pl-6">
         <li>With an API key, your model provider charges you for every message.</li>
         <li>
-          Workers AI is metered. Cloudflare includes a free daily allowance, and the Usage page
-          shows how much of it you've used.
+          Workers AI is metered. Cloudflare includes a free daily allowance, and your Cloudflare
+          dashboard shows how much of it you've used.
         </li>
         <li>Providers also set their own rate limits; a busy model may ask you to wait.</li>
       </ul>
