@@ -25,13 +25,16 @@ const SECRET_SHAPES = [
   /\b(?:bearer|basic)\s+\S+/gi,
   /\beyJ[\w-]*\.[\w-]*\.[\w-]*/g, // JWT
   /\b(?:sk|pk|rk|ghp|gho|ghs|xox[abp])[-_][\w-]{8,}/gi, // vendor API keys
-  /[A-Za-z0-9+/_-]{24,}={0,2}/g, // long base64, base64url or hex runs
+  // Long base64, base64url or hex runs with at least two digits or capitals, so a route pattern
+  // such as `/api/setup/recovery-codes` survives.
+  /(?=(?:[a-z+/_-]*[A-Z0-9]){2})[A-Za-z0-9+/_-]{24,}={0,2}/g,
 ];
 
+/** Redacts before it truncates, so a secret cut at the limit can't slip past its shape. */
 export function redact(value: string): string {
-  let out = value.length > 200 ? `${value.slice(0, 200)}…` : value;
+  let out = value;
   for (const shape of SECRET_SHAPES) out = out.replace(shape, "[redacted]");
-  return out;
+  return out.length > 200 ? `${out.slice(0, 200)}…` : out;
 }
 
 type Level = "info" | "warn" | "error";

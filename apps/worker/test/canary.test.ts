@@ -6,7 +6,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { beforeAll, expect, it, vi } from "vitest";
 import { app } from "../src/app";
-import { appEnv, type WorkerEnv } from "../src/index";
+import { appEnv, type WorkerEnv } from "../src/compose";
 
 const env = workerEnv as unknown as WorkerEnv & {
   TEST_MIGRATIONS: D1Migration[];

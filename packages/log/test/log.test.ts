@@ -32,4 +32,21 @@ describe("allowlist logger", () => {
     }
     expect(redact("ab ".repeat(100))).toHaveLength(201);
   });
+
+  it("redacts a secret that straddles the length limit", () => {
+    const secret = "opa-canary-0123456789abcdef0123456789abcdef";
+    const out = redact(`${"x ".repeat(90)}${secret}`);
+    expect(out).toBe(`${"x ".repeat(90)}[redacted]`);
+    expect(out).not.toContain("opa-canary");
+  });
+
+  it("keeps route patterns", () => {
+    for (const route of [
+      "/api/setup/recovery-codes",
+      "/api/conversations/:id/messages",
+      "/api/v1/conversations/list",
+    ]) {
+      expect(redact(route)).toBe(route);
+    }
+  });
 });
