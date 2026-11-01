@@ -90,10 +90,10 @@ export function createSocketTransport({
         current?.close();
       };
     },
-    send(conversationId, text) {
+    send(conversationId, text, model) {
       if (socket?.readyState === OPEN) {
         lastSent = conversationId;
-        socket.send(JSON.stringify({ type: "chat.send", conversationId, text }));
+        socket.send(JSON.stringify({ type: "chat.send", conversationId, text, model }));
         return;
       }
       reject(

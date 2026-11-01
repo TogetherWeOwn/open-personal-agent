@@ -95,7 +95,10 @@ describe("several providers", () => {
     expect(a.body).toMatchObject({
       providerId: "my-openai",
       api: "openai-chat",
+      // Readable names for the chip and Settings: the biller's, not the typed provider ID.
+      providerName: "OpenAI",
       model: "gpt-4o-mini",
+      modelName: "GPT-4o mini",
       key: { last4: "WXYZ", lastUsedAt: null },
       price: { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6, stale: expect.any(Boolean) },
     });
@@ -218,6 +221,12 @@ describe("several providers", () => {
     const saved = "SELECT model_provider, model FROM conversations WHERE id = 'c1'";
     expect(await env.DB.prepare(saved).first()).toEqual({
       model_provider: first,
+      model: "gpt-4.1",
+    });
+    // The list carries the pin, so the context chip can show it after a reload (06b).
+    const chats = (await call("u1", "GET", "/conversations")).body.conversations;
+    expect(chats.find((c: { id: string }) => c.id === "c1").model).toEqual({
+      provider: first,
       model: "gpt-4.1",
     });
     expect((await pin("c1", null)).status).toBe(204);
