@@ -177,3 +177,121 @@ export function usageLedgerContract(name: string, migrated: () => Promise<D1Data
     });
   });
 }
+
+/**
+ * The memory store (M3-14a), against a migrated database: the hand-written FTS5 index and its
+ * triggers, and `MemoryService`'s reads. Rows are inserted directly here; the service's
+ * trust-gated writes have their own contract.
+ */
+export function memoryContract(name: string, migrated: () => Promise<D1Database>) {
+  describe(`${name}: memory contract`, () => {
+    async function user() {
+      const DB = await migrated();
+      const userId = `memory-${++tables}-${Date.now()}`;
+      await DB.prepare("INSERT INTO users (id, display_name, role) VALUES (?, 'M', 'owner')")
+        .bind(userId)
+        .run();
+      const stub = {} as never;
+      const repo = createRepository({ DB, FILES: stub, ASSISTANT: stub });
+      const { memory } = repo.forUser(scopeFromSession({ userId }));
+      const insert = async (text: string, status = "active") => {
+        const id = crypto.randomUUID();
+        await DB.prepare(
+          `INSERT INTO memories (id, user_id, kind, text, trust, status, op, source)
+           VALUES (?, ?, 'fact', ?, 'user', ?, 'create', 'chat')`,
+        )
+          .bind(id, userId, text, status)
+          .run();
+        return id;
+      };
+      return { DB, userId, memory, insert };
+    }
+    /** Index entries for `word`, every user's: the index itself, not the service's filter. */
+    const indexed = async (DB: D1Database, word: string) =>
+      DB.prepare("SELECT count(*) AS n FROM memories_fts WHERE memories_fts MATCH ?")
+        .bind(`"${word}"`)
+        .first("n");
+
+    it("finds the user's current memories by word, prefix and without accents", async () => {
+      const a = await user();
+      const b = await user();
+      const id = await a.insert("I'm vegetarian and love the café on Main St");
+      await a.insert("Vegetarian guests eat free", "proposed");
+      await a.insert("Was vegetarian once", "superseded");
+      await b.insert("Vegetarian too");
+      const texts = async (q: string) => (await a.memory.search(q)).map((m) => m.text);
+      expect(await texts("VEGETARIAN")).toEqual(["I'm vegetarian and love the café on Main St"]);
+      expect(await texts("veg cafe")).toHaveLength(1);
+      expect(await texts("vegetarian lisbon")).toEqual([]);
+      expect(await texts("cafe\u0301")).toHaveLength(1); // a decomposed accent
+      const decomposed = await a.insert("Sent her re\u0301sume\u0301");
+      expect((await a.memory.search("résumé")).map((m) => m.id)).toEqual([decomposed]);
+      expect((await a.memory.search("re\u0301sume\u0301")).map((m) => m.id)).toEqual([decomposed]);
+      expect(await texts('") OR * NEAR(')).toEqual([]); // FTS5 syntax is never passed through
+      expect(await texts("")).toEqual([]);
+      expect((await a.memory.list()).map((m) => m.id)).toEqual([decomposed, id]);
+      expect(await a.memory.get(id)).toMatchObject({ id, trust: "user", source: "chat" });
+      expect(await b.memory.get(id)).toBeUndefined();
+    });
+
+    it("ranks by relevance and caps the results", async () => {
+      const { memory, insert } = await user();
+      await insert("tea");
+      await insert("tea and more tea, green tea");
+      await insert("coffee, not tea, with a long tail of other words");
+      expect((await memory.search("tea")).map((m) => m.text)).toEqual([
+        "tea and more tea, green tea",
+        "tea",
+        "coffee, not tea, with a long tail of other words",
+      ]);
+      expect(await memory.search("tea", 1)).toHaveLength(1);
+      expect(await memory.search("tea", -1)).toHaveLength(1);
+    });
+
+    it("keeps the index in step with inserts, text changes, deletes and deleting the user", async () => {
+      const { DB, userId, insert } = await user();
+      const id = await insert("Collects xylophones");
+      expect(await indexed(DB, "xylophones")).toBe(1);
+      await DB.prepare("UPDATE memories SET text = 'Collects kazoos' WHERE id = ?").bind(id).run();
+      expect([await indexed(DB, "xylophones"), await indexed(DB, "kazoos")]).toEqual([0, 1]);
+      await DB.prepare("UPDATE memories SET status = 'superseded' WHERE id = ?").bind(id).run();
+      expect(await indexed(DB, "kazoos")).toBe(1);
+      await DB.prepare("DELETE FROM memories WHERE id = ?").bind(id).run();
+      expect(await indexed(DB, "kazoos")).toBe(0);
+      await insert("Plays the theremin");
+      await DB.prepare("DELETE FROM users WHERE id = ?").bind(userId).run();
+      expect(await indexed(DB, "theremin")).toBe(0);
+      expect(
+        await DB.prepare(
+          "INSERT INTO memories_fts (memories_fts) VALUES ('integrity-check')",
+        ).run(),
+      ).toMatchObject({ success: true });
+    });
+
+    it("links memories only within one user", async () => {
+      const a = await user();
+      const b = await user();
+      const [old, next, theirs] = [
+        await a.insert("Old"),
+        await a.insert("New"),
+        await b.insert("B"),
+      ];
+      const link = a.DB.prepare(
+        "INSERT INTO memory_links (memory_id, target_id, user_id) VALUES (?, ?, ?)",
+      );
+      await link.bind(next, old, a.userId).run();
+      for (const args of [
+        [next, theirs, a.userId],
+        [theirs, old, a.userId],
+        [next, old, b.userId],
+      ]) {
+        await expect((async () => link.bind(...args).run())()).rejects.toThrow();
+      }
+      await a.DB.prepare("DELETE FROM memories WHERE id = ?").bind(old).run();
+      const left = await a.DB.prepare("SELECT count(*) AS n FROM memory_links WHERE memory_id = ?")
+        .bind(next)
+        .first("n");
+      expect(left).toBe(0);
+    });
+  });
+}
