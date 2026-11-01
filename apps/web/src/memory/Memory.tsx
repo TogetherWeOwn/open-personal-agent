@@ -168,6 +168,7 @@ export function Memory() {
   const saved = (old: Note, next: Note) => {
     keys.current.set(next.id, keys.current.get(old.id) ?? old.id);
     setNotes((all) => all?.map((n) => (n.id === old.id ? next : n)) ?? null);
+    setProblem(null);
     setAnnouncement("Saved.");
     // The new text may not match the search any more: ask the server again.
     if (shown) {

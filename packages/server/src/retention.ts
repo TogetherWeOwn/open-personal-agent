@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-// Retention (COST-10, M3-18 AC1): the settings route.
+// Retention (COST-10, M3-18): the settings route and the reconciler's part. Each `*/10` tick
+// collects abandoned uploads, and the first tick of each UTC day runs the sweep that applies every
+// user's settings. Neither wakes a Durable Object. The Worker's cron and Node's timer both call it.
 import { createRepository } from "@opa/db/repository";
-import { RETENTION_BOUNDS, RETENTION_DEFAULTS, type RetentionSettings } from "@opa/db/retention";
+import {
+  DAY_MS,
+  RETENTION_BOUNDS,
+  RETENTION_DEFAULTS,
+  type RetentionSettings,
+  retentionStore,
+} from "@opa/db/retention";
+import { log } from "@opa/log";
 import { type Context, Hono } from "hono";
-import type { AppEnv } from "./env";
+import type { AppEnv, AppPorts } from "./env";
 
 type Ctx = Context<AppEnv>;
 const settingsOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope).settings;
@@ -56,3 +65,30 @@ retentionSettings.put("/retention", async (c) => {
   if (changed) await store.saveRetention(from, to);
   return c.json(view(to));
 });
+
+/**
+ * The reconciler's retention work. A failure logs and the next tick tries again, as with the key
+ * rotation; the sweep's deployment row is written only once it has run, so a crash retries it.
+ */
+export async function runRetention(env: Pick<AppPorts, "DB" | "FILES">, now = Date.now()) {
+  let store: ReturnType<typeof retentionStore>;
+  try {
+    store = retentionStore(env);
+  } catch (error) {
+    return log.error("retention", { errorName: (error as Error).name });
+  }
+  try {
+    const count = await store.collectUploads(now);
+    if (count) log.info("retention.uploads", { count });
+  } catch (error) {
+    log.error("retention.uploads", { errorName: (error as Error).name });
+  }
+  try {
+    if (await store.sweptSince(now - (now % DAY_MS))) return;
+    const totals = await store.sweep(now);
+    const count = totals.conversations + totals.toolOutputs + totals.proposals + totals.stepOutputs;
+    log.info("retention.sweep", { count, status: totals.failed ? "partial" : "ok" });
+  } catch (error) {
+    log.error("retention.sweep", { errorName: (error as Error).name });
+  }
+}

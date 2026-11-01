@@ -78,6 +78,39 @@ describe("scoped repository", () => {
     expect(alice?.assistant().id.toString()).toBe(id);
     expect(bob?.assistant().id.toString()).not.toBe(id);
   });
+
+  it("keeps stopped turn state scoped to its user (AC5)", async () => {
+    await alice?.createConversation("turns-c1", "Turns");
+    const saved = {
+      turnId: "turn-1",
+      conversationId: "turns-c1",
+      replyId: "reply-1",
+      providerId: "test",
+      model: "test-model",
+      status: "awaiting_approval" as const,
+      state: '{"counts":{"calls":1,"tools":0}}',
+    };
+    expect(await alice?.turns.save(saved)).toBe(true);
+    expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    // Another user cannot see, refresh or delete it.
+    expect(await bob?.turns.load("turn-1")).toBeUndefined();
+    expect(await bob?.turns.save({ ...saved, turnId: "turn-bob" })).toBe(false);
+    await bob?.turns.remove("turn-1");
+    expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    // A second stop replaces the first in place.
+    expect(await alice?.turns.save({ ...saved, status: "limit_reached", state: "{}" })).toBe(true);
+    expect((await alice?.turns.load("turn-1"))?.status).toBe("limit_reached");
+    const rows = await env.DB.prepare(
+      "SELECT count(*) AS n FROM turn_states WHERE turn_id = 'turn-1'",
+    ).first("n");
+    expect(rows).toBe(1);
+    await alice?.turns.remove("turn-1");
+    expect(await alice?.turns.load("turn-1")).toBeUndefined();
+    // Deleting the conversation takes its saved turns with it (cascade).
+    expect(await alice?.turns.save(saved)).toBe(true);
+    await env.DB.prepare("DELETE FROM conversations WHERE id = 'turns-c1'").run();
+    expect(await alice?.turns.load("turn-1")).toBeUndefined();
+  });
 });
 
 describe("attachment upload with no declared length", () => {
