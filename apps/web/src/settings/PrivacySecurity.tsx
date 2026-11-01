@@ -82,6 +82,15 @@ export function PrivacySecurity() {
     };
   }, []);
 
+  const reloadLists = () =>
+    Promise.all([
+      api<{ passkeys: PasskeyRow[] }>("/passkeys"),
+      api<{ sessions: SessionRow[] }>("/sessions"),
+    ]).then(([keys, sess]) => {
+      setPasskeys(keys.passkeys);
+      setSessions(sess.sessions);
+    });
+
   const run = async (key: string, fn: () => Promise<void>) => {
     if (pending) return;
     setPending(key);
@@ -89,8 +98,17 @@ export function PrivacySecurity() {
     try {
       await withAccountStepUp(fn);
     } catch (e) {
-      // A dismissed passkey prompt rejects here: the choice stays where it was.
-      setError(cancelled(e) ? "No passkey was created." : privacyError(e));
+      if ((e as Error).message === "not_found") {
+        // The copy says the list was refreshed: make it true before reporting it.
+        await reloadLists().catch(() => {});
+        setError(privacyError(e));
+      } else if (cancelled(e)) {
+        // A dismissed passkey prompt rejects here. Only adding promises a passkey; every
+        // other action leaves everything untouched (m3-ux §3.9).
+        setError(key === "add" ? "No passkey was created." : "Not confirmed. Nothing was done.");
+      } else {
+        setError(privacyError(e));
+      }
     } finally {
       setPending(null);
     }
