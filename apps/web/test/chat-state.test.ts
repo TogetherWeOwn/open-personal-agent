@@ -343,4 +343,15 @@ describe("chatReducer", () => {
       ["system", 0],
     ]);
   });
+
+  it("leaves the thread alone for the M3 events it doesn't render yet (M3-03 AC8)", () => {
+    const state = run(send, started(), delta("Hel"));
+    const m3: ChatAction[] = [
+      ev("step.started", { stepId: "s1", label: "Thinking" }),
+      ev("tool.called", { toolCallId: "call-1", tool: "web_fetch", args: "{}", risk: "read" }),
+      ev("context.tainted", { stepId: "s1", source: { kind: "web", label: "x.test" } }),
+      ev("limit.reached", { kind: "tools", detail: "20 tool calls" }),
+    ];
+    for (const action of m3) expect(chatReducer(state, action)).toBe(state);
+  });
 });
