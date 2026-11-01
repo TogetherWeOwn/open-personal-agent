@@ -121,22 +121,47 @@ test("an empty period offers a chat instead of an empty table; a member has no m
   await expect(page.getByRole("link", { name: "Start a chat" })).toHaveAttribute("href", "/");
 });
 
-test("going to Usage and back keeps the chat and its unsent draft", async ({ page }) => {
+test("going to Settings › Spending and back keeps the chat and its unsent draft", async ({
+  page,
+}) => {
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
-  await page.route("/api/usage?*", (route) =>
-    route.fulfill({ json: { currency: "USD", today: empty, month: empty, allowance } }),
+  const limits = {
+    taskBudgetMicroUsd: 500_000,
+    dailyCapMicroUsd: 5_000_000,
+    monthlyBudgetMicroUsd: 20_000_000,
+    hardCapMicroUsd: null,
+  };
+  await page.route("/api/settings/spending", (route) =>
+    route.fulfill({
+      json: {
+        settings: limits,
+        defaults: limits,
+        executionLimits: { callsPerMessage: 8, toolCallsPerMessage: 20, stepsPerTask: 200 },
+        todayMicroUsd: 0,
+        monthMicroUsd: 0,
+        warning: null,
+        hardCapReached: false,
+        month: Date.UTC(2026, 10, 1),
+        userId: "u",
+      },
+    }),
   );
   await page.goto("/");
   await page.getByRole("textbox", { name: "Message" }).fill("Half a thought");
-  await page.getByRole("link", { name: "Usage" }).click();
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
-  await expect(page).toHaveURL(/\/usage$/);
-  await page.getByRole("link", { name: "Chats" }).click();
+  await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("link", { name: "Spending" }).click();
+  await expect(page.getByRole("heading", { name: "Spending", level: 2 })).toBeVisible();
+  await expect(page).toHaveURL(/\/settings\/spending$/);
+  await expect(page.getByRole("link", { name: "Settings" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await page.getByRole("link", { name: "Chat", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("Half a thought");
   await page.goBack();
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
+  await expect(page.getByRole("heading", { name: "Spending", level: 2 })).toBeVisible();
 });
 
 for (const colorScheme of ["light", "dark"] as const) {

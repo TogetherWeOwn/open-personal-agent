@@ -14,6 +14,7 @@ import {
   type ModelMessage,
   type ModelProvider,
   type ModelUsage,
+  redactSecrets,
   TaskCancelledError,
   type TaskContext,
   TaskLimitError,
@@ -21,6 +22,9 @@ import {
 } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
 import {
+  continueTurn,
+  type LimitKind,
+  LimitStop,
   type LoopHost,
   type LoopTool,
   newTurn,
@@ -32,7 +36,7 @@ import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
-import { type AssistantTaskRpc, createWorkflowTaskContext, redactSecrets } from "./task-context";
+import { type AssistantTaskRpc, createWorkflowTaskContext } from "./task-context";
 
 /** Advisory only: identity comes from the instance's task row, never from these params (AC9). */
 export interface TaskParams {
@@ -48,9 +52,18 @@ export interface TaskTurnState {
   history: ModelMessage[];
   turn: TurnState;
   turnId: string;
+  /** The task's own budget (COST-3, A-Co2), when its creator set one; else the user's default. */
+  budgetMicroUsd?: number;
+  /**
+   * Why the task is paused as `budget_limited`, so Continue knows what to lift (M3-17 AC1).
+   * `final`: the run ended at an execution limit (steps, duration) and can't be continued.
+   */
+  paused?: { kind: LimitKind | "steps" | "duration"; detail: string; final?: boolean };
 }
 
-const DAILY_LIMIT_MESSAGE = "You've reached today's spending limit. It resets at midnight UTC.";
+/** How long a task paused by a limit waits for Continue before its run ends (it stays paused). */
+export const PAUSE_WAIT_MS = 7 * 86_400_000;
+const SLOW_DOWN = "Not run: too many tool calls in the last minute. Try again in a minute.";
 type ScopedUser = ReturnType<ReturnType<typeof createRepository>["forUser"]>;
 
 export class TaskWorkflow extends WorkflowEntrypoint<Bindings, TaskParams> {
@@ -112,8 +125,16 @@ export async function executeTask(
   if (started.status !== "running") return; // cancelled or finished before it began
 
   const initial = parseState(task.state);
+  // Every way out of a started task settles its budget (COST-3); outside `ctx.step`, whose guard
+  // would skip it for a task that has already ended.
+  const endBudget = () =>
+    stepper
+      .do("task:budget:end", {}, async () => (ctx ? await ctx.budget.end() : 0))
+      .catch(() => 0);
   let secrets: readonly string[] = [];
   let ctx: TaskContext | null = null;
+  // Paused time, summed from the wake steps' records, so a replay stops the clock the same way.
+  const paused = { ms: 0 };
   try {
     if (!initial) throw new NonRetryableError("the task has no readable turn state");
     // A turn keeps its conversation's model (the pin, else Chat); other work runs on Background.
@@ -131,6 +152,7 @@ export async function executeTask(
       conversationId: task.conversationId,
       turnId: initial.turnId,
       startedAt: started.startedAt,
+      pausedMs: () => paused.ms,
       mode: task.mode,
       readStatus: async () => (await user.tasks.get(task.id))?.status,
       outputs: user.stepOutputs,
@@ -138,30 +160,36 @@ export async function executeTask(
       secrets,
       now,
     });
-    const outcome = await driveLoop(ctx, user, task.id, picked, deps.taskTools, now);
+    const budgetMicroUsd = initial.budgetMicroUsd;
+    const reserved = ctx;
+    await ctx.step("task:budget", async () => await reserved.budget.start(budgetMicroUsd));
+    const outcome = await driveLoop(ctx, user, task.id, picked, deps.taskTools, now, paused);
     await stepper.do("task:finish", {}, async () => {
       await user.tasks.finish(task.id, outcome.status, outcome.error);
       return null;
     });
-    if (outcome.limit) {
-      ctx.progress({ type: "limit.reached", payload: outcome.limit });
-    }
+    await endBudget();
   } catch (err) {
-    if (isTaskCancelled(err)) return; // the row already says cancelled; nothing overwrites it
+    // The row already says cancelled; nothing overwrites it.
+    if (isTaskCancelled(err)) return void (await endBudget());
     const limit = isTaskLimit(err);
     const message = redactSecrets(messageOf(err), secrets).slice(0, 500);
     await stepper
       .do("task:finish:error", {}, async () => {
+        if (limit) {
+          // The run ends here, so this stop can't be continued: say so where Continue looks.
+          const state = parseState((await user.tasks.get(task.id))?.state ?? null);
+          const paused = { kind: limit.kind, detail: limit.detail, final: true };
+          if (state) await user.tasks.saveState(task.id, JSON.stringify({ ...state, paused }));
+        }
         await user.tasks.finish(task.id, limit ? "budget_limited" : "failed", message);
         return null;
       })
       .catch(() => {}); // a failed finish must not mask the task's own end
-    if (limit) {
-      ctx?.progress({
-        type: "limit.reached",
-        payload: { kind: "task_budget", detail: limit.detail },
-      });
-    }
+    await endBudget();
+    // An execution limit, not money: "Paused: limit" (m3-ux §1.3).
+    if (limit)
+      ctx?.progress({ type: "limit.reached", payload: { kind: limit.kind, detail: limit.detail } });
     if (err instanceof NonRetryableError) throw err;
   }
 }
@@ -169,7 +197,9 @@ export async function executeTask(
 /**
  * Runs the loop segment by segment. Each segment loads the state fresh from D1 (so a wake-up
  * after an approval reads the row the decision was written to, never the event payload),
- * forwards the loop's events as progress, and saves the state before it waits or ends.
+ * forwards the loop's events as progress, and saves the state before it waits or ends. A limit
+ * pauses the task as `budget_limited` until Continue (M3-17 AC1) or, for the daily and hard
+ * caps, until the cap resets.
  */
 async function driveLoop(
   ctx: TaskContext,
@@ -183,13 +213,9 @@ async function driveLoop(
   },
   taskTools: readonly LoopTool[],
   now: () => number,
-): Promise<{
-  status: "succeeded" | "failed" | "budget_limited";
-  error?: string;
-  limit?: { kind: string; detail: string };
-}> {
+  paused: { ms: number },
+): Promise<{ status: "succeeded" | "failed" | "budget_limited"; error?: string }> {
   const billingId = picked.billingId ?? picked.provider.id;
-  let dailyLimited = false;
   let llmSeq = 0;
   let toolSeq = 0;
   let ids = 0;
@@ -209,7 +235,7 @@ async function driveLoop(
             req.messages.reduce((sum, m) => sum + m.content.length, 0) +
             JSON.stringify(req.tools ?? []).length;
           const reservation = await ctx.budget.reserve(key, billingId, req.model, chars);
-          if (!reservation) return { limited: true, events: [] as JsonValue };
+          if ("limit" in reservation) return { refused: { ...reservation }, events: [] };
           // Once the hold is taken, only the model call itself may fail the step, so a retry
           // never pays for a second answer to a call that already succeeded. The key's
           // last-used stamp and the display ledger are bookkeeping: they fail quietly.
@@ -232,13 +258,10 @@ async function driveLoop(
           await user.usage
             .record({ providerId: billingId, model: req.model, usage })
             .catch(() => {});
-          return { limited: false, events: events as unknown as JsonValue };
+          return { refused: null, events: events as unknown as JsonValue };
         });
-        if (result.limited) {
-          dailyLimited = true;
-          yield { type: "error", code: "upstream", message: DAILY_LIMIT_MESSAGE } as const;
-          return;
-        }
+        // Thrown before anything is yielded: the loop stops resumably, the call never counted.
+        if (result.refused) throw new LimitStop(result.refused.limit, result.refused.detail);
         yield* result.events as unknown as ModelEvent[];
       })(),
   };
@@ -252,9 +275,14 @@ async function driveLoop(
         toolSeq += 1;
         // Only a read retries: a write that acted and then failed must not act again. (Steps
         // are still at-least-once: an engine crash mid-step reruns it.)
+        // The per-minute tool limit is counted in the same step, so a replay never counts twice;
+        // a refused call doesn't run, and the loop stops with `tool_rate` (COST-2).
         const out = await ctx.step(
           `tool:${toolSeq}`,
-          async () => tool.execute(input, new AbortController().signal),
+          async (key): Promise<ToolOutput> =>
+            (await ctx.budget.allowToolCall(key))
+              ? tool.execute(input, new AbortController().signal)
+              : { ok: false, content: SLOW_DOWN, slowDown: true },
           tool.manifest.riskClass === "read" ? undefined : { retries: { limit: 0, delayMs: 0 } },
         );
         return out as ToolOutput;
@@ -284,6 +312,9 @@ async function driveLoop(
     const state = parseState(loaded);
     if (!state) return { status: "failed", error: "the task's turn state could not be read" };
     const turn = state.turn;
+    // Continued after an execution limit: a fresh allowance of calls and tools for the turn.
+    if (state.paused?.kind === "calls" || state.paused?.kind === "tools") continueTurn(turn);
+    let limit: { kind: LimitKind; detail: string } | undefined;
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
     for (;;) {
@@ -292,10 +323,13 @@ async function driveLoop(
         outcome = next.value;
         break;
       }
+      if (next.value.type === "limit.reached") limit = next.value.payload;
       ctx.progress(next.value);
     }
     const saved = await ctx.step(`task:save:${cycle}`, async () => {
-      const body = JSON.stringify({ history: state.history, turn, turnId: state.turnId });
+      const paused = outcome === "limit_reached" ? limit : undefined;
+      const { budgetMicroUsd, turnId, history } = state;
+      const body = JSON.stringify({ history, turn, turnId, budgetMicroUsd, paused });
       const ok = await user.tasks.saveState(
         taskId,
         body,
@@ -304,11 +338,12 @@ async function driveLoop(
       return ok;
     });
     if (!saved) throw new TaskCancelledError(taskId); // cancelled while the segment ran
+    if (outcome === "limit_reached" && limit) {
+      if (await pause(ctx, user, taskId, cycle, limit.kind, now, paused)) continue;
+      return { status: "budget_limited" };
+    }
     if (outcome !== "awaiting_approval") {
-      if (dailyLimited)
-        return { status: "budget_limited", limit: { kind: "daily", detail: "daily spend cap" } };
       if (outcome === "completed") return { status: "succeeded" };
-      if (outcome === "limit_reached") return { status: "budget_limited" };
       if (outcome === "cancelled") throw new TaskCancelledError(taskId);
       return { status: "failed", error: "the model call failed" };
     }
@@ -324,6 +359,65 @@ async function driveLoop(
       .catch(() => ({ payload: null }));
   }
 }
+
+/**
+ * Pauses a task at a limit: `budget_limited` ("Paused: budget", or "Paused: limit" for an
+ * execution limit), then waits for Continue. The Continue route lifts the limit and moves the row
+ * back to `running` before it wakes the run, so what happened is read from D1, never from the
+ * event. The daily and hard caps also lift themselves at the next UTC day or month. The time spent
+ * paused doesn't count towards the task's duration limit.
+ */
+async function pause(
+  ctx: TaskContext,
+  user: ScopedUser,
+  taskId: string,
+  cycle: number,
+  kind: LimitKind,
+  now: () => number,
+  paused: { ms: number },
+): Promise<boolean> {
+  // When the cap lifts is fixed in the pause step and whether to run on in the wake step, so a
+  // replay on a later day takes the same path the run took (only steps replay; `now` doesn't).
+  const { at, resets } = await ctx.step(`task:pause:${cycle}`, async () => {
+    await user.tasks.finish(taskId, "budget_limited");
+    const at = now();
+    return {
+      at,
+      resets: kind === "daily" ? nextUtcDay(at) : kind === "monthly_hard" ? nextUtcMonth(at) : null,
+    };
+  });
+  const before = paused.ms;
+  // A wait is at most 7 days; a cap that lifts later (the hard cap, at the next month) is waited
+  // for in turns, each recorded, until it lifts or Continue comes.
+  for (let turn = 0; ; turn += 1) {
+    const name = turn === 0 ? `${cycle}` : `${cycle}:${turn}`;
+    const wait = Math.min(PAUSE_WAIT_MS, (resets ?? Number.POSITIVE_INFINITY) - now());
+    await ctx
+      .waitForEvent(`task:continue:${name}`, { type: "continue", timeoutMs: Math.max(1_000, wait) })
+      .catch(() => ({ payload: null }));
+    // The wake step's own guard must not count the pause either; once the step has recorded
+    // how long it was, that record (which a replay returns) is what counts.
+    paused.ms = before + Math.max(0, now() - at);
+    // A cancelled (stopped) task's step throws here, which ends the run as cancelled.
+    const woke = await ctx.step(`task:wake:${name}`, async () => {
+      const pausedMs = Math.max(0, now() - at);
+      const status = (await user.tasks.get(taskId))?.status;
+      // Continue moved it back before waking the run; else a daily or hard cap may have lifted.
+      if (status === "running") return { resume: true, again: false, pausedMs };
+      if (resets === null) return { resume: false, again: false, pausedMs };
+      if (now() < resets) return { resume: false, again: status === "budget_limited", pausedMs };
+      return { resume: await user.tasks.resume(taskId), again: false, pausedMs };
+    });
+    paused.ms = before + woke.pausedMs;
+    if (!woke.again) return woke.resume;
+  }
+}
+
+const nextUtcDay = (t: number) => t - (t % 86_400_000) + 86_400_000;
+const nextUtcMonth = (t: number) => {
+  const d = new Date(t);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+};
 
 /** The platform stepper's surface used here, without its serializable-type machinery. */
 type PlatformStepper = {
@@ -369,7 +463,16 @@ function parseState(json: string | null): TaskTurnState | null {
     const parsed = JSON.parse(json) as TaskTurnState;
     if (!Array.isArray(parsed.history) || typeof parsed.turnId !== "string") return null;
     if (!parsed.turn || !Array.isArray(parsed.turn.messages)) return null;
-    return { history: parsed.history, turn: parsed.turn, turnId: parsed.turnId };
+    const { history, turn, turnId, budgetMicroUsd, paused } = parsed;
+    return {
+      history,
+      turn,
+      turnId,
+      ...(Number.isSafeInteger(budgetMicroUsd) && (budgetMicroUsd as number) > 0
+        ? { budgetMicroUsd }
+        : {}),
+      ...(paused ? { paused } : {}),
+    };
   } catch {
     return null;
   }

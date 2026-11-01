@@ -44,6 +44,9 @@ importers:
       '@hono/node-server':
         specifier: 2.1.5
         version: 2.1.5(hono@4.13.14)
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@opa/server':
         specifier: workspace:*
         version: link:../../packages/server
