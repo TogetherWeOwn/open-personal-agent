@@ -65,7 +65,9 @@ export async function executeExport(
       // never turn ready. Drop the just-written ZIP and the staged files, expire the row,
       // and leave nothing orphaned for the sweep to miss.
       const row = await user.exports.get(id);
-      if (!row || row.status !== "running" || row.expiresAt <= now()) {
+      // Still running and unexpired (a missing row reads as expired, as before).
+      const ready = row?.status === "running" && row.expiresAt > now();
+      if (!ready) {
         await user.exports.removeZip(id).catch(() => {});
         await user.exports.removeStaged(id).catch(() => {});
         await user.exports.finishExpired(id);
