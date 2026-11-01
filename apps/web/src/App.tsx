@@ -199,15 +199,20 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       return;
     }
     const save = (saves.current.get(id) ?? Promise.resolve()).then(() =>
-      setConversationModel(id, pick).catch(() =>
-        // The failure line takes the place of the optimistic "Switched to" line.
-        dispatch({
-          type: "model",
-          id,
-          noticeId,
-          pick: previous,
-          notice: "Couldn't switch the model, so nothing changed.",
-        }),
+      setConversationModel(id, pick).then(
+        // The thread's line becomes the server's, so a reload keeps it.
+        (message) => {
+          if (message) dispatch({ type: "saved", id, noticeId, message });
+        },
+        () =>
+          // The failure line takes the place of the optimistic "Switched to" line.
+          dispatch({
+            type: "model",
+            id,
+            noticeId,
+            pick: previous,
+            notice: "Couldn't switch the model, so nothing changed.",
+          }),
       ),
     );
     saves.current.set(id, save);

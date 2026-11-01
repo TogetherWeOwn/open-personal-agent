@@ -120,9 +120,15 @@ test("the context chip names the model and switches this chat to another (M3-06 
   page,
 }) => {
   const pins: unknown[] = [];
+  // The server answers with the thread's saved line for the switch (TWO-614).
   await page.route("/api/conversations/*/model", async (route) => {
-    pins.push(route.request().postDataJSON());
-    await route.fulfill({ status: 204 });
+    const pick = route.request().postDataJSON();
+    pins.push(pick);
+    const content = pick
+      ? "Switched to some/model via OpenRouter"
+      : "Switched to GPT-4.1 mini via OpenAI";
+    const message = { id: `line-${pins.length}`, role: "system", status: "complete", content };
+    await route.fulfill({ json: { message } });
   });
   await page.goto("/");
   const chip = page.getByRole("button", { name: /GPT-4\.1 mini · OpenAI, model for this chat/ });
@@ -146,6 +152,9 @@ test("the context chip names the model and switches this chat to another (M3-06 
   await page.getByRole("button", { name: /model for this chat/ }).click();
   await page.getByRole("menuitem", { name: /some\/model · OpenRouter/ }).click();
   await expect.poll(() => pins).toEqual([null, { provider: "p2", model: "some/model" }]);
+  // Each saved line takes the place of this tab's, so each switch reads once; the new chat's
+  // first pick was never saved, so its line stays this tab's.
+  await expect(page.getByRole("log").getByText(/^Switched to/)).toHaveCount(3);
 });
 
 test("a send right after a switch waits for the switch to save, so the reply uses it", async ({

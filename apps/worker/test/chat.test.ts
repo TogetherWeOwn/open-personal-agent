@@ -178,10 +178,16 @@ describe("chat transport", () => {
     ]);
 
     // A conversation's own model overrides the Chat role, and the model gets the whole history
-    // from the other model's turns (M3-06 AC3).
+    // from the other model's turns (M3-06 AC3), but never the thread's switch line (TWO-614).
     const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
     const keyedRow = (await user.providers.list()).find((p) => p.kind === "openai-chat");
-    await user.chat.setModel("conv-6", { provider: String(keyedRow?.id), model: "gpt-y" });
+    const own6 = { provider: String(keyedRow?.id), model: "gpt-y" };
+    const pinned = await browser.req("/api/conversations/conv-6/model", {
+      method: "PUT",
+      body: own6,
+    });
+    const { message: line } = await pinned.json<{ message: { content: string } }>();
+    expect(line.content).toBe("Switched to gpt-y via api.example.com");
     tab.events.length = 0;
     tab.send?.("conv-6", "Back to you");
     await tab.until?.("turn.completed");
@@ -194,6 +200,19 @@ describe("chat transport", () => {
       "And now?",
       "From the starter",
       "Back to you",
+    ]);
+    // The thread keeps the line where the switch happened, for a reload or another tab.
+    const thread = await (await browser.req("/api/conversations/conv-6/messages")).json<{
+      messages: { role: string; content: string }[];
+    }>();
+    expect(thread.messages.map((m) => `${m.role}: ${m.content}`)).toEqual([
+      "user: Who are you?",
+      "assistant: From gpt-x",
+      "user: And now?",
+      "assistant: From the starter",
+      `system: ${line.content}`,
+      "user: Back to you",
+      "assistant: From gpt-x",
     ]);
 
     // A chat picked before the server had it sends its model with its first message, and that
