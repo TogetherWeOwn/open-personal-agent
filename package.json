@@ -23,7 +23,7 @@
     "teardown:cloudflare": "node scripts/teardown-cloudflare.mjs",
     "verify:cloudflare": "node scripts/verify-cloudflare.mjs",
     "docs:verify": "node scripts/generate-verify-guide.mjs",
-    "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker",
+    "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker --metafile dist/worker-meta.json",
     "lint": "biome check . && node scripts/check-scoped-access.mjs",
     "format": "biome format --write .",
     "typecheck": "pnpm -r typecheck",

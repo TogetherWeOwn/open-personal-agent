@@ -2,10 +2,9 @@
 // Supply-chain policy (ADR 0010 D12; R7 M2-9, M2-10): a reviewed build-script allowlist, a
 // minimum release age in pnpm and Renovate, and workflows that pin every action by commit SHA,
 // default to read-only permissions and never use `pull_request_target`. Also ADR 0010 D4.1 #8:
-// every third-party package the Worker can bundle is on a reviewed list.
+// every third-party package in the Worker bundle is on a reviewed list.
 
 import { readdirSync } from "node:fs";
-import { posix } from "node:path";
 import { parse } from "yaml";
 import { isMain, readText, report, repoTextFiles } from "./lib/repo.mjs";
 
@@ -14,7 +13,7 @@ export const REVIEWED_BUILDS = ["esbuild", "workerd"];
 export const MIN_RELEASE_AGE_MINUTES = 1440;
 
 /**
- * Third-party packages in the Worker's runtime dependency closure (D4.1 #8). Any of them can read
+ * Third-party packages the Worker bundle contains (D4.1 #8). Any of them can read
  * `OPA_MASTER_KEY` at runtime (D4 residual risk), so a PR that extends this list needs a Security
  * Engineer review stage. Version bumps don't; a new package, direct or transitive, does.
  */
@@ -48,55 +47,61 @@ export const REVIEWED_RUNTIME = [
   "reflect-metadata",
   "tslib",
   "tsyringe",
+  // agents@0.32.0 (M2-13) and what of it the bundle contains.
+  "@babel/runtime-corejs3",
+  "@modelcontextprotocol/client",
+  "@modelcontextprotocol/core",
+  "agents",
+  "capnweb",
+  "core-js-pure",
+  "cron-schedule",
+  "eventsource",
+  "eventsource-parser",
+  "jose",
+  "mime-db",
+  "mime-types",
+  "mimetext",
+  "nanoid",
+  "pkce-challenge",
+  "zod",
 ];
-export const WORKER_IMPORTER = "apps/worker";
 
-/** Every third-party package `apps/worker` reaches through `dependencies`, from pnpm-lock.yaml. */
-export function runtimeClosure(lockYaml, importer = WORKER_IMPORTER) {
-  const lock = parse(lockYaml) ?? {};
-  const seen = new Set();
+/** esbuild's metafile for the Worker bundle, written by `pnpm deploy:dry-run`. */
+export const WORKER_METAFILE = "dist/worker-meta.json";
+
+/**
+ * Every third-party package the Worker bundle contains, from the `inputs` of its esbuild metafile.
+ * Not from the lockfile: pnpm records a package's optional peers (agents' vite, rolldown, babel,
+ * esbuild, react) as snapshot dependencies, so a lockfile walk counts build tools that never ship.
+ * The metafile lists only the files esbuild actually bundled.
+ */
+export function bundledPackages(metafileJson) {
   const names = new Set();
-  // An alias (`npm:other@1`) is recorded as the full `other@1` key.
-  const keyOf = (name, version) =>
-    version.split("(")[0].includes("@") ? version : `${name}@${version}`;
-  const visitPackage = (key) => {
-    if (seen.has(key)) return;
-    seen.add(key);
-    names.add(key.slice(0, key.indexOf("@", 1)));
-    const snap = lock.snapshots?.[key] ?? {};
-    for (const [name, version] of Object.entries({
-      ...snap.dependencies,
-      ...snap.optionalDependencies,
-    })) {
-      visitPackage(keyOf(name, version));
+  for (const input of Object.keys(JSON.parse(metafileJson).inputs ?? {})) {
+    const at = input.lastIndexOf("node_modules/");
+    if (at >= 0) {
+      const [scope, name] = input.slice(at + "node_modules/".length).split("/");
+      names.add(scope.startsWith("@") ? `${scope}/${name}` : scope);
+    } else if (!/^(apps|packages)\/|^node-built-in-modules:/.test(input)) {
+      // Bundled from outside node_modules and the workspace: nothing can review that by name.
+      names.add(input);
     }
-  };
-  const visitImporter = (dir) => {
-    if (seen.has(`link:${dir}`)) return;
-    seen.add(`link:${dir}`);
-    // Workspace packages are bundled too, so their dependencies count. Optional ones are installed.
-    const importerDeps = lock.importers?.[dir] ?? {};
-    for (const [name, { version }] of Object.entries({
-      ...importerDeps.dependencies,
-      ...importerDeps.optionalDependencies,
-    })) {
-      if (version.startsWith("link:")) visitImporter(posix.join(dir, version.slice(5)));
-      else visitPackage(keyOf(name, version));
-    }
-  };
-  visitImporter(importer);
+  }
   return [...names].sort();
 }
 
-export function checkRuntimeDependencies(lockYaml) {
-  if (lockYaml == null) {
-    return ["pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked"];
+export function checkRuntimeDependencies(metafileJson) {
+  if (metafileJson == null) {
+    return [
+      `${WORKER_METAFILE}: missing, so the Worker's bundled packages can't be checked; ` +
+        "run `pnpm deploy:dry-run` first",
+    ];
   }
-  return runtimeClosure(lockYaml)
+  return bundledPackages(metafileJson)
     .filter((name) => !REVIEWED_RUNTIME.includes(name))
     .map(
       (name) =>
-        `pnpm-lock.yaml: "${name}" is bundled into the Worker unreviewed; add it to ` +
+        `${WORKER_METAFILE}: "${name}" is bundled into the Worker unreviewed; add it to ` +
         "REVIEWED_RUNTIME with a Security Engineer review (ADR 0010 D4.1 #8)",
     );
 }
@@ -170,7 +175,7 @@ if (isMain(import.meta.url)) {
   report("supply-chain", [
     ...checkPnpmPolicy(readText("pnpm-workspace.yaml") ?? ""),
     ...checkRenovatePolicy(readText("renovate.json")),
-    ...checkRuntimeDependencies(readText("pnpm-lock.yaml")),
+    ...checkRuntimeDependencies(readText(WORKER_METAFILE)),
     ...workflows.flatMap((f) => checkWorkflow(`${dir}/${f}`, readText(`${dir}/${f}`) ?? "")),
     ...actions.flatMap((f) => checkPins(f.path, parse(f.text))),
   ]);
