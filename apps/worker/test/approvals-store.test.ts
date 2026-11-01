@@ -55,7 +55,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.batch(
-    ["approvals", "tasks", "conversations", "audit_log", "users"].map((t) =>
+    ["approvals", "grants", "tasks", "conversations", "audit_log", "users"].map((t) =>
       db.prepare(`DELETE FROM ${t}`),
     ),
   );
@@ -167,6 +167,38 @@ describe("the approvals store", () => {
     expect(await audits("approval.approve")).toBe(0);
     expect(await alice.approvals.beginStepUp("batch_1", 0, ceremony, Date.now())).toBe(false);
     expect(await alice.approvals.beginStepUp("batch_none", 0, ceremony, Date.now())).toBe(false);
+  });
+
+  it("commits a grant with its decision, never from a tainted row or a cancelled task", async () => {
+    const hour = { tool: "send", scope: "hour", expiresAt: Date.now() + 3_600_000 } as const;
+    const approve = (approvalId: string) =>
+      ({ approvalId, decision: "approve", scope: "hour", detail: {}, grant: hour }) as const;
+    const offered = { scopes: '["once","hour"]' };
+    await alice.approvals.create([item("appr_g", 0, { batchId: "batch_g", ...offered })]);
+    await alice.approvals.decide("batch_g", [approve("appr_g")], Date.now());
+    expect(await count("grants")).toBe(1);
+    expect(await audits("policy.grant")).toBe(1);
+    // A tainted row: the decision and the grant both fail.
+    const tainted = { batchId: "batch_x", taint: '{"kind":"web"}', ...offered };
+    await alice.approvals.create([item("appr_x", 0, tainted)]);
+    await expect(
+      alice.approvals.decide("batch_x", [approve("appr_x")], Date.now()),
+    ).rejects.toThrow();
+    expect(await status("appr_x", "batch_x")).toBe("pending");
+    // A task cancelled after the caller read the batch: nothing is decided or granted.
+    await db
+      .prepare(
+        "INSERT INTO tasks (id, user_id, conversation_id, kind, mode, status) VALUES ('t2', 'alice', 'c1', 'chat', 'background', 'waiting_for_approval')",
+      )
+      .run();
+    const onTask = { batchId: "batch_k", turnId: null, taskId: "t2", ...offered };
+    await alice.approvals.create([item("appr_k", 0, onTask)]);
+    await alice.tasks.cancel("t2");
+    await expect(
+      alice.approvals.decide("batch_k", [approve("appr_k")], Date.now()),
+    ).rejects.toThrow();
+    expect(await status("appr_k", "batch_k")).toBe("pending");
+    expect(await count("grants")).toBe(1);
   });
 
   it("runs a step-up ceremony once: begin, take burns it, a second take finds nothing (W3)", async () => {

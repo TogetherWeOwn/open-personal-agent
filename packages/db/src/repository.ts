@@ -243,6 +243,13 @@ export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
 
 /**
+ * A batch ID: the assistant's are `batch_<uuid>`, a task's carry its Workflow instance ID, which
+ * can be longer than `isId` allows. Printable ASCII without a slash, so it stays one path segment.
+ */
+export const isBatchId = (id: unknown): id is string =>
+  typeof id === "string" && /^[\x21-\x2e\x30-\x7e]{1,200}$/.test(id);
+
+/**
  * Whether `error` is a uniqueness refusal from the store. D1 reports the violated constraint
  * in the cause, under drizzle's "Failed query" wrapper — so a racing insert that loses a
  * partial unique index reads as one, and the caller can answer what the check would have.
@@ -1026,7 +1033,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /** A batch's rows in their stored order; empty when it is missing or someone else's. */
           batch: (batchId: string): Promise<ApprovalRow[]> =>
-            isId(batchId)
+            isBatchId(batchId)
               ? db
                   .select()
                   .from(approvals)
@@ -1126,9 +1133,12 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * Records the user's decisions on pending, unexpired items, all of them or none, each
-           * with its audit row. An approval holds only a scope its row offered. Throws when any
-           * item was decided, expired or cancelled since the caller read the batch, or asks for
-           * a scope it wasn't offered; nothing is written then.
+           * with its audit row. An approval holds only a scope its row offered, and a task's
+           * batch is decided only while the task is live. A `grant` (AC3) is written in the same
+           * batch, from an untainted row only, so a decision never commits without the grant
+           * the user chose. Throws when any item was decided, expired or cancelled since the
+           * caller read the batch, asks for a scope it wasn't offered, or grants from a tainted
+           * row; nothing is written then.
            */
           decide: async (
             batchId: string,
@@ -1137,6 +1147,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               decision: "approve" | "deny";
               scope: "once" | "task" | "hour" | "destination";
               detail: Record<string, unknown>;
+              grant?: StandingGrant;
             }[],
             now: number,
           ) => {
@@ -1144,6 +1155,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             const statements: BatchItem<"sqlite">[] = [];
             for (const d of decisions) {
               const approve = d.decision === "approve";
+              const grant = approve ? d.grant : undefined;
               statements.push(
                 db
                   .update(approvals)
@@ -1166,6 +1178,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                       approve
                         ? sql`EXISTS (SELECT 1 FROM json_each(${approvals.scopes}) WHERE value = ${d.scope})`
                         : undefined,
+                      sql`(${approvals.taskId} IS NULL OR EXISTS (SELECT 1 FROM ${tasks} WHERE ${tasks.id} = ${approvals.taskId} AND ${tasks.status} <> 'cancelled' AND ${tasks.finishedAt} IS NULL))`,
+                      grant ? isNull(approvals.taint) : undefined,
                     ),
                   ),
                 db
@@ -1182,6 +1196,30 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                     ),
                   ),
               );
+              if (grant) {
+                // Reached only if the decision above changed its row: its audit row's guard
+                // aborts the batch otherwise.
+                const id = crypto.randomUUID();
+                statements.push(
+                  db.insert(grants).values({
+                    id,
+                    userId,
+                    tool: grant.tool,
+                    scope: grant.scope,
+                    taskId: grant.taskId ?? null,
+                    destination: grant.destination ?? null,
+                    expiresAt: grant.expiresAt ?? null,
+                  }),
+                  db.insert(auditLog).values({
+                    userId,
+                    action: "policy.grant",
+                    module: "policy",
+                    targetId: id,
+                    result: "ok",
+                    detail: JSON.stringify(grant),
+                  }),
+                );
+              }
             }
             await db.batch(statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]]);
           },
