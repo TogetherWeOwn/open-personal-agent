@@ -357,6 +357,36 @@ export const tasks = sqliteTable(
 );
 
 /**
+ * A data export (M3-20 AC1): the Workflow-built ZIP of every item type. The Workflow instance is
+ * named here (`workflow_instance_id`), so `scopeForExport` mints its authority from this row
+ * alone — instance params are never consulted, as with tasks (M3-12 AC9). The ZIP itself lives
+ * in R2 under `u/{userId}/exports/{id}.zip` (the repository derives the key); item files stream
+ * through `u/{userId}/exports/{id}/staged/` while the run builds it. `expires_at` is stamped at
+ * creation (1 hour out): the reconciler deletes the object then, and the same bound frees a run
+ * that never finishes. The row stays as the user's history.
+ */
+export const dataExports = sqliteTable(
+  "exports",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    status: text("status", { enum: ["running", "ready", "failed", "expired"] })
+      .notNull()
+      .default("running"),
+    workflowInstanceId: text("workflow_instance_id").unique(),
+    sizeBytes: integer("size_bytes"),
+    error: text("error"),
+    createdAt: createdAt(),
+    readyAt: integer("ready_at"),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [
+    index("exports_user_idx").on(t.userId, t.createdAt),
+    index("exports_sweep_idx").on(t.status, t.expiresAt),
+  ],
+);
+
+/**
  * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
  * a model; a null Background role means the cheapest configured one. Embedding has no column
  * until it has a user (ADR 0008).

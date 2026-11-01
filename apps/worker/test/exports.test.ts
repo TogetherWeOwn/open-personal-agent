@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: Apache-2.0
+// The exports table and scope minting for the export Workflow (M3-20 AC1): a Workflow's authority
+// comes from its exports row alone, another user's export is invisible, a finished row never moves
+// again, and every item type the export walks lists its rows.
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env as workerEnv } from "cloudflare:workers";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
+import { beforeAll, describe, expect, it } from "vitest";
+import type { WorkerEnv } from "../src/compose";
+
+const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
+const repo = createRepository(env);
+const alice = repo.forUser(scopeFromSession({ userId: "alice" }));
+const bob = repo.forUser(scopeFromSession({ userId: "bob" }));
+
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  await env.DB.prepare(
+    "INSERT INTO users (id, display_name, role) VALUES ('alice', 'A', 'owner'), ('bob', 'B', 'member')",
+  ).run();
+  await alice.createConversation("ca", "Alice's");
+  await bob.createConversation("cb", "Bob's");
+});
+
+describe("export rows", () => {
+  it("creates a running export; a duplicate instance or a bad id creates none", async () => {
+    expect(
+      await alice.exports.create({ id: "e1", workflowInstanceId: "exp-e1", expiresAt: 3600000 }),
+    ).toBe(true);
+    expect((await alice.exports.get("e1"))?.status).toBe("running");
+    // The instance id is the Workflow's authority: it names one row, so a second fails.
+    expect(
+      await alice.exports.create({ id: "e1b", workflowInstanceId: "exp-e1", expiresAt: 3600000 }),
+    ).toBe(false);
+    expect(await alice.exports.get("e1b")).toBeUndefined();
+    // Another user's export is invisible, and an unresolvable instance id is rejected.
+    expect(await bob.exports.get("e1")).toBeUndefined();
+    await expect(
+      alice.exports.create({ id: "e9", workflowInstanceId: "x".repeat(129), expiresAt: 3600000 }),
+    ).rejects.toThrow(/invalid instance id/);
+    expect(await alice.exports.get("e9")).toBeUndefined();
+  });
+
+  it("mints the scope from the row's user_id, never from a claim about it", async () => {
+    const minted = await repo.scopeForExport("exp-e1");
+    expect(minted?.scope.userId).toBe("alice");
+    expect(minted?.export.id).toBe("e1");
+    // The minted scope really is Alice's authority, usable with forUser.
+    expect((await repo.forUser(minted?.scope as never).exports.get("e1"))?.id).toBe("e1");
+    // Nothing about the lookup can be steered: unknown or malformed instances mint nothing.
+    expect(await repo.scopeForExport("exp-nope")).toBeNull();
+    expect(await repo.scopeForExport("")).toBeNull();
+    expect(await repo.scopeForExport("e1")).toBeNull();
+    expect(await repo.scopeForExport("x".repeat(129))).toBeNull();
+  });
+
+  it("lists newest first, only the user's own", async () => {
+    await alice.exports.create({ id: "e2", workflowInstanceId: "exp-e2", expiresAt: 3600000 });
+    await bob.exports.create({ id: "e3", workflowInstanceId: "exp-e3", expiresAt: 3600000 });
+    // `created_at` ticks in seconds; pin the order so the test asserts it, not the clock.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE exports SET created_at = 1000 WHERE id = 'e1'"),
+      env.DB.prepare("UPDATE exports SET created_at = 2000 WHERE id = 'e2'"),
+    ]);
+    expect((await alice.exports.list()).map((r) => r.id)).toEqual(["e2", "e1"]);
+    expect((await bob.exports.list()).map((r) => r.id)).toEqual(["e3"]);
+  });
+
+  it("running finds the in-flight export, none once it finished", async () => {
+    await alice.exports.create({ id: "e4", workflowInstanceId: "exp-e4", expiresAt: 3600000 });
+    expect((await alice.exports.running())?.id).toBe("e4");
+    expect((await bob.exports.running())?.id).toBe("e3");
+    expect(await alice.exports.finishReady("e4", 12, 3000)).toBe(true);
+    // A second running export now surfaces; a finished one never does.
+    await alice.exports.create({ id: "e4b", workflowInstanceId: "exp-e4b", expiresAt: 3600000 });
+    expect((await alice.exports.running())?.id).toBe("e4b");
+    const done = (await alice.exports.list()).find((r) => r.id === "e4");
+    expect(done?.status).toBe("ready");
+    expect(done?.sizeBytes).toBe(12);
+    expect(done?.readyAt).toBe(3000);
+    expect(done?.expiresAt).toBe(3600000);
+  });
+
+  it("a finished export never moves again, and nobody finishes another's", async () => {
+    await alice.exports.create({ id: "e5", workflowInstanceId: "exp-e5", expiresAt: 3600000 });
+    expect(await alice.exports.finishFailed("e5", "boom")).toBe(true);
+    expect((await alice.exports.get("e5"))?.error).toBe("boom");
+    // Terminal rows stay terminal, whatever the caller claims.
+    expect(await alice.exports.finishReady("e5", 1, 4001)).toBe(false);
+    expect(await alice.exports.finishFailed("e5", "again")).toBe(false);
+    // Bob names Alice's row and fails the user match, twice over.
+    expect(await bob.exports.finishReady("e5", 1, 4001)).toBe(false);
+    expect(await bob.exports.finishFailed("e4b", "smuggled")).toBe(false);
+    expect((await alice.exports.get("e4b"))?.status).toBe("running");
+  });
+
+  it("keeps keys under the user's export prefix", async () => {
+    expect(alice.exports.key("e1")).toBe("u/alice/exports/e1.zip");
+    expect(alice.exports.stagedPrefix("e1")).toBe("u/alice/exports/e1/staged/");
+    expect(alice.exports.stagedKey("e1", "conversations.json")).toBe(
+      "u/alice/exports/e1/staged/conversations.json",
+    );
+    // Staged names are fixed filenames, never paths: separators become underscores.
+    expect(alice.exports.stagedKey("e1", "../e2/staged/x")).toBe(
+      "u/alice/exports/e1/staged/.._e2_staged_x",
+    );
+    expect(() => alice.exports.key("../bob/exports/e1")).toThrow(/invalid id/);
+  });
+
+  it("listPrefix enumerates staged keys in order, and nothing without a listing", async () => {
+    const prefix = alice.exports.stagedPrefix("e7");
+    await env.FILES.put(`${prefix}b.json`, "b");
+    await env.FILES.put(`${prefix}a.json`, "a");
+    await env.FILES.put("u/alice/files/not-staged", "x");
+    expect(await alice.exports.listPrefix(prefix)).toEqual([
+      { key: `${prefix}a.json`, size: 1 },
+      { key: `${prefix}b.json`, size: 1 },
+    ]);
+    // Another user's directory is empty to her; Node has no listing, so the walk sees none.
+    expect(await alice.exports.listPrefix(bob.exports.stagedPrefix("e7"))).toEqual([]);
+    const noList = createRepository({ ...env, FILES: {} as never }).forUser(
+      scopeFromSession({ userId: "alice" }),
+    );
+    expect(await noList.exports.listPrefix(prefix)).toEqual([]);
+  });
+});
+
+describe("export item listings", () => {
+  it("lists every task row, oldest first, only the user's own", async () => {
+    await alice.tasks.create({
+      id: "xt1",
+      conversationId: "ca",
+      workflowInstanceId: "xinst-1",
+      kind: "turn",
+      mode: "background" as const,
+    });
+    await bob.tasks.create({
+      id: "xt2",
+      conversationId: "cb",
+      workflowInstanceId: "xinst-2",
+      kind: "turn",
+      mode: "background" as const,
+    });
+    expect((await alice.tasks.list()).map((r) => r.id)).toContain("xt1");
+    expect((await alice.tasks.list()).map((r) => r.id)).not.toContain("xt2");
+    expect((await bob.tasks.list()).map((r) => r.id)).toEqual(["xt2"]);
+  });
+
+  it("lists every attachment row with its message, only the user's own", async () => {
+    await alice.attachments.create({
+      id: "xa1",
+      name: "f.txt",
+      mediaType: "text/plain",
+      kind: "text",
+      sizeBytes: 3,
+    });
+    const rows = await alice.attachments.list();
+    expect(rows.find((r) => r.id === "xa1")).toMatchObject({
+      name: "f.txt",
+      conversationId: null,
+      messageId: null,
+    });
+    expect(await bob.attachments.list()).toEqual([]);
+  });
+
+  it("lists every ledger row, oldest first, only the user's own", async () => {
+    await alice.usage.record({
+      providerId: "p",
+      model: "m",
+      usage: { inputTokens: 1, outputTokens: 2, cachedInputTokens: 0 },
+    });
+    const rows = await alice.usage.list();
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({ providerId: "p", model: "m" });
+    expect(await bob.usage.list()).toEqual([]);
+  });
+
+  it("lists the user's own audit trail, oldest first; deployment rows belong to nobody", async () => {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO audit_log (user_id, action, module, result) VALUES ('alice', 'a1', 'm', 'ok')",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_log (user_id, action, module, result) VALUES (NULL, 'a0', 'm', 'ok')",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_log (user_id, action, module, result) VALUES ('bob', 'b1', 'm', 'denied')",
+      ),
+    ]);
+    expect((await alice.audit.list()).map((r) => r.action)).toEqual(["a1"]);
+    expect((await bob.audit.list()).map((r) => r.action)).toEqual(["b1"]);
+  });
+});

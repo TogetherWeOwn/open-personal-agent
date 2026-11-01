@@ -26,6 +26,7 @@ import {
   attachments,
   auditLog,
   conversations,
+  dataExports,
   grants,
   messages,
   modelProviders,
@@ -104,6 +105,16 @@ export interface DataBindings<Stub, Id> {
       complete(parts: UploadedPart[]): Promise<unknown>;
       abort(): Promise<unknown>;
     }>;
+    /**
+     * The keys under a prefix, for enumerating the file and task-output stores an export
+     * walks (M3-20 AC1). Absent where the store has no listing (Node); the walk then treats
+     * the store as empty. The export Workflow runs on Workers, where R2 always lists.
+     */
+    list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
+      objects: { key: string; size: number }[];
+      truncated: boolean;
+      cursor?: string;
+    }>;
   };
   ASSISTANT: { idFromName(name: string): Id; get(id: Id): Stub };
 }
@@ -167,6 +178,10 @@ export type HistoryHit = {
 
 /** A task row (M3-12): the durable run's authority and state. */
 export type TaskRow = typeof tasks.$inferSelect;
+/** An export row (M3-20): the durable run's authority, size and expiry. */
+export type ExportRow = typeof dataExports.$inferSelect;
+/** Export rows the run moves through; anything else ends it (a step that finds one stops). */
+export const EXPORT_TERMINAL_STATUSES = ["ready", "failed", "expired"] as const;
 export type TaskStatus = TaskRow["status"];
 /** Statuses a task never leaves; a step that finds one does nothing (M3-12 AC3). */
 export const TASK_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "interrupted"] as const;
@@ -223,6 +238,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         .where(eq(tasks.workflowInstanceId, instanceId))
         .limit(1);
       return task ? { scope: issue(task.userId), task } : null;
+    },
+    /**
+     * For the export Workflow entrypoint only: the scope of the user whose exports row names
+     * this Workflow instance, with the row itself. The same authority rule as `scopeForTask`
+     * (M3-12 AC9) over the exports table, which carries the expiry and size a task row has no
+     * room for: instance params are never consulted, so a parameter naming another user mints
+     * nothing. `null` when no exports row claims the instance.
+     */
+    scopeForExport: async (
+      instanceId: string,
+    ): Promise<{ scope: UserScope; export: ExportRow } | null> => {
+      if (!isInstanceId(instanceId)) return null;
+      const [row] = await db
+        .select()
+        .from(dataExports)
+        .where(eq(dataExports.workflowInstanceId, instanceId))
+        .limit(1);
+      return row ? { scope: issue(row.userId), export: row } : null;
     },
     /** Deployment-level checks that read no user's data. */
     deployment: {
@@ -537,6 +570,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           record: async (call: LedgerCall) => {
             await db.insert(usage).values({ ...ledgerValues(call), userId });
           },
+          /** Every ledger row, oldest first, for the data export (M3-20 AC1). */
+          list: () =>
+            db.select().from(usage).where(eq(usage.userId, userId)).orderBy(usage.createdAt),
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
         memory: memoryService(db, userId),
@@ -693,6 +729,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]);
             return update.meta.changes > 0;
           },
+        },
+        /**
+         * The user's own audit trail, oldest first, for the data export (M3-20 AC1) and the
+         * activity log: deployment-level rows (`user_id` null) belong to nobody's export.
+         */
+        audit: {
+          list: () =>
+            db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
         },
         /**
          * Saved model providers (M3-06). A foreign key proves only that a row exists, so every
@@ -874,6 +918,26 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .where(and(eq(attachments.userId, userId), inArray(attachments.id, [...ids])))
                   .orderBy(attachments.createdAt)
               : [],
+          /**
+           * Every attachment row, oldest first, each with the message carrying it, for the data
+           * export (M3-20 AC1). The bytes stay in R2; the export's finish step streams them.
+           */
+          list: () =>
+            db
+              .select({
+                id: attachments.id,
+                name: attachments.name,
+                mediaType: attachments.mediaType,
+                kind: attachments.kind,
+                sizeBytes: attachments.sizeBytes,
+                sentToModel: attachments.sentToModel,
+                conversationId: attachments.conversationId,
+                messageId: attachments.messageId,
+                createdAt: attachments.createdAt,
+              })
+              .from(attachments)
+              .where(eq(attachments.userId, userId))
+              .orderBy(attachments.createdAt),
           /** Deletes the row and its object; `false` when it isn't the user's. */
           remove: async (id: string) => {
             if (!isId(id)) return false;
@@ -925,6 +989,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
                 .limit(1)
             )[0],
+          /** Every task row, oldest first, for the data export (M3-20 AC1). */
+          list: () =>
+            db.select().from(tasks).where(eq(tasks.userId, userId)).orderBy(tasks.createdAt),
           /**
            * Moves a task to `running`, stamping `started_at` the first time. Returns the row as
            * updated, or `undefined` when it was already terminal (a cancelled task never runs).
@@ -1022,6 +1089,130 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ).length > 0
             );
           },
+        },
+        /**
+         * Data exports (M3-20 AC1). The R2 keys are derived, never stored: the final ZIP at
+         * `key`, the item files the run stages at `stagedKey`, both under the user's prefix so
+         * no export can name another user's objects (and M3-20b's deletion walks the prefix).
+         */
+        exports: {
+          /** The final ZIP's key; `checkId` keeps it inside the user's exports prefix. */
+          key: (id: string) => `u/${userId}/exports/${checkId(id)}.zip`,
+          /** One staged item file's key, under the export's own directory. */
+          stagedKey: (id: string, name: string) =>
+            `u/${userId}/exports/${checkId(id)}/staged/${name.replace(/[^A-Za-z0-9._-]/g, "_")}`,
+          /** The export's directory: the final ZIP beside it is not staged, so it is excluded. */
+          stagedPrefix: (id: string) => `u/${userId}/exports/${checkId(id)}/staged/`,
+          /**
+           * Every key under a prefix, in order, following cursors. `[]` where the store has no
+           * listing (Node); the export Workflow runs on Workers, where R2 always lists.
+           */
+          listPrefix: async (prefix: string): Promise<{ key: string; size: number }[]> => {
+            if (!FILES.list) return [];
+            const keys: { key: string; size: number }[] = [];
+            let cursor: string | undefined;
+            for (;;) {
+              const page = await FILES.list({
+                prefix,
+                limit: 1000,
+                ...(cursor === undefined ? {} : { cursor }),
+              });
+              for (const o of page.objects) keys.push({ key: o.key, size: o.size });
+              if (!page.truncated) break;
+              cursor = page.cursor;
+            }
+            return keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+          },
+          /**
+           * Creates the row a run fills; the instance id names it for `scopeForExport`. `false`
+           * when the instance already names a row, so a retry or a racing second POST claims
+           * nothing new; anything else (a real database failure) still throws.
+           */
+          create: async (input: {
+            id: string;
+            workflowInstanceId: string;
+            expiresAt: number;
+          }): Promise<boolean> => {
+            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
+            try {
+              await db.insert(dataExports).values({
+                id: checkId(input.id),
+                userId,
+                workflowInstanceId: input.workflowInstanceId,
+                expiresAt: input.expiresAt,
+              });
+            } catch (error) {
+              const [claimed] = await db
+                .select({ id: dataExports.id })
+                .from(dataExports)
+                .where(eq(dataExports.workflowInstanceId, input.workflowInstanceId))
+                .limit(1);
+              if (!claimed) throw error;
+              return false;
+            }
+            return true;
+          },
+          /** The user's export row; `undefined` when it is missing or someone else's. */
+          get: async (id: string) =>
+            isId(id)
+              ? (
+                  await db
+                    .select()
+                    .from(dataExports)
+                    .where(and(eq(dataExports.id, id), eq(dataExports.userId, userId)))
+                    .limit(1)
+                )[0]
+              : undefined,
+          /** Every export row, newest first, for the status list. */
+          list: () =>
+            db
+              .select()
+              .from(dataExports)
+              .where(eq(dataExports.userId, userId))
+              .orderBy(desc(dataExports.createdAt)),
+          /** The still-running row, if any: the UI's "already being made" state (m3-ux §3.11). */
+          running: async () =>
+            (
+              await db
+                .select()
+                .from(dataExports)
+                .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running")))
+                .orderBy(desc(dataExports.createdAt))
+                .limit(1)
+            )[0],
+          /**
+           * Marks a running export ready. `false` when it had already ended: a retry that finds
+           * one never overwrites it.
+           */
+          finishReady: async (id: string, sizeBytes: number, now: number) =>
+            (
+              await db
+                .update(dataExports)
+                .set({ status: "ready", sizeBytes, readyAt: now })
+                .where(
+                  and(
+                    eq(dataExports.id, id),
+                    eq(dataExports.userId, userId),
+                    eq(dataExports.status, "running"),
+                  ),
+                )
+                .returning({ id: dataExports.id })
+            ).length > 0,
+          /** Marks a running export failed, keeping the reason; `false` when it had ended. */
+          finishFailed: async (id: string, error: string) =>
+            (
+              await db
+                .update(dataExports)
+                .set({ status: "failed", error: error.slice(0, 500) })
+                .where(
+                  and(
+                    eq(dataExports.id, id),
+                    eq(dataExports.userId, userId),
+                    eq(dataExports.status, "running"),
+                  ),
+                )
+                .returning({ id: dataExports.id })
+            ).length > 0,
         },
         /**
          * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they
