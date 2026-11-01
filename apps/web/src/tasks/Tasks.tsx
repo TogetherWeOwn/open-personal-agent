@@ -3,11 +3,13 @@
 // one way or another). Each tab fetches its statuses from `GET /api/tasks`, so the filter is
 // the server's, not a client guess. A row names the task, chips its status (a `budget_limited`
 // stop by an execution limit reads "Paused: limit", never "budget"), and shows the spend and
-// elapsed time so far.
-import { useEffect, useState } from "react";
+// elapsed time so far. A tab shows a page at a time; "Show older tasks" fetches the next one
+// with the same statuses (TWO-713).
+import { useEffect, useRef, useState } from "react";
 import { Link, ToggleButton, ToggleButtonGroup } from "react-aria-components";
-import { EmptyState, Page, Skeleton, StatusChip } from "../ui";
+import { Button, EmptyState, Page, Skeleton, StatusChip } from "../ui";
 import {
+  addPage,
   costLabel,
   elapsed,
   HISTORY_STATUSES,
@@ -15,8 +17,17 @@ import {
   listQuery,
   NOW_STATUSES,
   type TaskItem,
+  type TaskPages,
   taskTitle,
 } from "./tasks";
+
+async function fetchPage(tab: "now" | "history", until: number | null): Promise<TaskItem[]> {
+  const res = await fetch(
+    `/api/tasks?${listQuery(tab === "now" ? NOW_STATUSES : HISTORY_STATUSES, until)}`,
+  );
+  if (!res.ok) throw new Error(String(res.status));
+  return ((await res.json()) as { tasks: TaskItem[] }).tasks;
+}
 
 function TaskRow({ task }: { task: TaskItem }) {
   const time = elapsed(task);
@@ -41,19 +52,55 @@ function TaskRow({ task }: { task: TaskItem }) {
 
 export function Tasks() {
   const [tab, setTab] = useState<"now" | "history">("now");
-  const [tasks, setTasks] = useState<TaskItem[] | null>(null);
+  const [pages, setPages] = useState<TaskPages | null>(null);
   const [failed, setFailed] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreFailed, setMoreFailed] = useState(false);
+  // Focus stays on "Show older tasks" while rows land above it, so a status line says so.
+  const [added, setAdded] = useState("");
+  // Bumped on every tab switch: a page fetched for an earlier visit to a tab is dropped.
+  const visit = useRef(0);
 
   useEffect(() => {
-    setTasks(null);
+    const mine = ++visit.current;
+    setPages(null);
     setFailed(false);
-    fetch(`/api/tasks?${listQuery(tab === "now" ? NOW_STATUSES : HISTORY_STATUSES)}`)
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
-      .then(
-        (body) => setTasks(body.tasks as TaskItem[]),
-        () => setFailed(true),
-      );
+    setLoadingMore(false);
+    setMoreFailed(false);
+    setAdded("");
+    fetchPage(tab, null).then(
+      (page) => {
+        if (visit.current === mine) setPages(addPage([], page));
+      },
+      () => {
+        if (visit.current === mine) setFailed(true);
+      },
+    );
   }, [tab]);
+
+  const showOlder = () => {
+    if (pages?.until == null || loadingMore) return;
+    const mine = visit.current;
+    setLoadingMore(true);
+    setMoreFailed(false);
+    fetchPage(tab, pages.until).then(
+      (page) => {
+        if (visit.current !== mine) return;
+        const next = addPage(pages.tasks, page);
+        const count = next.tasks.length - pages.tasks.length;
+        setPages(next);
+        setAdded(`${count} older ${count === 1 ? "task" : "tasks"} added.`);
+        setLoadingMore(false);
+      },
+      () => {
+        if (visit.current !== mine) return;
+        setMoreFailed(true);
+        setLoadingMore(false);
+      },
+    );
+  };
+
+  const tasks = pages?.tasks ?? null;
 
   return (
     <Page title="Tasks">
@@ -95,6 +142,17 @@ export function Tasks() {
             ))}
           </ul>
         ))}
+      {!failed && pages?.until != null && (
+        <Button isPending={loadingMore} onPress={showOlder} className="self-start">
+          {loadingMore ? "Loading older tasks…" : "Show older tasks"}
+        </Button>
+      )}
+      <p role="status" className="sr-only">
+        {added}
+      </p>
+      {moreFailed && (
+        <p role="alert">Older tasks couldn&apos;t be loaded. Try again in a moment.</p>
+      )}
     </Page>
   );
 }

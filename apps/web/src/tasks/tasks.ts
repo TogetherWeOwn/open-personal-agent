@@ -64,15 +64,48 @@ export function isExecutionLimitKind(kind: string | null): boolean {
   );
 }
 
+/** Rows per `GET /api/tasks` fetch. */
+export const PAGE_SIZE = 100;
+
 /**
- * The query string for a `GET /api/tasks` fetch over these statuses. One capped fetch for
- * now; paging History past 100 is TWO-713.
+ * The query string for a `GET /api/tasks` fetch over these statuses: the newest page, or with
+ * `until`, the page created at or before it. Every page repeats the statuses.
  */
-export function listQuery(statuses: readonly TaskStatus[], limit = 100): string {
+export function listQuery(
+  statuses: readonly TaskStatus[],
+  until: number | null = null,
+  limit = PAGE_SIZE,
+): string {
   const params = new URLSearchParams();
   for (const status of statuses) params.append("status", status);
+  if (until !== null) params.set("until", String(until));
   params.set("limit", String(limit));
   return params.toString();
+}
+
+/** The rows shown so far, and the `until` that fetches the next page (null at the end). */
+export interface TaskPages {
+  tasks: TaskItem[];
+  until: number | null;
+}
+
+/**
+ * Adds a fetched page to the rows shown so far. The list is newest first and `until` is
+ * inclusive, so the next page starts at the oldest row's `createdAt` and repeats the rows that
+ * share it; those are dropped by id. A short page is the end. A full page with nothing new
+ * means more than a page of tasks share one millisecond, so the next page starts just before it.
+ */
+export function addPage(
+  shown: readonly TaskItem[],
+  page: readonly TaskItem[],
+  limit = PAGE_SIZE,
+): TaskPages {
+  const seen = new Set(shown.map((task) => task.id));
+  const fresh = page.filter((task) => !seen.has(task.id));
+  const tasks = [...shown, ...fresh];
+  const oldest = page.at(-1);
+  if (page.length < limit || oldest === undefined) return { tasks, until: null };
+  return { tasks, until: fresh.length > 0 ? oldest.createdAt : oldest.createdAt - 1 };
 }
 
 /** Never shows a non-zero cost as $0.00. Costs are micro USD, as the field says. */
