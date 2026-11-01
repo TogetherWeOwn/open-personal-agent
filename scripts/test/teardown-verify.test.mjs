@@ -94,7 +94,8 @@ const ONE_EACH = async () => [d1("u1"), { kind: "r2", name: "b", item: {} }];
 function verifySetup({ changes, inventory = ONE_EACH } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
   fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
-  fs.cpSync(path.join(REPO, "migrations"), path.join(root, "migrations"), { recursive: true });
+  fs.mkdirSync(path.join(root, "migrations"));
+  fs.writeFileSync(path.join(root, "migrations", "0000_schema_v0.sql"), "");
   const [calls, out] = [[], []];
   const plan = changes ?? [["worker", "migrations", "secrets"], [], ["worker", "migrations"]];
   const url = `https://${P}.owner-sub.workers.dev`;
@@ -119,12 +120,11 @@ describe("verify:cloudflare", () => {
   it("deploys, re-runs, upgrades with a dummy migration, tears down and reports", async () => {
     const t = verifySetup();
     await t.run();
-    const [base, mig] = ["0000_schema_v0.sql,meta", "0001_verify_upgrade.sql"];
-    const upgrade = `deploy 0000_schema_v0.sql,${mig},meta`;
+    const [base, mig] = ["0000_schema_v0.sql", "0001_verify_upgrade.sql"];
     expect(t.calls).toEqual([
       `deploy ${base}`,
       `deploy ${base}`,
-      upgrade,
+      `deploy ${base},${mig}`,
       `teardown --name ${P} --confirm ${P}`,
     ]);
     expect(fs.readdirSync(path.join(t.root, "migrations")).sort().join()).toBe(base);
