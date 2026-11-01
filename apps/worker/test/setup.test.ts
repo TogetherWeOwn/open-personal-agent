@@ -18,6 +18,7 @@ import { SoftPasskey } from "./helpers/softauthn";
 const ORIGIN = "https://opa.test";
 const TOKEN = "setup-token-0123456789abcdefghijklmn";
 const ROTATED = "rotated-token-0123456789abcdefghijklm";
+const THIRD = "third-token-0123456789abcdefghijklmnop";
 const base = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
 const env: Env = {
   ...base,
@@ -28,7 +29,8 @@ const env: Env = {
 };
 const rotated: Env = { ...env, OPA_SETUP_TOKEN: ROTATED };
 const db = env.DB;
-const TABLES = "setup_state sessions passkeys recovery_codes conversations audit_log users";
+const TABLES =
+  "setup_state used_setup_tokens webauthn_challenges sessions passkeys recovery_codes conversations audit_log users";
 
 type Options = { options: { challenge: string } };
 type Result = { mode: string; recoveryCodes: string[] };
@@ -103,6 +105,17 @@ describe("before the claim", () => {
     expect(await (await br.req("/setup")).text()).toBe("spa");
   });
 
+  it("answers not_claimed when the database cannot even prepare a query", async () => {
+    const DB = {
+      prepare() {
+        throw new Error("D1 unavailable");
+      },
+    } as unknown as D1Database;
+    const res = await new Browser({ ...env, DB }).req("/api/me");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "not_claimed" });
+  });
+
   it("rejects a cross-origin POST", async () => {
     const res = await new Browser().req("/setup/options", {
       body: { token: TOKEN },
@@ -130,6 +143,28 @@ describe("before the claim", () => {
     const weak = { ...env, OPA_SETUP_TOKEN: "short" };
     expect((await new Browser(weak).options("short")).status).toBe(503);
     expect((await new Browser(weak).req("/setup")).status).toBe(403);
+  });
+
+  it("stays closed while the setup token has too few distinct characters", async () => {
+    for (const token of ["a".repeat(22), "ab".repeat(20), "abcdefg".repeat(4)]) {
+      const weak = { ...env, OPA_SETUP_TOKEN: token };
+      const res = await new Browser(weak).options(token);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "setup_token_weak" });
+      expect((await new Browser(weak).req("/setup")).status).toBe(403);
+    }
+  });
+
+  it("purges expired challenges when it issues options", async () => {
+    await db
+      .prepare(
+        "INSERT INTO webauthn_challenges (id_hash, kind, challenge, expires_at) VALUES ('stale', 'claim', 'c', ?)",
+      )
+      .bind(Date.now() - 1)
+      .run();
+    expect((await new Browser().options(TOKEN)).status).toBe(200);
+    expect(await count("webauthn_challenges", "id_hash = 'stale'")).toBe(0);
+    expect(await count("webauthn_challenges")).toBe(1);
   });
 
   it("requires user verification and the right origin in the passkey response", async () => {
@@ -258,6 +293,31 @@ describe("recovery after the token rotates", () => {
     // Recovery is single-use for this token.
     expect((await br.options(ROTATED)).status).toBe(403);
     expect((await br.req("/setup")).status).toBe(403);
+  });
+
+  it("never reopens for a token that was already used", async () => {
+    expect((await new Browser().setup(TOKEN)).status).toBe(200);
+    expect((await new Browser(rotated).setup(ROTATED)).status).toBe(200);
+    // The operator puts the first secret back: whoever kept it must not get recovery again.
+    const res = await new Browser(env).options(TOKEN);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "already_claimed" });
+    expect((await new Browser(env).req("/setup")).status).toBe(403);
+    expect(await count("passkeys")).toBe(1);
+  });
+
+  it("rejects a challenge issued before the token rotated again", async () => {
+    expect((await new Browser().setup(TOKEN)).status).toBe(200);
+    const br = new Browser(rotated);
+    const { options } = await (await br.options(ROTATED)).json<Options>();
+    const credential = await passkey().create(options);
+    // The secret rotates once more before the browser finishes.
+    const late = new Browser({ ...env, OPA_SETUP_TOKEN: THIRD });
+    late.cookies = br.cookies;
+    const res = await late.req("/setup", { body: { token: THIRD, credential } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "no_challenge" });
+    expect(await count("audit_log", "action = 'setup.recovery'")).toBe(0);
   });
 
   it("lets exactly one of two concurrent recoveries win", async () => {

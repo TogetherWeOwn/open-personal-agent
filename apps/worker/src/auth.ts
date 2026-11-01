@@ -38,36 +38,50 @@ export async function secretsEqual(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(x, y);
 }
 
-/** Stores a challenge and returns the cookie value that redeems it. */
+/**
+ * Stores a challenge and returns the cookie value that redeems it. A claim or recovery challenge
+ * carries the setup token hash it was issued under, so rotating the token voids it. Expired rows
+ * nobody redeemed are purged here, in the same batch.
+ */
 export async function putChallenge(
   db: D1Database,
   kind: "claim" | "recovery" | "login",
   challenge: string,
   userId: string | null,
+  tokenHash: string | null = null,
 ): Promise<string> {
   const id = randomId();
-  await db
-    .prepare(
-      "INSERT INTO webauthn_challenges (id_hash, kind, challenge, user_id, expires_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(await sha256(id), kind, challenge, userId, Date.now() + CHALLENGE_TTL_MS)
-    .run();
+  const now = Date.now();
+  await db.batch([
+    db.prepare("DELETE FROM webauthn_challenges WHERE expires_at <= ?").bind(now),
+    db
+      .prepare(
+        "INSERT INTO webauthn_challenges (id_hash, kind, challenge, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(await sha256(id), kind, challenge, userId, tokenHash, now + CHALLENGE_TTL_MS),
+  ]);
   return id;
 }
 
-/** Consumes a challenge: a second call with the same cookie finds nothing. */
+/**
+ * Consumes a challenge: a second call with the same cookie finds nothing. A challenge issued under
+ * another setup token is consumed too, but not returned.
+ */
 export async function takeChallenge(
   db: D1Database,
   cookie: string | undefined,
   kind: "claim" | "recovery" | "login",
+  tokenHash: string | null = null,
 ): Promise<{ challenge: string; user_id: string | null } | null> {
   if (!cookie) return null;
-  return db
+  const row = await db
     .prepare(
-      "DELETE FROM webauthn_challenges WHERE id_hash = ? AND kind = ? AND expires_at > ? RETURNING challenge, user_id",
+      "DELETE FROM webauthn_challenges WHERE id_hash = ? AND kind = ? AND expires_at > ? RETURNING challenge, user_id, token_hash",
     )
     .bind(await sha256(cookie), kind, Date.now())
-    .first();
+    .first<{ challenge: string; user_id: string | null; token_hash: string | null }>();
+  if (!row || row.token_hash !== tokenHash) return null;
+  return { challenge: row.challenge, user_id: row.user_id };
 }
 
 /**
