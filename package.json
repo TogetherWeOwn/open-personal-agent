@@ -20,7 +20,7 @@
     "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker",
-    "lint": "biome check .",
+    "lint": "biome check . && node scripts/check-scoped-access.mjs",
     "format": "biome format --write .",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run --project unit --project worker",

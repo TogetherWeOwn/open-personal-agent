@@ -47,7 +47,7 @@ export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   const row = await store.sessions.find(await auth.sha256(cookie), now, now - IDLE_MS);
   if (!row) return c.json({ error: "unauthenticated" }, 401);
   if (now - row.last_seen_at > TOUCH_MS) await store.sessions.touch(row.id, now);
-  c.set("session", { id: row.id, userId: row.user_id });
+  c.set("session", { id: row.id, userId: row.user_id, scope: row.scope });
   return next();
 };
 

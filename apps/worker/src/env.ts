@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { UserScope } from "@opa/db/repository";
 import type { Vault } from "@opa/vault";
 import type { Assistant } from "./assistant";
 
@@ -27,6 +28,8 @@ export interface Session {
   /** The `sessions` row ID, never the cookie value. */
   id: string;
   userId: string;
+  /** For the scoped repository (ADR 0010 D3). */
+  scope: UserScope;
 }
 
 /** Hono's environment for the app: bindings, plus the session the guard resolved. */

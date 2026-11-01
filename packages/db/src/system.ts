@@ -2,6 +2,7 @@
 // The system-level store (ADR 0010 D3): the deployment's identity tables, read before any user
 // scope exists. Setup state, WebAuthn challenges, passkeys, sessions and their audit rows. Every
 // multi-row change is one D1 batch, so it commits or rolls back as a whole.
+import { scopeFromSession } from "./repository";
 
 /** The parts of a D1 database used here; the Node root supplies its own. */
 export interface SqlStatement {
@@ -182,15 +183,20 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
     },
 
     sessions: {
-      /** A live session: not revoked, not past its absolute expiry, seen after `idleSince`. */
-      find: (tokenHash: string, now: number, idleSince: number) =>
-        db
+      /**
+       * A live session: not revoked, not past its absolute expiry, seen after `idleSince`. Its
+       * `scope` is the only `UserScope` the app gets: one exists only for a live session row.
+       */
+      find: async (tokenHash: string, now: number, idleSince: number) => {
+        const row = await db
           .prepare(
             `SELECT id, user_id, last_seen_at FROM sessions
              WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?`,
           )
           .bind(tokenHash, now, idleSince)
-          .first<{ id: string; user_id: string; last_seen_at: number }>(),
+          .first<{ id: string; user_id: string; last_seen_at: number }>();
+        return row && { ...row, scope: scopeFromSession({ userId: row.user_id }) };
+      },
       touch: async (id: string, now: number) => {
         await db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, id).run();
       },
@@ -260,14 +266,6 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           audit(userId, "auth.sign_out_everywhere", "auth", "ok"),
         ]);
       },
-    },
-
-    users: {
-      get: (id: string) =>
-        db
-          .prepare("SELECT id, display_name, role FROM users WHERE id = ?")
-          .bind(id)
-          .first<{ id: string; display_name: string; role: string }>(),
     },
   };
 }

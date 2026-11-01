@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { openD1, readSchemaVersion, SCHEMA_VERSION } from "@opa/db";
+import { SCHEMA_VERSION } from "@opa/db";
+import { createRepository } from "@opa/db/repository";
+import { masterKeySet, type SecretName } from "./compose";
 import type { Env } from "./env";
-
-/** Worker secrets the deploy generates (ADR 0001 #5). Health reports presence only, never values. */
-export const REQUIRED_SECRETS = [
-  "OPA_MASTER_KEY",
-  "OPA_SESSION_SECRET",
-  "OPA_SETUP_TOKEN",
-] as const;
-export type SecretName = (typeof REQUIRED_SECRETS)[number];
 
 export interface Health {
   /** `setup_required`: unmigrated or a secret is missing. `degraded`: a binding check failed. */
@@ -46,15 +40,14 @@ async function probe(fn: () => Promise<unknown>): Promise<boolean> {
 export async function checkHealth(env: Env): Promise<Health> {
   // Assigned inside the database probe; the cast stops TypeScript narrowing it to `null`.
   let applied = null as number | null;
+  const { deployment } = createRepository(env);
   const [database, storage, durableObject] = await Promise.all([
     probe(async () => {
-      applied = await readSchemaVersion(openD1(env.DB));
+      applied = await deployment.schemaVersion();
     }),
-    // A HEAD on a key that never exists: proves the bucket is bound and reachable.
-    probe(() => env.FILES.head("health/probe")),
-    // A fixed name outside the `u:<userId>` space, so it never touches a user's object.
+    probe(() => deployment.probeStorage()),
     probe(async () => {
-      const pong = await env.ASSISTANT.get(env.ASSISTANT.idFromName("health")).ping();
+      const pong = await deployment.healthObject().ping();
       if (pong !== "pong") throw new Error("unexpected ping reply");
     }),
   ]);
@@ -64,8 +57,7 @@ export async function checkHealth(env: Env): Promise<Health> {
 
   const isSet = (value: string | undefined) => typeof value === "string" && value !== "";
   const secrets: Record<SecretName, boolean> = {
-    // The app never sees the master key (ADR 0010 D4.1 #1), only whether it is valid.
-    OPA_MASTER_KEY: env.VAULT_STATUS !== "key_invalid",
+    ...masterKeySet(env),
     OPA_SESSION_SECRET: isSet(env.OPA_SESSION_SECRET),
     OPA_SETUP_TOKEN: isSet(env.OPA_SETUP_TOKEN),
   };

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { systemStore } from "@opa/db/system";
+import { createRepository } from "@opa/db/repository";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { checkHealth } from "./health";
@@ -44,10 +44,10 @@ app.route("/api/sessions", sessionRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */
 app.get("/api/me", async (c) => {
-  const user = await systemStore(c.env).users.get(c.var.session.userId);
+  const user = await createRepository(c.env).forUser(c.var.session.scope).profile();
   if (!user) return c.json({ error: "unauthenticated" }, 401);
   c.header("Cache-Control", "no-store");
-  return c.json({ id: user.id, displayName: user.display_name, role: user.role });
+  return c.json({ id: user.id, displayName: user.displayName, role: user.role });
 });
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
