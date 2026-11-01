@@ -17,6 +17,7 @@
   --color-accent-contrast: light-dark(#ffffff, #1a1815);
   --color-user-bubble: light-dark(#efe6dc, #2f2a24);
   --color-danger: light-dark(#a1261b, #f08a7e);
+  --color-status-warning: light-dark(#8a5a00, #e5b567);
 }
 
 :root {
@@ -33,6 +34,7 @@ body {
 }
 
 /* The streaming caret: silent for screen readers, and steady so reduced motion needs no case. */
-.caret::after {
+.caret:empty::after,
+.caret > :last-child::after {
   content: "▍" / "";
 }

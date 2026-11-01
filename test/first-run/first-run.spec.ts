@@ -77,7 +77,7 @@ test("claim, onboard and get a first answer", async ({ browser }) => {
   const log = page.getByRole("log", { name: "Messages" });
   const reply = log
     .getByText("Assistant", { exact: true })
-    .locator("xpath=following-sibling::p[1]");
+    .locator("xpath=following-sibling::div[1]");
   await expect(reply).toBeVisible({ timeout: 60_000 });
   // The caret marks a reply that is still streaming.
   await expect(log.locator(".caret")).toHaveCount(0, { timeout: 60_000 });

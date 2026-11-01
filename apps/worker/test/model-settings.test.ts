@@ -4,8 +4,9 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { STARTER_MODEL } from "@opa/providers";
+import { app } from "@opa/server/app";
+import { encrypt, type UserScope, type Vault } from "@opa/vault";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
 import { ORIGIN, sessionHeaders } from "./helpers/app";
@@ -35,6 +36,15 @@ const sse = (...lines: string[]) =>
       controller.close();
     },
   });
+
+/** Whether a model request offers tools: the Test's tool-call probe (M3-06 AC4) does. */
+const offersTools = (init?: RequestInit) => !!JSON.parse(String(init?.body ?? "{}")).tools;
+/** A Chat Completions stream that calls the probe's tool. */
+const toolCall = () => {
+  const call = { index: 0, id: "call_1", function: { name: "report_ready", arguments: "{}" } };
+  const chunk = { choices: [{ delta: { tool_calls: [call] }, finish_reason: "tool_calls" }] };
+  return new Response(sse(JSON.stringify(chunk), "[DONE]"));
+};
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -103,12 +113,15 @@ describe("model settings", () => {
       return new Response(sse(chunk, "[DONE]"));
     });
     const body = JSON.parse((await call("/model/test", { method: "POST" })).text);
-    expect(body).toMatchObject({ ok: true, tools: true });
+    // This server answers the probe in text, so tools are reported as not working.
+    expect(body).toMatchObject({ ok: true, tools: false, toolProbe: "ignored" });
     expect(body.latencyMs).toBeTypeOf("number");
     expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8788/v1/chat/completions");
     // No usage came back, so the ledger keeps the call unpriced, billed by the endpoint's host.
     const ledger = "SELECT provider_id, cost_micro_usd FROM usage WHERE model = 'echo'";
+    // The probe is a second call, so it is in the ledger too.
     expect((await env.DB.prepare(ledger).all()).results).toEqual([
+      { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
       { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
     ]);
   });
@@ -159,13 +172,16 @@ describe("model settings", () => {
   });
 
   it("tests the saved key against its own origin and reports latency and tools", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) return toolCall();
       const chunk = (content: string) => JSON.stringify({ choices: [{ delta: { content } }] });
       return new Response(sse(chunk("rea"), chunk("dy"), "[DONE]"));
     });
     const res = await call("/model/test", { method: "POST" });
     const body = JSON.parse(res.text);
-    expect(body).toMatchObject({ ok: true, tools: true, reply: "ready" });
+    expect(body).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    const probe = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    expect(probe.tools).toMatchObject([{ function: { name: "report_ready" } }]);
     expect(body.latencyMs).toBeTypeOf("number");
     expect(res.text).not.toContain(CANARY);
     const [url, init] = fetch.mock.calls[0] ?? [];
@@ -213,13 +229,19 @@ describe("model settings", () => {
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
-    const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
+    const called = '{"tool_calls":[{"name":"report_ready","arguments":{}}]}';
+    const AI = {
+      run: async (_model: string, inputs: { tools?: unknown }) =>
+        inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]"),
+    } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
-    // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
-    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
+    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    // Both calls are billed, so the ledger has them. The first is priced: 25 × $0.293/M +
+    // 6 × $2.253/M. The probe reported no usage, so it is unpriced.
+    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai' ORDER BY rowid";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
       { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
+      { input_tokens: 0, cost_micro_usd: null },
     ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
@@ -227,5 +249,233 @@ describe("model settings", () => {
 
   it("keeps the saved key for switching back from the starter", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
+  });
+
+  it("asks for the key again when it was saved before its binding covered the path", async () => {
+    // A key as saved before its binding covered the path (crypto review I-2), in the old
+    // origin-only form. Nothing stored says which path it was saved for, and the saved URL is
+    // only data, so it is never opened as-is: at its old path, or at another path written to D1.
+    const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
+    const chatKey =
+      "SELECT key_secret_id AS id FROM model_providers " +
+      "WHERE id = (SELECT chat_provider FROM user_settings)";
+    const row = await env.DB.prepare(chatKey).first();
+    const secretId = row?.id as string;
+    const binding = "model:openai|https://api.example.com";
+    const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
+    await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
+      );
+    });
+    const required = { status: 409, text: '{"error":"key_required"}' };
+    expect(await call("/model/test", { method: "POST" })).toEqual(required);
+    const move =
+      "UPDATE model_providers SET base_url = ? WHERE id = (SELECT chat_provider FROM user_settings)";
+    await env.DB.prepare(move).bind("https://api.example.com/x/v1").run();
+    expect(await call("/model/test", { method: "POST" })).toEqual(required);
+    expect(fetch).not.toHaveBeenCalled();
+    await env.DB.prepare(move).bind(OPENAI.baseUrl).run();
+  });
+
+  it("does not accept a keyless save that keeps a key it can no longer open", async () => {
+    // The saved key above is sealed under the old origin-only binding, so no current read can
+    // open it. A save without a replacement key must say so at save time, on onboarding's route
+    // and on the provider update, rather than reporting success and failing later at chat.
+    const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
+    const chatKey =
+      "SELECT key_secret_id AS id FROM model_providers " +
+      "WHERE id = (SELECT chat_provider FROM user_settings)";
+    const row = await env.DB.prepare(chatKey).first();
+    const secretId = row?.id as string;
+    const binding = "model:openai|https://api.example.com";
+    const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
+    await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
+
+    const required = { status: 400, text: '{"error":"key_required"}' };
+    expect(await put("/model", { ...OPENAI, model: "gpt-new" })).toEqual(required);
+    // The refused save changed nothing: the Chat role still names the earlier model.
+    expect(JSON.parse((await call("")).text).model.model).not.toBe("gpt-new");
+
+    const view = JSON.parse((await call("")).text);
+    const provider = view.providers.find(
+      (p: { providerId: string; baseUrl: string }) =>
+        p.providerId === "openai" && p.baseUrl === OPENAI.baseUrl,
+    ) as { id: string };
+    const update = { providerId: "openai", baseUrl: OPENAI.baseUrl, model: "gpt-new" };
+    expect(await put(`/providers/${provider.id}`, update)).toEqual(required);
+  });
+
+  it("reports a vault fault on a keyless save as unavailable, not as a key to replace", async () => {
+    expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
+    // The key opens, but its decrypt can't be audited, so the vault refuses it (fails closed).
+    await env.DB.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const unavailable = { status: 503, text: '{"error":"vault_unavailable"}' };
+      expect(await put("/model", { ...OPENAI, model: "gpt-new" })).toEqual(unavailable);
+    } finally {
+      await env.DB.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect((await put("/model", { ...OPENAI, model: "gpt-new" })).status).toBe(200);
+  });
+
+  it("does not open a saved key when the stored path changes", async () => {
+    expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
+      );
+    });
+    expect(JSON.parse((await call("/model/test", { method: "POST" })).text)).toMatchObject({
+      ok: true,
+    });
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      `Bearer ${CANARY}`,
+    );
+    const sent = fetch.mock.calls.length;
+    // Pointing the saved URL at another path on the host, in D1, fails rather than sending the key.
+    const move =
+      "UPDATE model_providers SET base_url = ? WHERE id = (SELECT chat_provider FROM user_settings)";
+    await env.DB.prepare(move).bind("https://api.example.com/x/v1").run();
+    expect(await call("/model/test", { method: "POST" })).toEqual({
+      status: 409,
+      text: '{"error":"key_required"}',
+    });
+    expect(fetch.mock.calls).toHaveLength(sent);
+    await env.DB.prepare(move).bind(OPENAI.baseUrl).run();
+  });
+});
+
+describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
+  const preset = {
+    kind: "openai-chat",
+    providerId: "openai",
+    baseUrl: "https://api.openai.com/v1",
+  };
+  const event = (type: string, fields: object) => JSON.stringify({ type, ...fields });
+
+  it("moves a saved OpenAI key to Responses without asking for it again", async () => {
+    // Saved exactly as M2 saved it: kind `openai-chat`, the preset's provider and URL.
+    const saved = await put("/model", { ...preset, model: "gpt-5-mini", apiKey: CANARY });
+    expect(JSON.parse(saved.text).model).toMatchObject({
+      kind: "openai-chat",
+      api: "openai-responses",
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) {
+        const item = {
+          type: "function_call",
+          call_id: "fc_1",
+          name: "report_ready",
+          arguments: "{}",
+        };
+        return new Response(
+          sse(
+            event("response.output_item.done", { item }),
+            event("response.completed", { response: { status: "completed" } }),
+          ),
+        );
+      }
+      const done = {
+        response: { status: "completed", usage: { input_tokens: 9, output_tokens: 1 } },
+      };
+      return new Response(
+        sse(
+          event("response.output_text.delta", { delta: "ready" }),
+          event("response.completed", done),
+        ),
+      );
+    });
+    const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(url).toBe("https://api.openai.com/v1/responses");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${CANARY}`);
+    expect(JSON.parse(String(init?.body))).toMatchObject({ store: false });
+    // Another OpenAI-compatible host stays on Chat Completions.
+    expect(
+      JSON.parse((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).text).model,
+    ).toMatchObject({ api: "openai-chat" });
+  });
+
+  it("can't decrypt a key bound to one origin under another", async () => {
+    await put("/model", { ...preset, model: "gpt-5-mini", apiKey: CANARY });
+    const fetch = vi.spyOn(globalThis, "fetch");
+    // Bypass the route's own check: the vault's binding still refuses the key.
+    await env.DB.prepare(
+      "UPDATE model_providers SET base_url = 'https://eu.api.openai.com/v1'",
+    ).run();
+    const res = await call("/model/test", { method: "POST" });
+    expect(res).toEqual({ status: 409, text: '{"error":"key_required"}' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("the Anthropic preset on Messages (M3-05 AC3)", () => {
+  const preset = {
+    kind: "openai-chat",
+    providerId: "anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+  };
+  const event = (type: string, fields: object = {}) => JSON.stringify({ type, ...fields });
+
+  it("saves an Anthropic key, tests it on Messages and shows its dated price", async () => {
+    const saved = await put("/model", { ...preset, model: "claude-sonnet-5-5", apiKey: CANARY });
+    expect(JSON.parse(saved.text).model).toMatchObject({
+      providerId: "anthropic",
+      api: "anthropic-messages",
+      key: { last4: CANARY.slice(-4) },
+    });
+    expect(saved.text).not.toContain(CANARY);
+    const usage = { input_tokens: 9, output_tokens: 1 };
+    const reply = (block: object, delta: object, stop: string) =>
+      new Response(
+        sse(
+          event("message_start", { message: { usage } }),
+          event("content_block_start", { index: 0, content_block: block }),
+          event("content_block_delta", { index: 0, delta }),
+          event("message_delta", { delta: { stop_reason: stop }, usage }),
+          event("message_stop"),
+        ),
+      );
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_url, init) =>
+        offersTools(init)
+          ? reply(
+              { type: "tool_use", id: "toolu_1", name: "report_ready", input: {} },
+              { type: "input_json_delta", partial_json: "{}" },
+              "tool_use",
+            )
+          : reply({ type: "text", text: "" }, { type: "text_delta", text: "ready" }, "end_turn"),
+      );
+    const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(tested).toMatchObject({
+      ok: true,
+      tools: true,
+      toolProbe: "called",
+      reply: "ready",
+      price: { inputUsdPerMTok: 2, outputUsdPerMTok: 10, verifiedAt: "2026-11-01" },
+    });
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("x-api-key")).toBe(CANARY);
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("anthropic-version")).toBe("2026-10-21");
+    // The probe offers its tool in the Messages shape, cached as the last tool.
+    const probe = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    expect(probe.tools).toMatchObject([
+      { name: "report_ready", cache_control: { type: "ephemeral" } },
+    ]);
+  });
+
+  it("keeps Anthropic's host under another preset on Chat Completions", async () => {
+    const other = { ...preset, providerId: "custom", model: "m", apiKey: CANARY };
+    expect(JSON.parse((await put("/model", other)).text).model).toMatchObject({
+      api: "openai-chat",
+    });
   });
 });

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { runRotation } from "@opa/server/vault-rotation";
 import { compose, type WorkerEnv } from "./compose";
 import { workerApp } from "./worker-app";
 
@@ -16,6 +17,8 @@ export default {
   async fetch(request, env, ctx) {
     return workerApp.fetch(request, await compose(env), ctx);
   },
-  // Stub for the */10 reconciler (ADR 0003 #4).
-  async scheduled(_controller, _env, _ctx) {},
+  // The */10 reconciler (ADR 0003 #4). For now it runs a pending key rotation (crypto review C-1).
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(compose(env).then(runRotation));
+  },
 } satisfies ExportedHandler<WorkerEnv>;

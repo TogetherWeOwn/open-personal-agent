@@ -2,10 +2,10 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { exports, env as workerEnv } from "cloudflare:workers";
 import { SCHEMA_VERSION } from "@opa/db";
+import { app } from "@opa/server/app";
+import { type Health, setupRequired } from "@opa/server/health";
 import { beforeAll, describe, expect, it } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
-import { type Health, setupRequired } from "../src/health";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 
@@ -14,10 +14,10 @@ const SECRETS = {
   OPA_SESSION_SECRET: "test-session-secret",
   OPA_SETUP_TOKEN: "test-setup-token",
 };
-const TABLES =
-  `audit_log conversations grants messages passkeys recovery_codes schema_version secrets
-  sessions setup_state tool_overrides usage used_setup_tokens user_keys user_settings users
-  webauthn_challenges`.split(/\s+/);
+const TABLES = `audit_log conversations grants memories memories_fts memories_fts_config
+  memories_fts_data memories_fts_docsize memories_fts_idx memory_links messages model_providers
+  passkeys recovery_codes schema_version secrets sessions setup_state tool_overrides usage
+  used_setup_tokens user_keys user_settings users webauthn_challenges`.split(/\s+/);
 
 async function health(bindings: WorkerEnv = env): Promise<[number, Health]> {
   const res = await app.request("/api/health", {}, await compose(bindings));

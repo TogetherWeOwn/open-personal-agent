@@ -25,4 +25,4 @@ CREATE TABLE `tool_overrides` (
 --> statement-breakpoint
 ALTER TABLE `sessions` ADD `step_up_at` integer;--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (5);
+INSERT INTO `schema_version` (`version`) VALUES (7);

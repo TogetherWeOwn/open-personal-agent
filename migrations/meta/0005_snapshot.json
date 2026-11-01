@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "3b3b32ea-0b78-4a68-90f6-2106054094ad",
+  "id": "6a71cb54-4b8e-43de-92cc-a44d9d58e25c",
   "prevId": "d9a1be81-b0c8-48d9-a7d0-244a44e69ea2",
   "tables": {
     "audit_log": {
@@ -111,6 +111,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "model_provider": {
+          "name": "model_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -151,106 +165,20 @@
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "grants": {
-      "name": "grants",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
         },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "tool": {
-          "name": "tool",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "scope": {
-          "name": "scope",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "destination": {
-          "name": "destination",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        },
-        "revoked_at": {
-          "name": "revoked_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "grants_user_tool_idx": {
-          "name": "grants_user_tool_idx",
-          "columns": ["user_id", "tool"],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "grants_user_id_users_id_fk": {
-          "name": "grants_user_id_users_id_fk",
-          "tableFrom": "grants",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
+        "conversations_model_provider_model_providers_id_fk": {
+          "name": "conversations_model_provider_model_providers_id_fk",
+          "tableFrom": "conversations",
+          "tableTo": "model_providers",
+          "columnsFrom": ["model_provider"],
           "columnsTo": ["id"],
-          "onDelete": "cascade",
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {
-        "grants_scope_target": {
-          "name": "grants_scope_target",
-          "value": "(\"grants\".\"scope\" = 'task' AND \"grants\".\"task_id\" IS NOT NULL) OR (\"grants\".\"scope\" = 'hour' AND \"grants\".\"expires_at\" IS NOT NULL) OR (\"grants\".\"scope\" = 'destination' AND \"grants\".\"destination\" IS NOT NULL)"
-        }
-      }
+      "checkConstraints": {}
     },
     "messages": {
       "name": "messages",
@@ -338,6 +266,111 @@
           "columnsFrom": ["conversation_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "model_providers": {
+      "name": "model_providers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "base_url": {
+          "name": "base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "key_secret_id": {
+          "name": "key_secret_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {
+        "model_providers_user_idx": {
+          "name": "model_providers_user_idx",
+          "columns": ["user_id", "created_at"],
+          "isUnique": false
+        },
+        "model_providers_key_idx": {
+          "name": "model_providers_key_idx",
+          "columns": ["key_secret_id"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "model_providers_user_id_users_id_fk": {
+          "name": "model_providers_user_id_users_id_fk",
+          "tableFrom": "model_providers",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "model_providers_key_secret_id_secrets_id_fk": {
+          "name": "model_providers_key_secret_id_secrets_id_fk",
+          "tableFrom": "model_providers",
+          "tableTo": "secrets",
+          "columnsFrom": ["key_secret_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -697,13 +730,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "step_up_at": {
-          "name": "step_up_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {
@@ -791,65 +817,6 @@
         "setup_state_single_row": {
           "name": "setup_state_single_row",
           "value": "\"setup_state\".\"id\" = 1"
-        }
-      }
-    },
-    "tool_overrides": {
-      "name": "tool_overrides",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "tool": {
-          "name": "tool",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "decision": {
-          "name": "decision",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "tool_overrides_user_id_users_id_fk": {
-          "name": "tool_overrides_user_id_users_id_fk",
-          "tableFrom": "tool_overrides",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "tool_overrides_user_id_tool_pk": {
-          "columns": ["user_id", "tool"],
-          "name": "tool_overrides_user_id_tool_pk"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "tool_overrides_decision": {
-          "name": "tool_overrides_decision",
-          "value": "\"tool_overrides\".\"decision\" IN ('auto', 'ask', 'never')"
         }
       }
     },
@@ -1102,36 +1069,29 @@
           "notNull": false,
           "autoincrement": false
         },
-        "model_kind": {
-          "name": "model_kind",
+        "chat_provider": {
+          "name": "chat_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "provider_id": {
-          "name": "provider_id",
+        "chat_model": {
+          "name": "chat_model",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "base_url": {
-          "name": "base_url",
+        "background_provider": {
+          "name": "background_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "model_key_secret_id": {
-          "name": "model_key_secret_id",
+        "background_model": {
+          "name": "background_model",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1164,11 +1124,20 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "user_settings_model_key_secret_id_secrets_id_fk": {
-          "name": "user_settings_model_key_secret_id_secrets_id_fk",
+        "user_settings_chat_provider_model_providers_id_fk": {
+          "name": "user_settings_chat_provider_model_providers_id_fk",
           "tableFrom": "user_settings",
-          "tableTo": "secrets",
-          "columnsFrom": ["model_key_secret_id"],
+          "tableTo": "model_providers",
+          "columnsFrom": ["chat_provider"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "user_settings_background_provider_model_providers_id_fk": {
+          "name": "user_settings_background_provider_model_providers_id_fk",
+          "tableFrom": "user_settings",
+          "tableTo": "model_providers",
+          "columnsFrom": ["background_provider"],
           "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"

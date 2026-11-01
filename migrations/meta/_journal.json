@@ -40,8 +40,22 @@
     {
       "idx": 5,
       "version": "6",
-      "when": 1793512085729,
-      "tag": "0005_policy_grants",
+      "when": 1793510975466,
+      "tag": "0005_model_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793513458012,
+      "tag": "0006_memory",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1793513999000,
+      "tag": "0007_policy_grants",
       "breakpoints": true
     }
   ]

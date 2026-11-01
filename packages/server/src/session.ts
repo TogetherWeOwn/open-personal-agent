@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Passkey login, sessions and the route-auth guard (ADR 0010 D2). The guard denies by default:
 // a route is reachable without a session only if it is on `PUBLIC_ROUTES`, so a new route that
-// forgets to declare itself stays closed. test/routes.test.ts enumerates the route table.
-import { SESSION_IDLE_MS as IDLE_MS, systemStore } from "@opa/db/system";
+// forgets to declare itself stays closed. apps/worker/test/routes.test.ts enumerates the route
+// table.
+import { SESSION_IDLE_MS as IDLE_MS, type SystemStore, systemStore } from "@opa/db/system";
 import {
   type AuthenticationResponseJSON,
   type AuthenticatorTransport,
@@ -98,24 +99,8 @@ authRoutes.post("/login", async (c) => {
   const body = await c.req.json().catch(() => null);
   const response = body?.credential as AuthenticationResponseJSON | undefined;
   const passkey = await store.passkeys.get(typeof response?.id === "string" ? response.id : "");
-  const url = new URL(c.req.url);
-  const verification =
-    passkey &&
-    (await verifyAuthenticationResponse({
-      response: response as AuthenticationResponseJSON,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: url.origin,
-      expectedRPID: url.hostname,
-      requireUserVerification: true,
-      credential: {
-        id: passkey.id,
-        publicKey: new Uint8Array(passkey.public_key),
-        counter: passkey.counter,
-        transports: (passkey.transports?.split(",").filter(Boolean) ??
-          []) as AuthenticatorTransport[],
-      },
-    }).catch(() => null));
-  if (!passkey || !verification?.verified) {
+  const counter = passkey && (await verifyAssertion(c, passkey, response, challenge.challenge));
+  if (!passkey || counter === null) {
     await store.audit(passkey?.user_id ?? null, "auth.login", "auth", "denied");
     return c.json({ error: "not_verified" }, 401);
   }
@@ -125,7 +110,7 @@ authRoutes.post("/login", async (c) => {
   const session = await auth.newSession(passkey.user_id);
   await store.sessions.login({
     passkeyId: passkey.id,
-    counter: verification.authenticationInfo.newCounter,
+    counter,
     previousTokenHash: await auth.sha256(previous ?? ""),
     session: session.row,
     now: Date.now(),
@@ -146,7 +131,7 @@ authRoutes.post("/step-up/options", async (c) => {
   const options = await generateAuthenticationOptions({
     rpID: new URL(c.req.url).hostname,
     userVerification: "required",
-    allowCredentials: (await store.passkeys.forUser(userId)).map((p) => ({
+    allowCredentials: (await store.passkeys.ofUser(userId)).map((p) => ({
       id: p.id,
       transports: (p.transports?.split(",").filter(Boolean) ?? []) as AuthenticatorTransport[],
     })),
@@ -177,32 +162,45 @@ authRoutes.post("/step-up", async (c) => {
   const response = body?.credential as AuthenticationResponseJSON | undefined;
   const found = await store.passkeys.get(typeof response?.id === "string" ? response.id : "");
   const passkey = found?.user_id === userId ? found : null;
-  const url = new URL(c.req.url);
-  const verification =
-    passkey &&
-    (await verifyAuthenticationResponse({
-      response: response as AuthenticationResponseJSON,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: url.origin,
-      expectedRPID: url.hostname,
-      requireUserVerification: true,
-      credential: {
-        id: passkey.id,
-        publicKey: new Uint8Array(passkey.public_key),
-        counter: passkey.counter,
-        transports: (passkey.transports?.split(",").filter(Boolean) ??
-          []) as AuthenticatorTransport[],
-      },
-    }).catch(() => null));
-  if (!passkey || !verification?.verified) {
+  const counter = passkey && (await verifyAssertion(c, passkey, response, challenge.challenge));
+  if (!passkey || counter === null) {
     await store.audit(userId, "auth.step_up", "auth", "denied");
     return c.json({ error: "not_verified" }, 401);
   }
   const now = Date.now();
-  const counter = verification.authenticationInfo.newCounter;
   await store.sessions.stepUp({ id, userId, passkeyId: passkey.id, counter, now });
   return c.json({ ok: true, expiresAt: now + auth.STEP_UP_MS });
 });
+
+type StoredPasskey = NonNullable<Awaited<ReturnType<SystemStore["passkeys"]["get"]>>>;
+
+/**
+ * Verifies an assertion by `passkey` over `challenge`, from this origin, with user verification
+ * and a counter that moved on if it counts. The new counter, or `null` if it doesn't verify.
+ */
+export async function verifyAssertion(
+  c: Context<AppEnv>,
+  passkey: StoredPasskey,
+  response: AuthenticationResponseJSON | undefined,
+  challenge: string,
+): Promise<number | null> {
+  const url = new URL(c.req.url);
+  const verification = await verifyAuthenticationResponse({
+    response: response as AuthenticationResponseJSON,
+    expectedChallenge: challenge,
+    expectedOrigin: url.origin,
+    expectedRPID: url.hostname,
+    requireUserVerification: true,
+    credential: {
+      id: passkey.id,
+      publicKey: new Uint8Array(passkey.public_key),
+      counter: passkey.counter,
+      transports: (passkey.transports?.split(",").filter(Boolean) ??
+        []) as AuthenticatorTransport[],
+    },
+  }).catch(() => null);
+  return verification?.verified ? verification.authenticationInfo.newCounter : null;
+}
 
 authRoutes.post("/logout", async (c) => {
   const { id, userId } = c.var.session;

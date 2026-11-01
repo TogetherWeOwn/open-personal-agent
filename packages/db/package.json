@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./memory": "./src/memory.ts",
     "./repository": "./src/repository.ts",
     "./system": "./src/system.ts",
     "./vault-store": "./src/vault-store.ts"

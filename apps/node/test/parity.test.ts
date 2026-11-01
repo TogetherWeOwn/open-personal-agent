@@ -7,6 +7,7 @@ import { unstable_readConfig } from "wrangler";
 import {
   blobStoreContract,
   databaseContract,
+  memoryContract,
   usageLedgerContract,
 } from "../../../test/contract/storage";
 import { localBlobStore } from "../src/blobs";
@@ -24,6 +25,10 @@ afterAll(() => {
 databaseContract("SQLite", () => sqliteD1(sqlite));
 blobStoreContract("local files", () => localBlobStore(join(dir, "files")));
 usageLedgerContract("SQLite", async () => {
+  migrate(sqlite, join(import.meta.dirname, "../../../migrations"));
+  return sqliteD1(sqlite);
+});
+memoryContract("SQLite", async () => {
   migrate(sqlite, join(import.meta.dirname, "../../../migrations"));
   return sqliteD1(sqlite);
 });

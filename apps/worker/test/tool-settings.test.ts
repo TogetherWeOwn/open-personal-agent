@@ -2,10 +2,10 @@
 // Per-tool overrides, the account step-up and standing grants (M3-02 AC2, AC7).
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { type TaintState, type ToolManifest, TRUSTED } from "@opa/policy";
+import { CHALLENGE_COOKIE, STEP_UP_MS } from "@opa/server/auth";
+import { hasStepUp } from "@opa/server/session";
+import { builtinTools } from "@opa/server/tools";
 import { beforeAll, describe, expect, it } from "vitest";
-import { CHALLENGE_COOKIE, STEP_UP_MS } from "../src/auth";
-import { hasStepUp } from "../src/session";
-import { builtinTools } from "../src/tools";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();

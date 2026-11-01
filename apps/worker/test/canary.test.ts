@@ -4,9 +4,9 @@
 // scans this suite's console output and the built bundles.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
+import { app } from "@opa/server/app";
 import { beforeAll, expect, it, vi } from "vitest";
 import { canaryForms } from "../../../scripts/canary-forms.mjs";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 
 const env = workerEnv as unknown as WorkerEnv & {
