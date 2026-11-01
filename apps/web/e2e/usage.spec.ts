@@ -71,10 +71,10 @@ const period = {
 const empty = { costMicroUsd: 0, unpricedCalls: 0, groups: [] };
 const allowance = { neuronsPerDay: 10_000, neuronsUsed: 3_200, resetsAt: Date.UTC(2026, 10, 2) };
 
-async function open(page: Page, today: unknown, month: unknown) {
+async function open(page: Page, today: unknown, month: unknown, allowed: unknown = allowance) {
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/usage?*", (route) =>
-    route.fulfill({ json: { currency: "USD", today, month, allowance } }),
+    route.fulfill({ json: { currency: "USD", today, month, allowance: allowed } }),
   );
   await page.goto("/usage");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
@@ -104,8 +104,11 @@ test("leads with the totals, labels every cost and flags old and missing prices"
   await expect(page.getByRole("table", { name: "Billed by OpenAI, this month" })).toBeVisible();
 });
 
-test("an empty period offers a chat instead of an empty table", async ({ page }) => {
-  await open(page, empty, empty);
+test("an empty period offers a chat instead of an empty table; a member has no meter", async ({
+  page,
+}) => {
+  await open(page, empty, empty, null);
+  await expect(page.getByRole("meter")).toHaveCount(0);
   await expect(page.getByText("No usage yet.")).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Start a chat" })).toHaveAttribute("href", "/");

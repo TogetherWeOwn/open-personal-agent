@@ -40,7 +40,8 @@ interface UsageData {
   currency: string;
   today: Period;
   month: Period;
-  allowance: { neuronsPerDay: number; neuronsUsed: number; resetsAt: number };
+  /** Only the owner gets it: the total includes everyone's calls. */
+  allowance: { neuronsPerDay: number; neuronsUsed: number; resetsAt: number } | null;
 }
 
 const link = "font-medium text-accent underline underline-offset-2";
@@ -182,7 +183,7 @@ function GroupSection({
   );
 }
 
-function Allowance({ allowance }: { allowance: UsageData["allowance"] }) {
+function Allowance({ allowance }: { allowance: NonNullable<UsageData["allowance"]> }) {
   const { neuronsUsed, neuronsPerDay, resetsAt } = allowance;
   const pct = Math.min(100, Math.round((neuronsUsed / neuronsPerDay) * 100));
   const reset = new Date(resetsAt).toLocaleTimeString(undefined, { timeStyle: "short" });
@@ -267,7 +268,7 @@ export function Usage() {
               </ToggleButton>
             ))}
           </ToggleButtonGroup>
-          <Allowance allowance={data.allowance} />
+          {data.allowance && <Allowance allowance={data.allowance} />}
           {period.unpricedCalls > 0 && (
             <p className="text-sm">
               {num.format(period.unpricedCalls)}{" "}
