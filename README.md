@@ -54,6 +54,8 @@ internet unencrypted.
 | `pnpm check`                      | Dry run, ports rule, dependency guard, builder independence, supply chain |
 | `pnpm notices`                    | Writes `dist/THIRD_PARTY_NOTICES.md` for production dependencies          |
 | `pnpm --filter @opa/web test:e2e` | Playwright: axe, keyboard send and screenshot baselines (`visual` CI job) |
+| `pnpm test:e2e`                   | Playwright on the real app (after `build`): claim, onboard, chat, restart |
+| `BASE_URL=… pnpm test:acceptance` | Read-only acceptance checks against a deployment (a local one if unset)   |
 
 `GET /api/health` reports the schema version, each binding (D1, R2, the Durable Object, the
 Workflow, Workers AI) and whether each secret is set, as booleans. While the database is
