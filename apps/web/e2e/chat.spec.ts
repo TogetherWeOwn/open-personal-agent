@@ -49,7 +49,7 @@ test("Stop ends a reply", async ({ page }) => {
   await page.getByRole("textbox", { name: "Message" }).fill("Write an essay");
   await page.keyboard.press("Enter");
   await page.getByRole("button", { name: "Stop" }).click();
-  await expect(page.getByRole("log")).toContainText("Stopped.");
+  await expect(page.getByRole("log")).toContainText("Stopped before it finished.");
 });
 
 for (const colorScheme of ["light", "dark"] as const) {
