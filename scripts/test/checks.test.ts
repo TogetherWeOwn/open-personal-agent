@@ -159,8 +159,8 @@ describe("docs-cost-lint", () => {
       "| `DB` | D1 | 5 GB \\| 25B rows | $0.75/GB |",
     );
     expect(checkDocsCost(piped)).toEqual([]);
-    // An escaped backslash before a pipe leaves the pipe a delimiter: four cells, one empty.
-    piped.readme = piped.readme.replace("5 GB \\| 25B rows", "5 GB \\\\| 25B rows |");
+    // An escaped backslash before a pipe leaves the pipe a delimiter, so the row has four cells.
+    piped.readme = piped.readme.replace("5 GB \\| 25B rows", "5 GB \\\\| 25B rows");
     expect(checkDocsCost(piped)).toEqual(['DB: no cost row in the README "What this costs" table']);
     const env = repo();
     env.config.env = {
