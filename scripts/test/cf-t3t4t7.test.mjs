@@ -8,6 +8,7 @@ import {
   newCampaignPrefix,
   redact,
   scoreTurn,
+  waitReady,
 } from "../cf-verify-t3t4t7.mjs";
 import { teardownCloudflare } from "../teardown-cloudflare.mjs";
 
@@ -72,5 +73,13 @@ describe("t7 corpus and scoring", () => {
     );
     expect(scoreTurn({ kind: "chat" }, [])).toBe("pass");
     expect(scoreTurn({ kind: "chat" }, [{ name: "add" }])).toBe("fail");
+  });
+});
+
+describe("25 h callback gate", () => {
+  it("refuses an early callback and accepts one at or after 25 h", () => {
+    const start = "2026-11-01T00:00:00.000Z";
+    expect(waitReady(start, Date.parse(start) + 25 * 3600_000 - 1)).toBe(false);
+    expect(waitReady(start, Date.parse(start) + 25 * 3600_000)).toBe(true);
   });
 });

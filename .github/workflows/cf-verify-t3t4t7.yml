@@ -1,0 +1,126 @@
+# SPDX-License-Identifier: Apache-2.0
+# T3/T4/T7 cf-verify window (TWO-669, plan TWO-573). Manual only, never a PR gate.
+# `start` deploys the fixtures, runs the T3 sync cases, starts the real 25 h wait, then runs
+# T4 (one real hour) and the T7 pilot. The operator dispatches `finish` at least 25 h later
+# with the start run's prefix and run id: it delivers the synthetic approval event, collects
+# the redacted bundles and tears everything down by manifest. Shares the deploy-verify
+# concurrency group so two campaigns never touch the account at once.
+name: cf-verify-t3t4t7
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "start, finish (at least 25 h after start) or teardown-only"
+        required: true
+        default: "start"
+        type: choice
+        options: ["start", "finish", "teardown-only"]
+      prefix:
+        description: "Campaign prefix from the start run (finish and teardown-only)"
+        required: false
+        type: string
+      start_run_id:
+        description: "Start run id (finish: restores manifest and wait state)"
+        required: false
+        type: string
+      model:
+        description: "Pinned Workers AI starter model for the T7 pilot"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency: deploy-verify
+
+jobs:
+  start:
+    if: inputs.phase == 'start'
+    runs-on: ubuntu-latest
+    environment: cf-verify
+    timeout-minutes: 200
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Deploy the fixtures
+        id: deploy
+        run: |
+          out=$(pnpm cf-verify:t3t4t7 deploy)
+          echo "$out"
+          echo "prefix=$(echo "$out" | grep -o 'opa-v-q4-[0-9-]*-[0-9a-f]*' | head -1)" >> "$GITHUB_OUTPUT"
+      - run: pnpm cf-verify:t3t4t7 t3-sync --prefix "${{ steps.deploy.outputs.prefix }}"
+      - name: Start the 25 h wait
+        run: |
+          pnpm cf-verify:t3t4t7 t3-wait-start --prefix "${{ steps.deploy.outputs.prefix }}"
+          echo "Dispatch finish with prefix ${{ steps.deploy.outputs.prefix }} no earlier than:"
+          cat "$RUNNER_TEMP/${{ steps.deploy.outputs.prefix }}/wait.json"
+      - run: pnpm cf-verify:t3t4t7 t4 --prefix "${{ steps.deploy.outputs.prefix }}"
+      - run: pnpm cf-verify:t3t4t7 t7 --prefix "${{ steps.deploy.outputs.prefix }}" --model "${{ inputs.model }}"
+        continue-on-error: true
+      - name: Collect partial evidence
+        if: always()
+        run: pnpm cf-verify:t3t4t7 collect --prefix "${{ steps.deploy.outputs.prefix }}"
+      - name: Upload start state
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3t4t7-${{ steps.deploy.outputs.prefix }}
+          path: ${{ runner.temp }}/${{ steps.deploy.outputs.prefix }}
+          retention-days: 7
+
+  finish:
+    if: inputs.phase == 'finish'
+    runs-on: ubuntu-latest
+    environment: cf-verify
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_SEND_METRICS: "false"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Restore start state
+        run: gh run download "${{ inputs.start_run_id }}" -n "t3t4t7-${{ inputs.prefix }}" -D "$RUNNER_TEMP/${{ inputs.prefix }}"
+      - run: pnpm cf-verify:t3t4t7 callback --prefix "${{ inputs.prefix }}"
+      - name: Collect evidence and tear down
+        if: always()
+        run: |
+          pnpm cf-verify:t3t4t7 collect --prefix "${{ inputs.prefix }}"
+          pnpm cf-verify:t3t4t7 teardown --prefix "${{ inputs.prefix }}"
+      - name: Upload evidence bundles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3t4t7-evidence-${{ inputs.prefix }}
+          path: ${{ runner.temp }}/${{ inputs.prefix }}
+          retention-days: 90
+
+  teardown-only:
+    if: inputs.phase == 'teardown-only'
+    runs-on: ubuntu-latest
+    environment: cf-verify
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: pnpm cf-verify:t3t4t7 teardown --prefix "${{ inputs.prefix }}"
