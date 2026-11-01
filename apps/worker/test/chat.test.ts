@@ -2,13 +2,18 @@
 // The Assistant DO and chat transport (M2-13): two tabs share one stream, a conversation survives
 // an eviction, and the DO name comes from the session only.
 import { runInDurableObject } from "cloudflare:test";
+import { env as workerEnv } from "cloudflare:workers";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
-import { describe, expect, it, vi } from "vitest";
+import { STARTER_MODEL } from "@opa/providers";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
+import { resolveChatModel } from "../src/chat-model";
+import { compose, type WorkerEnv } from "../src/compose";
 import { workerApp } from "../src/worker-app";
 import { Browser, claim, count, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
 freshDatabase();
+afterEach(() => vi.restoreAllMocks());
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
 const never = new Promise<void>(() => {});
@@ -39,6 +44,22 @@ function useModel(userId: string, provider: ModelProvider) {
     instance.resolveModel = async () => ({ provider, model: "test-model", apiKey: null });
   });
 }
+
+/**
+ * The real resolver, with the vault and AI binding the test runtime lacks: the DO's own env has no
+ * master key here, and Workers AI is remote-only.
+ */
+async function useSavedModel(userId: string, AI: Ai) {
+  const raw = { ...workerEnv, OPA_MASTER_KEY: btoa("k".repeat(32)) } as unknown as WorkerEnv;
+  const { VAULT } = await compose(raw);
+  await runInDurableObject(assistantOf(userId), (instance: Assistant) => {
+    instance.resolveModel = (doEnv, scope, caller) =>
+      resolveChatModel({ ...doEnv, VAULT, AI }, scope, caller);
+  });
+  return { ...env, VAULT };
+}
+
+const sse = (...lines: string[]) => new Response(lines.map((line) => `data: ${line}\n\n`).join(""));
 
 /** Opens a tab's WebSocket and collects the events it receives. */
 async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
@@ -92,6 +113,64 @@ describe("chat transport", () => {
       { user_id: owner, conversation_id: "conv-1", provider_id: "scripted", model: "test-model" },
     ]);
     expect(ledger.results[0]).toMatchObject({ input_tokens: 12, output_tokens: 3 });
+  });
+
+  it("calls the saved model, and a settings change applies to the next turn", async () => {
+    const { browser, owner } = await claim();
+    const AI = {
+      run: vi.fn(async (_model: string) => sse('{"response":"From the starter"}', "[DONE]").body),
+    };
+    const withVault = new Browser(await useSavedModel(owner, AI as unknown as Ai));
+    withVault.cookies = browser.cookies;
+    const KEY = "sk-chat-0123456789abcdefWXYZ";
+    const keyed = {
+      kind: "openai-chat",
+      providerId: "openai",
+      baseUrl: "https://api.example.com/v1",
+    };
+    const saved = await withVault.req("/api/settings/model", {
+      method: "PUT",
+      body: { ...keyed, model: "gpt-x", apiKey: KEY },
+    });
+    expect(saved.status).toBe(200);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      const chunk = JSON.stringify({ choices: [{ delta: { content: "From gpt-x" } }] });
+      return sse(chunk, "[DONE]");
+    });
+
+    const tab = await openTab(browser);
+    tab.send?.("conv-6", "Who are you?");
+    await tab.until?.("turn.completed");
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(url).toBe("https://api.example.com/v1/chat/completions");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${KEY}`);
+    expect(JSON.parse(init?.body as string)).toMatchObject({ model: "gpt-x" });
+
+    // Switching to the starter model takes effect on the same socket's next turn.
+    const starter = { method: "PUT", body: { kind: "workers-ai" } };
+    expect((await withVault.req("/api/settings/model", starter)).status).toBe(200);
+    tab.events.length = 0;
+    tab.send?.("conv-6", "And now?");
+    await tab.until?.("turn.completed");
+    expect(AI.run.mock.calls[0]?.[0]).toBe(STARTER_MODEL);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    const res = await browser.req("/api/conversations/conv-6/messages");
+    const { messages } = await res.json<{ messages: { content: string }[] }>();
+    expect(messages.map((m) => m.content)).toEqual([
+      "Who are you?",
+      "From gpt-x",
+      "And now?",
+      "From the starter",
+    ]);
+    const ledger = await db
+      .prepare("SELECT provider_id, model FROM usage WHERE conversation_id = 'conv-6'")
+      .all();
+    // The ledger names who bills the call from its endpoint, not the provider ID typed for it.
+    expect(ledger.results).toEqual([
+      { provider_id: "api.example.com", model: "gpt-x" },
+      { provider_id: "workers-ai", model: STARTER_MODEL },
+    ]);
   });
 
   it.each([
