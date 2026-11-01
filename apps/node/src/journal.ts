@@ -35,13 +35,29 @@ export interface SqliteJournalDeps {
 
 /**
  * A `TaskStepper` over the journal tables. `do` replays a finished step from its row; a step
- * interrupted before its write (crash, restart) simply runs again on resume. Retries and the
- * timeout run inline — there is no engine to own them — with the same option shapes as the
- * port. `sleep` is a plain timer: a restart re-sleeps, which only delays the run.
+ * interrupted before its write (crash, restart) simply runs again on resume. A consumed
+ * `waitForEvent` replays its payload from the same table, so a resume never re-waits on an
+ * event row that is already gone. Retries and the timeout run inline — there is no engine
+ * to own them — with the same option shapes as the port. `sleep` is a plain timer: a
+ * restart re-sleeps, which only delays the run.
  */
 export function createSqliteJournal(deps: SqliteJournalDeps): TaskStepper {
   const now = deps.now ?? Date.now;
   const pollIntervalMs = deps.pollIntervalMs ?? 25;
+  // Serialises consumes across this journal's concurrent waiters: one runner owns an
+  // instance — the assistant is serialised per user — so an in-process mutex makes the
+  // select-then-batch consume exactly-once. Only held across one select plus its batch,
+  // never across the poll delay. Waiters on different journal objects over one instance
+  // must not run concurrently.
+  let consumeMutex = Promise.resolve();
+  function serialiseConsume<T>(fn: () => Promise<T>): Promise<T> {
+    const run = consumeMutex.then(fn);
+    consumeMutex = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
   return {
     async do<T extends JsonValue>(name: string, config: StepOptions, fn: () => Promise<T>) {
@@ -63,26 +79,41 @@ export function createSqliteJournal(deps: SqliteJournalDeps): TaskStepper {
     },
 
     /**
-     * Consumes the oldest matching row from `task_events`. One runner owns an instance — the
-     * assistant is serialised per user — so a select-then-delete is enough for exactly-once
-     * delivery; concurrent waiters on one instance would need an atomic consume.
+     * Consumes the oldest matching row from `task_events`, serialised against this journal's
+     * other waiters so each posted event reaches exactly one of them. A consumed wait
+     * journals its payload to `task_steps` under its name in the same batch as the delete,
+     * so a resume replays the payload instead of waiting on an event row that is already
+     * gone — the way the Workflow engine replays a finished wait.
      */
     async waitForEvent<T extends JsonValue>(
       name: string,
       options: { type: string; timeoutMs: number },
     ): Promise<{ payload: T }> {
+      const replayed = await deps.db
+        .prepare("SELECT output FROM task_steps WHERE instance_id = ? AND name = ?")
+        .bind(deps.instanceId, name)
+        .first("output");
+      if (typeof replayed === "string") return JSON.parse(replayed) as { payload: T };
       const deadline = now() + options.timeoutMs;
       for (;;) {
-        const row = (await deps.db
-          .prepare(
-            "SELECT id, payload FROM task_events WHERE instance_id = ? AND type = ? ORDER BY id LIMIT 1",
-          )
-          .bind(deps.instanceId, options.type)
-          .first()) as { id: number; payload: string } | null;
-        if (row) {
-          await deps.db.prepare("DELETE FROM task_events WHERE id = ?").bind(row.id).run();
-          return { payload: JSON.parse(row.payload) as T };
-        }
+        const consumed = await serialiseConsume(async () => {
+          const row = (await deps.db
+            .prepare(
+              "SELECT id, payload FROM task_events WHERE instance_id = ? AND type = ? ORDER BY id LIMIT 1",
+            )
+            .bind(deps.instanceId, options.type)
+            .first()) as { id: number; payload: string } | null;
+          if (!row) return null;
+          const payload = JSON.parse(row.payload) as T;
+          await deps.db.batch([
+            deps.db.prepare("DELETE FROM task_events WHERE id = ?").bind(row.id),
+            deps.db
+              .prepare("INSERT INTO task_steps (instance_id, name, output) VALUES (?, ?, ?)")
+              .bind(deps.instanceId, name, JSON.stringify({ payload })),
+          ]);
+          return { payload };
+        });
+        if (consumed) return consumed;
         if (now() >= deadline) {
           throw new Error(`waitForEvent "${name}" timed out after ${options.timeoutMs} ms`);
         }
@@ -112,8 +143,9 @@ const DEFAULT_STEP: Required<StepOptions> = {
 
 /**
  * Runs `fn` with the step's retries and timeout. A timed-out call keeps running in the
- * background — there is no cancellation handle — so a slow step may still journal its write
- * while its attempt already failed; the journal row wins on resume, as with an engine replay.
+ * background — there is no cancellation handle — but its late value is thrown away, never
+ * journalled; the retry runs `fn` again while the hung attempt is still running, so a step
+ * with a side effect can run it twice.
  */
 async function runWithRetries<T>(fn: () => Promise<T>, config: StepOptions): Promise<T> {
   const retries = { ...DEFAULT_STEP.retries, ...config.retries };
@@ -145,11 +177,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`step timed out after ${timeoutMs} ms`)), timeoutMs);
   });
-  const settled = promise.then((value) => {
-    clearTimeout(timer);
-    return value;
-  });
-  return Promise.race([settled, timeout]);
+  return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

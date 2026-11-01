@@ -117,4 +117,18 @@ describe("journal events", () => {
       journal.waitForEvent("approval", { type: "approval", timeoutMs: 20 }),
     ).rejects.toThrow(/timed out/);
   });
+
+  it("replays a consumed wait after a resume instead of timing out", async () => {
+    const journal = createSqliteJournal({ db, instanceId: "events-resume", pollIntervalMs: 1 });
+    await postTaskEvent(db, "events-resume", "approval", { decision: "approve" });
+    expect(
+      await journal.waitForEvent("approval:1", { type: "approval", timeoutMs: 2_000 }),
+    ).toEqual({ payload: { decision: "approve" } });
+    // A new journal object over the same database and instance: a resumed run. The event
+    // row is gone, but the wait replays its payload from the journal.
+    const resumed = createSqliteJournal({ db, instanceId: "events-resume", pollIntervalMs: 1 });
+    expect(
+      await resumed.waitForEvent("approval:1", { type: "approval", timeoutMs: 50 }),
+    ).toEqual({ payload: { decision: "approve" } });
+  });
 });
