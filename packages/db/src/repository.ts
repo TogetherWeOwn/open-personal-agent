@@ -2,12 +2,20 @@
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
 import { estimate, findPrice } from "@opa/pricing";
-import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, type SQL, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
-import { conversations, messages, secrets, usage, userSettings, users } from "./schema";
+import {
+  conversations,
+  messages,
+  modelProviders,
+  secrets,
+  usage,
+  userSettings,
+  users,
+} from "./schema";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
@@ -56,6 +64,12 @@ export interface DataBindings<Stub, Id> {
 /** The `user_settings` columns a route may write; the user and timestamps come from here. */
 export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
+>;
+
+/** The `model_providers` columns a route may write. */
+export type ProviderValues = Pick<
+  typeof modelProviders.$inferInsert,
+  "kind" | "providerId" | "baseUrl" | "model" | "keySecretId"
 >;
 
 /** A conversation ID comes from the client, so it is checked before it reaches a query. */
@@ -127,6 +141,29 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
       const getConversation = async (id: string) =>
         (await db.select().from(conversations).where(own(id)).limit(1))[0];
+      const ownProvider = (id: string) =>
+        and(eq(modelProviders.id, id), eq(modelProviders.userId, userId));
+      const providerRows = (where?: SQL) =>
+        db
+          .select({
+            id: modelProviders.id,
+            kind: modelProviders.kind,
+            providerId: modelProviders.providerId,
+            baseUrl: modelProviders.baseUrl,
+            model: modelProviders.model,
+            keySecretId: modelProviders.keySecretId,
+            createdAt: modelProviders.createdAt,
+            keyLast4: secrets.last4,
+            keyCreatedAt: secrets.createdAt,
+            keyUpdatedAt: secrets.updatedAt,
+            keyLastUsedAt: secrets.lastUsedAt,
+          })
+          .from(modelProviders)
+          .leftJoin(
+            secrets,
+            and(eq(secrets.id, modelProviders.keySecretId), eq(secrets.userId, userId)),
+          )
+          .where(and(eq(modelProviders.userId, userId), where));
       const createConversation = async (id: string, title: string | null = null) => {
         await db.insert(conversations).values({ id: checkId(id), userId, title });
       };
@@ -178,6 +215,19 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             // A conflict is either another user's row or this user's from a concurrent open.
             await createConversation(id, title).catch(() => {});
             return (await getConversation(id)) !== undefined;
+          },
+          /** Pins the conversation to a model, or back to the Chat role with `null`. */
+          setModel: async (
+            conversationId: string,
+            pick: { provider: string; model: string } | null,
+          ) => {
+            const set = { modelProvider: pick?.provider ?? null, model: pick?.model ?? null };
+            const done = await db
+              .update(conversations)
+              .set(set)
+              .where(own(conversationId))
+              .returning({ id: conversations.id });
+            return done.length > 0;
           },
           /** Writes the user's message and the empty streaming reply after it, both or neither. */
           startTurn: async (conversationId: string, text: string, replyId: string) => {
@@ -246,7 +296,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
         memory: memoryService(db, userId),
-        /** Onboarding answers and the chat model (M2-15). The key itself is in `secrets`. */
+        /** Onboarding answers and the model roles (M2-15, M3-06). */
         settings: {
           get: async () =>
             (
@@ -254,22 +304,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .select({
                   displayName: users.displayName,
                   about: userSettings.about,
-                  modelKind: userSettings.modelKind,
-                  providerId: userSettings.providerId,
-                  baseUrl: userSettings.baseUrl,
-                  model: userSettings.model,
-                  keySecretId: userSettings.modelKeySecretId,
+                  chatProvider: userSettings.chatProvider,
+                  chatModel: userSettings.chatModel,
+                  backgroundProvider: userSettings.backgroundProvider,
+                  backgroundModel: userSettings.backgroundModel,
                   onboardedAt: userSettings.onboardedAt,
-                  keyLast4: secrets.last4,
-                  keyUpdatedAt: secrets.updatedAt,
-                  keyLastUsedAt: secrets.lastUsedAt,
                 })
                 .from(users)
                 .leftJoin(userSettings, eq(userSettings.userId, users.id))
-                .leftJoin(
-                  secrets,
-                  and(eq(secrets.id, userSettings.modelKeySecretId), eq(secrets.userId, users.id)),
-                )
                 .where(eq(users.id, userId))
                 .limit(1)
             )[0],
@@ -291,6 +333,44 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .update(secrets)
               .set({ lastUsedAt: Date.now() })
               .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
+          },
+        },
+        /**
+         * Saved model providers (M3-06). A foreign key proves only that a row exists, so every
+         * read here also matches the user: a role or conversation can never name another's key.
+         */
+        providers: {
+          /** Oldest first, each with its key's last 4 and dates (SEC-7), never the key. */
+          list: () => providerRows().orderBy(modelProviders.createdAt),
+          /** `undefined` when the row is missing or someone else's. */
+          get: async (id: string) =>
+            isId(id) ? (await providerRows(eq(modelProviders.id, id)).limit(1))[0] : undefined,
+          add: async (values: ProviderValues) => {
+            const id = crypto.randomUUID();
+            await db.insert(modelProviders).values({ ...values, id, userId });
+            return id;
+          },
+          update: async (id: string, values: Partial<ProviderValues>) => {
+            await db
+              .update(modelProviders)
+              .set({ ...values, updatedAt: Date.now() })
+              .where(ownProvider(id));
+          },
+          /** Removes the row and its key; roles and conversations naming it fall back. */
+          remove: async (id: string) => {
+            const row = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
+            if (!row) return false;
+            await db.batch([
+              db.delete(modelProviders).where(ownProvider(id)),
+              ...(row.keySecretId
+                ? [
+                    db
+                      .delete(secrets)
+                      .where(and(eq(secrets.id, row.keySecretId), eq(secrets.userId, userId))),
+                  ]
+                : []),
+            ]);
+            return true;
           },
         },
         getFile: (id: string) => FILES.get(fileKey(id)),

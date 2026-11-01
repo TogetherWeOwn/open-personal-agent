@@ -83,6 +83,8 @@ describe("scoped-access lint", () => {
       ["apps/worker/src/health.ts", `env.${KEY}`, 1],
       ["packages/core/src/a.ts", `"${KEY}_PREV"`, 1],
       ["apps/worker/src/compose.ts", `env.${KEY}`, 0],
+      ["packages/server/src/compose.ts", `raw.${KEY}`, 0],
+      ["packages/server/src/health.ts", `env.${KEY}`, 1],
       ["apps/worker/src/index.ts", `env.${KEY}`, 1],
       ["apps/node/src/compose.ts", `vars.${KEY}`, 0],
       ["apps/node/src/main.ts", `vars.${KEY}`, 1],

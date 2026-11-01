@@ -55,9 +55,9 @@ export const RULES = [
   ],
   [
     "master-key",
-    /^(?:packages\/vault\/|apps\/(?:worker|node)\/src\/compose\.ts$)/,
+    /^(?:packages\/vault\/|(?:apps\/(?:worker|node)|packages\/server)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,
-    "only packages/vault and the composition root may name it (ADR 0010 D4.1 #2)",
+    "only packages/vault and the composition roots may name it (ADR 0010 D4.1 #2)",
   ],
   [
     "cloudflare-env",

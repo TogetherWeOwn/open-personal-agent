@@ -4,8 +4,8 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { STARTER_MODEL } from "@opa/providers";
+import { app } from "@opa/server/app";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
 import { ORIGIN, sessionHeaders } from "./helpers/app";
@@ -215,7 +215,7 @@ describe("model settings", () => {
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
     const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
+    expect(tested).toMatchObject({ ok: true, tools: true, reply: "ready" });
     // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
     const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
@@ -227,5 +227,56 @@ describe("model settings", () => {
 
   it("keeps the saved key for switching back from the starter", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
+  });
+});
+
+describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
+  const preset = {
+    kind: "openai-chat",
+    providerId: "openai",
+    baseUrl: "https://api.openai.com/v1",
+  };
+  const event = (type: string, fields: object) => JSON.stringify({ type, ...fields });
+
+  it("moves a saved OpenAI key to Responses without asking for it again", async () => {
+    // Saved exactly as M2 saved it: kind `openai-chat`, the preset's provider and URL.
+    const saved = await put("/model", { ...preset, model: "gpt-5-mini", apiKey: CANARY });
+    expect(JSON.parse(saved.text).model).toMatchObject({
+      kind: "openai-chat",
+      api: "openai-responses",
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      const done = {
+        response: { status: "completed", usage: { input_tokens: 9, output_tokens: 1 } },
+      };
+      return new Response(
+        sse(
+          event("response.output_text.delta", { delta: "ready" }),
+          event("response.completed", done),
+        ),
+      );
+    });
+    const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(tested).toMatchObject({ ok: true, tools: true, reply: "ready" });
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(url).toBe("https://api.openai.com/v1/responses");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${CANARY}`);
+    expect(JSON.parse(String(init?.body))).toMatchObject({ store: false });
+    // Another OpenAI-compatible host stays on Chat Completions.
+    expect(
+      JSON.parse((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).text).model,
+    ).toMatchObject({ api: "openai-chat" });
+  });
+
+  it("can't decrypt a key bound to one origin under another", async () => {
+    await put("/model", { ...preset, model: "gpt-5-mini", apiKey: CANARY });
+    const fetch = vi.spyOn(globalThis, "fetch");
+    // Bypass the route's own check: the vault's binding still refuses the key.
+    await env.DB.prepare(
+      "UPDATE model_providers SET base_url = 'https://eu.api.openai.com/v1'",
+    ).run();
+    const res = await call("/model/test", { method: "POST" });
+    expect(res).toEqual({ status: 409, text: '{"error":"key_required"}' });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
