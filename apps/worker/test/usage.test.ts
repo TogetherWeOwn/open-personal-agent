@@ -6,7 +6,16 @@ import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
 import { describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { workerApp } from "../src/worker-app";
-import { Browser, claim, db, env, freshDatabase, ORIGIN, sessionHeaders } from "./helpers/app";
+import {
+  Browser,
+  claim,
+  db,
+  env,
+  freshDatabase,
+  ORIGIN,
+  SOCKET_WAIT,
+  sessionHeaders,
+} from "./helpers/app";
 
 freshDatabase();
 
@@ -47,7 +56,7 @@ async function chat(owner: string, cookie: string, providerId: string, model: st
     events.push((JSON.parse(e.data as string) as HarnessEvent).type);
   });
   ws.send(JSON.stringify({ type: "chat.send", conversationId: crypto.randomUUID(), text: "Hi" }));
-  await vi.waitFor(() => expect(events).toContain("turn.completed"));
+  await vi.waitFor(() => expect(events).toContain("turn.completed"), SOCKET_WAIT);
   ws.close();
 }
 
