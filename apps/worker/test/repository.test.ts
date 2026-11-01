@@ -91,12 +91,12 @@ describe("scoped repository", () => {
       state: '{"counts":{"calls":1,"tools":0}}',
     };
     expect(await alice?.turns.save(saved)).toBe(true);
-    expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    expect(await alice?.turns.load("turn-1")).toEqual({ ...saved, updatedAt: expect.any(Number) });
     // Another user cannot see, refresh or delete it.
     expect(await bob?.turns.load("turn-1")).toBeUndefined();
     expect(await bob?.turns.save({ ...saved, turnId: "turn-bob" })).toBe(false);
     await bob?.turns.remove("turn-1");
-    expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    expect(await alice?.turns.load("turn-1")).toEqual({ ...saved, updatedAt: expect.any(Number) });
     // A turn_id Bob already owns is never overwritten by Alice's save: the scoped conflict
     // update touches nothing, reports `false`, and both rows read back as before.
     await bob?.createConversation("turns-c2", "Bob's turns");
