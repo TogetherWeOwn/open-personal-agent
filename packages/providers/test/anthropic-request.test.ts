@@ -155,6 +155,30 @@ describe("anthropic-messages request", () => {
     ]);
   });
 
+  it("keeps only the later thinking when two replies in a row merge", () => {
+    const signedReply = (text: string, signature: string): ModelMessage => ({
+      role: "assistant",
+      content: text,
+      reasoning: reasoning([
+        { ...SIGNED, signature },
+        { type: "text", chars: text.length },
+      ]),
+    });
+    const merged = wire([
+      { role: "user", content: "Go" },
+      signedReply("First.", "sig-1"),
+      signedReply("Second.", "sig-2"),
+    ]);
+    expect(merged[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "text", text: "First." },
+        { ...SIGNED, signature: "sig-2" },
+        { type: "text", text: "Second." },
+      ],
+    });
+  });
+
   it("merges system prompts and roles, skips empty turns and sends a non-object input as {}", () => {
     const messages: ModelMessage[] = [
       { role: "system", content: "One." },
