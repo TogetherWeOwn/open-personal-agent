@@ -11,7 +11,7 @@ import { type Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { AppEnv } from "./env";
-import { checkHealth } from "./health";
+import { setupRequired } from "./health";
 import { clientIp } from "./security";
 
 /** Denied attempts one address may make in its window. */
@@ -29,7 +29,7 @@ type Body = { code?: unknown; credential?: unknown };
  * audit. Returns the matching code, or the error response.
  */
 async function redeemable(c: Context<AppEnv>): Promise<Response | (Code & { body: Body })> {
-  if ((await checkHealth(c.env)).status === "setup_required") {
+  if (await setupRequired(c.env)) {
     return c.json({ error: "setup_required" }, 503);
   }
   const store = systemStore(c.env);
