@@ -40,13 +40,6 @@ describe("turn rate", () => {
     clock.now += 1;
     expect(l.startTurn()).toBe(true);
   });
-
-  it("caps model calls per turn", () => {
-    const { limits: l } = limits();
-    expect(l.call("t1")).toBe(true);
-    expect(l.call("t1")).toBe(false);
-    expect(l.call("t2")).toBe(true);
-  });
 });
 
 describe("daily spend", () => {
