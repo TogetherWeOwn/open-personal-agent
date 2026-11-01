@@ -300,14 +300,15 @@ export interface TurnRecord {
   replyId: string;
   providerId: string;
   model: string;
-  reply: string;
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null;
-  /** The model call has started, so the messages exist and the call belongs in the ledger. */
-  called: boolean;
 }
 
 /** One model call for the ledger. `providerId` is who bills it (`billingProviderId`). */
-export type LedgerCall = Pick<TurnRecord, "providerId" | "model" | "usage">;
+export interface LedgerCall {
+  providerId: string;
+  model: string;
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null;
+}
 
 /** Why a saved turn stopped, and so how it can resume (M3-03 AC5). */
 export type TurnStatus = "awaiting_approval" | "limit_reached";
@@ -798,26 +799,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]);
           },
           /**
-           * Finishes a reply and writes the call's usage ledger row (ADR 0006) in one transaction.
-           * A call that never started gets no row.
+           * A stopped turn's partial reply so far, still `streaming`: what a tab that loads the
+           * conversation while the turn waits to resume reads (M3-03 AC5).
            */
-          settle: async (turn: TurnRecord, status: MessageStatus) => {
-            await db.batch([
-              db
-                .update(messages)
-                .set({ status, content: turn.reply })
-                .where(and(eq(messages.id, turn.replyId), eq(messages.userId, userId))),
-              ...(turn.called
-                ? [
-                    db.insert(usage).values({
-                      ...ledgerValues(turn),
-                      userId,
-                      conversationId: turn.conversationId,
-                      messageId: turn.replyId,
-                    }),
-                  ]
-                : []),
-            ]);
+          checkpointReply: async (replyId: string, content: string) => {
+            await db
+              .update(messages)
+              .set({ content })
+              .where(and(eq(messages.id, replyId), eq(messages.userId, userId)));
+          },
+          /**
+           * Finishes a reply. The ledger is written per model call as calls end (`usage.record`),
+           * so settling only closes the message.
+           */
+          settle: async (reply: { replyId: string; reply: string }, status: MessageStatus) => {
+            await db
+              .update(messages)
+              .set({ status, content: reply.reply })
+              .where(and(eq(messages.id, reply.replyId), eq(messages.userId, userId)));
           },
         },
         /**
@@ -826,15 +825,24 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          * DO's hibernation, eviction and redeploy, and removing it is part of settling.
          */
         turns: {
-          /** Saves (or refreshes) a stopped turn; `false` if the conversation isn't the user's. */
+          /**
+           * Saves (or refreshes) a stopped turn; `false` if the conversation isn't the user's,
+           * or the row isn't (a `turnId` that ever collided, or came from the caller, can never
+           * overwrite another user's row — the scoped conflict update touches nothing).
+           */
           save: async (turn: SavedTurn) => {
             if (!(await getConversation(turn.conversationId))) return false;
             const set = { ...turn, updatedAt: Date.now() };
-            await db
+            const rows = await db
               .insert(turnStates)
               .values({ ...set, userId })
-              .onConflictDoUpdate({ target: turnStates.turnId, set });
-            return true;
+              .onConflictDoUpdate({
+                target: turnStates.turnId,
+                set,
+                setWhere: eq(turnStates.userId, userId),
+              })
+              .returning({ turnId: turnStates.turnId });
+            return rows.length > 0;
           },
           /** A stopped turn by ID, or `undefined` when it is missing or someone else's. */
           load: async (turnId: string) =>

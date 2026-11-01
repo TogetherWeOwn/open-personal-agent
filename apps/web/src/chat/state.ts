@@ -281,35 +281,55 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return updateMessage(seen, pending, (m) => ({ text: m.text + event.payload.text }));
     case "message.completed":
       return {
-        ...updateMessage(seen, pending, () => ({ text: event.payload.text })),
+        ...updateMessage(seen, pending, (m) => ({ text: withSegment(m.text, event.payload.text) })),
         announcement: `Assistant replied: ${event.payload.text}`,
       };
     case "turn.completed":
       return finish(seen, "complete", seen.announcement);
+    // `turn.cancelled` is the user's Stop; `turn.interrupted` is the server going away
+    // mid-reply (M3-03 AC6). On screen both are the same cut-short reply.
+    case "turn.cancelled":
     case "turn.interrupted":
       return finish(seen, "interrupted", "The reply stopped before it finished.");
     case "turn.failed": {
       const { message, code } = event.payload;
       return finish(seen, "error", `Something went wrong: ${message}`, code && { failure: code });
     }
+    // The turn stopped without settling: it waits in D1 for a decision or a Continue, and its
+    // reply stays `streaming`, so its later deltas stream into the same message. The cards
+    // that act on these come with the timeline (M3-07b); the composer frees up either way.
+    case "approval.requested":
+      return {
+        ...seen,
+        pending: null,
+        announcement: "The assistant is waiting for your approval.",
+      };
+    case "limit.reached":
+      return { ...seen, pending: null, announcement: "The assistant stopped at a limit." };
     case "usage.updated":
       return seen;
-    // The M3 events (steps, tools, approvals, limits) get their timeline with the cards that
+    // The remaining M3 events (steps, tools, taint) get their timeline with the cards that
     // render them; until then they leave the thread as it is.
-    case "turn.cancelled":
     case "step.started":
     case "step.completed":
     case "tool.called":
     case "tool.result":
-    case "approval.requested":
     case "approval.resolved":
     case "context.tainted":
     case "task.promoted":
-    case "limit.reached":
     case "artifact.created":
     case "memory.proposed":
       return seen;
   }
+}
+
+/**
+ * A turn can speak before and after its tools, so each `message.completed` is one segment of
+ * the reply (already streamed by its deltas). Segments join as paragraphs, as D1 stores them.
+ */
+function withSegment(text: string, segment: string): string {
+  const base = text.endsWith(segment) ? text.slice(0, text.length - segment.length) : text;
+  return base && segment ? `${base}\n\n${segment}` : base + segment;
 }
 
 /** Replaces a conversation's messages with the server's, keeping what streams here meanwhile. */
@@ -318,7 +338,7 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   const current = state.conversations.find((c) => c.id === id);
   if (!current) return state;
   const local = new Map(current.messages.map((m) => [m.id, m]));
-  // D1 holds a streaming reply's text only once it ends; the stream here is ahead.
+  // D1 holds a streaming reply's text only at its stops; the stream here is ahead.
   const messages = stored.map(({ id, role, status, content, attachments }): Message => {
     const m = local.get(id);
     return m?.status === "streaming" && status === "streaming"
