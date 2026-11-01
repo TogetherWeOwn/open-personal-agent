@@ -4,6 +4,7 @@
 // which stays mounted behind the others so drafts and streams survive.
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
+import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { TaskDetails } from "./tasks/TaskDetails";
@@ -56,7 +57,7 @@ export const SETTINGS: {
   },
   { id: "apps", label: "Apps & tools" },
   { id: "memory", label: "Memory" },
-  { id: "spending", label: "Spending" },
+  { id: "spending", label: "Spending", shipped: true },
   { id: "privacy", label: "Privacy & security" },
   { id: "deployment", label: "Deployment" },
 ];
@@ -68,7 +69,7 @@ function SettingsList() {
         {SETTINGS.map((s) => (
           <li key={s.id}>
             <Link
-              href={s.id === "spending" ? "/usage" : `/settings/${s.id}`}
+              href={`/settings/${s.id}`}
               className="flex min-h-11 items-center rounded-lg px-3 hover:bg-surface-raised"
             >
               {s.label}
@@ -83,7 +84,6 @@ function SettingsList() {
 function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
-  if (page.id === "spending") return <Redirect to="/usage" />;
   // Models and Agent engine already shipped with real screens; the table serves them instead of
   // their placeholders, so the rebase keeps what `main` already gives those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
@@ -133,24 +133,8 @@ export const routes: Route[] = [
   { path: "/activity", nav: "activity", screen: () => <Redirect to="/activity/tasks" /> },
   { path: "/activity/tasks", nav: "activity", screen: Tasks },
   { path: "/activity/tasks/:taskId", nav: "activity", screen: TaskDetails },
-  {
-    path: "/activity/outputs",
-    nav: "activity",
-    screen: placeholder(
-      "Outputs",
-      "Files I make for you show up here, like summaries and reports.",
-    ),
-  },
-  {
-    path: "/activity/outputs/:outputId",
-    nav: "activity",
-    screen: placeholder(
-      "Output",
-      "This file doesn't exist or was deleted.",
-      undefined,
-      go("/activity/outputs", "All files"),
-    ),
-  },
+  { path: "/activity/outputs", nav: "activity", screen: Outputs },
+  { path: "/activity/outputs/:outputId", nav: "activity", screen: Output },
   {
     path: "/activity/log",
     nav: "activity",

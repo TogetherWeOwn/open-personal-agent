@@ -352,8 +352,43 @@ export const tasks = sqliteTable(
     updatedAt: integer("updated_at").notNull().default(now),
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
+    /** When the retention sweep removed the tool outputs from `state` (M3-18 AC1). */
+    outputsRemovedAt: integer("outputs_removed_at"),
   },
   (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
+);
+
+/**
+ * A data export (M3-20 AC1): the Workflow-built ZIP of every item type. The Workflow instance is
+ * named here (`workflow_instance_id`), so `scopeForExport` mints its authority from this row
+ * alone — instance params are never consulted, as with tasks (M3-12 AC9). The ZIP itself lives
+ * in R2 under `u/{userId}/exports/{id}.zip` (the repository derives the key); item files stream
+ * through `u/{userId}/exports/{id}/staged/` while the run builds it. `expires_at` is stamped at
+ * creation (1 hour out): the reconciler deletes the object then, and the same bound frees a run
+ * that never finishes. The row stays as the user's history. One export runs at a time per user:
+ * the partial unique index below rejects a second `running` row, so two racing POSTs cannot
+ * start two Workflow runs — the loser answers 409 `already_running` like the check did.
+ */
+export const dataExports = sqliteTable(
+  "exports",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    status: text("status", { enum: ["running", "ready", "failed", "expired"] })
+      .notNull()
+      .default("running"),
+    workflowInstanceId: text("workflow_instance_id").unique(),
+    sizeBytes: integer("size_bytes"),
+    error: text("error"),
+    createdAt: createdAt(),
+    readyAt: integer("ready_at"),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [
+    index("exports_user_idx").on(t.userId, t.createdAt),
+    index("exports_sweep_idx").on(t.status, t.expiresAt),
+    uniqueIndex("exports_running_user_unique").on(t.userId).where(sql`${t.status} = 'running'`),
+  ],
 );
 
 /**
@@ -391,6 +426,34 @@ export const taskEvents = sqliteTable(
 );
 
 /**
+ * A file a tool wrote (M3-11, F-3.13): the Outputs library. The bytes live in R2 under
+ * `u/{userId}/files/{id}` (the repository derives the key, and writes the row in the same call
+ * as the object, so no tool file is missing from Outputs). The source run is the conversation
+ * and turn it came from, and the task when a Workflow ran it; each is cleared, never cascaded,
+ * when its source goes, so the file outlives the chat that made it.
+ */
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    turnId: text("turn_id"),
+    name: text("name").notNull(),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("artifacts_user_created_idx").on(t.userId, t.createdAt),
+    index("artifacts_user_conversation_idx").on(t.userId, t.conversationId, t.createdAt),
+  ],
+);
+
+/**
  * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
  * a model; a null Background role means the cheapest configured one. Embedding has no column
  * until it has a user (ADR 0008).
@@ -403,6 +466,17 @@ export const userSettings = sqliteTable("user_settings", {
   backgroundProvider: providerRef("background_provider"),
   backgroundModel: text("background_model"),
   onboardedAt: integer("onboarded_at"),
+  /**
+   * Retention (COST-10, M3-18 AC1), applied by the daily sweep. A chat with no new message for
+   * this many days is deleted; 0 keeps chats forever.
+   */
+  messageRetentionDays: integer("message_retention_days").notNull().default(0),
+  /** Tool outputs in finished tasks are removed after this many days; 0 keeps them. */
+  toolOutputRetentionDays: integer("tool_output_retention_days").notNull().default(30),
+  /** Unconfirmed memory suggestions expire to rejected after this many days (M3-15 AC2). */
+  memoryInboxDays: integer("memory_inbox_days").notNull().default(14),
+  /** Settings › Memory › "Learn from our chats": the assistant may use `remember` (M3-15 AC5). */
+  learnFromChats: integer("learn_from_chats", { mode: "boolean" }).notNull().default(true),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 

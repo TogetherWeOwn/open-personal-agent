@@ -7,6 +7,13 @@
     "verifiedAt": "2026-11-01",
     "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/"
   },
+  "cloudflare": {
+    "d1IncludedBytes": 5000000000,
+    "d1MaxBytes": 10000000000,
+    "r2IncludedBytes": 10000000000,
+    "verifiedAt": "2026-11-01",
+    "source": "https://developers.cloudflare.com/d1/platform/pricing/ https://developers.cloudflare.com/d1/platform/limits/ https://developers.cloudflare.com/r2/pricing/"
+  },
   "providers": {
     "workers-ai": {
       "name": "Cloudflare: Workers AI",

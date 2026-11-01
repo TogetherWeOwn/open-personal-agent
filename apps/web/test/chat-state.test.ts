@@ -4,8 +4,12 @@ import { describe, expect, it } from "vitest";
 import { type ChatAction, type ChatState, chatReducer, initialState } from "../src/chat/state";
 import type { StoredMessage } from "../src/chat/transport";
 
+let nextSeq = 0; // the server's `seq` never restarts, and the reducer drops one it has applied
 const ev = (type: HarnessEvent["type"], payload = {}, turnId = "t1", sessionId = "c1") =>
-  ({ type: "event", event: { v: 1, seq: 1, sessionId, turnId, type, payload } }) as ChatAction;
+  ({
+    type: "event",
+    event: { v: 1, seq: ++nextSeq, sessionId, turnId, type, payload },
+  }) as ChatAction;
 const started = (turnId = "t1", sessionId = "c1") =>
   ev("turn.started", { messageId: `r-${turnId}` }, turnId, sessionId);
 const run = (...actions: ChatAction[]) => actions.reduce(chatReducer, initialState("c1"));
@@ -342,5 +346,39 @@ describe("chatReducer", () => {
       ["assistant", 0],
       ["system", 0],
     ]);
+  });
+
+  it("leaves the thread alone for the M3 events it doesn't render yet (M3-03 AC8)", () => {
+    const state = run(send, started(), delta("Hel"));
+    const m3: ChatAction[] = [
+      ev("step.started", { stepId: "s1", label: "Thinking" }),
+      ev("tool.called", { toolCallId: "call-1", tool: "web_fetch", args: "{}", risk: "read" }),
+      ev("context.tainted", { stepId: "s1", source: { kind: "web", label: "x.test" } }),
+      ev("limit.reached", { kind: "tools", detail: "20 tool calls" }),
+    ];
+    for (const action of m3) {
+      const next = chatReducer(state, action);
+      // Only the applied-`seq` marker moves; nothing on screen does.
+      expect(next.conversations).toBe(state.conversations);
+      expect(next.announcement).toBe(state.announcement);
+      expect(next.pending?.turnId).toBe("t1");
+    }
+  });
+
+  it("applies a resumed turn's replayed events only once (M3-03 AC11)", () => {
+    const at = (seq: number, type: HarnessEvent["type"], payload = {}): ChatAction =>
+      ({
+        type: "event",
+        event: { v: 1, seq, sessionId: "c1", turnId: "t1", type, payload },
+      }) as ChatAction;
+    const state = run(
+      send,
+      at(7, "turn.started", { messageId: "r-t1" }),
+      at(8, "message.delta", { text: "Hel" }),
+    );
+    // The socket dropped and resumed: the log replays the turn from its start.
+    expect(chatReducer(state, at(7, "turn.started", { messageId: "r-t1" }))).toBe(state);
+    expect(chatReducer(state, at(8, "message.delta", { text: "Hel" }))).toBe(state);
+    expect(reply(chatReducer(state, at(9, "message.delta", { text: "lo" })))?.text).toBe("Hello");
   });
 });

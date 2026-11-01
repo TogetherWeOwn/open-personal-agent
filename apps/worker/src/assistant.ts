@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
-// tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
-import type { HarnessEvent, ModelAttachment, TurnFailure, TurnLimit } from "@opa/core";
+// tab, so two tabs show the same stream. D1 holds the messages; the DO holds the running turn
+// and the event log a reconnected tab replays from (M3-03 AC10).
+import {
+  type HarnessEvent,
+  type ModelAttachment,
+  TASK_LIMITS,
+  type TurnFailure,
+  type TurnLimit,
+} from "@opa/core";
 import {
   type AttachmentRow,
   createRepository,
@@ -11,6 +18,8 @@ import {
   type TurnRecord,
 } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
+import { TURN_LIMITS } from "@opa/harness-builtin";
+import type { AllowanceWarnings } from "@opa/server/allowances";
 import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import {
   Agent,
@@ -21,7 +30,16 @@ import {
 } from "agents";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
-import { Limits, type Reservation } from "./limits";
+import { EventLog } from "./event-log";
+import {
+  type CallScope,
+  checkSpending,
+  Limits,
+  type Refusal,
+  type Reservation,
+  SPENDING_DEFAULTS,
+  type SpendingSettings,
+} from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
@@ -65,6 +83,8 @@ export class Assistant extends Agent<Bindings> {
   #running: AbortController | null = null;
   /** Turn rate and daily spend, in this DO's storage (M2-22). */
   readonly limits = new Limits(this.ctx.storage.kv);
+  /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
+  readonly #events = new EventLog(this.ctx.storage.sql);
   /** The env with the vault: `compose` stays the only reader of the master keys. */
   readonly #composed: Promise<Env>;
 
@@ -85,16 +105,18 @@ export class Assistant extends Agent<Bindings> {
    * reach them. The key is the call's idempotency key (`instanceId:stepName`): a retried step
    * may already hold a reservation under it and may already have spent it, so that hold settles
    * at its full reservation before a new one is taken. Settling a key with no hold charges
-   * nothing, so the first reserve is unaffected.
+   * nothing, so the first reserve is unaffected. The scope names the task, whose budget the call
+   * draws on, and whether it runs in the background, where the monthly hard cap applies.
    */
   reserveTaskCall(
     key: string,
     providerId: string,
     model: string,
     chars: number,
-  ): Reservation | null {
+    scope: CallScope = {},
+  ): Reservation | Refusal {
     this.limits.settle(key, providerId, model, null);
-    return this.limits.reserve(key, providerId, model, chars);
+    return this.limits.reserveFor(key, providerId, model, chars, 0, scope);
   }
 
   /** Settles a task's model call to what it used; settling twice charges once. */
@@ -110,6 +132,85 @@ export class Assistant extends Agent<Bindings> {
   /** Drops a task call's reservation without a charge: the call never happened. */
   releaseTaskCall(key: string): void {
     this.limits.release(key);
+  }
+
+  /** Reserves a task's budget as it starts (COST-3); a replayed start keeps what it spent. */
+  startTask(taskId: string, budgetMicroUsd?: number): { budgetMicroUsd: number } {
+    return this.limits.startTask(taskId, budgetMicroUsd);
+  }
+
+  /** Continue after a task-budget stop: `false` once the budget was already raised (A-Co2). */
+  raiseTask(taskId: string): boolean {
+    return this.limits.raiseTask(taskId);
+  }
+
+  /** Undoes a Continue's raise when the task couldn't be woken, so Continue can try again. */
+  unraiseTask(taskId: string): void {
+    this.limits.unraiseTask(taskId);
+  }
+
+  /** Settles a task's budget at its end: what the task spent. */
+  endTask(taskId: string): number {
+    return this.limits.endTask(taskId);
+  }
+
+  /** A task's budget and spend so far, for its card; `null` once it has ended. */
+  taskBudget(taskId: string) {
+    return this.limits.task(taskId);
+  }
+
+  /**
+   * Counts a tool call against 60 a minute (COST-2); `false` means the tool must not run. The
+   * key (the step's idempotency key) keeps a retried step from counting the same call twice.
+   */
+  allowToolCall(callKey?: string): boolean {
+    return this.limits.toolCall(callKey);
+  }
+
+  /** The Spending settings and what they limit so far, for Settings › Spending (M3-17 AC5). */
+  spending() {
+    return {
+      settings: this.limits.settings(),
+      defaults: SPENDING_DEFAULTS,
+      // Read-only in M3 (§4.2): shown with the editable limits so every limit is in one place.
+      executionLimits: {
+        callsPerMessage: TURN_LIMITS.calls,
+        toolCallsPerMessage: TURN_LIMITS.tools,
+        stepsPerTask: TASK_LIMITS.steps,
+      },
+      ...this.limits.totals(),
+      // Only the owner's assistant gets these: the reconciler writes them there (COST-5).
+      allowance: this.ctx.storage.kv.get<AllowanceWarnings>("allowance-warnings") ?? null,
+    };
+  }
+
+  /** The reconciler's latest allowance warnings (M3-17 AC4); each run replaces the last. */
+  setAllowanceWarnings(warnings: AllowanceWarnings): void {
+    this.ctx.storage.kv.put("allowance-warnings", warnings);
+  }
+
+  /**
+   * Saves a Spending change if every field is valid (`checkSpending`); `null` if not. Returns
+   * the settings before and after together, so an audit of the change can't pair this write
+   * with another request's "before", and the write's number for `revertSpending`.
+   */
+  setSpending(
+    body: unknown,
+  ): { before: SpendingSettings; after: SpendingSettings; write: number } | null {
+    const changes = checkSpending(body);
+    if (!changes) return null;
+    const before = this.limits.settings();
+    const { settings: after, write } = this.limits.saveSettings(changes);
+    return { before, after, write };
+  }
+
+  /**
+   * Undoes a `setSpending` whose audit row couldn't be written. A field goes back only while
+   * this write is still the last to have changed it, so a later change that saved meanwhile is
+   * never overwritten, even one that set the same value.
+   */
+  revertSpending(write: number, before: SpendingSettings): void {
+    this.limits.revertSettings(write, before);
   }
 
   /**
@@ -184,6 +285,21 @@ export class Assistant extends Agent<Bindings> {
     // A tab whose session is still live may stop the running turn.
     if (msg?.type === "turn.cancel")
       void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
+    // A reconnected tab replays what it missed (M3-03 AC11): to this tab only, after the same
+    // session recheck, and only from this user's own log — the DO is named from the session, so
+    // a conversation ID from the client can't reach another user's events.
+    if (msg?.type === "resume") {
+      void this.#sessionLive(connection).then((ok) => {
+        if (!ok) return;
+        try {
+          for (const frame of this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq)) {
+            connection.send(frame);
+          }
+        } catch {
+          // The tab went away mid-replay; it will resume again on its next connect.
+        }
+      });
+    }
     if (msg?.type !== "chat.send") return;
     const text = msg.text.trim();
     // One turn at a time is the concurrency limit: a second send waits for the first.
@@ -403,7 +519,8 @@ export class Assistant extends Agent<Bindings> {
     try {
       await chat.settle(turn, signal.aborted ? "interrupted" : failure ? "error" : "complete");
     } catch {
-      return emit("turn.failed", { message: "The reply couldn't be saved." });
+      emit("turn.failed", { message: "The reply couldn't be saved." });
+      return this.#events.trim(conversationId, turn.turnId);
     }
     if (signal.aborted) {
       emit("turn.interrupted", { message: "Stopped." });
@@ -413,6 +530,8 @@ export class Assistant extends Agent<Bindings> {
       emit("message.completed", { text: turn.reply });
       emit("turn.completed", {});
     }
+    // The turn is in D1 now, so its events leave the log; a later tab reloads from D1 instead.
+    this.#events.trim(conversationId, turn.turnId);
   }
 
   /**
@@ -460,24 +579,35 @@ export class Assistant extends Agent<Bindings> {
     else this.limits.release(turn.turnId);
     await this.#chat.settle(turn, "interrupted"); // the ledger keeps any usage already reported
     this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
+    this.#events.trim(turn.conversationId, turn.turnId);
   }
 
   #emitter(sessionId: string, turnId: string): Emit {
-    let seq = 0;
-    return (type, payload) =>
-      this.broadcast(JSON.stringify({ v: 1, seq: ++seq, sessionId, turnId, type, payload }));
+    return (type, payload) => {
+      const frame = this.#events.append(sessionId, turnId, (seq) =>
+        JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
+      );
+      this.broadcast(frame);
+    };
   }
 }
 
 /**
  * What a tab may send: `chat.send`, with the chat's own model if it names one and any uploaded
- * files by ID, or `turn.cancel`. Anything else is ignored.
+ * files by ID, `turn.cancel`, or `resume`. Anything else is ignored.
  */
 function parse(message: WSMessage) {
   if (typeof message !== "string") return null;
   try {
     const msg = JSON.parse(message) as Partial<Record<string, unknown>>;
     if (msg.type === "turn.cancel") return { type: "turn.cancel" } as const;
+    if (msg.type === "resume") {
+      const { conversationId, turnId, afterSeq } = msg;
+      const at = typeof afterSeq === "number" && Number.isSafeInteger(afterSeq) && afterSeq >= 0;
+      return isId(conversationId) && isId(turnId) && at
+        ? ({ type: "resume", conversationId, turnId, afterSeq } as const)
+        : null;
+    }
     const conversationId = String(msg.conversationId);
     if (msg.type === "chat.send" && typeof msg.text === "string") {
       const { provider, model } = (msg.model ?? {}) as Partial<Record<string, unknown>>;
