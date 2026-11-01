@@ -120,6 +120,23 @@ describe("task rows", () => {
     expect(done?.finishedAt).not.toBeNull();
   });
 
+  it("clears the limit kind when a paused task resumes or is cancelled", async () => {
+    await alice.tasks.create(makeTask("t13", "ca"));
+    await alice.tasks.markRunning("t13", 1_000);
+    expect(await alice.tasks.finish("t13", "budget_limited", "too many calls", "calls")).toBe(true);
+    expect((await alice.tasks.get("t13"))?.limitKind).toBe("calls");
+    // Resuming moves back to running, so the pause's kind no longer describes the row.
+    const resumed = await alice.tasks.markRunning("t13", 2_000);
+    expect(resumed?.status).toBe("running");
+    expect(resumed?.limitKind).toBeNull();
+    expect(await alice.tasks.finish("t13", "budget_limited", "too slow", "duration")).toBe(true);
+    // Cancelling ends it, so the kind clears with the move to cancelled.
+    expect(await alice.tasks.cancel("t13")).toBe(true);
+    const cancelled = await alice.tasks.get("t13");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.limitKind).toBeNull();
+  });
+
   it("lists runs with their conversation and spend, and filters them", async () => {
     await alice.tasks.create({ ...makeTask("t11", "ca"), title: "Report" });
     await alice.tasks.create(makeTask("t12", "ca"));
@@ -130,6 +147,12 @@ describe("task rows", () => {
     };
     await alice.usage.record({ ...call, taskId: "t11" });
     await alice.usage.record({ ...call, taskId: "t11" });
+    await alice.usage.record({
+      providerId: "unpriced-vendor",
+      model: "mystery",
+      usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0 },
+      taskId: "t11",
+    }); // no price on file: counted, but missing from the subtotal
     await alice.usage.record(call); // a chat turn: no task, so no run may claim it
     await bob.usage.record({ ...call, taskId: "t11" }); // another user's call: same
     await expect(alice.usage.record({ ...call, taskId: "../x" })).rejects.toThrow(/invalid id/);
@@ -144,16 +167,26 @@ describe("task rows", () => {
       mode: "background",
       status: "queued",
       limitKind: null,
-      calls: 2,
+      calls: 3,
+      unpricedCalls: 1,
     });
     expect(typeof report?.costMicroUsd).toBe("number");
     // No calls yet reads as zero calls and unknown cost, never as nulls.
-    expect(listed.find((t) => t.id === "t12")).toMatchObject({ calls: 0, costMicroUsd: null });
+    expect(listed.find((t) => t.id === "t12")).toMatchObject({
+      calls: 0,
+      unpricedCalls: 0,
+      costMicroUsd: null,
+    });
     // Newest first.
     expect(listed[0]?.createdAt).toBeGreaterThanOrEqual(listed.at(-1)?.createdAt ?? 0);
 
     const details = await alice.tasks.details("t11");
-    expect(details).toMatchObject({ id: "t11", calls: 2, conversationTitle: "Alice's" });
+    expect(details).toMatchObject({
+      id: "t11",
+      calls: 3,
+      unpricedCalls: 1,
+      conversationTitle: "Alice's",
+    });
     expect(details?.costMicroUsd).toBe(report?.costMicroUsd);
     expect(await alice.tasks.details("missing")).toBeUndefined();
     expect(await bob.tasks.details("t11")).toBeUndefined(); // someone else's run

@@ -9,13 +9,19 @@ import type { AppEnv } from "./env";
 
 export const taskRoutes = new Hono<AppEnv>();
 
+/** A numeric filter, or `undefined` when absent or blank so the repository default applies. */
+function numeric(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  return Number(value);
+}
+
 taskRoutes.get("/", async (c) => {
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const tasks = await user.tasks.list({
     status: c.req.queries("status"),
-    since: Number(c.req.query("since")),
-    until: Number(c.req.query("until")),
-    limit: Number(c.req.query("limit")),
+    since: numeric(c.req.query("since")),
+    until: numeric(c.req.query("until")),
+    limit: numeric(c.req.query("limit")),
   });
   c.header("Cache-Control", "no-store");
   return c.json({ tasks });

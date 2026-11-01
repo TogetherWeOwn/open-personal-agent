@@ -225,8 +225,12 @@ export interface TaskListItem {
   limitKind: TaskLimitKind | null;
   error: string | null;
   costMicroUsd: number | null;
+  /** Calls with no price on file; their cost is missing from `costMicroUsd` (as Usage does). */
+  unpricedCalls: number;
   calls: number;
   createdAt: number;
+  /** A paused task's last write is its pause, so the view can freeze its elapsed clock there. */
+  updatedAt: number;
   startedAt: number | null;
   finishedAt: number | null;
 }
@@ -1002,6 +1006,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .select({
                 taskId: usage.taskId,
                 costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                unpriced: sql<
+                  number | null
+                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
                 calls: count().as("calls"),
               })
               .from(usage)
@@ -1027,8 +1034,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 limitKind: tasks.limitKind,
                 error: tasks.error,
                 costMicroUsd: cost.costMicroUsd,
+                unpriced: cost.unpriced,
                 calls: cost.calls,
                 createdAt: tasks.createdAt,
+                updatedAt: tasks.updatedAt,
                 startedAt: tasks.startedAt,
                 finishedAt: tasks.finishedAt,
               })
@@ -1050,7 +1059,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .orderBy(desc(tasks.createdAt))
               .limit(limit);
             // No calls yet reads as zero calls and unknown cost, never as nulls.
-            return rows.map((row) => ({ ...row, calls: row.calls ?? 0 }));
+            return rows.map(({ unpriced, ...row }) => ({
+              ...row,
+              calls: row.calls ?? 0,
+              unpricedCalls: unpriced ?? 0,
+            }));
           },
           /** One Tasks row with its conversation and spend; `undefined` when missing or foreign. */
           details: async (id: string): Promise<TaskListItem | undefined> => {
@@ -1067,8 +1080,12 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 limitKind: tasks.limitKind,
                 error: tasks.error,
                 costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                unpriced: sql<
+                  number | null
+                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
                 calls: count(usage.id).as("calls"),
                 createdAt: tasks.createdAt,
+                updatedAt: tasks.updatedAt,
                 startedAt: tasks.startedAt,
                 finishedAt: tasks.finishedAt,
               })
@@ -1079,11 +1096,15 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .groupBy(tasks.id)
               .limit(1);
             // A task with no calls still counts zero, never null; the cost stays null then.
-            return row && { ...row, calls: Number(row.calls) };
+            if (!row) return row;
+            const { unpriced, ...rest } = row;
+            return { ...rest, calls: Number(rest.calls), unpricedCalls: Number(unpriced ?? 0) };
           },
           /**
-           * Moves a task to `running`, stamping `started_at` the first time. Returns the row as
-           * updated, or `undefined` when it was already terminal (a cancelled task never runs).
+           * Moves a task to `running`, stamping `started_at` the first time. Resuming clears a
+           * previous limit kind, which only ever describes a `budget_limited` pause. Returns
+           * the row as updated, or `undefined` when it was already terminal (a cancelled task
+           * never runs).
            */
           markRunning: async (id: string, now: number) =>
             (
@@ -1091,6 +1112,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .update(tasks)
                 .set({
                   status: "running",
+                  limitKind: null,
                   startedAt: sql`coalesce(${tasks.startedAt}, ${now})`,
                   updatedAt: now,
                 })
@@ -1166,14 +1188,18 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ).length > 0
             );
           },
-          /** Sets `cancelled` on an active task. Terminating its Workflow is the caller's job. */
+          /**
+           * Sets `cancelled` on an active task. Cancelling clears the limit kind, which only
+           * ever describes a `budget_limited` pause. Terminating its Workflow is the
+           * caller's job.
+           */
           cancel: async (id: string) => {
             const now = Date.now();
             return (
               (
                 await db
                   .update(tasks)
-                  .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+                  .set({ status: "cancelled", limitKind: null, finishedAt: now, updatedAt: now })
                   .where(
                     and(
                       eq(tasks.id, id),
