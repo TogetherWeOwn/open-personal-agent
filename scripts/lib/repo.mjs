@@ -14,6 +14,11 @@ export function readText(path) {
   }
 }
 
+// JSONC comments and trailing commas; group 1 keeps string literals intact.
+const JSONC_NOISE = /("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\/|,(?=\s*[}\]])/g;
+/** Parses JSONC such as wrangler.jsonc. */
+export const parseJsonc = (text) => JSON.parse(text.replace(JSONC_NOISE, (_m, s) => s ?? ""));
+
 /** Text files git knows about (tracked plus untracked, minus ignored) as [{ path, text }]. */
 export function repoTextFiles() {
   const args = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"];

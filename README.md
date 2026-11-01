@@ -79,6 +79,9 @@ pnpm deploy:cloudflare         # --name <prefix> (or OPA_PREFIX) to deploy under
 A re-run upgrades, or prints "Up to date"; `--dry-run` changes nothing on Cloudflare. A scoped
 token needs the `required` entries in [`deploy/permissions.json`](deploy/permissions.json).
 
+On a brand-new Cloudflare account, a few one-time steps happen in the dashboard, not in the
+script. See [`docs/manual-first-run-checks.md`](docs/manual-first-run-checks.md).
+
 ### Deploy button (experimental)
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/TogetherWeOwn/open-personal-agent)
@@ -89,6 +92,48 @@ runs `pnpm run deploy` again on every push. It is experimental until the checks 
 `/setup` shows the **Finish setup** page with the commands that set them. Workflow names are
 unique per account, and the button probably keeps `opa-task-workflow` unprefixed, so plan on one
 button deploy per account; to run more than one, use `pnpm deploy:cloudflare --name <prefix>`.
+
+## What this costs
+
+Prices as of 2026-10-31, in USD, excluding tax.
+
+**Required: Cloudflare Workers Paid, $5 per month.** Open Personal Agent runs on your own
+Cloudflare account and needs the Workers Paid plan. The $5 is Cloudflare's monthly minimum. It
+includes a monthly allowance of requests, Durable Objects, D1 database, R2 storage, Workflows and a
+small amount of Workers AI. For one person, and for most households or small teams, normal use of
+the app stays inside that allowance. We do not charge anything; this project is free and open
+source.
+
+**The $5 does not include unlimited usage.** Cloudflare bills separately for usage above the
+included amounts. The ones you are most likely to meet are:
+
+- **AI models.** You bring your own model provider (for example OpenAI, Anthropic, Google,
+  OpenRouter or a local model). That provider bills you directly, and this is usually your largest
+  cost: from about $0–5 a month for light use on a budget model to $50 or more for heavy use of a
+  top model. The built-in Workers AI starter model has a small free daily allowance, then
+  Cloudflare bills it per use.
+- **Storage above the allowance.** After about 5 GB of database or 10 GB of files.
+- **Later features you switch on.** Cloud computers, web search, AI Gateway logging and extra
+  browser hours are not in this release. Each will say what it costs before you turn it on.
+
+Budgets, spending warnings and a Usage page are planned but not in this release. Until then, check
+your usage in the Cloudflare dashboard under **Billing**.
+
+What each binding in `wrangler.jsonc` uses (CI checks that every binding has a row here):
+
+| Binding         | Cloudflare service      | Included in Workers Paid each month           | Then                                              |
+| --------------- | ----------------------- | --------------------------------------------- | ------------------------------------------------- |
+| (the Worker)    | Workers                 | 10M requests, 30M CPU-ms                      | $0.30/M requests, $0.02/M CPU-ms                  |
+| `ASSETS`        | Static assets (the app) | Unlimited                                     | Free                                              |
+| `DB`            | D1                      | 25B rows read, 50M rows written, 5 GB stored  | $0.001/M read, $1.00/M written, $0.75/GB-month    |
+| `FILES`         | R2                      | 10 GB-month, 1M Class A and 10M Class B ops   | $0.015/GB-month, $4.50/M Class A, $0.36/M Class B |
+| `AI`            | Workers AI              | 10,000 neurons a day                          | $0.011 per 1,000 neurons                          |
+| `ASSISTANT`     | Durable Objects         | 1M requests, 400,000 GB-s, 5 GB SQLite stored | $0.15/M requests, $12.50/M GB-s, $0.20/GB-month   |
+| `TASK_WORKFLOW` | Workflows               | 500,000 steps, 1 GB-month stored              | $0.80 per 100,000 steps, $0.20/GB-month           |
+| `triggers`      | Cron Triggers           | Included                                      | Each run counts as a Worker request and its CPU   |
+
+Prices are Cloudflare's and your providers', and they can change. Check
+<https://developers.cloudflare.com/workers/platform/pricing/> for current Cloudflare rates.
 
 ## Layout
 
