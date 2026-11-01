@@ -7,10 +7,10 @@ const REPLY =
   "answer, streamed a word at a time.";
 
 /** Sending exactly one of these gets that limit's refusal instead of a reply. */
-export const MOCK_LIMITS: Record<string, TurnLimit> = {
-  "/mock slow down": "slow_down",
-  "/mock limit reached": "limit_reached",
-};
+export const MOCK_LIMITS = new Map<string, TurnLimit>([
+  ["/mock slow down", "slow_down"],
+  ["/mock limit reached", "limit_reached"],
+]);
 const LIMIT_MESSAGES: Record<TurnLimit, string> = {
   slow_down: "You're sending messages quickly. Wait a minute, then try again.",
   limit_reached: "You've reached today's spending limit. It resets at midnight UTC.",
@@ -31,7 +31,7 @@ export function createMockTransport(delayMs = 30): ChatTransport {
     },
     send(sessionId, text) {
       // Lets the e2e tests and `vite dev` show the limit states (M2-22).
-      const reason = MOCK_LIMITS[text];
+      const reason = MOCK_LIMITS.get(text);
       if (reason) {
         const payload = { message: LIMIT_MESSAGES[reason], reason };
         const event = { v: 1, seq: 0, sessionId, turnId: "", type: "turn.failed", payload };
