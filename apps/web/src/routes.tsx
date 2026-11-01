@@ -4,6 +4,7 @@
 // which stays mounted behind the others so drafts and streams survive.
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
+import { Memory } from "./memory/Memory";
 import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
@@ -102,12 +103,6 @@ export function NotFound() {
   );
 }
 
-const memory = placeholder(
-  "Memory",
-  "I'll remember things you tell me, like your preferences and ongoing projects.",
-  "You can always see and change them here.",
-);
-
 // m3-ux §1.2 names this screen "Waiting for you", so the two Memory addresses don't look alike.
 const waiting = placeholder(
   "Waiting for you",
@@ -156,7 +151,7 @@ export const routes: Route[] = [
     nav: "activity",
     screen: placeholder("Activity log", "Nothing has happened yet."),
   },
-  { path: "/memory", nav: "memory", screen: memory },
+  { path: "/memory", nav: "memory", screen: Memory },
   { path: "/memory/waiting", nav: "memory", screen: waiting },
   {
     path: "/settings",
