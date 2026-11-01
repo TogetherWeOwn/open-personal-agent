@@ -84,9 +84,14 @@ export class Limits {
     const now = this.now();
     const day = now - (now % DAY);
     const spend = this.kv.get<Spend>("spend");
-    if (spend?.day === day) return spend;
-    const held = Object.entries(spend?.held ?? {}).filter(([, hold]) => now - hold.at < DAY);
-    return { day, spentMicroUsd: 0, held: Object.fromEntries(held) };
+    // Holds stored before they kept a time are plain amounts; count them as made now.
+    const holds = Object.entries(spend?.held ?? {}).map(([turnId, hold]): [string, Hold] => [
+      turnId,
+      typeof hold === "number" ? { microUsd: hold, at: now } : hold,
+    ]);
+    if (spend?.day === day) return { ...spend, held: Object.fromEntries(holds) };
+    const live = holds.filter(([, hold]) => now - hold.at < DAY);
+    return { day, spentMicroUsd: 0, held: Object.fromEntries(live) };
   }
 
   /**
