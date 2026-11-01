@@ -152,6 +152,15 @@ importers:
         specifier: 0.31.11
         version: 0.31.11
 
+  packages/harness-builtin:
+    dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../policy
+
   packages/log: {}
 
   packages/policy: {}
