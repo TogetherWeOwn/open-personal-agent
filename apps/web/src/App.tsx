@@ -586,6 +586,7 @@ export function App({ transport }: AppProps) {
                 ))}
               </>
             }
+            onDequeue={(conversationId, messageId) => transport.dequeue(conversationId, messageId)}
           />
           {waiting[0] && (
             <div className="mx-auto flex w-full max-w-[720px] items-center gap-2 px-4 pb-2 text-sm">

@@ -2,7 +2,8 @@
 // The turn timeline (M3-09 AC1-3, AC5, m3-ux §3.1): the running header with its ticking
 // elapsed time and "still working" timer, the step list with tool cards, the collapsed "Worked
 // for …" summary and the taint marker. The reply streams below as `children`, so the thread
-// keeps one view per message. (Queued sends bubble up in the next part.)
+// keeps one view per message. Waiting sends bubble in the thread itself (AC4), on the
+// conversation whose FIFO holds them rather than on the turn that was running.
 
 import { CircleCheck, CircleX, FileText, Globe, Hand, Loader } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";

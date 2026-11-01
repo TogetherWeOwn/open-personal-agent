@@ -43,6 +43,8 @@ export function createMockTransport(delayMs = 30): ChatTransport {
   let seq = 0; // one counter, as the server's per-conversation `seq` never restarts per turn
   let onEvent: (event: HarnessEvent) => void = () => {};
   let stop: (() => void) | null = null;
+  /** The running turn's ID, so a dequeue lands on it the way the server's would. */
+  let current: { sessionId: string; turnId: string } | null = null;
   return {
     connect(handle, onOpen) {
       onEvent = handle;
@@ -69,8 +71,13 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         return queueMicrotask(() => onEvent(event as HarnessEvent));
       }
       const turnId = `mock-${++turns}`;
+      current = { sessionId, turnId };
       const emit = (type: HarnessEvent["type"], payload = {}) =>
         onEvent({ v: 1, seq: ++seq, sessionId, turnId, type, payload } as HarnessEvent);
+      const settle = (type: HarnessEvent["type"], payload = {}) => {
+        current = null;
+        emit(type, payload);
+      };
       const reply = text === MOCK_HOSTILE ? HOSTILE_REPLY : REPLY;
       const words = reply.split(/(?<= )/);
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -79,7 +86,7 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         if (text === undefined) {
           stop = null;
           emit("message.completed", { text: reply });
-          return emit("turn.completed");
+          return settle("turn.completed");
         }
         emit("message.delta", { text });
         timer = setTimeout(tick, delayMs);
@@ -94,7 +101,7 @@ export function createMockTransport(delayMs = 30): ChatTransport {
         stop = null;
         // A turn stopped before its start still starts, so the tab can match the cancellation.
         if (!started) begin();
-        emit("turn.cancelled");
+        settle("turn.cancelled");
       };
       const start = () => {
         begin();
@@ -104,6 +111,21 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       else start();
     },
     cancel: () => stop?.(),
+    dequeue: (conversationId, messageId) => {
+      if (current?.sessionId !== conversationId) return;
+      const { sessionId, turnId } = current;
+      queueMicrotask(() =>
+        onEvent({
+          v: 1,
+          seq: ++seq,
+          sessionId,
+          turnId,
+          type: "turn.dequeued",
+          // Logged under the running turn like the server's, naming the send's conversation.
+          payload: { messageId, conversationId: sessionId },
+        } as HarnessEvent),
+      );
+    },
     conversations: async () => [],
     messages: async () => null,
   };

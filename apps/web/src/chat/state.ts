@@ -35,6 +35,12 @@ export type Conversation = {
    * their summary and cards for the session, since the server trims settled turns from its
    * log and a reload can't rebuild them. */
   turns: Turn[];
+  /**
+   * Sends waiting in this conversation's FIFO (M3-09 AC4). Kept on the conversation, not on
+   * the turn that was running when they arrived: a send parked behind another chat's run
+   * logs under that run, but bubbles in its own thread.
+   */
+  queued: QueuedSend[];
 };
 
 /** One row of the turn timeline (M3-09 AC1): a model step, possibly around one tool call. */
@@ -87,6 +93,7 @@ export type TurnOutcome =
 /**
  * The turn model (m3-ux §3.1): the assistant reply's timeline. `messageId` is the reply the
  * timeline belongs to; steps and tools arrive in socket order, so array order is time order.
+ * Waiting sends live on the conversation (`Conversation.queued`), not here.
  */
 export interface Turn {
   turnId: string;
@@ -102,7 +109,6 @@ export interface Turn {
   tools: TurnTool[];
   taint: TurnTaint[];
   usage: UsageEntry[];
-  queued: QueuedSend[];
   /** Steer texts that joined the turn, in arrival order. */
   steered: { messageId: string; text: string }[];
   /** `task.promoted`: the run continues server-side if the tab closes. */
@@ -182,6 +188,7 @@ const blank = (id: string): Conversation => ({
   stale: 0,
   model: null,
   turns: [],
+  queued: [],
 });
 
 /** A turn shell for a turn this tab meets mid-run; steps fill it in as they arrive. */
@@ -194,7 +201,6 @@ const shellTurn = (turnId: string, messageId: string): Turn => ({
   tools: [],
   taint: [],
   usage: [],
-  queued: [],
   steered: [],
   promotedTaskId: null,
   updatedAt: Date.now(),
@@ -274,6 +280,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             title: title || NEW_TITLE,
             messages: known.get(id)?.messages ?? [],
             turns: known.get(id)?.turns ?? [],
+            queued: known.get(id)?.queued ?? [],
             stale: (known.get(id)?.stale ?? 0) + 1,
             // The server's pin wins; a summary without one (the mock transport) keeps this tab's.
             model: model === undefined ? (known.get(id)?.model ?? null) : model,
@@ -328,7 +335,6 @@ const ADOPTABLE: ReadonlySet<HarnessEvent["type"]> = new Set([
   "tool.result",
   "context.tainted",
   "usage.updated",
-  "turn.queued",
   "turn.steered",
   "approval.requested",
   "approval.resolved",
@@ -338,8 +344,24 @@ const ADOPTABLE: ReadonlySet<HarnessEvent["type"]> = new Set([
 
 function onEvent(state: ChatState, event: HarnessEvent): ChatState {
   const { pending } = state;
+  // Queue events name the queued send's conversation, which may differ from the running
+  // turn they log under (M3-09 AC4): a send parked behind another chat's run lands in its
+  // own conversation's queue, whether or not this tab watches the running turn. They carry
+  // their own address, so they apply with no running turn — a dequeue that lands after the
+  // run's end still takes its bubble back.
+  if (event.type === "turn.queued") {
+    const { conversationId, messageId, text, position } = event.payload;
+    return update(state, conversationId, (c) =>
+      c.queued.some((q) => q.messageId === messageId)
+        ? {}
+        : { queued: [...c.queued, { messageId, text, position }] },
+    );
+  }
+  if (event.type === "turn.dequeued") {
+    return clearQueued(state, event.payload.conversationId, event.payload.messageId);
+  }
   if (event.type === "turn.started") {
-    const { messageId } = event.payload;
+    const { messageId, sendMessageId } = event.payload;
     const turn = {
       conversationId: event.sessionId,
       turnId: event.turnId,
@@ -349,7 +371,12 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     if (pending?.turnId === null && pending.conversationId === event.sessionId) {
       // The turn this tab sent: its reply takes the server's message ID.
       const next = updateMessage(state, pending, () => ({ id: messageId }));
-      const started = addTurn(next, event.sessionId, shellTurn(event.turnId, messageId));
+      const started = addTurn(
+        next,
+        event.sessionId,
+        shellTurn(event.turnId, messageId),
+        sendMessageId,
+      );
       return { ...started, pending: turn, announcement: "Assistant is working." };
     }
     if (pending) return state;
@@ -360,7 +387,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       stale: c.stale + 1,
     }));
     return {
-      ...addTurn(next, event.sessionId, shellTurn(event.turnId, messageId)),
+      ...addTurn(next, event.sessionId, shellTurn(event.turnId, messageId), sendMessageId),
       pending: turn,
       announcement: "Assistant is working.",
     };
@@ -523,21 +550,11 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
           },
         ],
       }));
-    case "turn.queued":
-      return updateTurn(seen, event, (t) => ({
-        ...t,
-        queued: [
-          ...t.queued.filter((q) => q.messageId !== event.payload.messageId),
-          { ...event.payload },
-        ],
-      }));
     case "turn.steered":
       return updateTurn(seen, event, (t) => ({
         ...t,
         steered: [...t.steered, { ...event.payload }],
       }));
-    case "turn.dequeued":
-      return clearQueued(seen, event.sessionId, event.payload.messageId);
     case "task.promoted":
       return updateTurn(seen, event, (t) => ({
         ...t,
@@ -559,24 +576,24 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
 }
 
 /**
- * Appends a turn to its conversation, replacing a shell with the same ID. Starting a queued
- * send takes the head of the FIFO, so the queued bubble clears as its turn starts (M3-09 AC4).
+ * Appends a turn to its conversation, replacing a shell with the same ID. A start that
+ * answers an admitted send names it, so exactly its waiting bubble clears as its turn
+ * starts (M3-09 AC4). A start with no send — a fresh send, or a late approval moved to a
+ * new turn — leaves the queue alone instead of guessing at its head.
  */
-function addTurn(state: ChatState, conversationId: string, turn: Turn): ChatState {
-  return update(state, conversationId, (c) => {
-    const queued = c.turns.flatMap((t) => t.queued);
-    const head =
-      queued.length > 0
-        ? queued.reduce((a, b) => (a.position <= b.position ? a : b)).messageId
-        : null;
-    const turns = [...c.turns.filter((t) => t.turnId !== turn.turnId), turn];
-    return {
-      turns:
-        head === null
-          ? turns
-          : turns.map((t) => ({ ...t, queued: t.queued.filter((q) => q.messageId !== head) })),
-    };
-  });
+function addTurn(
+  state: ChatState,
+  conversationId: string,
+  turn: Turn,
+  sendMessageId?: string,
+): ChatState {
+  return update(state, conversationId, (c) => ({
+    turns: [...c.turns.filter((t) => t.turnId !== turn.turnId), turn],
+    queued:
+      sendMessageId === undefined
+        ? c.queued
+        : c.queued.filter((q) => q.messageId !== sendMessageId),
+  }));
 }
 
 /**
@@ -641,17 +658,13 @@ function updateTurn(
 }
 
 /**
- * Takes a queued send out of every turn of its conversation. Queue entries stay on the turn
- * that was running when they were admitted, so a dequeue logged under a later turn still
- * finds one parked on an earlier turn (M3-09 AC4).
+ * Takes a queued send out of its conversation's queue. Queue events carry their own
+ * conversation, so a dequeue logged under another turn — or after the run's end, with no
+ * running turn at all — still finds the entry (M3-09 AC4).
  */
 function clearQueued(state: ChatState, conversationId: string, messageId: string): ChatState {
   return update(state, conversationId, (c) => ({
-    turns: c.turns.map((t) =>
-      t.queued.some((q) => q.messageId === messageId)
-        ? { ...t, queued: t.queued.filter((q) => q.messageId !== messageId), updatedAt: Date.now() }
-        : t,
-    ),
+    queued: c.queued.filter((q) => q.messageId !== messageId),
   }));
 }
 

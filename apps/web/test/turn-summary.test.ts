@@ -37,7 +37,6 @@ const turn = (outcome: Turn["outcome"], updatedAt: number): Turn => ({
   tools: [],
   taint: [],
   usage: [],
-  queued: [],
   steered: [],
   promotedTaskId: null,
   updatedAt,

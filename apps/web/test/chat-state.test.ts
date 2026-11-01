@@ -509,7 +509,7 @@ describe("turn timeline (M3-09)", () => {
     expect(chatReducer(once, at(1000000))).toBe(once);
   });
 
-  it("records taint, usage, steers and the queue on the turn", () => {
+  it("records taint, usage and steers on the turn, and the queue on the conversation", () => {
     const state = run(
       send,
       started(),
@@ -520,47 +520,58 @@ describe("turn timeline (M3-09)", () => {
         model: "gpt-4.1-mini",
       }),
       ev("turn.steered", { messageId: "u2", text: "actually tomorrow" }),
-      ev("turn.queued", { messageId: "u3", text: "and Friday", position: 1 }),
+      ev("turn.queued", {
+        messageId: "u3",
+        text: "and Friday",
+        position: 1,
+        conversationId: "c1",
+      }),
     );
     expect(turnOf(state)).toMatchObject({
       taint: [{ stepId: "s1", kind: "web", label: "example.com" }],
       usage: [{ providerId: "openai", model: "gpt-4.1-mini" }],
       steered: [{ messageId: "u2", text: "actually tomorrow" }],
-      queued: [{ messageId: "u3", text: "and Friday", position: 1 }],
     });
+    expect(turnOf(state)).not.toHaveProperty("queued");
+    expect(state.conversations[0]?.queued).toEqual([
+      { messageId: "u3", text: "and Friday", position: 1 },
+    ]);
   });
 
   it("clears a queued send when it is taken back, or when its turn starts", () => {
-    const queued = run(
-      send,
-      started(),
-      ev("turn.queued", { messageId: "u3", text: "later", position: 1 }),
-    );
+    const queued = (id: string, text: string, position: number) =>
+      ev("turn.queued", { messageId: id, text, position, conversationId: "c1" });
     const back = run(
       send,
       started(),
-      ev("turn.queued", { messageId: "u3", text: "later", position: 1 }),
-      ev("turn.dequeued", { messageId: "u3" }),
+      queued("u3", "later", 1),
+      ev("turn.dequeued", { messageId: "u3", conversationId: "c1" }),
     );
-    expect(turnOf(back)?.queued).toHaveLength(0);
-    // The queued send's turn starts under a new turn ID; the bubble clears (M3-09 AC4).
-    const settled = chatReducer(queued, ev("turn.completed"));
-    const next = (
-      seq: number,
-      type: HarnessEvent["type"],
-      payload = {},
-      turnId = "t2",
-    ): ChatAction =>
-      ({
-        type: "event",
-        event: { v: 1, seq, sessionId: "c1", turnId, type, payload },
-      }) as ChatAction;
-    const started2 = chatReducer(settled, next(1000001, "turn.started", { messageId: "r-t2" }));
-    expect(started2.conversations[0]?.turns.find((t) => t.turnId === "t1")?.queued).toHaveLength(0);
-    expect(started2.conversations[0]?.turns.find((t) => t.turnId === "t2")).toMatchObject({
+    expect(back.conversations[0]?.queued).toHaveLength(0);
+    // The queued send's turn starts under a new turn ID and names its send: exactly that
+    // bubble clears, and the send still waiting stays (M3-09 AC4).
+    const waiting = run(
+      send,
+      started(),
+      queued("u2", "two", 1),
+      queued("u3", "three", 2),
+      ev("turn.completed"),
+    );
+    const running = chatReducer(
+      waiting,
+      ev("turn.started", { messageId: "r-t2", sendMessageId: "u2" }, "t2"),
+    );
+    expect(running.conversations[0]?.queued).toEqual([
+      { messageId: "u3", text: "three", position: 2 },
+    ]);
+    expect(running.conversations[0]?.turns.find((t) => t.turnId === "t2")).toMatchObject({
       messageId: "r-t2",
       outcome: "running",
     });
+    // A start that answers no queued send — a fresh send, or a late approval moved to a new
+    // turn — leaves the queue alone instead of guessing at its head.
+    const moved = chatReducer(waiting, ev("turn.started", { messageId: "r-t2" }, "t2"));
+    expect(moved.conversations[0]?.queued).toHaveLength(2);
   });
 
   it("tracks waiting, limited and settled outcomes without touching the streaming reply", () => {
@@ -617,21 +628,58 @@ describe("turn timeline (M3-09)", () => {
     expect(other.pending).toMatchObject({ turnId: "t2" });
   });
 
-  it("takes a dequeued send off every turn of its conversation", () => {
-    const queued = run(
-      send,
-      started("t1"),
-      ev("turn.queued", { messageId: "u2", text: "two", position: 1 }, "t1"),
-      ev("turn.queued", { messageId: "u3", text: "three", position: 2 }, "t1"),
-      ev("turn.completed", {}, "t1"),
+  it("routes queue events to the queued send's conversation, not the running turn", () => {
+    // c1 runs while c2's send parks behind it. The worker logs under c1's turn, but the
+    // payload names c2 — so c2's thread bubbles and c1's stays clean (M3-09 AC4).
+    const both = run(list("c1", "c2"), send, started("t1", "c1"));
+    const parked = chatReducer(
+      both,
+      ev(
+        "turn.queued",
+        { messageId: "u9", text: "from the other chat", position: 1, conversationId: "c2" },
+        "t1",
+        "c1",
+      ),
     );
-    // U2's turn starts and clears the head; U3 stays parked on the finished turn.
-    const running = chatReducer(queued, ev("turn.started", { messageId: "r-t2" }, "t2"));
-    expect(turnOf(running, "t1")?.queued).toHaveLength(1);
-    // The dequeue logs under the running turn but clears the earlier turn's entry.
-    const back = chatReducer(running, ev("turn.dequeued", { messageId: "u3" }, "t2"));
-    expect(turnOf(back, "t1")?.queued).toHaveLength(0);
-    expect(turnOf(back, "t2")?.queued).toHaveLength(0);
+    expect(parked.conversations.find((c) => c.id === "c1")?.queued).toHaveLength(0);
+    expect(parked.conversations.find((c) => c.id === "c2")?.queued).toEqual([
+      { messageId: "u9", text: "from the other chat", position: 1 },
+    ]);
+    // The take-back logs under the still-running turn and clears c2's entry.
+    const back = chatReducer(
+      parked,
+      ev("turn.dequeued", { messageId: "u9", conversationId: "c2" }, "t1", "c1"),
+    );
+    expect(back.conversations.find((c) => c.id === "c2")?.queued).toHaveLength(0);
+    // A replayed announcement applies once, and an unknown conversation stays untouched.
+    const twice = chatReducer(
+      parked,
+      ev(
+        "turn.queued",
+        { messageId: "u9", text: "from the other chat", position: 1, conversationId: "c2" },
+        "t1",
+        "c1",
+      ),
+    );
+    expect(twice.conversations.find((c) => c.id === "c2")?.queued).toHaveLength(1);
+    expect(twice.conversations).toHaveLength(parked.conversations.length);
+  });
+
+  it("takes a queued send back after its run ends, without marking the chat stale", () => {
+    // The Cancel button outlives the run: a dequeue after the turn completed still takes
+    // its bubble back, carrying its own address with no running turn (M3-09 AC4).
+    const done = run(
+      send,
+      started(),
+      ev("turn.queued", { messageId: "u3", text: "later", position: 1, conversationId: "c1" }),
+      ev("turn.completed"),
+    );
+    const back = chatReducer(
+      done,
+      ev("turn.dequeued", { messageId: "u3", conversationId: "c1" }, "t1"),
+    );
+    expect(back.conversations[0]?.queued).toHaveLength(0);
+    expect(back.conversations[0]?.stale).toBe(0);
   });
 
   it("runs a paused turn again on its first progressing event", () => {
@@ -649,7 +697,7 @@ describe("turn timeline (M3-09)", () => {
     // A queued send behind the paused turn leaves the outcome alone too.
     const parked = chatReducer(
       limited,
-      ev("turn.queued", { messageId: "u3", text: "later", position: 1 }),
+      ev("turn.queued", { messageId: "u3", text: "later", position: 1, conversationId: "c1" }),
     );
     expect(turnOf(parked)?.outcome).toBe("limited");
     // The Continue's first step runs the turn again without an outcome event.

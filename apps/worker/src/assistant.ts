@@ -212,7 +212,8 @@ export class Assistant extends Agent<Bindings> {
   /**
    * The running turn's address, set with `#running` and cleared with it: `turn.queued` for a
    * send that waits and `turn.dequeued` for one taken back are logged under this turn, so they
-   * trim with it and replay to a reconnected tab.
+   * trim with it and replay to a reconnected tab. The payloads name the queued send's own
+   * conversation, which may differ from this turn's.
    */
   #executing: { conversationId: string; turnId: string } | null = null;
   /**
@@ -660,13 +661,16 @@ export class Assistant extends Agent<Bindings> {
     queue.push(item);
     this.#queues.set(item.conversationId, queue);
     this.#saveQueues();
-    // Logged under the running turn, so it trims with it and replays to a reconnected tab.
+    // Logged under the running turn, so it trims with it and replays to a reconnected
+    // tab — even when that turn belongs to another conversation, so the payload names the
+    // queued send's own conversation for the thread it bubbles in.
     const ex = this.#executing;
     if (ex) {
       this.#send(ex.conversationId, ex.turnId, "turn.queued", {
         messageId: item.messageId,
         text: item.text,
         position: queue.length,
+        conversationId: item.conversationId,
       });
     }
     if (!this.#running) void this.#drain();
@@ -837,7 +841,11 @@ export class Assistant extends Agent<Bindings> {
       return;
     }
     const ex = this.#executing;
-    if (ex) this.#send(ex.conversationId, ex.turnId, "turn.dequeued", { messageId });
+    if (ex)
+      this.#send(ex.conversationId, ex.turnId, "turn.dequeued", {
+        messageId,
+        conversationId,
+      });
   }
 
   /** The running turn's next steer for the loop, oldest first (M3-09 AC4). */
@@ -1096,8 +1104,12 @@ export class Assistant extends Agent<Bindings> {
     cp.wrote = true;
     stash(cp);
     await this.#sweepTabs();
-    // The host names the turn; the loop never emits `turn.started` itself.
-    emit("turn.started", { messageId: cp.replyId });
+    // The host names the turn; the loop never emits `turn.started` itself. A queued
+    // start names the send it answers, so the thread takes back exactly its waiting bubble.
+    emit("turn.started", {
+      messageId: cp.replyId,
+      ...(queued ? { sendMessageId: queued.messageId } : {}),
+    });
     // Plainly, per m3-ux §3.2: the file stays with the message, but this model won't read it.
     for (const kind of skipped) emit("status", { text: UNREAD[kind] });
     await this.#drive({

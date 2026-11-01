@@ -140,6 +140,11 @@ export function createSocketTransport({
     cancel() {
       if (socket?.readyState === OPEN) socket.send(JSON.stringify({ type: "turn.cancel" }));
     },
+    dequeue(conversationId, messageId) {
+      if (socket?.readyState === OPEN) {
+        socket.send(JSON.stringify({ type: "chat.dequeue", conversationId, messageId }));
+      }
+    },
     conversations: async () =>
       (await json<{ conversations: ConversationSummary[] }>(""))?.conversations ?? [],
     messages: async (id) =>
