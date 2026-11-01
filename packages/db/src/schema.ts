@@ -249,6 +249,71 @@ export const turnStates = sqliteTable(
 );
 
 /**
+ * Approvals (M3-07 AC9): the source of truth for every gated call, pending or decided, for the
+ * Inbox, the reconciler's expiry, the audit log, export, deletion and the isolation suite. A row
+ * is one item of a batch; `position` is its place in the batch, the order a step-up signs.
+ *
+ * `canonical` is the JCS envelope the binding hashes (`@opa/policy` `bindApproval`), and is what
+ * executes: the arguments are parsed back out of it, never out of history or an event (crypto
+ * review C1). `nonce` and the other `step_up_*` columns are a step-up ceremony in progress
+ * (W2, W3): they never leave the server except as the derived challenge, and every decision,
+ * expiry or new ceremony clears or replaces them.
+ */
+export const approvals = sqliteTable(
+  "approvals",
+  {
+    batchId: text("batch_id").notNull(),
+    approvalId: text("approval_id").notNull(),
+    position: integer("position").notNull(),
+    userId: userId(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    turnId: text("turn_id"),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    tool: text("tool").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    target: text("target"),
+    risk: text("risk").notNull(),
+    rule: text("rule").notNull(),
+    stepUp: integer("step_up", { mode: "boolean" }).notNull(),
+    scopes: text("scopes").notNull(), // JSON: the scopes the card may offer
+    taint: text("taint"), // JSON: what tainted the context first, if anything did
+    canonical: text("canonical").notNull(),
+    bindingHash: text("binding_hash").notNull(),
+    status: text("status", {
+      enum: [
+        "pending",
+        "approved",
+        "denied",
+        "expired",
+        "executing",
+        "dispatched",
+        "executed",
+        "failed",
+      ],
+    })
+      .notNull()
+      .default("pending"),
+    scope: text("scope", { enum: ["once", "task", "hour", "destination"] }),
+    reason: text("reason"), // why it was denied or expired after it was asked
+    nonce: text("nonce"),
+    stepUpDigest: text("step_up_digest"),
+    stepUpExpiresAt: integer("step_up_expires_at"),
+    stepUpSessionId: text("step_up_session_id"),
+    createdAt: createdAt(),
+    expiresAt: integer("expires_at").notNull(),
+    decidedAt: integer("decided_at"),
+    finishedAt: integer("finished_at"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.batchId, t.approvalId] }),
+    index("approvals_user_status_idx").on(t.userId, t.status, t.expiresAt),
+    check("approvals_one_context", sql`(${t.turnId} IS NULL) <> (${t.taskId} IS NULL)`),
+  ],
+);
+
+/**
  * A file the user attached (M3-10). The bytes live in R2 under `u/{userId}/attachments/{id}`
  * (the repository derives the key); this row holds what the server sniffed from its first bytes,
  * never the type or size the client claimed. `message_id` is set when the message carrying it is

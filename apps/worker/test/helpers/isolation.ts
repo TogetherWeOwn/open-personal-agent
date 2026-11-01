@@ -10,7 +10,7 @@ import { workerApp as app } from "../../src/worker-app";
 import { db, env, ORIGIN, sessionHeaders } from "./app";
 
 /** The Worker's env with a working vault, so a model credential is really encrypted. */
-const bindings: Promise<Env> = compose({
+export const bindings: Promise<Env> = compose({
   ...env,
   OPA_MASTER_KEY: btoa("i".repeat(32)),
 } as unknown as WorkerEnv);
@@ -41,6 +41,8 @@ export interface Seeded {
   secret: string;
   grant: string;
   usage: string;
+  /** A pending approval batch for the task's irreversible call. */
+  batch: string;
   /** The plaintext of the user's model key, which no response may carry. */
   apiKey: string;
   /** Every ID and every piece of content above: none may reach another user. */
@@ -209,6 +211,27 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       message,
       JSON.stringify({ tag }),
     ),
+    // A second task, waiting on an approval that needs a step-up: its own, so stopping the first
+    // task in isolation.test.ts doesn't cancel the batch.
+    run(
+      `INSERT INTO tasks (id, user_id, conversation_id, workflow_instance_id, kind, mode, status, title, state)
+       VALUES (?, ?, ?, ?, 'chat', 'background', 'waiting_for_approval', ?, '{}')`,
+      `approval-task-${tag}`,
+      id,
+      conversation,
+      `wf-approval-${tag}`,
+      `approval task of ${tag}`,
+    ),
+    run(
+      `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, task_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+       VALUES (?, 'approval-1', 0, ?, ?, ?, 'web_fetch', 'call-1', 'external', 'ask', 1, '["once"]', ?, 'hash', ?)`,
+      `batch-${tag}`,
+      id,
+      conversation,
+      `approval-task-${tag}`,
+      JSON.stringify({ tag }),
+      Date.now() + 3_600_000,
+    ),
     // The task's run journal, keyed by its Workflow instance rather than by user.
     run(
       "INSERT INTO task_events (instance_id, type, payload) VALUES (?, 'isolation', ?)",
@@ -233,7 +256,16 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     });
 
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
-  const ids = { ...items, spareSession, spareMemory, proposal, artifact, grant, usage };
+  const ids = {
+    ...items,
+    spareSession,
+    spareMemory,
+    proposal,
+    artifact,
+    grant,
+    usage,
+    batch: `batch-${tag}`,
+  };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }

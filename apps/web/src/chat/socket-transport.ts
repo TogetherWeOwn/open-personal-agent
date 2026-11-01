@@ -74,13 +74,15 @@ export function createSocketTransport({
       let current: Socket | null = null;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const open = () => {
-        const ws = openSocket(url);
+        // A reconnect that will resume says so up front: the server then holds live frames
+        // until the replay is sent, so they arrive in order.
+        const ws = openSocket(cursor ? `${url}${url.includes("?") ? "&" : "?"}resume=1` : url);
         current = ws;
         ws.onopen = () => {
           retries = 0;
           socket = ws;
-          // Ask for what the dropped socket missed before the reload `onOpen` starts; the log
-          // and the live stream may both deliver an event, and the reducer drops the copy.
+          // Ask for what the dropped socket missed before the reload `onOpen` starts; live frames
+          // follow the replay, and the reducer drops any copy.
           if (cursor) {
             const { conversationId, turnId, seq } = cursor;
             ws.send(JSON.stringify({ type: "resume", conversationId, turnId, afterSeq: seq }));
