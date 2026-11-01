@@ -27,6 +27,11 @@ export interface Bindings {
    * them as false without degrading.
    */
   UNAVAILABLE?: readonly ("workflow" | "ai")[];
+  /**
+   * The header that carries the client's address, set by a proxy you trust. Defaults to
+   * `CF-Connecting-IP`, which only Cloudflare sets; elsewhere a client can send it themselves.
+   */
+  OPA_CLIENT_IP_HEADER?: string;
 }
 
 /** What the HTTP app sees. `VAULT` is `null` unless `VAULT_STATUS` is `ok`. */

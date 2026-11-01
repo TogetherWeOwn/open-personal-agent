@@ -35,6 +35,8 @@ describe("the route table", () => {
         "POST /setup/options",
         "POST /api/auth/login/options",
         "POST /api/auth/login",
+        "POST /api/auth/recover/options",
+        "POST /api/auth/recover",
       ].sort(),
     );
     for (const route of PUBLIC_ROUTES) expect(routes).toContain(route);

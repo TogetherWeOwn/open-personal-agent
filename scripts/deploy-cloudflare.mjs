@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { parseJsonc } from "./lib/repo.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WRANGLER = path.join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
@@ -17,9 +18,10 @@ const SECRET_NAMES = ["OPA_MASTER_KEY", "OPA_SESSION_SECRET", "OPA_SETUP_TOKEN"]
 const NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const API = "https://api.cloudflare.com/client/v4";
 const DASH = "https://dash.cloudflare.com";
+// The short form of the README's "What this costs" (cost model §8).
 const COST_LINE =
-  "Cost: Workers Paid is required ($5/month baseline). Usage above the included amounts is " +
-  "metered; Workers AI, storage and Containers are billed separately.";
+  "Baseline: Workers Paid, $5/month. AI models and usage above Cloudflare's included amounts " +
+  'are billed separately. See "What this costs" in the README.';
 
 export class DeployError extends Error {}
 
@@ -62,10 +64,6 @@ function runProcess(cmd, args, { cwd, env, input, onOutput }) {
 function openTerminal(env) {
   return env.CI || !process.stdout.isTTY ? null : (text) => process.stdout.write(text);
 }
-
-// JSONC comments and trailing commas; group 1 keeps string literals intact.
-const JSONC_NOISE = /("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\/|,(?=\s*[}\]])/g;
-const parseJsonc = (text) => JSON.parse(text.replace(JSONC_NOISE, (_m, s) => s ?? ""));
 
 // The deploy config for one prefix, under `.wrangler/` (gitignored). Workflow names are
 // account-wide, so they take the prefix too. wrangler's ID write-back never reaches wrangler.jsonc.

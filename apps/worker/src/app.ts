@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { checkHealth, setupRequired } from "./health";
 import { settings } from "./model-settings";
+import { recover } from "./recover";
 import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
@@ -45,6 +46,7 @@ shared.get("/setup", async (c) => {
 });
 
 shared.route("/setup", setup);
+shared.route("/api/auth/recover", recover);
 shared.route("/api/auth", authRoutes);
 shared.route("/api/sessions", sessionRoutes);
 

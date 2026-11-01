@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { findDependencyViolations, findPortViolations } from "../check-boundaries.mjs";
 import { findViolations } from "../check-builder-independence.mjs";
 import { checkBudget, findLeakedNames, serverOnlyNames } from "../check-bundles.mjs";
-import { checkPnpmPolicy, checkRenovatePolicy, checkWorkflow } from "../check-supply-chain.mjs";
+import { bindingNames, checkDocsCost } from "../check-docs-cost.mjs";
+import {
+  checkPnpmPolicy,
+  checkRenovatePolicy,
+  checkRuntimeDependencies,
+  checkWorkflow,
+  runtimeClosure,
+} from "../check-supply-chain.mjs";
 import { disallowed, flatten } from "../generate-notices.mjs";
+import { parseJsonc } from "../lib/repo.mjs";
 
 // Denylisted words are assembled at runtime so this file passes its own scan.
 const join = (...parts: string[]) => parts.join("");
@@ -114,6 +123,57 @@ describe("supply chain", () => {
       checkWorkflow("ci.yml", `on: [push, ${trigger}]\npermissions:\n  contents: read\n`),
     ).toEqual(["ci.yml: uses pull_request_target"]);
   });
+
+  it("lists the Worker's runtime closure and flags unreviewed packages", () => {
+    const lock = `
+importers:
+  apps/worker:
+    dependencies:
+      '@opa/db': { specifier: 'workspace:*', version: link:../../packages/db }
+      hono: { specifier: 4.0.0, version: 4.0.0 }
+    devDependencies:
+      vitest: { specifier: 1.0.0, version: 1.0.0 }
+  packages/db:
+    dependencies:
+      drizzle-orm: { specifier: 1.0.0, version: 1.0.0(@cloudflare/workers-types@5.0.0) }
+snapshots:
+  hono@4.0.0: {}
+  vitest@1.0.0: { dependencies: { evil: 1.0.0 } }
+  drizzle-orm@1.0.0(@cloudflare/workers-types@5.0.0):
+    dependencies: { '@cloudflare/workers-types': 5.0.0, left-pad: 2.0.0 }
+    optionalDependencies: { strip: string-width@4.0.0 }
+`;
+    expect(runtimeClosure(lock)).toEqual([
+      "@cloudflare/workers-types",
+      "drizzle-orm",
+      "hono",
+      "left-pad",
+      "string-width",
+    ]);
+    expect(checkRuntimeDependencies(lock)).toHaveLength(2);
+    expect(checkRuntimeDependencies(lock)[1]).toContain('"string-width"');
+  });
+
+  it("follows importer optional dependencies and aliases", () => {
+    const lock = `
+importers:
+  apps/worker:
+    dependencies:
+      hono: { specifier: npm:evil@1.0.0, version: evil@1.0.0 }
+    optionalDependencies:
+      extra: { specifier: 1.0.0, version: 1.0.0 }
+snapshots:
+  evil@1.0.0: {}
+  extra@1.0.0: { dependencies: { deep: 2.0.0 } }
+`;
+    expect(runtimeClosure(lock)).toEqual(["deep", "evil", "extra"]);
+  });
+
+  it("fails when the lockfile is missing", () => {
+    expect(checkRuntimeDependencies(null)).toEqual([
+      "pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked",
+    ]);
+  });
 });
 
 describe("bundles", () => {
@@ -134,5 +194,72 @@ describe("notices", () => {
     });
     expect(packages.map((p: { id: string }) => p.id)).toEqual(["bad@1.0.0", "hono@4.0.0"]);
     expect(disallowed(packages)).toEqual(['bad@1.0.0: licence "AGPL-3.0" is not allowed']);
+  });
+});
+
+describe("docs-cost-lint", () => {
+  const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  const repo = () => ({
+    readme: read("README.md"),
+    config: parseJsonc(read("wrangler.jsonc")),
+    permissions: JSON.parse(read("deploy/permissions.json")),
+  });
+
+  it("passes on the repo and covers every binding type in wrangler.jsonc", () => {
+    const docs = repo();
+    expect(checkDocsCost(docs)).toEqual([]);
+    expect(bindingNames(docs.config)).toEqual(
+      ["AI", "ASSETS", "ASSISTANT", "DB", "FILES", "TASK_WORKFLOW", "triggers"].sort(),
+    );
+  });
+
+  it("fails when a binding has no cost note or no permission entry", () => {
+    const docs = repo();
+    docs.config.kv_namespaces = [{ binding: "CACHE" }];
+    expect(checkDocsCost(docs)).toEqual([
+      'CACHE: no cost row in the README "What this costs" table',
+      'CACHE: no entry lists it in deploy/permissions.json "bindings"',
+    ]);
+    const blank = repo();
+    blank.readme = blank.readme.replace(/^\| `DB` .*$/m, "| `DB` | D1 | | |");
+    blank.permissions.permissions = blank.permissions.permissions.filter(
+      (p: { id: string }) => p.id !== "r2",
+    );
+    expect(checkDocsCost(blank)).toEqual([
+      'DB: no cost row in the README "What this costs" table',
+      'FILES: no entry lists it in deploy/permissions.json "bindings"',
+    ]);
+    const short = repo();
+    short.readme = short.readme.replace(/^\| `DB` .*$/m, "| `DB` | D1 |");
+    expect(checkDocsCost(short)).toEqual(['DB: no cost row in the README "What this costs" table']);
+    const piped = repo();
+    piped.readme = piped.readme.replace(
+      /^\| `DB` .*$/m,
+      "| `DB` | D1 | 5 GB \\| 25B rows | $0.75/GB |",
+    );
+    expect(checkDocsCost(piped)).toEqual([]);
+    // An escaped backslash before a pipe leaves the pipe a delimiter, so the row has four cells.
+    piped.readme = piped.readme.replace("5 GB \\| 25B rows", "5 GB \\\\| 25B rows");
+    expect(checkDocsCost(piped)).toEqual(['DB: no cost row in the README "What this costs" table']);
+    const env = repo();
+    env.config.env = {
+      staging: { vars: { binding: "NOT_A_BINDING" }, queues: { producers: [{ binding: "JOBS" }] } },
+    };
+    expect(checkDocsCost(env)).toEqual([
+      'JOBS: no cost row in the README "What this costs" table',
+      'JOBS: no entry lists it in deploy/permissions.json "bindings"',
+    ]);
+  });
+
+  it("requires the section, the baseline, the unlimited caveat and a price date", () => {
+    const { readme, ...rest } = repo();
+    expect(checkDocsCost({ ...rest, readme: "# x\n" })).toEqual([
+      'README.md: no "## What this costs" section',
+    ]);
+    const vague = readme
+      .replace(/Prices as of [\d-]+/, "Prices as of recently")
+      .replace("Workers Paid, $5 per month", "Workers Paid")
+      .replace("does not include unlimited usage", "covers most use");
+    expect(checkDocsCost({ ...rest, readme: vague })).toHaveLength(3);
   });
 });
