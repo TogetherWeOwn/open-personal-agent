@@ -19,6 +19,8 @@ import {
   renderDeployConfig,
   scoreTurn,
   stubResult,
+  summarizeDedupeAttempts,
+  t7Budget,
   teardown,
   waitReady,
 } from "../cf-verify-t3t4t7.mjs";
@@ -239,12 +241,33 @@ describe("t4 reconnect bookkeeping", () => {
       }
     }
     vi.stubGlobal("WebSocket", FakeWebSocket);
+    const ticketPosts = [];
+    vi.stubGlobal("fetch", async (url, init) => {
+      ticketPosts.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ ticket: "single-use", expiresAt: 1 }) };
+    });
     try {
       // Tab holds seqs 0-8, reconnects with since=8, replays 9-10, then lives on.
       const received = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-      const opened = openSocket("https://w.example.workers.dev", "s", 8, "bearer", received);
+      const opened = openSocket(
+        "https://w.example.workers.dev",
+        "s",
+        8,
+        {
+          secrets: [],
+          bearer: "campaign-bearer",
+        },
+        received,
+      );
+      for (let i = 0; i < 10 && instances.length === 0; i++) await Promise.resolve();
+      const minted = ticketPosts.at(0);
+      expect(minted.url).toContain("/t4/ticket?stream=s");
+      expect(minted.init.headers.authorization).toBe("Bearer campaign-bearer");
       const sock = instances.at(-1);
       expect(sock.url).toContain("since=8");
+      expect(sock.url).toContain("ticket=single-use");
+      expect(sock.url).not.toContain("bearer=");
+      expect(sock.url).not.toContain("campaign-bearer");
       sock.emit("message", { data: JSON.stringify({ seq: 9, chat: "a" }) });
       sock.emit("message", { data: JSON.stringify({ seq: 10, chat: "b" }) });
       sock.emit("message", { data: JSON.stringify({ hello: true, lastSeq: 10 }) });
@@ -257,6 +280,47 @@ describe("t4 reconnect bookkeeping", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+  it("refuses to connect when the ticket mint carries no ticket", async () => {
+    vi.stubGlobal("WebSocket", class {});
+    vi.stubGlobal("fetch", async () => ({ ok: true, status: 200, json: async () => ({}) }));
+    try {
+      await expect(
+        openSocket("https://w.example.workers.dev", "s", -1, { secrets: [], bearer: "b" }),
+      ).rejects.toThrow(/ticket mint failed/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("t3 duplicate-ID verdict", () => {
+  const dup = (n) =>
+    [...Array(n)].map((_, i) =>
+      i === 0 ? { ok: true, id: "w1" } : { ok: false, error: `HTTP 409 duplicate ${i}` },
+    );
+  it("needs exactly one effective create with every rejection documented", () => {
+    expect(summarizeDedupeAttempts(dup(4))).toEqual({
+      okCreates: 1,
+      failuresDocumented: true,
+      errors: ["HTTP 409 duplicate 1", "HTTP 409 duplicate 2", "HTTP 409 duplicate 3"],
+    });
+  });
+  it("fails silent duplicates, missing reasons and all-success", () => {
+    // Four successes: duplicate-ID rejection was never observed.
+    expect(summarizeDedupeAttempts(dup(4).map((a) => ({ ...a, ok: true }))).okCreates).toBe(4);
+    // A rejection without a recorded reason is not documented semantics.
+    expect(
+      summarizeDedupeAttempts([{ ok: true, id: "w1" }, { ok: false }]).failuresDocumented,
+    ).toBe(false);
+    // Empty errors collapse: no rejection observed at all.
+    expect(summarizeDedupeAttempts([{ ok: true, id: "w1" }]).failuresDocumented).toBe(false);
+  });
+});
+
+describe("t7 server-side budget", () => {
+  it("caps past the corpus with headroom for retried turns", () => {
+    expect(t7Budget()).toBe(BOUNDS.t7.turns + 50);
   });
 });
 

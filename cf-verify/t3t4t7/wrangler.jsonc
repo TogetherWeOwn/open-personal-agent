@@ -9,7 +9,7 @@
   "d1_databases": [{ "binding": "DB" }],
   "r2_buckets": [{ "binding": "FILES" }],
   "ai": { "binding": "AI", "remote": true },
-  "vars": { "VERIFY_T7_MODEL": "__T7_MODEL__" },
+  "vars": { "VERIFY_T7_MODEL": "__T7_MODEL__", "VERIFY_T7_BUDGET": "__T7_BUDGET__" },
   "durable_objects": {
     "bindings": [{ "name": "VERIFY_SOCKET", "class_name": "VerifySocket" }]
   },
