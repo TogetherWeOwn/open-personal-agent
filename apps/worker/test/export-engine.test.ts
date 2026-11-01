@@ -8,7 +8,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { JsonValue, TaskStepper } from "@opa/core";
-import { EXPORT_ITEM_TYPES, sweepExports } from "@opa/db/export";
+import { EXPORT_ITEM_TYPES, SWEEP_BATCH, sweepExports } from "@opa/db/export";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { WorkerEnv } from "../src/compose";
@@ -342,6 +342,42 @@ describe("sweepExports", () => {
     expect(await sweepExports(env, () => now)).toEqual({ expired: 1 });
     expect((await alice.exports.get(id))?.status).toBe("expired");
     expect(await env.FILES.get(`u/alice/exports/${id}.zip`)).toBeNull();
+  });
+
+  it("reaches rows past a stuck batch instead of starving them", async () => {
+    const now = 10_000;
+    // A full batch whose deletes keep failing, then one more stale row behind it: without
+    // cursor paging the limit would select the same stuck rows on every tick.
+    const stuck: string[] = [];
+    for (let i = 0; i < SWEEP_BATCH; i++) {
+      const row = await makeExport(now - 1);
+      await alice.exports.finishReady(row.id, 7, now - 2);
+      stuck.push(row.id);
+    }
+    const { id: late } = await makeExport(now - 1);
+    await alice.exports.finishReady(late, 7, now - 2);
+    await env.FILES.put(`u/alice/exports/${late}.zip`, "zip");
+    const partialFailure = {
+      ...env,
+      // R2 methods reject a detached call, so untrapped methods stay bound to the target.
+      FILES: new Proxy(env.FILES, {
+        get: (target, prop, receiver) => {
+          if (prop === "delete")
+            return async (key: string) => {
+              if (key.includes(late))
+                return (target.delete as (key: string) => Promise<void>).call(target, key);
+              throw new Error("R2 is down");
+            };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    } as unknown as WorkerEnv;
+    // The stuck batch stays for the next tick, but the later row is still reached this one.
+    expect(await sweepExports(partialFailure, () => now)).toEqual({ expired: 1 });
+    expect((await alice.exports.get(late))?.status).toBe("expired");
+    expect(await env.FILES.get(`u/alice/exports/${late}.zip`)).toBeNull();
+    for (const id of stuck) expect((await alice.exports.get(id))?.status).toBe("ready");
   });
 });
 

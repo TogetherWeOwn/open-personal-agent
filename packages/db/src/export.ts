@@ -8,7 +8,7 @@
 // the ZIP itself stream, so the archive is never in Worker memory or a step output. Nothing
 // staged or zipped holds secret material: settings omit the key ids, grants and task state
 // carry none (task outputs are redacted for secrets at write time, M3-12 AC4).
-import { and, eq, lte, ne } from "drizzle-orm";
+import { and, asc, eq, gt, lte, ne, or } from "drizzle-orm";
 import { writeZip } from "./export-zip";
 import { openD1 } from "./index";
 import { type createRepository, type DataBindings, isId } from "./repository";
@@ -164,8 +164,10 @@ export async function buildExportZip(
   }
 }
 
-/** Rows reconciled per sweep tick: a few deletes and one batch each, well inside a cron's CPU. */
+/** Rows reconciled per sweep batch: a few deletes and one query each, well inside a cron's CPU. */
 export const SWEEP_BATCH = 100;
+/** Batches walked per sweep tick: enough to pass a stuck batch, few enough for the cron. */
+export const SWEEP_MAX_BATCHES = 5;
 
 /**
  * The export reconciler (M3-20 AC1), on the Worker's 10-minute cron: rows past their expiry —
@@ -181,48 +183,74 @@ export async function sweepExports(
   now: () => number = Date.now,
 ): Promise<{ expired: number }> {
   const db = openD1(bindings.DB);
-  const stale = await db
-    .select({ id: dataExports.id, userId: dataExports.userId })
-    .from(dataExports)
-    .where(and(ne(dataExports.status, "expired"), lte(dataExports.expiresAt, now())))
-    .limit(SWEEP_BATCH);
+  const at = now();
   let expired = 0;
-  for (const row of stale) {
-    // Keys are built only from checked ids; a row that fails the check is skipped, never thrown.
-    if (!isId(row.id) || !isId(row.userId)) continue;
-    const dir = `u/${row.userId}/exports/${row.id}`;
-    let cleaned = true;
-    const remove = (key: string) =>
-      bindings.FILES.delete(key).catch(() => {
-        cleaned = false;
-      });
-    await remove(`${dir}.zip`);
-    if (bindings.FILES.list) {
-      let cursor: string | undefined;
-      for (;;) {
-        const page = await bindings.FILES.list({
-          prefix: `${dir}/staged/`,
-          limit: 1000,
-          ...(cursor === undefined ? {} : { cursor }),
-        }).catch(() => null);
-        if (!page) {
+  // Keyset cursor over (expiresAt, id): a batch of rows whose deletes keep failing stays
+  // eligible for the next tick, but the cursor walks past it within this tick, so later rows
+  // are still reached — one stuck batch can never starve the rest past the batch limit.
+  let cursor: { expiresAt: number; id: string } | undefined;
+  for (let batch = 0; batch < SWEEP_MAX_BATCHES; batch++) {
+    const stale = await db
+      .select({
+        id: dataExports.id,
+        userId: dataExports.userId,
+        expiresAt: dataExports.expiresAt,
+      })
+      .from(dataExports)
+      .where(
+        and(
+          ne(dataExports.status, "expired"),
+          lte(dataExports.expiresAt, at),
+          cursor === undefined
+            ? undefined
+            : or(
+                gt(dataExports.expiresAt, cursor.expiresAt),
+                and(eq(dataExports.expiresAt, cursor.expiresAt), gt(dataExports.id, cursor.id)),
+              ),
+        ),
+      )
+      .orderBy(asc(dataExports.expiresAt), asc(dataExports.id))
+      .limit(SWEEP_BATCH);
+    if (stale.length === 0) break;
+    for (const row of stale) {
+      cursor = { expiresAt: row.expiresAt, id: row.id };
+      // Keys are built only from checked ids; a row that fails the check is skipped, never thrown.
+      if (!isId(row.id) || !isId(row.userId)) continue;
+      const dir = `u/${row.userId}/exports/${row.id}`;
+      let cleaned = true;
+      const remove = (key: string) =>
+        bindings.FILES.delete(key).catch(() => {
           cleaned = false;
-          break;
+        });
+      await remove(`${dir}.zip`);
+      if (bindings.FILES.list) {
+        let listCursor: string | undefined;
+        for (;;) {
+          const page = await bindings.FILES.list({
+            prefix: `${dir}/staged/`,
+            limit: 1000,
+            ...(listCursor === undefined ? {} : { cursor: listCursor }),
+          }).catch(() => null);
+          if (!page) {
+            cleaned = false;
+            break;
+          }
+          for (const object of page.objects) await remove(object.key);
+          if (!page.truncated) break;
+          listCursor = page.cursor;
         }
-        for (const object of page.objects) await remove(object.key);
-        if (!page.truncated) break;
-        cursor = page.cursor;
       }
+      // A failed delete leaves the row for the next tick: moved rows never come back, and
+      // their files would be orphaned with nothing left to sweep them.
+      if (!cleaned) continue;
+      const moved = await db
+        .update(dataExports)
+        .set({ status: "expired" })
+        .where(and(eq(dataExports.id, row.id), ne(dataExports.status, "expired")))
+        .returning({ id: dataExports.id });
+      if (moved.length > 0) expired += 1;
     }
-    // A failed delete leaves the row for the next tick: moved rows never come back, and
-    // their files would be orphaned with nothing left to sweep them.
-    if (!cleaned) continue;
-    const moved = await db
-      .update(dataExports)
-      .set({ status: "expired" })
-      .where(and(eq(dataExports.id, row.id), ne(dataExports.status, "expired")))
-      .returning({ id: dataExports.id });
-    if (moved.length > 0) expired += 1;
+    if (stale.length < SWEEP_BATCH) break;
   }
   return { expired };
 }
