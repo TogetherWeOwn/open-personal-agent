@@ -7,9 +7,10 @@ import {
   startRegistration,
 } from "@simplewebauthn/browser";
 import { useState } from "react";
-import { Button, Input, Label, TextField } from "react-aria-components";
+import { Input, Label, TextField } from "react-aria-components";
+import { Button } from "../ui";
 import { RecoveryCodes } from "./Setup";
-import { Alert, cancelled, type Failure, input, post, primary, Screen } from "./ui";
+import { Alert, cancelled, type Failure, input, post, Screen } from "./ui";
 
 interface Recovered {
   recoveryCodes: string[];
@@ -84,7 +85,12 @@ export function Recover() {
         <Input className={input} autoComplete="off" spellCheck={false} />
       </TextField>
       <Alert failure={error} />
-      <Button onPress={start} isDisabled={busy || !code.trim()} className={`${primary} self-start`}>
+      <Button
+        onPress={start}
+        isDisabled={busy || !code.trim()}
+        variant="primary"
+        className="self-start"
+      >
         {error ? "Try again" : "Create a new passkey"}
       </Button>
     </Screen>

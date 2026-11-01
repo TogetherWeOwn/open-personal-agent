@@ -5,9 +5,10 @@ import {
   startAuthentication,
 } from "@simplewebauthn/browser";
 import { useState } from "react";
-import { Button } from "react-aria-components";
+import { Button as TextButton } from "react-aria-components";
+import { Button } from "../ui";
 import { Recover } from "./Recover";
-import { Alert, cancelled, type Failure, post, primary, Screen } from "./ui";
+import { Alert, cancelled, type Failure, post, Screen } from "./ui";
 
 async function signIn(retried = false): Promise<void> {
   const { options } = await post<{ options: PublicKeyCredentialRequestOptionsJSON }>(
@@ -52,17 +53,17 @@ export function SignIn() {
     <Screen title="Sign in">
       <p>Use the passkey you created when you set up your assistant.</p>
       <Alert failure={error} />
-      <Button onPress={start} isDisabled={busy} className={`${primary} self-start`}>
+      <Button onPress={start} isDisabled={busy} variant="primary" className="self-start">
         {error ? "Try again" : "Sign in with your passkey"}
       </Button>
       <details className="text-sm text-text-muted">
         <summary className="min-h-11 cursor-pointer content-center">Lost your passkey?</summary>
-        <Button
+        <TextButton
           onPress={() => setRecovering(true)}
           className="min-h-11 text-accent underline underline-offset-2"
         >
           Use a recovery code
-        </Button>
+        </TextButton>
         <p>
           No codes left? Whoever runs your server can set a new setup token. Then open{" "}
           <a href="/setup" className="text-accent underline underline-offset-2">

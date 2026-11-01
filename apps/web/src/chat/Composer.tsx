@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ReactNode } from "react";
-import { Button, Form, TextArea } from "react-aria-components";
+import { Form, TextArea } from "react-aria-components";
+import { Button } from "../ui";
 
 interface Props {
   busy: boolean;
@@ -48,10 +49,7 @@ export function Composer({ busy, text, setText, onSend, onStop, chip, onNoModel 
             }}
             className="field-sizing-content block max-h-52 min-h-11 flex-1 resize-none rounded-xl border border-border-strong bg-surface-raised px-3 py-2 placeholder:text-text-muted"
           />
-          <Button
-            type="submit"
-            className="min-h-11 rounded-xl bg-accent px-4 font-medium text-accent-contrast data-pressed:opacity-90"
-          >
+          <Button type="submit" variant="primary">
             {busy ? "Stop" : "Send"}
           </Button>
         </div>

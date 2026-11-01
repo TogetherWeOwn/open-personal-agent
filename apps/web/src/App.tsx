@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
-import { Button, Heading, Link } from "react-aria-components";
+import { Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
 import { ModelChip } from "./chat/ModelChip";
@@ -21,11 +21,9 @@ import {
   settingsApi,
 } from "./models/settings-api";
 import { ThemeToggle } from "./ThemeToggle";
+import { Button, buttonClass } from "./ui";
 
 const newId = () => crypto.randomUUID();
-
-const buttonClass =
-  "min-h-11 rounded-lg px-3 text-sm font-medium hover:bg-surface-raised data-pressed:bg-border data-selected:bg-surface-raised";
 
 /** Loads a stale chat's messages from the server. */
 function useLoad(
@@ -231,18 +229,18 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
           <Heading level={2} className="px-1 text-lg font-semibold">
             Chats
           </Heading>
-          <ThemeToggle className={buttonClass} />
+          <ThemeToggle className={buttonClass("quiet")} />
         </div>
-        <Button
-          className={`${buttonClass} mx-3 mb-2 border border-border-strong`}
-          onPress={() => open({ type: "new", id: newId() })}
-        >
+        <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
           New chat
         </Button>
-        <Link href="/usage" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
+        <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
           Usage
         </Link>
-        <Link href="/settings/models" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
+        <Link
+          href="/settings/models"
+          className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
+        >
           Settings
         </Link>
         <ConversationList
@@ -253,7 +251,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
       </aside>
       <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
         <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
-          <Button className={`${buttonClass} sm:hidden`} onPress={() => setThreadOpen(false)}>
+          <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
             <span aria-hidden="true">← </span>Chats
           </Button>
           <Heading level={2} className="truncate px-1 font-semibold">
