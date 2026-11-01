@@ -107,7 +107,8 @@ export function blobStoreContract(name: string, bucket: () => R2Bucket) {
 
 /**
  * The usage ledger's statements through the repository (M2-21), against a migrated database:
- * `chat.settle` writes the priced row, and `usage.totals` and `usage.neurons` read it back.
+ * `chat.settle` and `usage.record` write priced rows; `usage.totals` and
+ * `deployment.workersAiNeurons` read them back.
  */
 export function usageLedgerContract(name: string, migrated: () => Promise<D1Database>) {
   describe(`${name}: usage ledger contract`, () => {
@@ -163,11 +164,16 @@ export function usageLedgerContract(name: string, migrated: () => Promise<D1Data
           priceVerifiedAt: null,
         },
       ]);
-      expect(await usage.neurons(before)).toBe(260);
-      expect([
-        await usage.totals(Date.now() + 1000),
-        await usage.neurons(Date.now() + 1000),
-      ]).toEqual([[], 0]);
+      const neurons = repo.deployment.workersAiNeurons;
+      expect(await neurons(before)).toBe(260);
+      await usage.record({ providerId: "openai", model: "gpt-4.1-mini", usage: counts });
+      expect((await usage.totals(before)).find((r) => r.providerId === "openai")).toMatchObject({
+        calls: 1,
+        costMicroUsd: 1200,
+        costSource: "estimated",
+      });
+      const later = Date.now() + 1000;
+      expect([await usage.totals(later), await neurons(later)]).toEqual([[], 0]);
     });
   });
 }

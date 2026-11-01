@@ -3,6 +3,7 @@
 // turns and the settings Test button both resolve it per call, so a change applies to the next one.
 import type { ModelProvider } from "@opa/core";
 import { createRepository, type UserScope } from "@opa/db/repository";
+import { billingProviderId } from "@opa/pricing";
 import {
   createOpenAIChatProvider,
   createWorkersAIProvider,
@@ -18,6 +19,8 @@ export interface ChatModel {
   provider: ModelProvider;
   model: string;
   apiKey: string | null;
+  /** Who bills the calls, for the usage ledger; the provider's own ID when it is the biller. */
+  billingId?: string;
   /** Records the saved key's use; callers run it just before the model call. */
   used?: () => Promise<void>;
 }
@@ -67,5 +70,6 @@ export async function resolveChatModel(
     // Saved as plain HTTP while private hosts were allowed, and they no longer are.
     return { error: "invalid_base_url" };
   }
-  return { provider, model: row.model, apiKey, used: () => store.keyUsed(secretId) };
+  const billingId = billingProviderId(baseUrl);
+  return { provider, model: row.model, apiKey, billingId, used: () => store.keyUsed(secretId) };
 }
