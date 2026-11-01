@@ -96,6 +96,13 @@ const memory = placeholder(
   "You can always see and change them here.",
 );
 
+// m3-ux §1.2 names this screen "Waiting for you", so the two Memory addresses don't look alike.
+const waiting = placeholder(
+  "Waiting for you",
+  "I'll remember things you tell me, like your preferences and ongoing projects.",
+  "You can always see and change them here.",
+);
+
 export const routes: Route[] = [
   { path: "/", nav: "chat" },
   { path: "/c/:conversationId", nav: "chat" },
@@ -154,7 +161,7 @@ export const routes: Route[] = [
     screen: placeholder("Activity log", "Nothing has happened yet."),
   },
   { path: "/memory", nav: "memory", screen: memory },
-  { path: "/memory/waiting", nav: "memory", screen: memory },
+  { path: "/memory/waiting", nav: "memory", screen: waiting },
   {
     path: "/settings",
     nav: "settings",

@@ -27,7 +27,7 @@ const PAGES: [path: string, heading: string, url?: RegExp][] = [
   ["/activity/outputs/o1", "Output"],
   ["/activity/log", "Activity log"],
   ["/memory", "Memory"],
-  ["/memory/waiting", "Memory"],
+  ["/memory/waiting", "Waiting for you"],
   ["/settings", "Settings"],
   ["/settings/models", "Models"],
   ["/settings/computer", "Computer"],
