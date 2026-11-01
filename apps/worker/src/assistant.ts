@@ -9,10 +9,7 @@ import {
   type ModelAttachment,
   type ModelMessage,
   type ModelProvider,
-  type ModelUsage,
   TASK_LIMITS,
-  type TurnFailure,
-  type TurnLimit,
 } from "@opa/core";
 import {
   type AttachmentRow,
@@ -38,7 +35,41 @@ import {
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
 import type { AllowanceWarnings } from "@opa/server/allowances";
-import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
+import { resolveChatModel } from "@opa/server/chat-model";
+import {
+  base64,
+  type CallUsage,
+  type Emit,
+  fileTokenEstimate,
+  LABEL_CHARS,
+  MAX_ATTACHMENT_TEXT,
+  MAX_TEXT,
+  MODEL_ERRORS,
+  messageChars,
+  messageFileTokens,
+  modelBytes,
+  parse,
+  parseTurnState,
+  pickUsage,
+  QUEUE_KEY,
+  type ResumeResult,
+  readPrefix,
+  reject,
+  replySegments,
+  type TaskProgress,
+  TEXT_READ_BYTES,
+  TURN_FILE_BYTES,
+  UNREAD,
+} from "@opa/server/chat-protocol";
+import {
+  type CallScope,
+  checkSpending,
+  Limits,
+  type Refusal,
+  type Reservation,
+  SPENDING_DEFAULTS,
+  type SpendingSettings,
+} from "@opa/server/limits";
 import {
   Agent,
   type Connection,
@@ -49,32 +80,9 @@ import {
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import { EventLog } from "./event-log";
-import {
-  type CallScope,
-  checkSpending,
-  Limits,
-  type Refusal,
-  type Reservation,
-  SPENDING_DEFAULTS,
-  type SpendingSettings,
-} from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
-const MAX_TEXT = 32_000;
-const MAX_ATTACHMENTS = 10;
-/** How much of a text file one turn carries to the model; the file itself is kept whole in R2. */
-const MAX_ATTACHMENT_TEXT = 100_000;
-/** How far a text file is read: enough bytes for `MAX_ATTACHMENT_TEXT` characters of any UTF-8. */
-const TEXT_READ_BYTES = MAX_ATTACHMENT_TEXT * 4;
-/**
- * The bytes of files one turn hands the model. Images and PDFs go as base64 in one request, so
- * this bounds the Durable Object's memory (128 MB) and the upstream request (about 32 MB at the
- * strictest provider) whatever the conversation holds.
- */
-export const TURN_FILE_BYTES = 16 * 1024 * 1024;
-const IMAGE_TOKENS = 2_500;
-const PDF_MAX_TOKENS = 100_000; // about 100 pages, the providers' usual page limit
 const TAB_RECHECK_MS = 30_000; // how often task progress rechecks the tabs' sessions
 /** A live frame held back from a replaying tab, with what its replay may already have sent. */
 interface HeldFrame {
@@ -86,28 +94,6 @@ interface HeldFrame {
 /** Live frames held back from one replaying tab, at most: far beyond a turn's, as REPLAY_LIMIT. */
 const MAX_HELD_FRAMES = 100_000;
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
-/** Decided batches waiting for the running turn to end (M3-07 AC14, M3-09 AC4's FIFO). */
-const QUEUE_KEY = "approvals:queue";
-/** How much of the original request a late approval's label quotes. */
-const LABEL_CHARS = 80;
-
-/** What `resumeBatch` did with a decided batch. */
-export type ResumeResult = "resumed" | "waiting" | "queued" | "gone";
-
-type Emit = <T extends HarnessEvent["type"]>(
-  type: T,
-  payload: Extract<HarnessEvent, { type: T }>["payload"],
-) => void;
-
-/** One progress event from a Workflow task (M3-12 AC8), as its driver numbers them. */
-export interface TaskProgress {
-  conversationId: string;
-  turnId: string;
-  taskId: string;
-  seq: number;
-  type: string;
-  payload: unknown;
-}
 
 /** A stored message as `listMessages` returns it, with its attachments. */
 type StoredMessage = NonNullable<
@@ -115,7 +101,6 @@ type StoredMessage = NonNullable<
     ReturnType<ReturnType<ReturnType<typeof createRepository>["forUser"]>["chat"]["listMessages"]>
   >
 >[number];
-type CallUsage = { inputTokens: number; outputTokens: number; cachedInputTokens: number };
 
 /**
  * A running turn's eviction checkpoint (the fiber snapshot): plain JSON. The loop's own
@@ -153,10 +138,6 @@ interface TurnCheckpoint {
    */
   stopping?: number;
 }
-
-/** A turn's reply text in its saved state: one segment per model call that spoke. */
-const replySegments = (state: TurnState) =>
-  state.messages.flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []));
 
 /** A resumed batch, for the loop's approval hooks. */
 type ApprovalRun = {
@@ -1365,193 +1346,4 @@ export class Assistant extends Agent<Bindings> {
   #emitter(sessionId: string, turnId: string): Emit {
     return (type, payload) => this.#send(sessionId, turnId, type, payload);
   }
-}
-
-/** The characters a request's messages carry, a text file's included, for its reservation. */
-const messageChars = (messages: readonly ModelMessage[]) =>
-  messages.reduce(
-    (sum, m) =>
-      sum +
-      m.content.length +
-      (m.role === "user"
-        ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
-        : 0),
-    0,
-  );
-
-const pickUsage = (usage: ModelUsage): CallUsage => ({
-  inputTokens: usage.inputTokens,
-  outputTokens: usage.outputTokens,
-  cachedInputTokens: usage.cachedInputTokens,
-});
-
-/**
- * A saved `TurnState` back from D1, or `null` if it isn't one. The row is only ever written by
- * this host, so this is defense in depth: anything unexpected closes the turn instead of
- * running the loop over it (`#dropCorrupt`).
- */
-function parseTurnState(json: string): TurnState | null {
-  try {
-    const s = JSON.parse(json) as Partial<TurnState> | null;
-    if (!s || typeof s !== "object") return null;
-    const counts = s.counts;
-    const taint = s.taint;
-    const usage = s.usage;
-    if (!counts || typeof counts.calls !== "number" || typeof counts.tools !== "number")
-      return null;
-    if (!taint || (taint.taint !== "trusted" && taint.taint !== "untrusted")) return null;
-    if (!Array.isArray(taint.sources)) return null;
-    if (!usage || typeof usage.inputTokens !== "number") return null;
-    if (!Array.isArray(s.messages)) return null;
-    for (const m of s.messages) {
-      if (!m || typeof m !== "object" || typeof m.content !== "string") return null;
-      if (m.role !== "user" && m.role !== "assistant" && m.role !== "tool" && m.role !== "system")
-        return null;
-    }
-    const pending = s.pending;
-    if (pending !== null) {
-      if (!pending || typeof pending.batchId !== "string" || !Array.isArray(pending.items))
-        return null;
-    }
-    return s as TurnState;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * What a tab may send: `chat.send`, with the chat's own model if it names one and any uploaded
- * files by ID, `turn.cancel`, or `resume`. Anything else is ignored.
- */
-function parse(message: WSMessage) {
-  if (typeof message !== "string") return null;
-  try {
-    const msg = JSON.parse(message) as Partial<Record<string, unknown>>;
-    if (msg.type === "turn.cancel") return { type: "turn.cancel" } as const;
-    if (msg.type === "resume") {
-      const { conversationId, turnId, afterSeq } = msg;
-      const at = typeof afterSeq === "number" && Number.isSafeInteger(afterSeq) && afterSeq >= 0;
-      return isId(conversationId) && isId(turnId) && at
-        ? ({ type: "resume", conversationId, turnId, afterSeq } as const)
-        : null;
-    }
-    const conversationId = String(msg.conversationId);
-    if (msg.type === "chat.send" && typeof msg.text === "string") {
-      const { provider, model } = (msg.model ?? {}) as Partial<Record<string, unknown>>;
-      const own =
-        typeof provider === "string" && typeof model === "string" && provider && model
-          ? { provider, model }
-          : undefined;
-      const ids = Array.isArray(msg.attachmentIds) ? msg.attachmentIds.filter(isId) : [];
-      return {
-        type: "chat.send",
-        conversationId,
-        text: msg.text,
-        model: own,
-        attachmentIds: [...new Set(ids)].slice(0, MAX_ATTACHMENTS),
-      } as const;
-    }
-  } catch {}
-  return null;
-}
-
-/** m3-ux §3.2, for a file the chosen model can't read. The file is kept with the message. */
-const UNREAD = {
-  image: "This model can't see images. I'll keep the file in Outputs, but it won't read it.",
-  pdf: "This model can't read PDFs. I'll keep the file in Outputs, but it won't read it.",
-} as const;
-
-/** Encoded in slices a multiple of 3 bytes long, so no binary string of the whole file is built. */
-function base64(bytes: Uint8Array): string {
-  const slices: string[] = [];
-  for (let i = 0; i < bytes.length; i += 0x6000)
-    slices.push(btoa(String.fromCharCode(...bytes.subarray(i, i + 0x6000))));
-  return slices.join("");
-}
-
-/** Up to `limit` bytes from the start of a stream, and whether it held more; the rest is not read. */
-async function readPrefix(body: ReadableStream<Uint8Array>, limit: number) {
-  const bytes = new Uint8Array(limit);
-  let filled = 0;
-  let more = false;
-  const reader = body.getReader();
-  for (let next = await reader.read(); !next.done; next = await reader.read()) {
-    const take = Math.min(next.value.byteLength, limit - filled);
-    bytes.set(next.value.subarray(0, take), filled);
-    filled += take;
-    if (take < next.value.byteLength || filled === limit) {
-      more = take < next.value.byteLength || !(await reader.read()).done;
-      break;
-    }
-  }
-  await reader.cancel().catch(() => {});
-  return { bytes: bytes.subarray(0, filled), more };
-}
-
-/** What a file costs the turn's byte budget: a text file only as far as it is read. */
-const modelBytes = (row: AttachmentRow) =>
-  row.kind === "text" ? Math.min(row.sizeBytes, TEXT_READ_BYTES) : row.sizeBytes;
-
-/**
- * A file's input tokens for the spend reservation; its text is counted as characters. The
- * providers scale an image down to a bounded size, so it costs at most a few thousand tokens; a
- * PDF is read page by page, so it is counted by size up to the providers' page limit.
- */
-const fileTokenEstimate = (row: AttachmentRow) =>
-  row.kind === "image"
-    ? IMAGE_TOKENS
-    : row.kind === "pdf"
-      ? Math.min(PDF_MAX_TOKENS, Math.ceil(row.sizeBytes / 4))
-      : 0;
-
-/**
- * A history's files for a later call's spend reservation. Text rides in `chars`, as in the first
- * call; a PDF is measured from its base64, which decodes to about three quarters of its length.
- */
-const messageFileTokens = (messages: readonly ModelMessage[]) =>
-  messages.reduce(
-    (sum, m) =>
-      sum +
-      (m.role === "user"
-        ? (m.attachments ?? []).reduce(
-            (n, f) =>
-              n +
-              (f.kind === "image"
-                ? IMAGE_TOKENS
-                : f.kind === "pdf"
-                  ? Math.min(PDF_MAX_TOKENS, Math.ceil(((f.data?.length ?? 0) * 3) / 16))
-                  : 0),
-            0,
-          )
-        : 0),
-    0,
-  );
-
-const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
-  no_model: "Pick a model in Settings first.",
-  key_required: "Enter your model key again in Settings.",
-  vault_reset_required:
-    "Your saved keys can't be opened. Reset them in Settings, then enter your key again.",
-};
-
-/**
- * Fails a send for the tab that made it only. No turn started, so it has no turn ID, and `seq` 0
- * keeps it outside the sequence of a turn the tab may be receiving.
- */
-function reject(
-  connection: Connection,
-  sessionId: string,
-  message: string,
-  reason?: TurnLimit,
-  code?: TurnFailure,
-) {
-  const event: HarnessEvent = {
-    v: 1,
-    seq: 0,
-    sessionId,
-    turnId: "",
-    type: "turn.failed",
-    payload: { message, ...(reason && { reason }), ...(code && { code }) },
-  };
-  connection.send(JSON.stringify(event));
 }

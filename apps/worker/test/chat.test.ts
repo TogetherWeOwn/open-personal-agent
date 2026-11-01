@@ -9,10 +9,10 @@ import type { LoopTool } from "@opa/harness-builtin";
 import { type RiskClass, ToolRegistry } from "@opa/policy";
 import { STARTER_MODEL } from "@opa/providers";
 import { resolveChatModel } from "@opa/server/chat-model";
+import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "@opa/server/limits";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { compose, type WorkerEnv } from "../src/compose";
-import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "../src/limits";
 import { workerApp } from "../src/worker-app";
 import { Browser, claim, count, db, env, freshDatabase, ORIGIN, SOCKET_WAIT } from "./helpers/app";
 
