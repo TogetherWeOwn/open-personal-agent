@@ -37,9 +37,7 @@ export interface VaultHealth {
 
 async function vaultHealth(env: Env): Promise<VaultHealth | undefined> {
   if (!env.VAULT) return undefined;
-  const status = await vaultStatus(env.VAULT).catch(() => null);
-  if (!status) return undefined;
-  const { rotation, orphanedRows } = status;
+  const { rotation, orphanedRows } = await vaultStatus(env.VAULT);
   return rotation === "complete"
     ? { rotation, orphanedRows, action: RETIRE_PREVIOUS_KEY }
     : { rotation, orphanedRows };
@@ -91,7 +89,8 @@ export async function checkHealth(env: Env): Promise<Health> {
   // Assigned inside the database probe; the cast stops TypeScript narrowing it to `null`.
   let applied = null as number | null;
   const { deployment } = createRepository(env);
-  const [database, storage, durableObject, vault] = await Promise.all([
+  let vault: VaultHealth | undefined;
+  const [database, storage, durableObject] = await Promise.all([
     probe(async () => {
       applied = await deployment.schemaVersion();
     }),
@@ -100,7 +99,10 @@ export async function checkHealth(env: Env): Promise<Health> {
       const pong = await deployment.healthObject().ping();
       if (pong !== "pong") throw new Error("unexpected ping reply");
     }),
-    vaultHealth(env),
+    // Left out, not failed, if the counts can't be read in time.
+    probe(async () => {
+      vault = await vaultHealth(env);
+    }),
   ]);
   // Presence only: creating a Workflow instance or running a model would cost money.
   const workflow = typeof env.TASK_WORKFLOW?.create === "function";
