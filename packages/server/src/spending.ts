@@ -72,6 +72,8 @@ spendingRoutes.get("/", async (c) => {
       settings.hardCapMicroUsd !== null &&
       limits.monthMicroUsd + limits.heldMicroUsd >= settings.hardCapMicroUsd,
     month: utcMonth,
+    /** Whose figures these are: the banners keep each user's dismissals apart. */
+    userId: c.var.session.scope.userId,
   });
 });
 
