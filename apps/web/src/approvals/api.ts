@@ -26,6 +26,16 @@ export async function listPending(): Promise<PendingBatch[]> {
   return ((await res.json()) as { batches: PendingBatch[] }).batches;
 }
 
+/** A batch the user answered, with what they answered, as `GET /api/approvals` lists it. */
+export type DecidedBatch = PendingBatch & { decidedAt: number; decisions: ApprovalDecision[] };
+
+/** What the user decided since `since` (ms), the latest first: the receipts behind a reload. */
+export async function listDecided(since: number): Promise<DecidedBatch[]> {
+  const res = await fetch(`/api/approvals?status=decided&since=${since}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`approvals: ${res.status}`);
+  return ((await res.json()) as { batches: DecidedBatch[] }).batches;
+}
+
 /**
  * How a submit ended. `done` carries what the run did with it: `waiting` and `queued` mean the
  * call runs later, which the receipt says, so it never reads as finished.

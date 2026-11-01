@@ -1343,6 +1343,39 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               );
           },
           /**
+           * Every item the user decided at or after `since` (for the receipts that outlive a
+           * reload), each with its conversation's title. At most `limit` batches, never part of
+           * one: the latest decided first, a batch's items together in their stored order. What
+           * happened after the decision (a run, a re-check's refusal) doesn't change what the
+           * user answered: the row's `scope` is set exactly when they approved. An expiry also
+           * stamps `decided_at`, so an expired row counts only if they had approved it first.
+           */
+          decided: (since: number, limit = 100) => {
+            const mine = and(
+              eq(approvals.userId, userId),
+              gte(approvals.decidedAt, since),
+              or(sql`${approvals.status} <> 'expired'`, isNotNull(approvals.scope)),
+            );
+            const batch = db
+              .select({
+                batchId: approvals.batchId,
+                at: sql<number>`max(${approvals.decidedAt})`.as("at"),
+              })
+              .from(approvals)
+              .where(mine)
+              .groupBy(approvals.batchId)
+              .orderBy(sql`at desc`, approvals.batchId)
+              .limit(limit)
+              .as("batch");
+            return db
+              .select({ row: approvals, conversationTitle: conversations.title })
+              .from(approvals)
+              .innerJoin(batch, eq(batch.batchId, approvals.batchId))
+              .innerJoin(conversations, eq(conversations.id, approvals.conversationId))
+              .where(mine)
+              .orderBy(sql`${batch.at} desc`, approvals.batchId, approvals.position);
+          },
+          /**
            * Starts a step-up ceremony over the batch's pending items (W3): the nonce, the digest
            * it was issued for, its expiry and the session that asked, on every pending row,
            * replacing any earlier ceremony. `false` unless exactly `pending` items are pending
