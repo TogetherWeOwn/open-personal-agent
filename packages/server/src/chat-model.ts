@@ -11,7 +11,6 @@ import {
   credentialBinding,
   usesOpenAIResponses,
   WORKERS_AI_PROVIDER_ID,
-  type WorkersAIBinding,
 } from "@opa/providers";
 import { decrypt, type UserScope as VaultScope } from "@opa/vault";
 import type { Env } from "./env";
@@ -108,7 +107,7 @@ export async function resolveChatModel(
   const { row, model } = picked;
   if (row.kind === "workers-ai") {
     if (!env.AI) return { error: "ai_unavailable" };
-    const provider = createWorkersAIProvider(env.AI as unknown as WorkersAIBinding);
+    const provider = createWorkersAIProvider(env.AI);
     return { provider, model, apiKey: null };
   }
   if (!env.VAULT) return { error: "vault_unavailable" };

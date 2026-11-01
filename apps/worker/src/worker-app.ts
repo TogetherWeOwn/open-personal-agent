@@ -2,11 +2,11 @@
 // The Worker's app: the shared app plus the chat socket to the user's assistant (ADR 0002), named
 // from the session only; the SDK's `/agents/*` router isn't mounted. apps/node never loads it.
 import { createRepository } from "@opa/db/repository";
+import { createApp } from "@opa/server/app";
+import { sameOrigin } from "@opa/server/security";
 import { Hono } from "hono";
-import { createApp } from "./app";
 import { SESSION_HEADER } from "./assistant";
 import type { AppEnv } from "./env";
-import { sameOrigin } from "./security";
 
 const workerRoutes = new Hono<AppEnv>();
 

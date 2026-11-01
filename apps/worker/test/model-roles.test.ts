@@ -5,8 +5,8 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { STARTER_MODEL } from "@opa/providers";
+import { pickModel, resolveChatModel } from "@opa/server/chat-model";
 import { beforeAll, describe, expect, it } from "vitest";
-import { pickModel, resolveChatModel } from "../src/chat-model";
 import type { Env } from "../src/env";
 
 const env = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };

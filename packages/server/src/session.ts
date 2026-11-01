@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Passkey login, sessions and the route-auth guard (ADR 0010 D2). The guard denies by default:
 // a route is reachable without a session only if it is on `PUBLIC_ROUTES`, so a new route that
-// forgets to declare itself stays closed. test/routes.test.ts enumerates the route table.
+// forgets to declare itself stays closed. apps/worker/test/routes.test.ts enumerates the route
+// table.
 import { SESSION_IDLE_MS as IDLE_MS, systemStore } from "@opa/db/system";
 import {
   type AuthenticationResponseJSON,
