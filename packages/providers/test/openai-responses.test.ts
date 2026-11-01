@@ -123,12 +123,13 @@ describe("openai-responses fixture replays", () => {
     expect(events.some((e) => e.startsWith("tool_call"))).toBe(false);
   });
 
-  it("rejects a call with no id or name", async () => {
-    const nameless = event("response.output_item.done", {
-      item: { type: "function_call", call_id: "call_1", arguments: "{}" },
-    });
+  it("rejects the whole reply, emitting no call, when any call has no id or name", async () => {
+    const item = (fields: object) =>
+      event("response.output_item.done", { item: { type: "function_call", ...fields } });
+    const valid = item({ call_id: "call_1", name: "send", arguments: "{}" });
+    const nameless = item({ call_id: "call_2", arguments: "{}" });
     const done = event("response.completed", { response: { status: "completed" } });
-    const { p } = provider(sse(nameless + done));
+    const { p } = provider(sse(valid + nameless + done));
     expect(await replay(p.stream({ model: MODEL, messages: ask, tools: [weather] }))).toEqual([
       "error bad_response: The provider sent a tool call with no id or name",
     ]);
