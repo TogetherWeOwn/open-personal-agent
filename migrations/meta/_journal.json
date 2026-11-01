@@ -75,8 +75,15 @@
     {
       "idx": 10,
       "version": "6",
-      "when": 1793530831327,
-      "tag": "0010_memory_settings",
+      "when": 1793529182768,
+      "tag": "0010_task_journal",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1793533303933,
+      "tag": "0011_memory_settings",
       "breakpoints": true
     }
   ]

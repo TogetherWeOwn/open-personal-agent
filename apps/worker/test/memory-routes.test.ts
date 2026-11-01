@@ -50,6 +50,12 @@ describe("memory notes", () => {
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ error: "invalid_text" });
     }
+    const typo = await browser.req("/api/memory", {
+      body: { text: "Reply in French", kind: "instructionn" },
+    });
+    expect(typo.status).toBe(400);
+    expect(await typo.json()).toEqual({ error: "invalid_kind" });
+    expect((await list(browser)).map((m) => m.id)).toEqual([note.id]);
   });
 
   it("supersedes a note on edit and keeps the old text as a version", async () => {
