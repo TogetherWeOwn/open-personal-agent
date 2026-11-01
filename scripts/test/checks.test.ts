@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { findDependencyViolations, findPortViolations } from "../check-boundaries.mjs";
 import { findViolations } from "../check-builder-independence.mjs";
 import { checkBudget, findLeakedNames, serverOnlyNames } from "../check-bundles.mjs";
-import { checkPnpmPolicy, checkRenovatePolicy, checkWorkflow } from "../check-supply-chain.mjs";
+import {
+  checkPnpmPolicy,
+  checkRenovatePolicy,
+  checkRuntimeDependencies,
+  checkWorkflow,
+  runtimeClosure,
+} from "../check-supply-chain.mjs";
 import { disallowed, flatten } from "../generate-notices.mjs";
 
 // Denylisted words are assembled at runtime so this file passes its own scan.
@@ -41,6 +47,28 @@ describe("boundaries", () => {
       findPortViolations(file("packages/db/src/a.ts", 'x;\nawait import(\n  "node:fs"\n)')),
     ).toEqual(['packages/db/src/a.ts:2: imports "node:fs" (ports rule, ADR 0011 #4)']);
     expect(ports("packages/db/src/a.ts", 'import { z } from "zod";')).toBe(0);
+  });
+
+  it("applies to the Worker modules @opa/worker exports to apps/node", () => {
+    const worker = (app: string) => [
+      { path: "apps/worker/package.json", text: '{ "exports": { "./app": "./src/app.ts" } }' },
+      { path: "apps/worker/src/app.ts", text: app },
+      {
+        path: "apps/worker/src/chat/index.tsx",
+        text: 'import { DurableObject } from "cloudflare:workers";',
+      },
+      { path: "apps/worker/src/index.ts", text: 'import { env } from "cloudflare:workers";' },
+    ];
+    expect(findPortViolations(worker('import { chat } from "./chat";'))).toEqual([
+      'apps/worker/src/chat/index.tsx:1: imports "cloudflare:workers" (ports rule, ADR 0011 #4)',
+    ]);
+    expect(findPortViolations(worker('import type { Chat } from "./chat";'))).toEqual([]);
+    // Types from a runtime module are erased too; a runtime import after them keeps its line.
+    const typed =
+      'import type {\n  DurableObjectState,\n} from "cloudflare:workers";\nimport "node:fs";';
+    expect(findPortViolations(worker(typed))).toEqual([
+      'apps/worker/src/app.ts:4: imports "node:fs" (ports rule, ADR 0011 #4)',
+    ]);
   });
 
   it("rejects tooling in dependencies but allows it in devDependencies", () => {
@@ -91,6 +119,57 @@ describe("supply chain", () => {
     expect(
       checkWorkflow("ci.yml", `on: [push, ${trigger}]\npermissions:\n  contents: read\n`),
     ).toEqual(["ci.yml: uses pull_request_target"]);
+  });
+
+  it("lists the Worker's runtime closure and flags unreviewed packages", () => {
+    const lock = `
+importers:
+  apps/worker:
+    dependencies:
+      '@opa/db': { specifier: 'workspace:*', version: link:../../packages/db }
+      hono: { specifier: 4.0.0, version: 4.0.0 }
+    devDependencies:
+      vitest: { specifier: 1.0.0, version: 1.0.0 }
+  packages/db:
+    dependencies:
+      drizzle-orm: { specifier: 1.0.0, version: 1.0.0(@cloudflare/workers-types@5.0.0) }
+snapshots:
+  hono@4.0.0: {}
+  vitest@1.0.0: { dependencies: { evil: 1.0.0 } }
+  drizzle-orm@1.0.0(@cloudflare/workers-types@5.0.0):
+    dependencies: { '@cloudflare/workers-types': 5.0.0, left-pad: 2.0.0 }
+    optionalDependencies: { strip: string-width@4.0.0 }
+`;
+    expect(runtimeClosure(lock)).toEqual([
+      "@cloudflare/workers-types",
+      "drizzle-orm",
+      "hono",
+      "left-pad",
+      "string-width",
+    ]);
+    expect(checkRuntimeDependencies(lock)).toHaveLength(2);
+    expect(checkRuntimeDependencies(lock)[1]).toContain('"string-width"');
+  });
+
+  it("follows importer optional dependencies and aliases", () => {
+    const lock = `
+importers:
+  apps/worker:
+    dependencies:
+      hono: { specifier: npm:evil@1.0.0, version: evil@1.0.0 }
+    optionalDependencies:
+      extra: { specifier: 1.0.0, version: 1.0.0 }
+snapshots:
+  evil@1.0.0: {}
+  extra@1.0.0: { dependencies: { deep: 2.0.0 } }
+`;
+    expect(runtimeClosure(lock)).toEqual(["deep", "evil", "extra"]);
+  });
+
+  it("fails when the lockfile is missing", () => {
+    expect(checkRuntimeDependencies(null)).toEqual([
+      "pnpm-lock.yaml: missing, so the Worker's runtime dependencies can't be checked",
+    ]);
   });
 });
 

@@ -12,10 +12,20 @@ const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
 
 // The setup link carries the token in the fragment. Take it out of the address bar and the
-// history entry before anything renders.
-const setupToken = new URLSearchParams(window.location.hash.slice(1)).get("token") ?? "";
+// history entry before anything renders. The token is base64, so a literal `+` stays a `+`
+// (URLSearchParams would read it as a space).
+const setupToken = fragmentToken(window.location.hash);
 if (window.location.hash) {
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
+}
+
+function fragmentToken(hash: string): string {
+  const raw = /(?:^#|&)token=([^&]*)/.exec(hash)?.[1] ?? "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 // Mocked until the Assistant DO transport (M2-13) lands.
