@@ -4,6 +4,7 @@ import { log } from "@opa/log";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { checkHealth, setupRequired } from "./health";
+import { settings } from "./model-settings";
 import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
@@ -37,6 +38,8 @@ app.use("/api/secrets/*", async (c, next) => {
   c.header("Cache-Control", "no-store");
   return c.json({ error: "vault_unavailable" }, 503);
 });
+
+app.route("/api/settings", settings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 app.get("/setup", async (c) => {
