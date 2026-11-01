@@ -7,9 +7,11 @@ type FakeSocket = ReturnType<NonNullable<SocketOptions["openSocket"]>> & { sent:
 
 function setup(responses: Record<string, Response> = {}) {
   const sockets: FakeSocket[] = [];
+  const urls: string[] = [];
   const transport = createSocketTransport({
     url: "ws://test/api/chat",
-    openSocket: () => {
+    openSocket: (url) => {
+      urls.push(url);
       const ws: FakeSocket = {
         readyState: 0,
         sent: [],
@@ -36,7 +38,7 @@ function setup(responses: Record<string, Response> = {}) {
     ws.onopen?.();
     return ws;
   };
-  return { transport, sockets, events, onOpen, disconnect, open };
+  return { transport, sockets, urls, events, onOpen, disconnect, open };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -93,7 +95,7 @@ describe("the socket transport", () => {
 
   it("resumes the running turn on a reconnect, and stops once it has settled (M3-03 AC11)", () => {
     vi.useFakeTimers();
-    const { sockets, open } = setup();
+    const { sockets, urls, open } = setup();
     const frame = (seq: number, type: string) =>
       JSON.stringify({ v: 1, seq, sessionId: "c1", turnId: "t1", type, payload: {} });
     const first = open();
@@ -111,6 +113,12 @@ describe("the socket transport", () => {
     vi.advanceTimersByTime(500);
     expect(open().sent).toEqual([]);
     expect(sockets).toHaveLength(3);
+    // Only the reconnect that resumes asks the server to hold live frames until its replay.
+    expect(urls).toEqual([
+      "ws://test/api/chat",
+      "ws://test/api/chat?resume=1",
+      "ws://test/api/chat",
+    ]);
   });
 
   it("reads the conversation list and a conversation's messages; a 404 is null", async () => {

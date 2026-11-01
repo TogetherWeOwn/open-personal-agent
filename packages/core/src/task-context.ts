@@ -80,9 +80,10 @@ export interface TaskBudget {
   end(): Promise<number>;
   /**
    * Counts a tool call against the user's 60 a minute (COST-2); `false`: the tool must not run.
-   * `key` is the call's idempotency key, so a retried step isn't counted twice.
+   * `key` is the call's idempotency key, so a retried step isn't counted twice. An `approved`
+   * call is counted but always allowed: the user's approval gates it.
    */
-  allowToolCall(key: string): Promise<boolean>;
+  allowToolCall(key: string, approved?: boolean): Promise<boolean>;
 }
 
 /**

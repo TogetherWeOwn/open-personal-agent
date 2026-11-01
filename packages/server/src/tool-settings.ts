@@ -6,7 +6,7 @@ import { createRepository, isId } from "@opa/db/repository";
 import { loosens, type ToolManifest, type ToolOverride } from "@opa/policy";
 import { type Context, Hono } from "hono";
 import type { AppEnv } from "./env";
-import { hasStepUp } from "./session";
+import { hasAccountStepUp } from "./session";
 import { builtinTools } from "./tools";
 
 type Ctx = Context<AppEnv>;
@@ -52,7 +52,7 @@ toolSettings.put("/tools/:name", async (c) => {
     return c.json({ error: "floor_irreversible" }, 400);
   }
   if (from === to) return c.json(view(manifest, to));
-  if (loosens(manifest.riskClass, from, to) && !hasStepUp(c.var.session)) {
+  if (loosens(manifest.riskClass, from, to) && !hasAccountStepUp(c.var.session)) {
     await policy.setOverride(change, "denied");
     return c.json({ error: "step_up_required" }, 403);
   }

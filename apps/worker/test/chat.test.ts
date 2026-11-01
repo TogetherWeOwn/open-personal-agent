@@ -5,6 +5,8 @@ import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
+import type { LoopTool } from "@opa/harness-builtin";
+import { type RiskClass, ToolRegistry } from "@opa/policy";
 import { STARTER_MODEL } from "@opa/providers";
 import { resolveChatModel } from "@opa/server/chat-model";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,12 +42,92 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
   };
 }
 
+/** The approvals route's write, without its checks: one item decided in D1 (M3-07 AC9). */
+const decideInD1 = (batchId: string, approvalId: string, status: "approved" | "denied") =>
+  db
+    .prepare(
+      "UPDATE approvals SET status = ?, scope = 'once', decided_at = ? WHERE batch_id = ? AND approval_id = ?",
+    )
+    .bind(status, Date.now(), batchId, approvalId)
+    .run();
+
 const assistantOf = (userId: string) => env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${userId}`));
 function useModel(userId: string, provider: ModelProvider) {
   return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
     instance.resolveModel = async () => ({ provider, model: "test-model", apiKey: null });
   });
 }
+
+type Reply = { text?: string; calls?: [name: string, args: unknown][] };
+
+/** A model that answers each call with the next reply (the last one repeats), for loop tests. */
+function replying(replies: (Reply | (() => Reply))[]): ModelProvider {
+  let ids = 0;
+  let at = 0;
+  return {
+    id: "scripted",
+    listModels: async () => [],
+    capabilities: () => ({ tools: true, usageInStream: true }),
+    async *stream(): AsyncGenerator<ModelEvent> {
+      const next = replies[Math.min(at++, replies.length - 1)] ?? { text: "done" };
+      const reply = typeof next === "function" ? next() : next;
+      for (const word of (reply.text ?? "").split(/(?<= )/).filter(Boolean)) {
+        yield { type: "text.delta", text: word };
+      }
+      for (const [name, args] of reply.calls ?? []) {
+        yield {
+          type: "tool_call",
+          toolCall: { id: `call_${++ids}`, name, arguments: JSON.stringify(args) },
+        };
+      }
+      yield { type: "usage", usage: USAGE };
+      yield { type: "done", finishReason: reply.calls ? "tool_calls" : "stop" };
+    },
+  };
+}
+
+/** A loop tool of the given risk class, recording the inputs it ran with. */
+function loopTool(name: string, riskClass: RiskClass) {
+  const inputs: Record<string, unknown>[] = [];
+  const tool: LoopTool = {
+    manifest: {
+      name,
+      description: `The ${name} tool.`,
+      inputSchema: {
+        type: "object",
+        properties: { q: { type: "string", minLength: 1 } },
+        required: ["q"],
+        additionalProperties: false,
+      },
+      riskClass,
+      destinations: [],
+      scopes: [],
+    },
+    execute: async (input) => {
+      inputs.push(input);
+      return { ok: true, content: `${name} ok`, context: { kind: "system" } };
+    },
+  };
+  return { tool, inputs };
+}
+
+function useTools(userId: string, tools: LoopTool[]) {
+  return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
+    instance.resolveTools = () => {
+      const registry = new ToolRegistry<LoopTool>();
+      for (const t of tools) registry.register(t);
+      return { tools: registry, policy: () => ({}) };
+    };
+  });
+}
+
+/** The conversation's stored messages' contents and statuses, oldest first. */
+const stored = async (br: Browser, id: string) =>
+  (
+    await (
+      await br.req(`/api/conversations/${id}/messages`)
+    ).json<{ messages: { content: string; status: string }[] }>()
+  ).messages;
 
 /**
  * The real resolver, with the vault and AI binding the test runtime lacks: the DO's own env has no
@@ -100,11 +182,11 @@ describe("chat transport", () => {
     a.send?.("conv-1", "Hi!");
     await a.until?.("turn.completed");
     await b.until?.("turn.completed");
-    const types = ["turn.started", "message.delta", "message.delta", "usage.updated"];
-    types.push("message.completed", "turn.completed");
+    const types = ["turn.started", "step.started", "message.delta", "message.delta"];
+    types.push("usage.updated", "message.completed", "step.completed", "turn.completed");
     expect(a.events.map((e) => e.type)).toEqual(types);
     expect(b.events).toEqual(a.events);
-    expect(a.events.map((e) => [e.v, e.seq])).toEqual([1, 2, 3, 4, 5, 6].map((n) => [1, n]));
+    expect(a.events.map((e) => [e.v, e.seq])).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map((n) => [1, n]));
     expect(seen).toEqual([[{ role: "user", content: "Hi!" }]]);
 
     const res = await browser.req("/api/conversations/conv-1/messages");
@@ -279,8 +361,15 @@ describe("chat transport", () => {
   it("settles a turn evicted before its first write: no messages, no ledger row", async () => {
     const { owner } = await claim();
     const turn = { conversationId: "c5", turnId: "t", replyId: "r", providerId: "p", model: "m" };
-    const ctx = { name: "chat-turn", snapshot: { ...turn, reply: "", usage: null, called: false } };
-    const day = Date.now() - (Date.now() % 86_400_000);
+    const checkpoint = { reply: "", wrote: false, holds: ["t"], callStarted: false };
+    const ctx = {
+      name: "chat-turn",
+      snapshot: { ...turn, ...checkpoint, callRecorded: false, callUsage: null },
+    };
+    // One clock read: two `Date.now()` calls in different milliseconds make a day 1ms
+    // before midnight, and the recovery recomputes the true boundary.
+    const now = Date.now();
+    const day = now - (now % 86_400_000);
     const spend = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
       state.storage.kv.put("spend", {
         day,
@@ -293,6 +382,37 @@ describe("chat transport", () => {
     expect([await count("messages", "1"), await count("usage", "1")]).toEqual([0, 0]);
     // It never called the model, so its reservation is released without a charge.
     expect(spend).toEqual({ day, spentMicroUsd: 0, held: {} });
+  });
+
+  it("writes a call's ledger row once when an eviction hid that it was written", async () => {
+    const { owner } = await claim();
+    const turn = { conversationId: "c6", turnId: "t6", replyId: "r6", providerId: "p", model: "m" };
+    const usage = { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0 };
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("c6", "Hi", undefined);
+    await user.chat.startTurn("c6", "Hi", "r6", []);
+    // The row landed; the process died before the checkpoint said so.
+    await user.usage.record({
+      id: "call-6",
+      providerId: "p",
+      model: "m",
+      usage,
+      conversationId: "c6",
+    });
+    const snapshot = {
+      ...turn,
+      reply: "Hel",
+      wrote: true,
+      holds: [],
+      callStarted: true,
+      callRecorded: false,
+      callUsage: usage,
+      callId: "call-6",
+    };
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({ name: "chat-turn", snapshot } as never),
+    );
+    expect(await count("usage", "1")).toBe(1);
   });
 
   it("names the DO from the session, never from the request", async () => {
@@ -321,7 +441,7 @@ describe("chat transport", () => {
     live.send?.("conv-4", "Still there?");
     await live.until?.("message.delta");
     live.ws?.send(JSON.stringify({ type: "turn.cancel" }));
-    await live.until?.("turn.interrupted");
+    await live.until?.("turn.cancelled");
   });
 
   it("sends a turn to no tab whose session has ended", async () => {
@@ -374,6 +494,77 @@ describe("chat transport", () => {
     resume("conv-7", turnId, -1); // not a valid frame either
     await new Promise((r) => setTimeout(r, 500)); // settled and unknown turns answer nothing
     expect(b.events.length).toBe(before);
+  });
+
+  it("holds live frames from a resuming tab until its replay is sent, so they stay in order", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const a = await openTab(browser);
+    // A tab that reconnects with `?resume` and hasn't sent its resume yet: a live frame now
+    // would reach it ahead of the ones it missed.
+    const b = await openTab(browser, "/api/chat?resume=1");
+    a.send?.("conv-9", "Tell me a story");
+    await a.until?.("message.delta");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(b.events).toEqual([]);
+    const turnId = a.events[0]?.turnId;
+    b.ws?.send(JSON.stringify({ type: "resume", conversationId: "conv-9", turnId, afterSeq: 0 }));
+    await vi.waitFor(() => expect(b.events).toEqual(a.events), SOCKET_WAIT);
+    // Its replay sent, it is live again.
+    release();
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+    const seqs = b.events.map((e) => e.seq);
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+  });
+
+  it("sends a resuming tab the end of a turn that settled before its replay", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const a = await openTab(browser);
+    const b = await openTab(browser, "/api/chat?resume=1");
+    a.send?.("conv-9b", "Hi!");
+    await a.until?.("turn.completed");
+    expect(b.events).toEqual([]);
+    // The turn settled and left the log: the replay is empty, the held frames are not.
+    const turnId = a.events[0]?.turnId;
+    b.ws?.send(JSON.stringify({ type: "resume", conversationId: "conv-9b", turnId, afterSeq: 0 }));
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+  });
+
+  it("sends live frames again to a tab that said resume but sent something else", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const b = await openTab(browser, "/api/chat?resume=1");
+    b.send?.("conv-10", "Hi!");
+    await b.until?.("turn.completed");
+  });
+
+  it("keeps a turn's frames for replay when D1 can't settle it", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    // D1 refuses the reply's final status, both at the turn's end and in the fallback.
+    await db.exec(
+      "CREATE TRIGGER no_settle BEFORE UPDATE OF status ON messages WHEN NEW.status IN ('complete', 'error') BEGIN SELECT RAISE(ABORT, 'D1 is down'); END;",
+    );
+    try {
+      const a = await openTab(browser);
+      a.send?.("conv-11", "Hi!");
+      await a.until?.("turn.failed");
+      const turnId = a.events[0]?.turnId;
+      // A tab that missed it all still learns how the turn ended, from the log.
+      const b = await openTab(browser, "/api/chat?resume=1");
+      b.ws?.send(
+        JSON.stringify({ type: "resume", conversationId: "conv-11", turnId, afterSeq: 0 }),
+      );
+      await b.until?.("turn.failed");
+      expect(b.events.map((e) => e.seq)).toEqual(a.events.map((e) => e.seq));
+    } finally {
+      await db.exec("DROP TRIGGER no_settle;");
+    }
   });
 
   it("answers no resume from a session that has ended", async () => {
@@ -443,6 +634,229 @@ describe("chat transport", () => {
   });
 });
 
+describe("the DO host for the builtin loop (M3-03c)", () => {
+  it("runs a tool turn: the read runs, both calls reach the ledger, segments join", async () => {
+    const { browser, owner } = await claim();
+    const lookup = loopTool("lookup", "read");
+    await useModel(
+      owner,
+      replying([{ text: "Checking.", calls: [["lookup", { q: "x" }]] }, { text: "All done" }]),
+    );
+    await useTools(owner, [lookup.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-tool", "Look it up");
+    await tab.until?.("turn.completed");
+    const types = tab.events.map((e) => e.type);
+    expect(types.indexOf("tool.called")).toBeLessThan(types.indexOf("tool.result"));
+    expect(types.indexOf("tool.result")).toBeLessThan(types.indexOf("turn.completed"));
+    expect(lookup.inputs).toEqual([{ q: "x" }]);
+    expect(await count("usage", "conversation_id = 'conv-tool'")).toBe(2); // one row per call
+    expect(await stored(browser, "conv-tool")).toMatchObject([
+      { content: "Look it up", status: "complete" },
+      { content: "Checking.\n\nAll done", status: "complete" },
+    ]);
+  });
+
+  it("stops at an approval in D1, survives an eviction, and resumes on the decision", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const provider = replying([{ calls: [["send", { q: "hi" }]] }, { text: "Sent" }]);
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-appr", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    if (!asked) throw new Error("no approval.requested");
+    const { batchId, items } = asked.payload;
+    const approvalId = items[0]?.approvalId;
+    if (!approvalId) throw new Error("no approval item");
+    const { turnId } = asked;
+    expect(send.inputs).toEqual([]); // gated: it has not run
+    const saved = "SELECT status FROM turn_states WHERE turn_id = ?";
+    expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
+
+    // The DO's memory goes away; the stopped turn is in D1, not in it (AC5).
+    await runInDurableObject(assistantOf(owner), (_, state) => state.abort()).catch(() => {});
+    expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
+    const back = await openTab(browser); // wakes the DO
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+
+    // The batch is in D1 too, pending and bound (M3-07 AC9).
+    const row = "SELECT status, binding_hash FROM approvals WHERE batch_id = ? AND approval_id = ?";
+    expect(await db.prepare(row).bind(batchId, approvalId).first()).toMatchObject({
+      status: "pending",
+      binding_hash: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+
+    // An unknown batch, or one still undecided, changes nothing and runs nothing.
+    const resume = (id: string) =>
+      runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(id));
+    expect(await resume("batch_nope")).toBe("gone");
+    expect(await resume(batchId)).toBe("waiting");
+    expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
+    expect(send.inputs).toEqual([]);
+
+    await decideInD1(batchId, approvalId, "approved");
+    expect(await resume(batchId)).toBe("resumed");
+    await back.until?.("turn.completed");
+    expect(back.events.map((e) => e.type)).toContain("approval.resolved");
+    expect(send.inputs).toEqual([{ q: "hi" }]);
+    // The claim and the end of the call are on the row and in the audit log (AC5, AC12).
+    expect(await db.prepare(row).bind(batchId, approvalId).first("status")).toBe("executed");
+    expect(
+      await count(
+        "audit_log",
+        `action = 'approval.execute' AND target_id = '${batchId}/${approvalId}'`,
+      ),
+    ).toBe(1);
+    expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(0); // settling removed it
+    expect(await stored(browser, "conv-appr")).toMatchObject([
+      { content: "Send it", status: "complete" },
+      { content: "Sent", status: "complete" },
+    ]);
+  });
+
+  it("runs one loop for two concurrent approves: one tool run, one more ledger row", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const provider = replying([{ calls: [["send", { q: "hi" }]] }, { text: "Sent" }]);
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-race", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    if (!asked) throw new Error("no approval.requested");
+    const { batchId, items } = asked.payload;
+    const approvalId = items[0]?.approvalId;
+    if (!approvalId) throw new Error("no approval item");
+    await decideInD1(batchId, approvalId, "approved");
+    // A double-clicked Approve, two tabs, a retried request: both calls start without
+    // awaiting between them, so both would load the same `awaiting_approval` row if the claim
+    // weren't held before the first await (S1). The second waits for the first turn to end,
+    // then finds nothing left to resume.
+    const [first, second] = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      Promise.all([i.resumeBatch(batchId), i.resumeBatch(batchId)]),
+    );
+    expect([first, second].sort()).toEqual(["queued", "resumed"]);
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([{ q: "hi" }]); // the approved tool ran once
+    expect(await count("usage", "conversation_id = 'conv-race'")).toBe(2); // one row per call
+  });
+
+  it("rejects a chat.send while a resume is still starting", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const provider = replying([{ calls: [["send", { q: "hi" }]] }, { text: "Sent" }]);
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-busy", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    if (!asked) throw new Error("no approval.requested");
+    const { batchId, items } = asked.payload;
+    const approvalId = items[0]?.approvalId;
+    if (!approvalId) throw new Error("no approval item");
+    await decideInD1(batchId, approvalId, "approved");
+    // The resume parks in its model pick; the claim is already held (S1), so a send arriving
+    // before the drive starts is rejected instead of starting a second loop. The releaser rides
+    // on the instance because only the DO can reach the gate.
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      (i as unknown as { releaseResume: () => void }).releaseResume = release;
+      i.resolveModel = (async () => {
+        await gate;
+        return { provider, model: "test-model", apiKey: null };
+      }) as Assistant["resolveModel"];
+      void i.resumeBatch(batchId);
+    });
+    tab.send?.("conv-busy", "Are you still there?");
+    await tab.until?.("turn.failed");
+    expect(tab.events.find((e) => e.type === "turn.failed")).toMatchObject({
+      payload: { message: "Another reply is still being written." },
+    });
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      (i as unknown as { releaseResume: () => void }).releaseResume(),
+    );
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([{ q: "hi" }]);
+    expect(await count("usage", "conversation_id = 'conv-busy'")).toBe(2);
+  });
+
+  it("stops at the call limit in D1 and a Continue runs it to the end", async () => {
+    const { browser, owner } = await claim();
+    const lookup = loopTool("lookup", "read");
+    let done = false;
+    const next = (): Reply => (done ? { text: "Finished" } : { calls: [["lookup", { q: "x" }]] });
+    await useModel(owner, replying([next]));
+    await useTools(owner, [lookup.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-limit", "Keep looking");
+    await tab.until?.("limit.reached");
+    const reached = tab.events.find((e) => e.type === "limit.reached");
+    expect(reached).toMatchObject({ payload: { kind: "calls" } });
+    const turnId = reached?.turnId;
+    const status = "SELECT status FROM turn_states WHERE turn_id = ?";
+    expect(await db.prepare(status).bind(turnId).first("status")).toBe("limit_reached");
+    // The counts stopped it, so a resume without a fresh allowance would be wrong here:
+    // resumeAfterLimit is the Continue that grants one (the same turn, counts reset).
+    done = true;
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeAfterLimit(turnId as string),
+    );
+    expect(resumed).toBe(true);
+    await tab.until?.("turn.completed");
+    expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(0);
+    expect(await stored(browser, "conv-limit")).toMatchObject([
+      { content: "Keep looking", status: "complete" },
+      { content: "Finished", status: "complete" },
+    ]);
+  });
+
+  it("cancels as turn.cancelled, keeping the partial reply and no saved state", async () => {
+    const { browser, owner } = await claim();
+    // One delta, then nothing until the abort: `scripted` yields a second delta after its gate
+    // releases, which races the cancel, so this turn's model ends its stream on the abort.
+    const provider: ModelProvider = {
+      id: "scripted",
+      listModels: async () => [],
+      capabilities: () => ({ tools: false, usageInStream: true }),
+      async *stream(request): AsyncGenerator<ModelEvent> {
+        yield { type: "text.delta", text: "Hello" };
+        await new Promise<void>((r) => request.signal?.addEventListener("abort", () => r()));
+        yield { type: "usage", usage: USAGE };
+        yield { type: "done", finishReason: "stop" };
+      },
+    };
+    await useModel(owner, provider);
+    const tab = await openTab(browser);
+    tab.send?.("conv-cancel", "Tell me a story");
+    await tab.until?.("message.delta");
+    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await tab.until?.("turn.cancelled");
+    expect(await stored(browser, "conv-cancel")).toMatchObject([
+      { content: "Tell me a story", status: "complete" },
+      { content: "Hello", status: "interrupted" },
+    ]);
+    expect(await count("turn_states", "1")).toBe(0);
+  });
+});
+
 describe("turn and spend limits (M2-22)", () => {
   /** gpt-4.1 at $2 in and $8 out per million tokens, recording each request's `max_tokens`. */
   function priced(userId: string, maxTokens: (number | undefined)[]) {
@@ -497,6 +911,30 @@ describe("turn and spend limits (M2-22)", () => {
     expect(await count("conversations")).toBe(0);
   });
 
+  it("gives back the first call's hold when Stop lands before the model is called", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      const pick = instance.resolveModel;
+      instance.resolveModel = async (...args) => {
+        await gate; // the Stop lands while the turn is still starting
+        return pick(...args);
+      };
+    });
+    const tab = await openTab(browser);
+    tab.send?.("conv-stop", "Hi!");
+    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await new Promise((r) => setTimeout(r, 200));
+    release();
+    await tab.until?.("turn.cancelled");
+    expect(maxTokens).toEqual([]);
+    const spend = await storage(owner, (kv) => kv.get<{ held: object }>("spend"));
+    expect(spend?.held).toEqual({});
+  });
+
   it("caps max_tokens from the budget left and charges the call's cost", async () => {
     const { browser, owner } = await claim();
     const maxTokens: (number | undefined)[] = [];
@@ -512,5 +950,500 @@ describe("turn and spend limits (M2-22)", () => {
       spentMicroUsd: DAILY_SPEND_CAP_MICRO_USD - (4 + 1000 * 8) + 12 * 2 + 3 * 8,
       held: {},
     });
+  });
+});
+
+describe("approvals in the DO host (M3-07a)", () => {
+  const asked = (events: HarnessEvent[]) => {
+    const e = events.find(
+      (x): x is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        x.type === "approval.requested",
+    );
+    if (!e) throw new Error("no approval.requested");
+    return { batchId: e.payload.batchId, approvalId: e.payload.items[0]?.approvalId ?? "" };
+  };
+  const completed = (events: HarnessEvent[]) =>
+    events.filter((e) => e.type === "turn.completed").length;
+
+  it("resumes on the conversation's own model, with its files still in the context", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const seen: ModelMessage[][] = [];
+    const picks: unknown[] = [];
+    const scripted = replying([{ calls: [["send", { q: "a" }]] }, { text: "Sent" }]);
+    const provider: ModelProvider = {
+      ...scripted,
+      capabilities: () => ({ tools: true, usageInStream: true }),
+      async *stream(request) {
+        seen.push(request.messages);
+        yield* scripted.stream(request);
+      },
+    };
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveModel = async (_env, _scope, _caller, pick) => {
+        picks.push(pick);
+        return { provider, model: "test-model", apiKey: null };
+      };
+    });
+    await useTools(owner, [send.tool]);
+    const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    const uploaded = await workerApp.request(
+      `${ORIGIN}/api/attachments`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          origin: ORIGIN,
+          "content-type": "text/plain",
+          "x-file-name": "notes.txt",
+        },
+        body: new TextEncoder().encode("the file's words"),
+      } as never,
+      browser.bindings,
+    );
+    const { id } = await uploaded.json<{ id: string }>();
+    const tab = await openTab(browser);
+    tab.ws?.send(
+      JSON.stringify({
+        type: "chat.send",
+        conversationId: "conv-files",
+        text: "",
+        attachmentIds: [id],
+      }),
+    );
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    await decideInD1(batchId, approvalId, "approved");
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(batchId),
+    );
+    expect(resumed).toBe("resumed");
+    await vi.waitFor(() => expect(completed(tab.events)).toBe(1), SOCKET_WAIT);
+    expect(picks.at(-1)).toEqual({ conversationId: "conv-files" });
+    // The file-only message and its file reach the resumed call as they reached the first.
+    const [first, again] = seen;
+    expect(first?.[0]).toMatchObject({ role: "user", attachments: [{ name: "notes.txt" }] });
+    expect(again?.[0]).toEqual(first?.[0]);
+  });
+
+  it("interrupts a resumed turn evicted mid-run, and drops its stale stop", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    const turn = {
+      conversationId: "conv-evict",
+      turnId: started?.turnId ?? "",
+      replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+      providerId: "scripted",
+      model: "test-model",
+    };
+    const checkpoint = {
+      reply: "Sending.",
+      wrote: true,
+      holds: [],
+      callStarted: false,
+      callRecorded: false,
+      callUsage: null,
+    };
+    expect(await count("turn_states", "1")).toBe(1);
+    // The resumed run's fiber dies with the old stop still in D1: that row is not a clean stop.
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: { ...turn, ...checkpoint, resumed: true },
+      } as never),
+    );
+    await tab.until?.("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict")).at(-1)?.status).toBe("interrupted");
+  });
+
+  it("keeps a resumed turn's new stop when it was evicted while saving it", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict2", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict2",
+          turnId: started?.turnId ?? "",
+          replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+          // It began saving before the row's save stamped it: the row is the new stop.
+          stopping: Date.now() - 60_000,
+        },
+      } as never),
+    );
+    expect(await count("turn_states", "1")).toBe(1);
+    expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+  });
+
+  it("interrupts a resumed turn evicted before its new stop saved, and drops the old one", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict3", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict3",
+          turnId: started?.turnId ?? "",
+          replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+          // The new stop's save never landed: the row is older than the attempt.
+          stopping: Date.now() + 60_000,
+        },
+      } as never),
+    );
+    await tab.until?.("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict3")).at(-1)).toMatchObject({
+      content: "Sending.",
+      status: "interrupted",
+    });
+  });
+
+  it("keeps a resumed reply's text when it is evicted before its drive starts", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict4", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    const { batchId, items } = asked?.payload ?? { batchId: "", items: [] };
+    await decideInD1(batchId, items[0]?.approvalId ?? "", "approved");
+    let snapshot: unknown = null;
+    await runInDurableObject(assistantOf(owner), async (i: Assistant) => {
+      // The process dies right after the resumed fiber's first stash.
+      const fiber = {
+        stash: (cp: unknown) => {
+          snapshot = structuredClone(cp);
+          throw new Error("evicted");
+        },
+      };
+      const run = (_: string, fn: (f: typeof fiber) => Promise<void>) => fn(fiber);
+      Object.assign(i, { runFiber: run });
+      expect(await i.resumeBatch(batchId)).toBe("resumed");
+      await vi.waitFor(() => expect(snapshot).not.toBeNull());
+      await i.onFiberRecovered({ name: "chat-turn", snapshot } as never);
+    });
+    expect(send.inputs).toEqual([]);
+    expect((await stored(browser, "conv-evict4")).at(-1)).toMatchObject({
+      content: "Sending.",
+      status: "interrupted",
+    });
+  });
+
+  it("keeps a resumed reply that settled before the eviction, and sends its end", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ text: "Sending.", calls: [["send", { q: "a" }]] }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-evict5", "Send it");
+    await tab.until?.("approval.requested");
+    const started = tab.events.find((e) => e.type === "turn.started");
+    const replyId = (started?.payload as { messageId?: string } | undefined)?.messageId ?? "";
+    // The resumed run settled its reply, then died before removing its old stop.
+    await db
+      .prepare("UPDATE messages SET status = 'complete', content = 'Sending.\n\nSent' WHERE id = ?")
+      .bind(replyId)
+      .run();
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered({
+        name: "chat-turn",
+        snapshot: {
+          conversationId: "conv-evict5",
+          turnId: started?.turnId ?? "",
+          replyId,
+          providerId: "scripted",
+          model: "test-model",
+          reply: "Sending.",
+          wrote: true,
+          holds: [],
+          callStarted: false,
+          callRecorded: false,
+          callUsage: null,
+          resumed: true,
+        },
+      } as never),
+    );
+    await tab.until?.("turn.completed");
+    expect(tab.events.map((e) => e.type)).not.toContain("turn.interrupted");
+    expect(await count("turn_states", "1")).toBe(0);
+    expect((await stored(browser, "conv-evict5")).at(-1)).toMatchObject({
+      content: "Sending.\n\nSent",
+      status: "complete",
+    });
+  });
+
+  it("waits in the FIFO behind a running turn, then appends a late approval at the end (AC14)", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const seen: ModelMessage[][] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const replies: Reply[] = [
+      { text: "Sending.", calls: [["send", { q: "hi" }]] },
+      { text: "Something else" },
+      { text: "Sent it after all" },
+    ];
+    let at = 0;
+    const provider: ModelProvider = {
+      ...replying([]),
+      async *stream(request) {
+        seen.push(request.messages);
+        const n = at++;
+        if (n === 1) await gate; // the newer turn is still running when the approval lands
+        yield* replying([replies[n] as Reply]).stream(request);
+      },
+    };
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-late", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+
+    tab.send?.("conv-late", "Never mind, something else");
+    await vi.waitFor(() => expect(seen).toHaveLength(2), SOCKET_WAIT);
+    await decideInD1(batchId, approvalId, "approved");
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(batchId),
+    );
+    expect(resumed).toBe("queued");
+    expect(send.inputs).toEqual([]);
+    release();
+    // The newer turn ends, then the batch resumes on its own: the old turn settles (its own
+    // turn.completed) and a new turn runs the call at the end.
+    await vi.waitFor(() => expect(completed(tab.events)).toBe(3), SOCKET_WAIT);
+    expect(send.inputs).toEqual([{ q: "hi" }]);
+    expect(await stored(browser, "conv-late")).toMatchObject([
+      { content: "Send it", status: "complete" },
+      { content: "Sending.", status: "complete" },
+      { content: "Never mind, something else", status: "complete" },
+      { content: "Something else", status: "complete" },
+      { content: 'Approved later: send, from "Send it"', status: "complete" },
+      { content: "Sent it after all", status: "complete" },
+    ]);
+    // The model continues from the end: the newer turn, then the label, the call, its result.
+    const last = seen.at(-1) ?? [];
+    expect(last.slice(-5).map((m) => [m.role, m.content.slice(0, 20)])).toEqual([
+      ["user", "Never mind, somethin"],
+      ["assistant", "Something else"],
+      ["user", "[Approved later] I a"],
+      ["assistant", ""],
+      ["tool", "send ok"],
+    ]);
+    expect(await count("turn_states", "1")).toBe(0);
+  });
+
+  it("resumes a batch queued behind a resume that found its own batch still waiting", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const replies = [{ calls: [["send", { q: "a" }]] }, { calls: [["send", { q: "b" }]] }];
+    await useModel(owner, replying([...(replies as Reply[]), { text: "Sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-qa", "Send a");
+    await tab.until?.("approval.requested");
+    const a = asked(tab.events);
+    tab.send?.("conv-qb", "Send b");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "approval.requested")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    const b = tab.events.filter(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    )[1]?.payload;
+    if (!b) throw new Error("no second batch");
+    await decideInD1(b.batchId, b.items[0]?.approvalId ?? "", "approved");
+    // A's resume holds the slot while it reads D1, so B queues; A is still undecided and
+    // starts nothing. B must still run once A lets go.
+    const results = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      Promise.all([i.resumeBatch(a.batchId), i.resumeBatch(b.batchId)]),
+    );
+    expect(results).toEqual(["waiting", "queued"]);
+    await vi.waitFor(() => expect(send.inputs).toEqual([{ q: "b" }]), SOCKET_WAIT);
+  });
+
+  it("keeps a queued batch whose resume failed, for the next try", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const replies = [{ calls: [["send", { q: "a" }]] }, { calls: [["send", { q: "b" }]] }];
+    await useModel(owner, replying([...(replies as Reply[]), { text: "Sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-fa", "Send a");
+    await tab.until?.("approval.requested");
+    const a = asked(tab.events);
+    tab.send?.("conv-fb", "Send b");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "approval.requested")).toHaveLength(2),
+      SOCKET_WAIT,
+    );
+    const b = tab.events.filter(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    )[1]?.payload;
+    if (!b) throw new Error("no second batch");
+    await decideInD1(b.batchId, b.items[0]?.approvalId ?? "", "approved");
+    // B queues behind A's resume, and its own resume then fails on a vault hiccup.
+    const queued = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
+      const resolve = i.resolveModel;
+      i.resolveModel = async () => {
+        throw new Error("vault hiccup");
+      };
+      const results = await Promise.all([i.resumeBatch(a.batchId), i.resumeBatch(b.batchId)]);
+      await vi.waitFor(() => expect(state.storage.kv.get("approvals:queue")).toEqual([b.batchId]));
+      i.resolveModel = resolve;
+      return results;
+    });
+    expect(queued).toEqual(["waiting", "queued"]);
+    expect(send.inputs).toEqual([]);
+    // Still queued, so the next try runs it.
+    const again = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(b.batchId),
+    );
+    expect(again).toBe("resumed");
+    await vi.waitFor(() => expect(send.inputs).toEqual([{ q: "b" }]), SOCKET_WAIT);
+  });
+
+  it("keeps queued batches in order when the first one's resume fails", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const replies = ["a", "b", "c"].map((q) => ({ calls: [["send", { q }]] }));
+    await useModel(owner, replying([...(replies as Reply[]), { text: "Sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    const batches = async (n: number) => {
+      await vi.waitFor(
+        () => expect(tab.events.filter((e) => e.type === "approval.requested")).toHaveLength(n),
+        SOCKET_WAIT,
+      );
+      return tab.events
+        .filter(
+          (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+            e.type === "approval.requested",
+        )
+        .map((e) => e.payload);
+    };
+    tab.send?.("conv-oa", "Send a");
+    await batches(1);
+    tab.send?.("conv-ob", "Send b");
+    await batches(2);
+    tab.send?.("conv-oc", "Send c");
+    const [a, b, c] = await batches(3);
+    if (!a || !b || !c) throw new Error("missing batches");
+    for (const x of [b, c]) await decideInD1(x.batchId, x.items[0]?.approvalId ?? "", "approved");
+    // B and C queue behind A's resume; B's resume then fails once, on a vault hiccup. Its
+    // failure must not let C run ahead of it.
+    const queue = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
+      const resolve = i.resolveModel;
+      let failed = false;
+      i.resolveModel = async (...args) => {
+        if (failed) return resolve(...args);
+        failed = true;
+        throw new Error("vault hiccup");
+      };
+      await Promise.all([a, b, c].map((x) => i.resumeBatch(x.batchId)));
+      await vi.waitFor(() => expect(failed).toBe(true));
+      await vi.waitFor(() =>
+        expect(state.storage.kv.get("approvals:queue")).toEqual([b.batchId, c.batchId]),
+      );
+      i.resolveModel = resolve;
+      return state.storage.kv.get("approvals:queue");
+    });
+    expect(queue).toEqual([b.batchId, c.batchId]);
+    expect(send.inputs).toEqual([]);
+  });
+
+  it("ends a row a restart left executing as failed with an unknown outcome", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ calls: [["send", { q: "hi" }]] }, { text: "Not sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-claimed", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    // A run claimed the row and then the DO restarted: whether the call acted is unknown.
+    await decideInD1(batchId, approvalId, "approved");
+    await db
+      .prepare("UPDATE approvals SET status = 'executing' WHERE batch_id = ?")
+      .bind(batchId)
+      .run();
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(batchId));
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([]);
+    const row = await db
+      .prepare("SELECT status, reason FROM approvals WHERE batch_id = ?")
+      .bind(batchId)
+      .first();
+    expect(row).toEqual({ status: "failed", reason: "outcome_unknown" });
+  });
+
+  it("refuses an approved call whose tool changed since it was approved (AC12)", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ calls: [["send", { q: "hi" }]] }, { text: "Not sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-changed", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    await decideInD1(batchId, approvalId, "approved");
+    const changed = { ...send.tool, manifest: { ...send.tool.manifest, description: "New." } };
+    await useTools(owner, [changed]);
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(batchId));
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([]);
+    const row = await db
+      .prepare("SELECT status, reason FROM approvals WHERE batch_id = ?")
+      .bind(batchId)
+      .first();
+    expect(row).toEqual({ status: "denied", reason: "tool_changed" });
+    const steps = tab.events.filter((e) => e.type === "step.completed");
+    expect(steps.map((e) => (e.payload as { status: string }).status)).toContain("denied");
   });
 });

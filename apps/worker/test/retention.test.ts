@@ -220,6 +220,33 @@ describe("the daily sweep", () => {
     ]);
   });
 
+  it("deletes a chat whose turn stopped and has waited past the setting, with its saved state", async () => {
+    await user("u1");
+    await setRetention("u1", 30);
+    // Two turns stopped at an approval, their replies still streaming: one stopped long ago and
+    // was never answered, the other stopped yesterday.
+    for (const [id, at] of [
+      ["abandoned", OLD],
+      ["waiting", NOW - DAY_MS],
+    ] as const) {
+      await chat("u1", id, OLD);
+      await db.batch([
+        db.prepare("UPDATE messages SET status = 'streaming' WHERE id = ?").bind(`${id}-m`),
+        db
+          .prepare(
+            "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state, updated_at) VALUES (?, 'u1', ?, ?, 'p', 'm', 'awaiting_approval', '{}', ?)",
+          )
+          .bind(`turn-${id}`, id, `${id}-m`, at),
+      ]);
+    }
+
+    expect(await store().sweep(NOW)).toMatchObject({ conversations: 1, failed: 0 });
+    const left = await db.prepare("SELECT id FROM conversations").all<{ id: string }>();
+    expect(left.results.map((r) => r.id)).toEqual(["waiting"]);
+    expect(await count("turn_states", "turn_id = 'turn-abandoned'")).toBe(0);
+    expect(await count("turn_states", "turn_id = 'turn-waiting'")).toBe(1);
+  });
+
   it("removes tool outputs from tasks that ended past the setting, once", async () => {
     await user("u1");
     await setRetention("u1", 0, 7);

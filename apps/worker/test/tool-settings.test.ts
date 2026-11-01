@@ -3,7 +3,7 @@
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { type TaintState, type ToolManifest, TRUSTED } from "@opa/policy";
 import { CHALLENGE_COOKIE, STEP_UP_MS } from "@opa/server/auth";
-import { hasStepUp } from "@opa/server/session";
+import { hasAccountStepUp } from "@opa/server/session";
 import { builtinTools } from "@opa/server/tools";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
@@ -151,7 +151,10 @@ describe("account step-up", () => {
   it("fails closed on a future step-up stamp", () => {
     const now = 1_000_000;
     const at = (stepUpAt: number | null) =>
-      hasStepUp({ id: "s", userId: "u", scope: scopeFromSession({ userId: "u" }), stepUpAt }, now);
+      hasAccountStepUp(
+        { id: "s", userId: "u", scope: scopeFromSession({ userId: "u" }), stepUpAt },
+        now,
+      );
     expect(at(null)).toBe(false);
     expect(at(now)).toBe(true);
     expect(at(now - STEP_UP_MS + 1)).toBe(true);
