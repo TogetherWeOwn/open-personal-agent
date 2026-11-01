@@ -42,6 +42,15 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
   };
 }
 
+/** The approvals route's write, without its checks: one item decided in D1 (M3-07 AC9). */
+const decideInD1 = (batchId: string, approvalId: string, status: "approved" | "denied") =>
+  db
+    .prepare(
+      "UPDATE approvals SET status = ?, scope = 'once', decided_at = ? WHERE batch_id = ? AND approval_id = ?",
+    )
+    .bind(status, Date.now(), batchId, approvalId)
+    .run();
+
 const assistantOf = (userId: string) => env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${userId}`));
 function useModel(userId: string, provider: ModelProvider) {
   return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
@@ -575,26 +584,34 @@ describe("the DO host for the builtin loop (M3-03c)", () => {
     await useModel(owner, provider);
     await useTools(owner, [send.tool]);
 
-    // An unknown approval changes nothing and runs nothing.
-    const decide = (id: string) =>
-      runInDurableObject(assistantOf(owner), async (i: Assistant) => {
-        try {
-          const decisions = [
-            { approvalId: id, decision: "approve" as const, scope: "once" as const },
-          ];
-          return String(await i.resumeWithDecisions({ turnId, batchId, decisions }));
-        } catch (e) {
-          return (e as { code?: string }).code ?? String(e);
-        }
-      });
-    expect(await decide("appr_nope")).toBe("unknown");
+    // The batch is in D1 too, pending and bound (M3-07 AC9).
+    const row = "SELECT status, binding_hash FROM approvals WHERE batch_id = ? AND approval_id = ?";
+    expect(await db.prepare(row).bind(batchId, approvalId).first()).toMatchObject({
+      status: "pending",
+      binding_hash: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+
+    // An unknown batch, or one still undecided, changes nothing and runs nothing.
+    const resume = (id: string) =>
+      runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(id));
+    expect(await resume("batch_nope")).toBe("gone");
+    expect(await resume(batchId)).toBe("waiting");
     expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
     expect(send.inputs).toEqual([]);
 
-    expect(await decide(approvalId)).toBe("true");
+    await decideInD1(batchId, approvalId, "approved");
+    expect(await resume(batchId)).toBe("resumed");
     await back.until?.("turn.completed");
     expect(back.events.map((e) => e.type)).toContain("approval.resolved");
     expect(send.inputs).toEqual([{ q: "hi" }]);
+    // The claim and the end of the call are on the row and in the audit log (AC5, AC12).
+    expect(await db.prepare(row).bind(batchId, approvalId).first("status")).toBe("executed");
+    expect(
+      await count(
+        "audit_log",
+        `action = 'approval.execute' AND target_id = '${batchId}/${approvalId}'`,
+      ),
+    ).toBe(1);
     expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(0); // settling removed it
     expect(await stored(browser, "conv-appr")).toMatchObject([
       { content: "Send it", status: "complete" },
@@ -619,18 +636,15 @@ describe("the DO host for the builtin loop (M3-03c)", () => {
     const { batchId, items } = asked.payload;
     const approvalId = items[0]?.approvalId;
     if (!approvalId) throw new Error("no approval item");
-    const { turnId } = asked;
-    const decisions = [{ approvalId, decision: "approve" as const, scope: "once" as const }];
-    // A double-clicked Approve, two tabs, a retried 07a request: both calls start without
+    await decideInD1(batchId, approvalId, "approved");
+    // A double-clicked Approve, two tabs, a retried request: both calls start without
     // awaiting between them, so both would load the same `awaiting_approval` row if the claim
-    // weren't held before the first await (S1).
+    // weren't held before the first await (S1). The second waits for the first turn to end,
+    // then finds nothing left to resume.
     const [first, second] = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
-      Promise.all([
-        i.resumeWithDecisions({ turnId, batchId, decisions }),
-        i.resumeWithDecisions({ turnId, batchId, decisions }),
-      ]),
+      Promise.all([i.resumeBatch(batchId), i.resumeBatch(batchId)]),
     );
-    expect([first, second].sort()).toEqual([false, true]);
+    expect([first, second].sort()).toEqual(["queued", "resumed"]);
     await tab.until?.("turn.completed");
     expect(send.inputs).toEqual([{ q: "hi" }]); // the approved tool ran once
     expect(await count("usage", "conversation_id = 'conv-race'")).toBe(2); // one row per call
@@ -653,7 +667,7 @@ describe("the DO host for the builtin loop (M3-03c)", () => {
     const { batchId, items } = asked.payload;
     const approvalId = items[0]?.approvalId;
     if (!approvalId) throw new Error("no approval item");
-    const { turnId } = asked;
+    await decideInD1(batchId, approvalId, "approved");
     // The resume parks in its model pick; the claim is already held (S1), so a send arriving
     // before the drive starts is rejected instead of starting a second loop. The releaser rides
     // on the instance because only the DO can reach the gate.
@@ -667,11 +681,7 @@ describe("the DO host for the builtin loop (M3-03c)", () => {
         await gate;
         return { provider, model: "test-model", apiKey: null };
       }) as Assistant["resolveModel"];
-      void i.resumeWithDecisions({
-        turnId,
-        batchId,
-        decisions: [{ approvalId, decision: "approve" as const, scope: "once" as const }],
-      });
+      void i.resumeBatch(batchId);
     });
     tab.send?.("conv-busy", "Are you still there?");
     await tab.until?.("turn.failed");
@@ -814,5 +824,105 @@ describe("turn and spend limits (M2-22)", () => {
       spentMicroUsd: DAILY_SPEND_CAP_MICRO_USD - (4 + 1000 * 8) + 12 * 2 + 3 * 8,
       held: {},
     });
+  });
+});
+
+describe("approvals in the DO host (M3-07a)", () => {
+  const asked = (events: HarnessEvent[]) => {
+    const e = events.find(
+      (x): x is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        x.type === "approval.requested",
+    );
+    if (!e) throw new Error("no approval.requested");
+    return { batchId: e.payload.batchId, approvalId: e.payload.items[0]?.approvalId ?? "" };
+  };
+  const completed = (events: HarnessEvent[]) =>
+    events.filter((e) => e.type === "turn.completed").length;
+
+  it("waits in the FIFO behind a running turn, then appends a late approval at the end (AC14)", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const seen: ModelMessage[][] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const replies: Reply[] = [
+      { text: "Sending.", calls: [["send", { q: "hi" }]] },
+      { text: "Something else" },
+      { text: "Sent it after all" },
+    ];
+    let at = 0;
+    const provider: ModelProvider = {
+      ...replying([]),
+      async *stream(request) {
+        seen.push(request.messages);
+        const n = at++;
+        if (n === 1) await gate; // the newer turn is still running when the approval lands
+        yield* replying([replies[n] as Reply]).stream(request);
+      },
+    };
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-late", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+
+    tab.send?.("conv-late", "Never mind, something else");
+    await vi.waitFor(() => expect(seen).toHaveLength(2), SOCKET_WAIT);
+    await decideInD1(batchId, approvalId, "approved");
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(batchId),
+    );
+    expect(resumed).toBe("queued");
+    expect(send.inputs).toEqual([]);
+    release();
+    // The newer turn ends, then the batch resumes on its own: the old turn settles (its own
+    // turn.completed) and a new turn runs the call at the end.
+    await vi.waitFor(() => expect(completed(tab.events)).toBe(3), SOCKET_WAIT);
+    expect(send.inputs).toEqual([{ q: "hi" }]);
+    expect(await stored(browser, "conv-late")).toMatchObject([
+      { content: "Send it", status: "complete" },
+      { content: "Sending.", status: "complete" },
+      { content: "Never mind, something else", status: "complete" },
+      { content: "Something else", status: "complete" },
+      { content: 'Approved later: send, from "Send it"', status: "complete" },
+      { content: "Sent it after all", status: "complete" },
+    ]);
+    // The model continues from the end: the newer turn, then the label, the call, its result.
+    const last = seen.at(-1) ?? [];
+    expect(last.slice(-5).map((m) => [m.role, m.content.slice(0, 20)])).toEqual([
+      ["user", "Never mind, somethin"],
+      ["assistant", "Something else"],
+      ["user", "[Approved later] I a"],
+      ["assistant", ""],
+      ["tool", "send ok"],
+    ]);
+    expect(await count("turn_states", "1")).toBe(0);
+  });
+
+  it("refuses an approved call whose tool changed since it was approved (AC12)", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    await useModel(owner, replying([{ calls: [["send", { q: "hi" }]] }, { text: "Not sent" }]));
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-changed", "Send it");
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    await decideInD1(batchId, approvalId, "approved");
+    const changed = { ...send.tool, manifest: { ...send.tool.manifest, description: "New." } };
+    await useTools(owner, [changed]);
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeBatch(batchId));
+    await tab.until?.("turn.completed");
+    expect(send.inputs).toEqual([]);
+    const row = await db
+      .prepare("SELECT status, reason FROM approvals WHERE batch_id = ?")
+      .bind(batchId)
+      .first();
+    expect(row).toEqual({ status: "denied", reason: "tool_changed" });
+    const steps = tab.events.filter((e) => e.type === "step.completed");
+    expect(steps.map((e) => (e.payload as { status: string }).status)).toContain("denied");
   });
 });

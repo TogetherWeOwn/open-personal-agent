@@ -21,10 +21,14 @@ import {
 } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
 import {
+  applyStoredDecisions,
+  bindBatch,
+  type LoopEvent,
   type LoopHost,
   type LoopTool,
   newTurn,
   runTurn,
+  type StoredApproval,
   type ToolOutput,
   type TurnState,
 } from "@opa/harness-builtin";
@@ -138,7 +142,14 @@ export async function executeTask(
       secrets,
       now,
     });
-    const outcome = await driveLoop(ctx, user, task.id, picked, deps.taskTools, now);
+    const outcome = await driveLoop(
+      ctx,
+      user,
+      { taskId: task.id, userId: minted.scope.userId, conversationId: task.conversationId },
+      picked,
+      deps.taskTools,
+      now,
+    );
     await stepper.do("task:finish", {}, async () => {
       await user.tasks.finish(task.id, outcome.status, outcome.error);
       return null;
@@ -174,7 +185,7 @@ export async function executeTask(
 async function driveLoop(
   ctx: TaskContext,
   user: ScopedUser,
-  taskId: string,
+  task: { taskId: string; userId: string; conversationId: string },
   picked: {
     provider: ModelProvider;
     model: string;
@@ -188,6 +199,7 @@ async function driveLoop(
   error?: string;
   limit?: { kind: string; detail: string };
 }> {
+  const { taskId } = task;
   const billingId = picked.billingId ?? picked.provider.id;
   let dailyLimited = false;
   let llmSeq = 0;
@@ -274,6 +286,8 @@ async function driveLoop(
     newId: () => `${ctx.instanceId}_s${++ids}`,
   };
 
+  const context = { kind: "task", id: taskId, conversationId: task.conversationId } as const;
+  const expect = { userId: task.userId, context, tools: registry };
   for (let cycle = 0; ; cycle += 1) {
     const loaded = await ctx.step(`task:load:${cycle}`, async () => {
       // After an approval wait the task is running again; markRunning never revives an ending.
@@ -284,15 +298,53 @@ async function driveLoop(
     const state = parseState(loaded);
     if (!state) return { status: "failed", error: "the task's turn state could not be read" };
     const turn = state.turn;
+    // A stopped batch resumes from its rows in D1, never from an event's payload (M3-07 AC10,
+    // M3-12 AC3): the decisions, and the arguments bound in each row's envelope.
+    if (turn.pending) {
+      const { batchId } = turn.pending;
+      const rows = await ctx.step(`task:decisions:${cycle}`, async () =>
+        (await user.approvals.batch(batchId)).map(storedApproval),
+      );
+      const applied = await applyStoredDecisions(turn, rows, expect, now());
+      if (applied.waiting) {
+        await waitForDecision(ctx, cycle, turn, now);
+        continue;
+      }
+      host.approvals = {
+        // Each a step, so a replay returns what happened instead of claiming again.
+        claim: (toolCallId) =>
+          ctx.step(`task:claim:${cycle}:${toolCallId}`, async () => {
+            const refused = applied.refused.get(toolCallId);
+            const id = `appr_${toolCallId}`;
+            if (refused) {
+              await user.approvals.finish(batchId, id, { status: "denied", reason: refused });
+              return "The approval doesn't hold for this call, so it didn't run.";
+            }
+            const row = await user.approvals.claim(batchId, id, now());
+            return row ? null : "The approval is no longer valid, so the call didn't run.";
+          }),
+        finish: async (toolCallId, outcome) => {
+          await ctx.step(`task:approval-end:${cycle}:${toolCallId}`, async () => {
+            await user.approvals.finish(batchId, `appr_${toolCallId}`, outcome);
+            return null;
+          });
+        },
+      };
+    } else {
+      delete host.approvals;
+    }
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
+    let asked: LoopEvent | null = null;
     for (;;) {
       const next = await gen.next();
       if (next.done) {
         outcome = next.value;
         break;
       }
-      ctx.progress(next.value);
+      // The card goes out once its rows exist, so a decision never finds no batch.
+      if (next.value.type === "approval.requested") asked = next.value;
+      else ctx.progress(next.value);
     }
     const saved = await ctx.step(`task:save:${cycle}`, async () => {
       const body = JSON.stringify({ history: state.history, turn, turnId: state.turnId });
@@ -312,18 +364,52 @@ async function driveLoop(
       if (outcome === "cancelled") throw new TaskCancelledError(taskId);
       return { status: "failed", error: "the model call failed" };
     }
-    // Wait for the approval decision, then loop: the next load reads what was decided from
-    // D1 (M3-07's route writes it there), never from this event's payload (AC3). A timeout
-    // just wakes the loop, which expires the batch itself.
-    const expiresAt = turn.pending?.items[0]?.expiresAt ?? now();
-    await ctx
-      .waitForEvent(`task:approval:${cycle}`, {
-        type: "approval",
-        timeoutMs: Math.max(1_000, expiresAt - now()),
-      })
-      .catch(() => ({ payload: null }));
+    const pending = turn.pending;
+    if (asked && pending) {
+      await ctx.step(`task:approvals:${cycle}`, async () => {
+        // A retried step may find the batch it already wrote.
+        if ((await user.approvals.batch(pending.batchId)).length > 0) return null;
+        const rows = await bindBatch({ userId: task.userId, tools: registry, pending, context });
+        if (!(await user.approvals.create(rows))) throw new TaskCancelledError(taskId);
+        return null;
+      });
+      ctx.progress(asked);
+    }
+    await waitForDecision(ctx, cycle, turn, now);
   }
 }
+
+/**
+ * Waits for the approvals route's wake-up, then loops: the next load reads what was decided
+ * from D1, never this event's payload (M3-12 AC3). A timeout just wakes the loop, which expires
+ * the batch itself.
+ */
+async function waitForDecision(
+  ctx: TaskContext,
+  cycle: number,
+  turn: TurnState,
+  now: () => number,
+): Promise<void> {
+  const expiresAt = Math.min(...(turn.pending?.items.map((i) => i.expiresAt) ?? [now()]));
+  await ctx
+    .waitForEvent(`task:approval:${cycle}`, {
+      type: "approval",
+      timeoutMs: Math.max(1_000, expiresAt - now()),
+    })
+    .catch(() => ({ payload: null }));
+}
+
+/** A row as the resume reads it: never its ceremony columns, which must not reach a step output. */
+const storedApproval = (r: StoredApproval): StoredApproval => ({
+  approvalId: r.approvalId,
+  toolCallId: r.toolCallId,
+  tool: r.tool,
+  status: r.status,
+  scope: r.scope,
+  canonical: r.canonical,
+  bindingHash: r.bindingHash,
+  expiresAt: r.expiresAt,
+});
 
 /** The platform stepper's surface used here, without its serializable-type machinery. */
 type PlatformStepper = {

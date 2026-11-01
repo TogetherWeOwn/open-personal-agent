@@ -7,7 +7,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { JsonValue, ModelEvent, ModelProvider, ModelRequest, TaskStepper } from "@opa/core";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import { type LoopTool, resolveApprovals } from "@opa/harness-builtin";
+import type { LoopTool } from "@opa/harness-builtin";
 import { beforeAll, describe, expect, it } from "vitest";
 import { canaryForms } from "../../../scripts/canary-forms.mjs";
 import { compose, type WorkerEnv } from "../src/compose";
@@ -245,22 +245,21 @@ describe("task workflow", () => {
     const stepper = new FakeStepper([
       // A payload that claims approval while D1 still says pending: nothing may run from it.
       async () => ({ decision: "approve", scope: "once" }) as JsonValue,
-      // The second wake: the decision has been written to D1 (what M3-07's route will do).
+      // The second wake: the decision is in the batch's D1 rows (what the approvals route
+      // writes), bound to this task.
       async () => {
         const row = await alice.tasks.get(taskId);
         const state = JSON.parse(row?.state ?? "{}");
-        const batchId = state.turn.pending.batchId as string;
+        batchId = state.turn.pending.batchId as string;
         const approvalId = state.turn.pending.items[0].approvalId as string;
-        resolveApprovals(
-          state.turn,
-          batchId,
-          [{ approvalId, decision: "approve", scope: "once" }],
-          Date.now(),
-        );
-        await alice.tasks.saveState(taskId, JSON.stringify(state));
+        const [stored] = await alice.approvals.batch(batchId);
+        expect(stored).toMatchObject({ taskId, turnId: null, status: "pending" });
+        const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+        await alice.approvals.decide(batchId, [decision], Date.now());
         return null;
       },
     ]);
+    let batchId = "";
     const { promise, streams } = await run(
       [{ calls: [["send", { q: "x" }]] }, { text: "done" }],
       instanceId,
@@ -276,6 +275,8 @@ describe("task workflow", () => {
     expect(toolStep?.[1]).toMatchObject({ retries: { limit: 0 } });
     expect(streams()).toBe(2);
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    // The claim and the call's end are on the row (M3-07 AC12).
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
   it("bookkeeping that fails after the hold never repeats the model call", async () => {

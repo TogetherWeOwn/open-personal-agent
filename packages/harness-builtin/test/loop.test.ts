@@ -298,6 +298,76 @@ describe("stop-and-resume approvals (M3-03 AC4)", () => {
     ]);
   });
 
+  it("records how each approved call ended, and runs none whose row it can't claim (AC12)", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    const approve = (approvalId: string) =>
+      ({ approvalId, decision: "approve", scope: "once" }) as const;
+    resolveApprovals(state, batchId, [approve("appr_call_1"), approve("appr_call_2")], NOW);
+    const ended: [string, string][] = [];
+    const approvals = {
+      // The first call's row was claimed elsewhere (a second tab, a run that died).
+      claim: async (id: string) => (id === "call_1" ? "Already used." : null),
+      finish: async (id: string, outcome: { status: string }) => {
+        ended.push([id, outcome.status]);
+      },
+    };
+    const { events } = await drain({ ...h, approvals }, state);
+    expect(send.inputs).toEqual([{ q: "b" }]);
+    expect(ofType(events, "tool.result").map((e) => e.payload.error ?? "ok")).toEqual([
+      "Already used.",
+      "ok",
+    ]);
+    expect(ofType(events, "step.completed").map((e) => e.payload.status)).toContain("denied");
+    expect(ended).toEqual([["call_2", "executed"]]);
+  });
+
+  it("denies at the re-check on the row, and expires an undecided item on it (AC12)", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    resolveApprovals(
+      state,
+      batchId,
+      [{ approvalId: "appr_call_1", decision: "approve", scope: "once" }],
+      NOW,
+    );
+    const ended: unknown[] = [];
+    const claims: string[] = [];
+    const approvals = {
+      claim: async (id: string) => {
+        claims.push(id);
+        return null;
+      },
+      finish: async (id: string, outcome: unknown) => {
+        ended.push([id, outcome]);
+      },
+    };
+    const later = { ...h, now: () => NOW + 24 * 3_600_000, approvals };
+    await drain({ ...later, policy: () => ({ override: "never" }) }, state);
+    expect(send.inputs).toEqual([]);
+    expect(claims).toEqual([]); // a denied call is never claimed
+    expect(ended).toEqual([
+      ["call_2", { status: "expired", reason: "expired" }],
+      ["call_1", { status: "denied", reason: "override_never" }],
+    ]);
+  });
+
+  it("refuses an approved call when the host can't check its row", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    const approve = (approvalId: string) =>
+      ({ approvalId, decision: "approve", scope: "once" }) as const;
+    resolveApprovals(state, batchId, [approve("appr_call_1"), approve("appr_call_2")], NOW);
+    const approvals = {
+      claim: async () => {
+        throw new Error("D1 is down");
+      },
+      finish: async () => {},
+    };
+    await drain({ ...h, approvals }, state);
+    expect(send.inputs).toEqual([]);
+  });
+
   it("keeps the model's order across writes and decides each call on the taint when it starts", async () => {
     const order: string[] = [];
     const log =
