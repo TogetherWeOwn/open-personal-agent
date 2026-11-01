@@ -439,6 +439,39 @@ export const tasks = sqliteTable(
 );
 
 /**
+ * A data export (M3-20 AC1): the Workflow-built ZIP of every item type. The Workflow instance is
+ * named here (`workflow_instance_id`), so `scopeForExport` mints its authority from this row
+ * alone — instance params are never consulted, as with tasks (M3-12 AC9). The ZIP itself lives
+ * in R2 under `u/{userId}/exports/{id}.zip` (the repository derives the key); item files stream
+ * through `u/{userId}/exports/{id}/staged/` while the run builds it. `expires_at` is stamped at
+ * creation (1 hour out): the reconciler deletes the object then, and the same bound frees a run
+ * that never finishes. The row stays as the user's history. One export runs at a time per user:
+ * the partial unique index below rejects a second `running` row, so two racing POSTs cannot
+ * start two Workflow runs — the loser answers 409 `already_running` like the check did.
+ */
+export const dataExports = sqliteTable(
+  "exports",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    status: text("status", { enum: ["running", "ready", "failed", "expired"] })
+      .notNull()
+      .default("running"),
+    workflowInstanceId: text("workflow_instance_id").unique(),
+    sizeBytes: integer("size_bytes"),
+    error: text("error"),
+    createdAt: createdAt(),
+    readyAt: integer("ready_at"),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [
+    index("exports_user_idx").on(t.userId, t.createdAt),
+    index("exports_sweep_idx").on(t.status, t.expiresAt),
+    uniqueIndex("exports_running_user_unique").on(t.userId).where(sql`${t.status} = 'running'`),
+  ],
+);
+
+/**
  * The Node step journal (M3-23b): one row per completed step of a task run, keyed by the
  * Workflow instance and the step name. A resumed run replays these rows instead of re-running
  * their functions, the way the Workflow engine replays `step.do` on Cloudflare. Only the Node
@@ -470,6 +503,34 @@ export const taskEvents = sqliteTable(
     createdAt: createdAt(),
   },
   (t) => [index("task_events_instance_idx").on(t.instanceId, t.id)],
+);
+
+/**
+ * A file a tool wrote (M3-11, F-3.13): the Outputs library. The bytes live in R2 under
+ * `u/{userId}/files/{id}` (the repository derives the key, and writes the row in the same call
+ * as the object, so no tool file is missing from Outputs). The source run is the conversation
+ * and turn it came from, and the task when a Workflow ran it; each is cleared, never cascaded,
+ * when its source goes, so the file outlives the chat that made it.
+ */
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    turnId: text("turn_id"),
+    name: text("name").notNull(),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("artifacts_user_created_idx").on(t.userId, t.createdAt),
+    index("artifacts_user_conversation_idx").on(t.userId, t.conversationId, t.createdAt),
+  ],
 );
 
 /**
