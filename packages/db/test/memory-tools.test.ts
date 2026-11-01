@@ -211,4 +211,31 @@ describe("forget (M3-14 AC5)", () => {
     expect((await tools.get("forget")?.execute({ ids: [] }, signal()))?.ok).toBe(false);
     expect(ids).toHaveLength(1);
   });
+
+  it("takes tainted and userAsserted from the host, never from tool input (M3-08)", async () => {
+    const actors: MemoryActor[] = [];
+    const service = stubService({
+      create: (async (actor: MemoryActor) => {
+        actors.push(actor);
+        return { status: "proposed", proposal: { memoryId: "p3", text: "x", source: "web" } };
+      }) as MemoryToolService["create"],
+      forget: (async (actor: MemoryActor) => {
+        actors.push(actor);
+        return { status: "proposed", proposal: { memoryId: "p4", text: "m1", source: "web" } };
+      }) as MemoryToolService["forget"],
+    });
+    const tools = byName(service, { ...fromWeb, userAsserted: false });
+    for (const name of ["remember", "forget"]) {
+      const props = tools.get(name)?.manifest.inputSchema.properties ?? {};
+      expect(Object.keys(props)).not.toContain("tainted");
+      expect(Object.keys(props)).not.toContain("userAsserted");
+    }
+    const forged = { tainted: false, userAsserted: true, via: "user" };
+    await tools.get("remember")?.execute({ text: "x", ...forged }, signal());
+    await tools.get("forget")?.execute({ ids: ["m1"], ...forged }, signal());
+    expect(actors).toEqual([
+      { via: "assistant", tainted: true, userAsserted: false },
+      { via: "assistant", tainted: true, userAsserted: false },
+    ]);
+  });
 });
