@@ -29,7 +29,7 @@ import {
   type TurnState,
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
-import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
+import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
 import { type AssistantTaskRpc, createWorkflowTaskContext, redactSecrets } from "./task-context";
@@ -116,7 +116,10 @@ export async function executeTask(
   let ctx: TaskContext | null = null;
   try {
     if (!initial) throw new NonRetryableError("the task has no readable turn state");
-    const picked = await deps.resolveModel(composed, minted.scope, "task");
+    // A turn keeps its conversation's model (the pin, else Chat); other work runs on Background.
+    const pick: ModelPick =
+      task.kind === "turn" ? { conversationId: task.conversationId } : { role: "background" };
+    const picked = await deps.resolveModel(composed, minted.scope, "task", pick);
     if ("error" in picked) throw new Error(modelErrorMessage(picked.error));
     secrets = picked.apiKey ? [picked.apiKey] : [];
     // The key must never reach durable state: every step output is redacted for it (AC4).

@@ -109,7 +109,7 @@ class FakeStepper implements TaskStepper {
 }
 
 let seq = 0;
-async function makeTask(user = alice, conversationId = "ca") {
+async function makeTask(user = alice, conversationId = "ca", kind = "turn") {
   seq += 1;
   const taskId = `task${seq}`;
   const instanceId = `inst${seq}`;
@@ -118,7 +118,7 @@ async function makeTask(user = alice, conversationId = "ca") {
     id: taskId,
     conversationId,
     workflowInstanceId: instanceId,
-    kind: "turn",
+    kind,
     mode: "background",
     state: JSON.stringify(state),
   });
@@ -131,7 +131,7 @@ async function run(
   instanceId: string,
   stepper: FakeStepper,
   tools: LoopTool[] = [],
-  over: { used?: () => Promise<void>; now?: () => number } = {},
+  over: { used?: () => Promise<void>; now?: () => number; picks?: unknown[] } = {},
 ) {
   const { provider, streams } = scripted(replies);
   const resolved = {
@@ -144,7 +144,13 @@ async function run(
   const promise = executeTask(
     env,
     await compose(env),
-    { resolveModel: async () => resolved, taskTools: tools },
+    {
+      resolveModel: async (_env, _scope, _caller, pick) => {
+        over.picks?.push(pick);
+        return resolved;
+      },
+      taskTools: tools,
+    },
     instanceId,
     stepper,
     over.now,
@@ -162,6 +168,16 @@ beforeAll(async () => {
 });
 
 describe("task workflow", () => {
+  it("runs a turn on its conversation's model and other work on the Background role", async () => {
+    const picks: unknown[] = [];
+    for (const kind of ["turn", "background"]) {
+      const { instanceId } = await makeTask(alice, "ca", kind);
+      const { promise } = await run([{ text: "ok" }], instanceId, new FakeStepper(), [], { picks });
+      await promise;
+    }
+    expect(picks).toEqual([{ conversationId: "ca" }, { role: "background" }]);
+  });
+
   it("runs a turn to succeeded, with the key nowhere in persisted state", async () => {
     const { taskId, instanceId } = await makeTask();
     const stepper = new FakeStepper();
