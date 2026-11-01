@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useReducer, useRef, useState } from "react";
-import { Button, Heading } from "react-aria-components";
+import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
+import { Button, Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
-import { type ChatAction, chatReducer, initialState } from "./chat/state";
+import { type ChatAction, type Conversation, chatReducer, initialState } from "./chat/state";
 import { Thread } from "./chat/Thread";
 import type { ChatTransport } from "./chat/transport";
 import { ThemeToggle } from "./ThemeToggle";
@@ -13,11 +13,30 @@ const newId = () => crypto.randomUUID();
 const buttonClass =
   "min-h-11 rounded-lg px-3 text-sm font-medium hover:bg-surface-raised data-pressed:bg-border data-selected:bg-surface-raised";
 
+/** Loads a stale chat's messages from the server. */
+function useLoad(
+  transport: ChatTransport,
+  chat: Conversation | undefined,
+  dispatch: Dispatch<ChatAction>,
+) {
+  const [id, stale] = [chat?.id, chat?.stale];
+  useEffect(() => {
+    if (!id || !stale) return;
+    let current = true;
+    transport
+      .messages(id)
+      .then((messages) => current && messages && dispatch({ type: "loaded", id, messages }))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [transport, id, stale, dispatch]);
+}
+
 export function App({ transport }: { transport: ChatTransport }) {
   const [state, dispatch] = useReducer(chatReducer, undefined, () => initialState(newId()));
   // Below 640 px the list and the open conversation take turns filling the screen.
   const [threadOpen, setThreadOpen] = useState(false);
-  const cancel = useRef<(() => void) | null>(null);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
@@ -35,6 +54,33 @@ export function App({ transport }: { transport: ChatTransport }) {
       .catch(() => setHealthy(false));
   }, []);
 
+  const known = useRef(new Set<string>());
+  known.current = new Set(state.conversations.map((c) => c.id));
+
+  // Every tab streams every turn. On each (re)connect, and for a chat another tab started, reload
+  // the list; it marks the server's chats stale, so the open one reloads its messages below.
+  useEffect(() => {
+    const list = () =>
+      transport
+        .conversations()
+        .then((conversations) => dispatch({ type: "listed", conversations }))
+        .catch(() => {});
+    const connected = () => {
+      dispatch({ type: "connected" });
+      void list();
+    };
+    return transport.connect((event) => {
+      if (event.type === "turn.started" && !known.current.has(event.sessionId)) void list();
+      dispatch({ type: "event", event });
+    }, connected);
+  }, [transport]);
+
+  // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
+  // whose last events were missed while disconnected.
+  const running = state.conversations.find((c) => c.id === state.pending?.conversationId);
+  useLoad(transport, active, dispatch);
+  useLoad(transport, running === active ? undefined : running, dispatch);
+
   const open = (action: ChatAction) => {
     dispatch(action);
     setThreadOpen(true);
@@ -43,16 +89,8 @@ export function App({ transport }: { transport: ChatTransport }) {
   const send = (text: string): boolean => {
     if (state.pending || !text.trim()) return false;
     dispatch({ type: "send", id: newId(), text });
-    cancel.current = transport.send(active.id, text, (event) => {
-      dispatch({ type: "event", event });
-      if (event.type === "turn.completed" || event.type === "turn.failed") cancel.current = null;
-    });
+    transport.send(active.id, text);
     return true;
-  };
-
-  const stop = () => {
-    cancel.current?.();
-    dispatch({ type: "stop" });
   };
 
   return (
@@ -76,6 +114,9 @@ export function App({ transport }: { transport: ChatTransport }) {
         >
           New chat
         </Button>
+        <Link href="/usage" className={`${buttonClass} mx-3 mb-2 flex items-center`}>
+          Usage
+        </Link>
         <ConversationList
           conversations={state.conversations}
           activeId={active.id}
@@ -102,7 +143,7 @@ export function App({ transport }: { transport: ChatTransport }) {
           setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
           busy={state.pending !== null}
           onSend={send}
-          onStop={stop}
+          onStop={() => transport.cancel()}
         />
       </main>
       <div role="status" className="sr-only">

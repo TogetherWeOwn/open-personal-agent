@@ -101,7 +101,7 @@ describe("V8: fail closed at startup", () => {
         expect(await res.json()).toEqual({ error: "vault_unavailable" });
       }
       expect(await countSecrets()).toBe(0);
-      const health = await (await app.request("/api/health", {}, await compose(raw))).json();
+      const health = await (await fetchWorker("/api/health", raw)).json();
       expect(health).toMatchObject({ secrets: { OPA_MASTER_KEY: false } });
     });
   }
@@ -111,7 +111,7 @@ describe("V8: fail closed at startup", () => {
       const raw = { ...env, ...{ OPA_SESSION_SECRET: "s", OPA_SETUP_TOKEN: "t" } };
       Object.assign(raw, { OPA_MASTER_KEY: KEY, OPA_MASTER_KEY_PREV: prev });
       expect((await fetchWorker("/api/secrets/s1", raw, { method: "POST" })).status).toBe(503);
-      const health = await (await app.request("/api/health", {}, await compose(raw))).json();
+      const health = await (await fetchWorker("/api/health", raw)).json();
       const secrets = { OPA_MASTER_KEY: true, OPA_SESSION_SECRET: true, OPA_SETUP_TOKEN: true };
       expect(health).toMatchObject({ status: "degraded", checks: { vault: false }, secrets });
     }

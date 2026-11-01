@@ -35,9 +35,15 @@ export interface Bindings {
   UNAVAILABLE?: readonly ("workflow" | "ai")[];
   /**
    * The header that carries the client's address, set by a proxy you trust. Defaults to
-   * `CF-Connecting-IP`, which only Cloudflare sets; elsewhere a client can send it themselves.
+   * `CF-Connecting-IP`, which only Cloudflare sets; elsewhere a client can send it themselves, so
+   * the Node root defaults to a header it fills from the socket.
    */
   OPA_CLIENT_IP_HEADER?: string;
+  /**
+   * The per-address limit on the routes that answer without a session (rate-limit.ts). The
+   * Worker's is `ratelimits` in wrangler.jsonc; the Node root passes one in memory.
+   */
+  PUBLIC_LIMIT?: RateLimit;
 }
 
 /** What the HTTP app sees. `VAULT` is `null` unless `VAULT_STATUS` is `ok`. */

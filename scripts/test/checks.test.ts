@@ -192,7 +192,16 @@ describe("docs-cost-lint", () => {
     const docs = repo();
     expect(checkDocsCost(docs)).toEqual([]);
     expect(bindingNames(docs.config)).toEqual(
-      ["AI", "ASSETS", "ASSISTANT", "DB", "FILES", "TASK_WORKFLOW", "triggers"].sort(),
+      [
+        "AI",
+        "ASSETS",
+        "ASSISTANT",
+        "DB",
+        "FILES",
+        "PUBLIC_LIMIT",
+        "TASK_WORKFLOW",
+        "triggers",
+      ].sort(),
     );
   });
 

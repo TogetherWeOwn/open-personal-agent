@@ -10,7 +10,7 @@ export default defineConfig({
   use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:4173" },
   expect: { toHaveScreenshot: { animations: "disabled", maxDiffPixelRatio: 0.01 } },
   webServer: {
-    command: "pnpm build && pnpm exec vite preview --port 4173 --strictPort",
+    command: "VITE_MOCK_CHAT=1 pnpm build && pnpm exec vite preview --port 4173 --strictPort",
     url: "http://localhost:4173",
   },
 });

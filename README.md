@@ -121,8 +121,10 @@ included amounts. The ones you are most likely to meet are:
 - **Later features you switch on.** Cloud computers, web search, AI Gateway logging and extra
   browser hours are not in this release. Each will say what it costs before you turn it on.
 
-Budgets, spending warnings and a Usage page are planned but not in this release. Until then, check
-your usage in the Cloudflare dashboard under **Billing**.
+The app's **Usage** page shows today's and this month's model calls, with an estimate from published
+prices for each and, for the owner, the Workers AI free allowance used today. Your providers' bills
+and the Cloudflare dashboard under **Billing** are the final word. Budgets and spending warnings are
+planned but not in this release.
 
 What each binding in `wrangler.jsonc` uses (CI checks that every binding has a row here):
 
@@ -135,6 +137,7 @@ What each binding in `wrangler.jsonc` uses (CI checks that every binding has a r
 | `AI`            | Workers AI              | 10,000 neurons a day                          | $0.011 per 1,000 neurons                          |
 | `ASSISTANT`     | Durable Objects         | 1M requests, 400,000 GB-s, 5 GB SQLite stored | $0.15/M requests, $12.50/M GB-s, $0.20/GB-month   |
 | `TASK_WORKFLOW` | Workflows               | 500,000 steps, 1 GB-month stored              | $0.80 per 100,000 steps, $0.20/GB-month           |
+| `PUBLIC_LIMIT`  | Workers rate limiting   | No separate price published (2026-11-01)      | Each check runs inside its Worker request         |
 | `triggers`      | Cron Triggers           | Included                                      | Each run counts as a Worker request and its CPU   |
 
 Prices are Cloudflare's and your providers', and they can change. Check
