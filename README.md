@@ -69,9 +69,9 @@ token needs the `required` entries in [`deploy/permissions.json`](deploy/permiss
 The button copies this repo into your GitHub account and deploys it with Workers Builds, which
 runs `pnpm run deploy` again on every push. It is experimental until the checks in
 [`deploy/BUTTON.md`](deploy/BUTTON.md) pass. If you're not asked for the three `OPA_*` secrets,
-`/setup` shows the **Finish setup** page with the commands that set them. The Workflow is always
-named `opa-task-workflow`, so an account can hold only one button deploy; to run more than one,
-use `pnpm deploy:cloudflare --name <prefix>`.
+`/setup` shows the **Finish setup** page with the commands that set them. Workflow names are
+unique per account, and the button probably keeps `opa-task-workflow` unprefixed, so plan on one
+button deploy per account; to run more than one, use `pnpm deploy:cloudflare --name <prefix>`.
 
 ## Layout
 

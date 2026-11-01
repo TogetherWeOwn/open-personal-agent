@@ -8,9 +8,11 @@ answers three open questions about the button (ADR 0001):
 3. Does a second push, deployed by Workers Builds, keep the same D1 database and R2 bucket?
 
 Use a throwaway prefix `opa-v-<yyyymmdd>-<rand>` (six lowercase letters or digits) for every name,
-so `pnpm teardown:cloudflare` can find what is left. Before you start, check that no Workflow named
-`opa-task-workflow` exists on the account (**Workers & Pages → Workflows**). The button uses
-`wrangler.jsonc` as it is, so the Workflow keeps that name and takes no prefix.
+so `pnpm teardown:cloudflare` can find what is left. Before you start, check that the account has
+no Worker named `opa` and no Workflow named `opa-task-workflow` (**Workers & Pages**). If either
+exists, stop: the button may deploy over it. Cloudflare says the names chosen in the form are
+"reflected in the newly created Git repository", but not which `wrangler.jsonc` fields it
+rewrites. The Workflow name probably keeps no prefix.
 
 ## 1. Deploy
 
@@ -22,6 +24,10 @@ so `pnpm teardown:cloudflare` can find what is left. Before you start, check tha
    for, fill each with `openssl rand -base64 32`.
 5. Leave the build and deploy commands as filled in (`pnpm run build` and `pnpm run deploy`), and
    deploy. Save the build log.
+6. In the new repo, read `wrangler.jsonc` and note `name`, the D1 `database_name` and
+   `database_id`, the R2 `bucket_name` and the Workflow `name`. The build log should show
+   `wrangler deploy` uploading `<prefix>`, not `opa`. If it uploaded `opa`, record that as the
+   answer and go straight to teardown, deleting `opa` as well.
 
 ## 2. Check what registered
 
@@ -54,6 +60,7 @@ so `pnpm teardown:cloudflare` can find what is left. Before you start, check tha
 
 | Question | Answer | Evidence |
 |---|---|---|
+| Deployed Worker named `<prefix>`? | yes / no | build log; cloned `wrangler.jsonc` |
 | Secrets asked for? | yes / no | screenshot of the form |
 | Binding descriptions shown? | yes / no | screenshot |
 | DO, Workflow and cron registered? | yes / no for each | Bindings and Trigger events pages |
