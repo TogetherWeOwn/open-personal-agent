@@ -157,15 +157,15 @@ export type PendingBatch = {
 };
 
 /**
- * A row's offered scopes. One that can't be read offers only "once", so a damaged row neither
- * fails the whole list nor widens what an approval grants.
+ * A row's offered scopes. One that can't be read offers none: the list still loads and the row
+ * can still be denied, but never approved, matching the repository's own check on the column.
  */
 function scopesOf(row: ApprovalRow): ApprovalScope[] {
   try {
     const scopes = JSON.parse(row.scopes) as unknown;
-    if (Array.isArray(scopes) && scopes.length) return scopes as ApprovalScope[];
+    if (Array.isArray(scopes)) return scopes as ApprovalScope[];
   } catch {}
-  return ["once"];
+  return [];
 }
 
 /** A row's taint. One that can't be read still says the context was tainted, never that it wasn't. */

@@ -346,7 +346,7 @@ describe("the pending list (M3-07 AC8)", () => {
     expect(batches.map((b) => b.batchId)).toEqual(["b_live"]);
   });
 
-  it("still lists the rest when a row's taint or scopes can't be read, and keeps it careful", async () => {
+  it("still lists the rest when a row's taint or scopes can't be read: careful, deny only", async () => {
     const { browser, owner } = await claim();
     const insert = (batch: string, taint: string | null, scopes: string) =>
       db
@@ -367,9 +367,15 @@ describe("the pending list (M3-07 AC8)", () => {
     expect(items.b_good).toMatchObject({ scopes: ["once", "hour"] });
     expect(items.b_good?.taint).toBeUndefined();
     expect(items.b_bad).toMatchObject({
-      scopes: ["once"],
+      scopes: [],
       taint: { kind: "tool", label: "a source I couldn't read" },
     });
+    const decide = (decision: string) =>
+      call(browser, "/api/approvals/b_bad", {
+        decisions: [{ approvalId: "appr_b_bad", decision, scope: "once" }],
+      });
+    expect(await (await decide("approve")).json()).toEqual({ error: "invalid_scope" });
+    expect((await decide("deny")).status).toBe(200);
   });
 
   it("limits by batch, never cutting one, and keeps a batch's items in their stored order", async () => {
