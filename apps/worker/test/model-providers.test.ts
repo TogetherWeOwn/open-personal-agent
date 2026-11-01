@@ -175,12 +175,42 @@ describe("several providers", () => {
     expect((await pin("nope", { provider: first })).status).toBe(404);
   });
 
+  it("moves the picks on a provider's model when it changes, and keeps the others", async () => {
+    await call("u1", "PUT", "/settings/roles", { background: { provider: first } });
+    await call("u1", "PUT", "/conversations/c1/model", { provider: first, model: "gpt-4.1" });
+    await call("u1", "PUT", `/settings/providers/${first}`, { ...OPENAI, model: "gpt-4o-mini" });
+    const { roles } = (await call("u1", "GET", "/settings")).body;
+    expect(roles.background).toEqual({ provider: first, model: "gpt-4o-mini", default: false });
+    const pinned = "SELECT model FROM conversations WHERE id = 'c1'";
+    expect(await env.DB.prepare(pinned).first("model")).toBe("gpt-4.1");
+    await call("u1", "PUT", "/settings/roles", { background: null });
+  });
+
+  it("lets onboarding edit only the provider saved for its endpoint", async () => {
+    const before = (await call("u1", "GET", "/settings")).body.providers;
+    // Chat is on OpenRouter; onboarding names OpenAI's endpoint, so it edits that row.
+    const saved = await call("u1", "PUT", "/settings/model", { ...OPENAI, model: "gpt-4.1" });
+    expect(saved.body.roles.chat).toEqual({ provider: first, model: "gpt-4.1" });
+    // A new endpoint adds a row instead of rewriting one.
+    const other = { ...ROUTER, baseUrl: "https://gateway.test/v1", model: "x", apiKey: KEYS[1] };
+    const added = await call("u1", "PUT", "/settings/model", other);
+    const after = added.body.providers;
+    expect(after).toHaveLength(before.length + 1);
+    expect(after.find((p: { id: string }) => p.id === second)).toEqual(
+      before.find((p: { id: string }) => p.id === second),
+    );
+    await call("u1", "PUT", "/settings/roles", {
+      chat: { provider: second, model: "other/model" },
+    });
+  });
+
   it("won't delete the Chat role's provider, and deletes another with its key", async () => {
     const chat = await call("u1", "DELETE", `/settings/providers/${second}`);
     expect(chat).toEqual({ status: 409, body: { error: "chat_role" } });
+    const keys = env.DB.prepare("SELECT count(*) AS n FROM secrets WHERE user_id = 'u1'");
+    const before = await keys.first<number>("n");
     expect((await call("u1", "DELETE", `/settings/providers/${first}`)).status).toBe(204);
-    const keys = await env.DB.prepare("SELECT count(*) AS n FROM secrets WHERE user_id = 'u1'");
-    expect(await keys.first("n")).toBe(1);
+    expect(await keys.first("n")).toBe(Number(before) - 1);
     expect((await call("u1", "DELETE", `/settings/providers/${first}`)).status).toBe(404);
   });
 });

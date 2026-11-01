@@ -4,6 +4,7 @@
 import { estimate, findPrice } from "@opa/pricing";
 import { and, count, desc, eq, gte, inArray, type SQL, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import {
@@ -347,11 +348,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             await db.insert(modelProviders).values({ ...values, id, userId });
             return id;
           },
+          /**
+           * A new model also moves the roles and conversations that were on the old one, so a
+           * listing never shows one model while calls go to another. Other picks stay.
+           */
           update: async (id: string, values: Partial<ProviderValues>) => {
-            await db
-              .update(modelProviders)
-              .set({ ...values, updatedAt: Date.now() })
-              .where(ownProvider(id));
+            const old = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
+            if (!old) return;
+            const { model } = values;
+            const moved = model && old.model && model !== old.model ? old.model : null;
+            const on = (provider: SQLiteColumn, column: SQLiteColumn, owner: SQLiteColumn) =>
+              and(eq(owner, userId), eq(provider, id), eq(column, moved as string));
+            const { chatProvider, chatModel, backgroundProvider, backgroundModel } = userSettings;
+            await db.batch([
+              db
+                .update(modelProviders)
+                .set({ ...values, updatedAt: Date.now() })
+                .where(ownProvider(id)),
+              ...(moved && model
+                ? [
+                    db
+                      .update(userSettings)
+                      .set({ chatModel: model })
+                      .where(on(chatProvider, chatModel, userSettings.userId)),
+                    db
+                      .update(userSettings)
+                      .set({ backgroundModel: model })
+                      .where(on(backgroundProvider, backgroundModel, userSettings.userId)),
+                    db
+                      .update(conversations)
+                      .set({ model })
+                      .where(
+                        on(conversations.modelProvider, conversations.model, conversations.userId),
+                      ),
+                  ]
+                : []),
+            ]);
           },
           /** Removes the row and its key; roles and conversations naming it fall back. */
           remove: async (id: string) => {

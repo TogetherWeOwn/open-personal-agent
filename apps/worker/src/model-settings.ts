@@ -166,6 +166,24 @@ async function keyedValues(
   return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
 }
 
+/** Whether a saved provider has the body's provider, origin and path: the key's own endpoint. */
+function sameEndpoint(row: Provider, body: Record<string, unknown>) {
+  const providerId = text(body.providerId, 63);
+  const baseUrl = text(body.baseUrl, 500);
+  if (row.kind !== "openai-chat" || !row.providerId || !row.baseUrl || !providerId || !baseUrl) {
+    return false;
+  }
+  try {
+    const binding = credentialBinding(providerId, baseUrl);
+    return (
+      credentialBinding(row.providerId, row.baseUrl) === binding &&
+      path(row.baseUrl) === path(baseUrl)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** The user's starter row, made on first use; there is one, as it has no key. */
 async function starterRow(user: User) {
   const saved = (await user.providers.list()).find((p) => p.kind === "workers-ai");
@@ -217,8 +235,9 @@ settings.put("/model", async (c) => {
   if (body?.kind !== "openai-chat") return fail(c, 400, "invalid_model");
   const settings = await user.settings.get();
   if (!settings) return fail(c, 404, "not_found");
-  // This route edits one key, as onboarding always has: the Chat role's, else the newest saved.
-  const keyed = (await user.providers.list()).filter((p) => p.kind === "openai-chat");
+  // Onboarding names an endpoint, not a row: it edits the saved provider for that endpoint, the
+  // Chat role's first, and otherwise adds one. A row for another endpoint is never rewritten.
+  const keyed = (await user.providers.list()).filter((p) => sameEndpoint(p, body));
   const current = keyed.find((p) => p.id === settings.chatProvider) ?? keyed.at(-1);
   const values = await keyedValues(c, body, current);
   if ("error" in values) return fail(c, values.status, values.error);
