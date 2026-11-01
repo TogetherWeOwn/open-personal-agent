@@ -15,7 +15,7 @@ ignoredBuiltDependencies:
 minimumReleaseAge: 1440
 strictDepBuilds: true
 
-# TWO-920: drizzle-kit (devDependency, schema generation only) pulls the deprecated
+# drizzle-kit (devDependency, schema generation only) pulls the deprecated
 # @esbuild-kit/core-utils, which pins esbuild 0.18.20 (GHSA-67mh-4wv8-2f99, fixed in 0.25.0).
 # Force the esbuild 0.25.12 already present in this tree under @esbuild-kit only; remove this
 # override once drizzle-kit drops @esbuild-kit. Verified: `drizzle-kit generate` produces no diff.
