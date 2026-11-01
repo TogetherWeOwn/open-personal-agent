@@ -6,6 +6,7 @@
 import { createRepository } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import { Hono } from "hono";
+import { type AllowanceWarnings, WARNINGS_TTL_MS } from "./allowances";
 import type { AppEnv } from "./env";
 
 interface Limits {
@@ -24,6 +25,7 @@ interface SpendingRpc {
     todayMicroUsd: number;
     monthMicroUsd: number;
     heldMicroUsd: number;
+    allowance?: AllowanceWarnings | null;
   }>;
   setSpending(body: unknown): Promise<{ before: Limits; after: Limits; write: number } | null>;
   revertSpending(write: number, before: Limits): Promise<void>;
@@ -72,6 +74,11 @@ spendingRoutes.get("/", async (c) => {
       settings.hardCapMicroUsd !== null &&
       limits.monthMicroUsd + limits.heldMicroUsd >= settings.hardCapMicroUsd,
     month: utcMonth,
+    /** The reconciler's 70% allowance warnings (COST-5): the owner's only, and only while fresh. */
+    allowanceWarnings:
+      limits.allowance && now - limits.allowance.at < WARNINGS_TTL_MS
+        ? limits.allowance.warnings
+        : [],
     /** Whose figures these are: the banners keep each user's dismissals apart. */
     userId: c.var.session.scope.userId,
   });
