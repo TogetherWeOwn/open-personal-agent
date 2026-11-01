@@ -8,6 +8,7 @@ import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-aria-components";
 import { type ModelSettings, settingsApi } from "../models/settings-api";
 import { Button, buttonClass, Checklist, Menu, MenuItem, Sheet } from "../ui";
+import { setPrefill } from "./prefill";
 import { SafetyExplainer } from "./Safety";
 import { SuggestedPrompts } from "./Suggestions";
 
@@ -27,7 +28,7 @@ export function SetupChecklist({
 }: {
   /** The chat's empty state can hide it and say "All set." once; Settings › Assistant keeps it. */
   place: "chat" | "settings";
-  /** Puts a suggested prompt in the chat's composer. */
+  /** Puts a suggested prompt in the chat's composer; without it, a pick opens the chat with it. */
   onPrompt?: (prompt: string) => void;
   /** Changes when the card should load again, as when the chat shows after another screen. */
   reload?: number;
@@ -37,6 +38,7 @@ export function SetupChecklist({
   const [safety, setSafety] = useState(false);
   const [suggest, setSuggest] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [hideFailed, setHideFailed] = useState(false);
   // Every open item finished while this card was on screen: it says "All set." once.
   const [allSet, setAllSet] = useState(false);
   const open = useRef(0);
@@ -85,15 +87,32 @@ export function SetupChecklist({
         Show me
       </Button>
     ),
-    chat:
-      place === "chat" ? (
-        <Button variant="quiet" onPress={() => setSuggest(true)}>
-          Show suggestions
-        </Button>
-      ) : (
-        link("/", "Go to Chat")
-      ),
+    // Offered in Settings too: a hidden card leaves the chat with no way to finish this step.
+    chat: (
+      <Button variant="quiet" onPress={() => setSuggest(true)}>
+        Show suggestions
+      </Button>
+    ),
   };
+  const pick = async (prompt: string) => {
+    if (onPrompt) {
+      onPrompt(prompt);
+      await finish("chat");
+      return;
+    }
+    // From Settings: the chat takes the prompt at load, unsent, as after onboarding.
+    setPrefill(prompt);
+    await finish("chat");
+    window.location.assign("/");
+  };
+  const hide = () =>
+    post({ hidden: true }).then(
+      (next) => {
+        setHideFailed(false);
+        setSetup(next);
+      },
+      () => setHideFailed(true),
+    );
   // Every step the checklist covers, in step order; the ones not skipped were done in onboarding.
   const items = SETUP_STEPS.map((step) => ({
     id: step,
@@ -120,22 +139,18 @@ export function SetupChecklist({
                   </>
                 }
               >
-                <MenuItem
-                  onAction={() => void post({ hidden: true }).then(setSetup, () => setSetup(null))}
-                >
-                  Hide
-                </MenuItem>
+                <MenuItem onAction={() => void hide()}>Hide</MenuItem>
               </Menu>
             )
           }
         >
-          {suggest && skipped.includes("chat") && onPrompt && (
-            <SuggestedPrompts
-              onPick={(prompt) => {
-                onPrompt(prompt);
-                void finish("chat");
-              }}
-            />
+          {hideFailed && (
+            <p role="alert" className="text-danger">
+              I couldn't hide this. Try again.
+            </p>
+          )}
+          {suggest && skipped.includes("chat") && (
+            <SuggestedPrompts onPick={(prompt) => void pick(prompt)} />
           )}
         </Checklist>
       )}

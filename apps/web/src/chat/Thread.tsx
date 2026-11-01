@@ -68,7 +68,8 @@ export function Thread({
       className="min-h-0 flex-1 overflow-y-auto"
     >
       <div className="mx-auto flex max-w-[720px] flex-col gap-6 px-4 py-6">
-        {conversation.messages.length === 0 && (
+        {/* A model switch's line isn't a start: the empty state stays until the user writes. */}
+        {!conversation.messages.some((m) => m.role !== "system") && (
           <>
             <p className="text-text-muted">Hi. What can I help you with?</p>
             {empty}

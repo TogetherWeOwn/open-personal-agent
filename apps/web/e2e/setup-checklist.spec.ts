@@ -125,3 +125,67 @@ test("a failed load leaves the card out silently", async ({ page }) => {
   await expect(card(page)).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
+
+test("a model switch before the first message keeps the checklist", async ({ page }) => {
+  const setup = { skipped: ["chat"], hidden: false };
+  await stub(page, setup);
+  const provider = (id: string, providerName: string, model: string) => ({
+    id,
+    kind: "openai-chat",
+    api: "openai-chat",
+    providerId: providerName.toLowerCase(),
+    baseUrl: "https://example.test/v1",
+    providerName,
+    model,
+    modelName: model,
+    createdAt: Date.UTC(2026, 9, 20),
+    key: { last4: "WXYZ", createdAt: 0, updatedAt: 0, lastUsedAt: null },
+    price: null,
+  });
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: {
+        displayName: "Sam",
+        about: "",
+        onboarded: true,
+        model: null,
+        setup,
+        providers: [provider("p1", "OpenAI", "gpt-4.1-mini"), provider("p2", "OpenRouter", "x/y")],
+        roles: {
+          chat: { provider: "p1", model: "gpt-4.1-mini" },
+          background: { provider: "p1", model: "gpt-4.1-mini", default: true },
+          embedding: null,
+        },
+      },
+    }),
+  );
+  await page.goto("/");
+  await expect(card(page)).toBeVisible();
+  await page.getByRole("button", { name: /model for this chat/ }).click();
+  await page.getByRole("menuitem", { name: /x\/y · OpenRouter/ }).click();
+  await expect(page.getByRole("log")).toContainText("Switched to x/y via OpenRouter");
+  await expect(card(page)).toBeVisible();
+  await expect(page.getByText("Hi. What can I help you with?")).toBeVisible();
+});
+
+test("after Hide, Settings › Assistant still finishes First chat", async ({ page }) => {
+  const { bodies } = await stub(page, { skipped: ["chat"], hidden: true });
+  await page.goto("/settings/assistant");
+  await card(page).getByRole("button", { name: "Show suggestions" }).click();
+  await card(page).getByRole("button", { name: "Remember that I'm vegetarian." }).click();
+  await page.waitForURL("/");
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(
+    "Remember that I'm vegetarian.",
+  );
+  expect(bodies).toEqual([{ done: "chat" }]);
+});
+
+test("a failed Hide keeps the card and says so", async ({ page }) => {
+  await stub(page, { skipped: ["about"], hidden: false });
+  await page.route("/api/settings/setup", (route) => route.fulfill({ status: 500 }));
+  await page.goto("/");
+  await card(page).getByRole("button", { name: "Setup checklist options" }).click();
+  await page.getByRole("menuitem", { name: "Hide" }).click();
+  await expect(card(page).getByRole("alert")).toHaveText("I couldn't hide this. Try again.");
+  await expect(card(page).getByRole("heading")).toHaveText("Finish setting up · 3 of 4 done");
+});
