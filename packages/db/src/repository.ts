@@ -165,6 +165,44 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             and(eq(secrets.id, modelProviders.keySecretId), eq(secrets.userId, userId)),
           )
           .where(and(eq(modelProviders.userId, userId), where));
+      /** The next message of a conversation; only a reply starts out streaming. */
+      const message = (
+        conversationId: string,
+        id: string,
+        role: "user" | "assistant" | "system",
+        content: string,
+      ) =>
+        db.insert(messages).values({
+          id,
+          userId,
+          conversationId,
+          seq: sql`(SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE conversation_id = ${conversationId})`,
+          role,
+          status: role === "assistant" ? "streaming" : "complete",
+          content,
+        });
+      /** A conversation's rows with the given roles, oldest first. */
+      const thread = <Role extends "user" | "assistant" | "system">(
+        conversationId: string,
+        roles: Role[],
+      ) =>
+        db
+          .select({
+            id: messages.id,
+            role: sql<Role>`${messages.role}`, // the filter below
+            status: messages.status,
+            content: messages.content,
+            createdAt: messages.createdAt,
+          })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.conversationId, conversationId),
+              eq(messages.userId, userId),
+              inArray(messages.role, roles),
+            ),
+          )
+          .orderBy(messages.seq);
       const createConversation = async (
         id: string,
         title: string | null = null,
@@ -194,26 +232,21 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         getConversation,
         createConversation,
         chat: {
-          /** The conversation's messages oldest first, or `null` when it isn't the user's. */
+          /**
+           * The conversation's messages oldest first, or `null` when it isn't the user's. This is
+           * the model context, so it never holds the thread's model-switch lines.
+           */
           listMessages: async (conversationId: string) =>
             (await getConversation(conversationId))
-              ? db
-                  .select({
-                    id: messages.id,
-                    role: sql<"user" | "assistant">`${messages.role}`, // the filter below
-                    status: messages.status,
-                    content: messages.content,
-                    createdAt: messages.createdAt,
-                  })
-                  .from(messages)
-                  .where(
-                    and(
-                      eq(messages.conversationId, conversationId),
-                      eq(messages.userId, userId),
-                      inArray(messages.role, ["user", "assistant"]),
-                    ),
-                  )
-                  .orderBy(messages.seq)
+              ? thread(conversationId, ["user", "assistant"])
+              : null,
+          /**
+           * What the chat shows: its messages and the `system` lines that record each model switch
+           * between them, oldest first. `null` when it isn't the user's.
+           */
+          listThread: async (conversationId: string) =>
+            (await getConversation(conversationId))
+              ? thread(conversationId, ["user", "assistant", "system"])
               : null,
           /** Creates the conversation on its first message; `false` if the ID is someone else's. */
           /** Opens a conversation, creating it, with its own model if one is given, when it's new. */
@@ -223,34 +256,27 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             await createConversation(id, title, pin).catch(() => {});
             return (await getConversation(id)) !== undefined;
           },
-          /** Pins the conversation to a model, or back to the Chat role with `null`. */
+          /**
+           * Pins the conversation to a model, or back to the Chat role with `null`. A `line` is the
+           * thread's record of the switch, written with the pin or not at all.
+           */
           setModel: async (
             conversationId: string,
             pick: { provider: string; model: string } | null,
+            line?: { id: string; content: string },
           ) => {
+            if (!(await getConversation(conversationId))) return false;
             const set = { modelProvider: pick?.provider ?? null, model: pick?.model ?? null };
-            const done = await db
-              .update(conversations)
-              .set(set)
-              .where(own(conversationId))
-              .returning({ id: conversations.id });
-            return done.length > 0;
+            const update = db.update(conversations).set(set).where(own(conversationId));
+            if (!line) await update;
+            else await db.batch([update, message(conversationId, line.id, "system", line.content)]);
+            return true;
           },
           /** Writes the user's message and the empty streaming reply after it, both or neither. */
           startTurn: async (conversationId: string, text: string, replyId: string) => {
-            const message = (id: string, role: "user" | "assistant", content: string) =>
-              db.insert(messages).values({
-                id,
-                userId,
-                conversationId,
-                seq: sql`(SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE conversation_id = ${conversationId})`,
-                role,
-                status: role === "user" ? "complete" : "streaming",
-                content,
-              });
             await db.batch([
-              message(crypto.randomUUID(), "user", text),
-              message(replyId, "assistant", ""),
+              message(conversationId, crypto.randomUUID(), "user", text),
+              message(conversationId, replyId, "assistant", ""),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
             ]);
           },

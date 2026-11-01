@@ -4,7 +4,10 @@ import type { ConversationSummary, StoredMessage } from "./transport";
 
 /** The statuses D1 stores, so a loaded message keeps its own. */
 type Status = StoredMessage["status"];
-/** `system` lines are this tab's own record (a model switch); the server never stores them. */
+/**
+ * `system` lines record a model switch. The server keeps each switch it saved; this tab keeps its
+ * own until then, and for good when nothing was saved (a failed switch, or a chat's first pick).
+ */
 export type Message = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -58,7 +61,9 @@ export type ChatAction =
       noticeId: string;
       pick: Conversation["model"];
       notice: string;
-    };
+    }
+  /** A switch saved: the server's line takes the place of this tab's `noticeId` line. */
+  | { type: "saved"; id: string; noticeId: string; message: StoredMessage };
 
 const NEW_TITLE = "New chat";
 const blank = (id: string): Conversation => ({
@@ -153,6 +158,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         })),
         announcement: action.notice,
       };
+    }
+    case "saved": {
+      const { id, content } = action.message;
+      const line: Message = { id, role: "system", text: content, status: "complete" };
+      return update(state, action.id, (c) => ({
+        // A load may have brought the saved line already; then this tab's copy just goes.
+        messages: c.messages.some((m) => m.id === id)
+          ? c.messages.filter((m) => m.id !== action.noticeId)
+          : c.messages.map((m) => (m.id === action.noticeId ? line : m)),
+      }));
     }
     case "loaded":
       return loaded(state, action.id, action.messages);
@@ -258,15 +273,16 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     if (sent?.role === "user" && !stored.some((s) => s.id === sent.id)) messages.push(sent);
     if (at >= 0) messages.push(current.messages[at] as Message);
   }
-  // This tab's system lines (model switches) aren't on the server; put each back after the
-  // message it followed, or at the end when that message is gone.
+  // This tab's system lines the server doesn't have (unsaved model switches): put each back after
+  // the last message before it that the server kept, or at the end when that message is gone.
+  const saved = new Set(stored.map((s) => s.id));
+  const kept = (m: Message) => m.role !== "system" || saved.has(m.id);
   const lines: { line: Message; after: string | null }[] = [];
   current.messages.forEach((m, i) => {
-    if (m.role === "system")
+    if (!kept(m))
       lines.push({
         line: m,
-        after:
-          [...current.messages.slice(0, i)].reverse().find((p) => p.role !== "system")?.id ?? null,
+        after: [...current.messages.slice(0, i)].reverse().find(kept)?.id ?? null,
       });
   });
   // Backwards, so several lines after one message keep their order. A line whose message is

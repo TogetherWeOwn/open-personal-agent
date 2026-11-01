@@ -211,6 +211,47 @@ describe("chatReducer", () => {
     expect(rolledBack.conversations[0]?.model).toBe(null);
   });
 
+  it("keeps a saved switch line once, in the server's place, across reloads (TWO-614)", () => {
+    const notice = "Switched to GPT-4.1 mini via OpenAI";
+    const switched = run(send, started(), ev("turn.completed"), {
+      type: "model",
+      id: "c1",
+      noticeId: "n1",
+      pick: { provider: "p1", model: "gpt-4.1-mini" },
+      notice,
+    });
+    const line: StoredMessage = { id: "s1", role: "system", content: notice, status: "complete" };
+    const saved = chatReducer(switched, { type: "saved", id: "c1", noticeId: "n1", message: line });
+    expect(saved.conversations[0]?.messages.at(-1)).toMatchObject({ id: "s1", text: notice });
+
+    // The server's thread holds the line: a reload shows it once, where the server put it.
+    const stored = [msg("m1", "Plan my week"), msg("r-t1", "Done."), line, msg("u2", "Next?")];
+    const ids = (s: ChatState) => s.conversations[0]?.messages.map((m) => m.id);
+    expect(ids(chatReducer(saved, load("c1", ...stored)))).toEqual(["m1", "r-t1", "s1", "u2"]);
+    // A tab that never saw the switch (a fresh load) shows it too.
+    expect(ids(run(load("c1", ...stored)))).toEqual(["m1", "r-t1", "s1", "u2"]);
+
+    // A load that brought the line before the save answered: this tab's copy just goes.
+    const early = chatReducer(switched, load("c1", ...stored));
+    expect(ids(early)).toEqual(["m1", "r-t1", "n1", "s1", "u2"]);
+    const once = chatReducer(early, { type: "saved", id: "c1", noticeId: "n1", message: line });
+    expect(ids(once)).toEqual(["m1", "r-t1", "s1", "u2"]);
+
+    // A failed switch after a saved one stays this tab's, after it, through a reload.
+    const failed = chatReducer(saved, {
+      type: "model",
+      id: "c1",
+      noticeId: "n2",
+      pick: null,
+      notice: "Couldn't switch the model, so nothing changed.",
+    });
+    const reloaded = chatReducer(
+      failed,
+      load("c1", msg("m1", "Plan my week"), msg("r-t1", "Done."), line),
+    );
+    expect(ids(reloaded)).toEqual(["m1", "r-t1", "s1", "n2"]);
+  });
+
   it("titles a chat switched before its first message from that message", () => {
     const switched: ChatAction = {
       type: "model",

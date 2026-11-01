@@ -68,22 +68,30 @@ const apiOf = (row: Provider) =>
         ? "anthropic-messages"
         : "openai-chat";
 
+/**
+ * Names a person reads ("GPT-4.1 mini · OpenAI"), from the price table where it has them; a
+ * provider it doesn't know is named by its billing host, as on the Usage page.
+ */
+export function namesOf(row: Provider, model: string | null) {
+  const billingId = billerOf(row);
+  const modelName = (model && findPrice(billingId, model)?.name) || model;
+  return { providerName: providerInfo(billingId).name, modelName };
+}
+
 /** A saved provider as the browser sees it: the key's last 4 and dates, never the key (SEC-7). */
 function providerView(row: Provider) {
   // `last4` is null for keys shorter than 20 characters; the join still finds the row.
   const keyed = row.keyCreatedAt !== null && row.kind !== "workers-ai";
-  const billingId = billerOf(row);
+  const { providerName, modelName } = namesOf(row, row.model);
   return {
     id: row.id,
     kind: row.kind,
     api: apiOf(row),
     providerId: row.providerId,
     baseUrl: row.baseUrl,
-    // Names a person reads ("GPT-4.1 mini · OpenAI"), from the price table where it has them;
-    // a provider it doesn't know is named by its billing host, as on the Usage page.
-    providerName: providerInfo(billingId).name,
+    providerName,
     model: row.model,
-    modelName: (row.model && findPrice(billingId, row.model)?.name) || row.model,
+    modelName,
     createdAt: row.createdAt,
     key: keyed
       ? {

@@ -9,10 +9,13 @@ export type ConversationSummary = {
   model?: { provider: string; model: string } | null;
 };
 
-/** A row of `GET /api/conversations/:id/messages`, oldest first. */
+/**
+ * A row of `GET /api/conversations/:id/messages`, oldest first. A `system` row records a model
+ * switch, and never reaches the model.
+ */
 export type StoredMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   status: "complete" | "streaming" | "interrupted" | "error";
   content: string;
 };

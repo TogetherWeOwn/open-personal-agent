@@ -6,6 +6,7 @@ import {
   type PublicKeyCredentialRequestOptionsJSON,
   startAuthentication,
 } from "@simplewebauthn/browser";
+import type { StoredMessage } from "../chat/transport";
 
 export interface PriceHint {
   inputUsdPerMTok: number;
@@ -89,13 +90,16 @@ export async function settingsApi<T>(path: string, method = "GET", body?: unknow
 export async function setConversationModel(
   conversationId: string,
   pick: RolePick | null,
-): Promise<void> {
+): Promise<StoredMessage | null> {
   const res = await fetch(`/api/conversations/${conversationId}/model`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(pick),
   });
   if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error);
+  // The thread's saved line for the switch; none when there was no model to name.
+  const { message } = (await res.json().catch(() => ({}))) as { message?: StoredMessage | null };
+  return message ?? null;
 }
 
 const ERRORS: Record<string, string> = {
