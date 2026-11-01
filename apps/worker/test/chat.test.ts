@@ -337,6 +337,63 @@ describe("chat transport", () => {
     expect(stale.events).toEqual([]);
   });
 
+  it("replays a running turn to a tab that resumes it, under a seq that never restarts", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const a = await openTab(browser);
+    a.send?.("conv-7", "Tell me a story");
+    await a.until?.("message.delta");
+    const turnId = a.events[0]?.turnId;
+    // A tab that connected late saw nothing; its resume replays the turn so far, to it alone.
+    const b = await openTab(browser);
+    const resume = (conversationId: string, id: unknown, afterSeq: number) =>
+      b.ws?.send(JSON.stringify({ type: "resume", conversationId, turnId: id, afterSeq }));
+    resume("conv-7", turnId, 0);
+    await vi.waitFor(() => expect(b.events).toEqual(a.events), SOCKET_WAIT);
+    release();
+    await a.until?.("turn.completed");
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+    const seqs = a.events.map((e) => e.seq);
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1)); // 1..n for the conversation's first turn
+
+    // The next turn continues the seq; the settled turn's rows are trimmed and replay empty.
+    a.events.length = 0;
+    a.send?.("conv-7", "Again");
+    await a.until?.("turn.completed");
+    expect(a.events[0]?.seq).toBe((seqs.at(-1) ?? 0) + 1);
+    const logged = await runInDurableObject(assistantOf(owner), (_i, state) =>
+      state.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM event_log").one(),
+    );
+    expect(logged).toEqual({ n: 0 });
+    const before = b.events.length;
+    resume("conv-7", turnId, 0);
+    resume("no-such-conversation", "no-such-turn", 0);
+    resume("conv-7", turnId, -1); // not a valid frame either
+    await new Promise((r) => setTimeout(r, 500)); // settled and unknown turns answer nothing
+    expect(b.events.length).toBe(before);
+  });
+
+  it("answers no resume from a session that has ended", async () => {
+    const { browser, owner, key } = await claim();
+    const other = new Browser();
+    expect((await other.login(key)).status).toBe(200);
+    await useModel(owner, scripted([], never));
+    const [stale, live] = [await openTab(browser), await openTab(other)];
+    live.send?.("conv-8", "Only for live tabs");
+    await live.until?.("message.delta");
+    expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    stale.events.length = 0; // it saw the turn live; the replay is what must not come
+    const turnId = live.events[0]?.turnId;
+    stale.ws?.send(
+      JSON.stringify({ type: "resume", conversationId: "conv-8", turnId, afterSeq: 0 }),
+    );
+    expect(await stale.closed).toBe(4401);
+    expect(stale.events).toEqual([]);
+  });
+
   it("refuses another user's conversation, bad input and a second concurrent turn", async () => {
     const { browser, owner } = await claim();
     await db.exec(`INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member');
