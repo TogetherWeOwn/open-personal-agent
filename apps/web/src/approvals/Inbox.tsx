@@ -40,6 +40,7 @@ export function Inbox() {
     void refreshApprovals();
   }, []);
   const today = receipts.filter((r) => r.at >= startOfToday());
+  // The API lists the batch that expires soonest first, so the first page is the most urgent.
   const shown = all ? batches : batches.slice(0, PAGE);
   return (
     <Page title="Inbox">
@@ -74,6 +75,7 @@ export function Inbox() {
               batch={b}
               context={<Origin batch={b} />}
               where={b.conversationTitle || "your chat"}
+              idPrefix="inbox-approval"
             />
           ))}
           {!all && batches.length > PAGE && (
@@ -106,15 +108,17 @@ export function ApprovalLink({ params }: { params: Record<string, string> }) {
   const { status, batches } = useApprovals();
   const id = params.approvalId ?? "";
   const batch = batches.find((b) => b.items.some((i) => i.approvalId === id));
+  // Decided only on a fresh read: the cached list may still hold one another tab answered.
+  const [read, setRead] = useState(false);
   useEffect(() => {
-    void refreshApprovals();
+    void refreshApprovals().finally(() => setRead(true));
   }, []);
   useEffect(() => {
-    if (!batch) return;
+    if (!read || !batch) return;
     wantFocus(batch.batchId);
     navigate(`/c/${encodeURIComponent(batch.conversationId)}`, true);
-  }, [batch]);
-  if (batch || status === "loading") return <Skeleton label="Opening the request" />;
+  }, [read, batch]);
+  if (!read || batch || status === "loading") return <Skeleton label="Opening the request" />;
   if (status === "error") {
     return (
       <Page title="Inbox">

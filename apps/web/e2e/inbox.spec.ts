@@ -120,6 +120,9 @@ test("a deep link opens its chat with focus on the card", async ({ page }) => {
   const id = new URL(href ?? "", "http://x").searchParams.get("conversation") ?? "";
   s.batches = [batch(1, id)];
   await page.getByRole("link", { name: "Inbox" }).first().click();
+  // The hidden chat shows the same card; the Inbox's keeps its own ids.
+  await expect(page.locator("#inbox-approval-batch_1")).toHaveCount(1);
+  await expect(page.locator("#approval-batch_1")).toHaveCount(1);
   await page.getByRole("link", { name: "Open in Chat 1" }).click();
   await expect(page).toHaveURL(`/c/${id}`);
   await expect(page.getByRole("heading", { name: "Send email · Needs your OK" })).toBeFocused();
@@ -133,6 +136,20 @@ test("a deep link to a request that no longer waits says so", async ({ page }) =
   );
   await page.getByRole("link", { name: "Go to your Inbox" }).click();
   await expect(page).toHaveURL("/inbox");
+});
+
+test("a deep link answered elsewhere since the last read doesn't open the chat", async ({
+  page,
+}) => {
+  const s = await stub(page, [batch(1)]);
+  await page.goto("/inbox");
+  await expect(page.getByRole("link", { name: "Open in Chat 1" })).toBeVisible();
+  s.batches = []; // another tab answered it; this tab's list still has it
+  await page.getByRole("link", { name: "Open in Chat 1" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "This request isn't waiting anymore",
+  );
+  await expect(page).toHaveURL("/approvals/appr_1");
 });
 
 for (const width of [375, 1280]) {
