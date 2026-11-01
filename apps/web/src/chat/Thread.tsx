@@ -58,8 +58,10 @@ function MessageView({ message: m }: { message: Message }) {
       <p className={`whitespace-pre-wrap break-words ${m.status === "streaming" ? "caret" : ""}`}>
         {m.text}
       </p>
-      {m.status === "stopped" && <p className="mt-1 text-sm text-text-muted">Stopped.</p>}
-      {m.status === "failed" && (
+      {m.status === "interrupted" && (
+        <p className="mt-1 text-sm text-text-muted">Stopped before it finished.</p>
+      )}
+      {m.status === "error" && (
         <p className="mt-1 text-sm text-danger">This reply failed. Try sending it again.</p>
       )}
     </div>
