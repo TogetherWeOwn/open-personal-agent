@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // The composition root (ADR 0010 D4.1 #1). It is the only Worker code that reads the master
 // keys: it hands them to the vault and gives everything else an env without them.
+import { d1VaultStore } from "@opa/db/vault-store";
 import { createVault } from "@opa/vault";
 import type { Bindings, Env } from "./env";
-import { d1VaultStore } from "./vault-store";
 
 /** The env as the runtime passes it. */
 export interface WorkerEnv extends Bindings {
@@ -32,7 +32,7 @@ export function compose(raw: WorkerEnv): Promise<Env> {
 
 async function build(raw: WorkerEnv): Promise<Env> {
   const bindings = withoutMasterKeys(raw);
-  const store = d1VaultStore(bindings.DB);
+  const store = d1VaultStore(bindings);
   const { OPA_MASTER_KEY: masterKey, OPA_MASTER_KEY_PREV: previousMasterKey } = raw;
   const vault = await createVault({ masterKey, previousMasterKey, store }).catch(() => null);
   if (vault) return { ...bindings, VAULT: vault, VAULT_STATUS: "ok" };

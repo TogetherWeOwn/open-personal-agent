@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { systemStore } from "@opa/db/system";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { checkHealth } from "./health";
@@ -43,9 +44,7 @@ app.route("/api/sessions", sessionRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */
 app.get("/api/me", async (c) => {
-  const user = await c.env.DB.prepare("SELECT id, display_name, role FROM users WHERE id = ?")
-    .bind(c.var.session.userId)
-    .first<{ id: string; display_name: string; role: string }>();
+  const user = await systemStore(c.env).users.get(c.var.session.userId);
   if (!user) return c.json({ error: "unauthenticated" }, 401);
   c.header("Cache-Control", "no-store");
   return c.json({ id: user.id, displayName: user.display_name, role: user.role });

@@ -2,6 +2,8 @@
 // Auth primitives shared by the claim (M2-09) and login (M2-10): random IDs, SHA-256 hashing,
 // single-use WebAuthn challenges, session rows and recovery codes (ADR 0010 D2). Every secret
 // value is ≥128 bits of randomness, so a plain SHA-256 is the right hash; nothing stores plaintext.
+import type { ChallengeKind, NewSession, SystemStore } from "@opa/db/system";
+
 export const SESSION_COOKIE = "__Host-opa_session";
 export const CHALLENGE_COOKIE = "__Host-opa_webauthn";
 export const COOKIE_OPTIONS = { path: "/", secure: true, httpOnly: true, sameSite: "Lax" } as const;
@@ -40,26 +42,27 @@ export async function secretsEqual(a: string, b: string): Promise<boolean> {
 
 /**
  * Stores a challenge and returns the cookie value that redeems it. A claim or recovery challenge
- * carries the setup token hash it was issued under, so rotating the token voids it. Expired rows
- * nobody redeemed are purged here, in the same batch.
+ * carries the setup token hash it was issued under, so rotating the token voids it.
  */
 export async function putChallenge(
-  db: D1Database,
-  kind: "claim" | "recovery" | "login",
+  store: SystemStore,
+  kind: ChallengeKind,
   challenge: string,
   userId: string | null,
   tokenHash: string | null = null,
 ): Promise<string> {
   const id = randomId();
   const now = Date.now();
-  await db.batch([
-    db.prepare("DELETE FROM webauthn_challenges WHERE expires_at <= ?").bind(now),
-    db
-      .prepare(
-        "INSERT INTO webauthn_challenges (id_hash, kind, challenge, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .bind(await sha256(id), kind, challenge, userId, tokenHash, now + CHALLENGE_TTL_MS),
-  ]);
+  const idHash = await sha256(id);
+  await store.challenges.put({
+    idHash,
+    kind,
+    challenge,
+    userId,
+    tokenHash,
+    now,
+    expiresAt: now + CHALLENGE_TTL_MS,
+  });
   return id;
 }
 
@@ -68,35 +71,30 @@ export async function putChallenge(
  * another setup token is consumed too, but not returned.
  */
 export async function takeChallenge(
-  db: D1Database,
+  store: SystemStore,
   cookie: string | undefined,
-  kind: "claim" | "recovery" | "login",
+  kind: ChallengeKind,
   tokenHash: string | null = null,
 ): Promise<{ challenge: string; user_id: string | null } | null> {
   if (!cookie) return null;
-  const row = await db
-    .prepare(
-      "DELETE FROM webauthn_challenges WHERE id_hash = ? AND kind = ? AND expires_at > ? RETURNING challenge, user_id, token_hash",
-    )
-    .bind(await sha256(cookie), kind, Date.now())
-    .first<{ challenge: string; user_id: string | null; token_hash: string | null }>();
+  const row = await store.challenges.take(await sha256(cookie), kind, Date.now());
   if (!row || row.token_hash !== tokenHash) return null;
   return { challenge: row.challenge, user_id: row.user_id };
 }
 
 /**
- * A new session for `userId`: the statement that stores its hash, and the cookie value. The caller
- * runs the statement in its own batch, so the session is created atomically with the rest.
+ * A new session for `userId`: the row to store, and the cookie value. The caller hands the row to
+ * a store method that writes it in one batch with the rest.
  */
-export async function newSession(
-  db: D1Database,
-  userId: string,
-): Promise<{ cookie: string; insert: D1PreparedStatement }> {
+export async function newSession(userId: string): Promise<{ cookie: string; row: NewSession }> {
   const cookie = randomId();
-  const insert = db
-    .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), userId, await sha256(cookie), Date.now() + SESSION_ABSOLUTE_MS);
-  return { cookie, insert };
+  const row = {
+    id: crypto.randomUUID(),
+    userId,
+    tokenHash: await sha256(cookie),
+    expiresAt: Date.now() + SESSION_ABSOLUTE_MS,
+  };
+  return { cookie, row };
 }
 
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
