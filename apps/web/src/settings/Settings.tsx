@@ -7,13 +7,15 @@ import { hasNavigated } from "../router";
 import { pageTitle } from "../ui";
 import { AgentEngine } from "./AgentEngine";
 import { ModelsSettings } from "./ModelsSettings";
+import { PrivacySettings } from "./PrivacySettings";
 import { SpendingSettings } from "./Spending";
 
-export type SettingsPage = "models" | "agent-engine" | "spending";
+export type SettingsPage = "models" | "agent-engine" | "privacy" | "spending";
 
 const PAGES: { id: SettingsPage; label: string; href: string }[] = [
   { id: "models", label: "Models", href: "/settings/models" },
   { id: "agent-engine", label: "Agent engine", href: "/settings/agent-engine" },
+  { id: "privacy", label: "Privacy & security", href: "/settings/privacy" },
   { id: "spending", label: "Spending", href: "/settings/spending" },
 ];
 
@@ -56,6 +58,8 @@ export function Settings({ page }: { page: SettingsPage }) {
       </nav>
       {page === "models" ? (
         <ModelsSettings />
+      ) : page === "privacy" ? (
+        <PrivacySettings />
       ) : page === "spending" ? (
         <SpendingSettings />
       ) : (
