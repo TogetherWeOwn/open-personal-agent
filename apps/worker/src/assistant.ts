@@ -99,6 +99,12 @@ export interface TaskProgress {
   payload: unknown;
 }
 
+/** A stored message as `listMessages` returns it, with its attachments. */
+type StoredMessage = NonNullable<
+  Awaited<
+    ReturnType<ReturnType<ReturnType<typeof createRepository>["forUser"]>["chat"]["listMessages"]>
+  >
+>[number];
 type CallUsage = { inputTokens: number; outputTokens: number; cachedInputTokens: number };
 
 /**
@@ -462,7 +468,7 @@ export class Assistant extends Agent<Bindings> {
     // share a byte budget: this send's files first, whole or not at all, then earlier turns'
     // newest first while they fit. An earlier file left out was read on its own turn.
     const sending = attached.filter(readable);
-    let budget = TURN_FILE_BYTES - sending.reduce((n, row) => n + modelBytes(row), 0);
+    const budget = TURN_FILE_BYTES - sending.reduce((n, row) => n + modelBytes(row), 0);
     if (budget < 0) {
       const message =
         "Those files are too large to send in one message. Try fewer, or smaller, files.";
@@ -481,58 +487,17 @@ export class Assistant extends Agent<Bindings> {
       callRecorded: false,
       callUsage: null,
     };
-    const past = history ?? [];
-    const replayed = new Set<string>();
-    for (const m of past.toReversed()) {
-      if (m.role !== "user") continue;
-      for (const row of m.attachments.filter(readable)) {
-        if (modelBytes(row) > budget) continue;
-        budget -= modelBytes(row);
-        replayed.add(row.id);
-      }
-    }
-    const messages: ModelMessage[] = [];
-    let fileTokens = 0;
-    const read = async (rows: readonly AttachmentRow[]) => {
-      const files: ModelAttachment[] = [];
-      const ids = new Set<string>();
-      for (const row of rows) {
-        const file = await this.#modelFile(row);
-        if (!file) continue;
-        files.push(file);
-        ids.add(row.id);
-        fileTokens += fileTokenEstimate(row);
-      }
-      return { files, ids };
-    };
-    for (const m of past) {
-      if (m.role === "user" && m.attachments.length) {
-        const { files } = await read(m.attachments.filter((row) => replayed.has(row.id)));
-        // A file-only message whose files aren't replayed leaves nothing to say: skip it, as an
-        // empty message always was.
-        if (!m.content && !files.length) continue;
-        messages.push({
-          role: "user",
-          content: m.content,
-          ...(files.length ? { attachments: files } : {}),
-        });
-      } else if (m.content !== "") {
-        messages.push({ role: m.role, content: m.content });
-      }
-    }
-    const { files: sent, ids: sentIds } = await read(sending);
+    const { messages, fileTokens: pastTokens } = await this.#modelHistory(
+      history ?? [],
+      readable,
+      budget,
+    );
+    const { files: sent, ids: sentIds, tokens: sentTokens } = await this.#readFiles(sending);
+    const fileTokens = pastTokens + sentTokens;
     messages.push({ role: "user", content: text, ...(sent.length ? { attachments: sent } : {}) });
     // Reserved before anything is written, so a refused send leaves no trace, not even a
     // conversation.
-    const chars = messages.reduce(
-      (sum, m) =>
-        sum +
-        m.content.length +
-        (m.role === "user"
-          ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
-          : 0),
-      0,
-    );
+    const chars = messageChars(messages);
     // Checkpoint before the reservation and the first write, so a recovery can always name the
     // turn and release what it holds.
     stash(cp);
@@ -773,21 +738,32 @@ export class Assistant extends Agent<Bindings> {
     running: AbortController,
     approvals?: ApprovalRun,
   ): Promise<boolean> {
-    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
+    // The conversation's own model, its pin if it has one, as the turn's start picked it.
+    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat", {
+      conversationId: stopped.conversationId,
+    });
     if ("error" in picked) return false; // the saved turn stays for a retry once a model is set
     const { provider, model } = picked;
     const repo = this.#repo;
-    // History is D1's, as at the turn's start, minus the still-streaming reply: its text so
-    // far is inside `state`, where the loop left it.
-    const historyOf = async (replyId: string): Promise<ModelMessage[]> =>
-      ((await repo.chat.listMessages(stopped.conversationId)) ?? [])
-        .filter((m) => m.id !== replyId && m.content !== "")
-        .map(({ role, content }) => ({ role, content }));
-    let history = await historyOf(stopped.replyId);
+    const caps = provider.capabilities(model);
+    const readable = (row: AttachmentRow) =>
+      row.kind === "text" || (row.kind === "image" ? caps.imageInput : caps.pdfInput) === true;
+    // History is D1's, as at the turn's start, files included, minus the still-streaming reply:
+    // its text so far is inside `state`, where the loop left it.
+    const historyOf = async (replyId: string) =>
+      this.#modelHistory(
+        ((await repo.chat.listMessages(stopped.conversationId)) ?? []).filter(
+          (m) => m.id !== replyId,
+        ),
+        readable,
+        TURN_FILE_BYTES,
+      );
+    const first = await historyOf(stopped.replyId);
+    let history = first.messages;
     const providerId = picked.billingId ?? provider.id;
     const firstHold = `${stopped.turnId}:0`;
-    const chars = [...history, ...state.messages].reduce((sum, m) => sum + m.content.length, 0);
-    const reservation = this.limits.reserve(firstHold, providerId, model, chars);
+    const chars = messageChars([...history, ...state.messages]);
+    const reservation = this.limits.reserve(firstHold, providerId, model, chars, first.fileTokens);
     if (!reservation) {
       // Stops again at today's limit. No fiber starts, so the caller's claim is released here.
       // A batch's decisions stay in its rows, so it stays waiting on them: resuming it again
@@ -815,7 +791,7 @@ export class Assistant extends Agent<Bindings> {
         const late = await this.#late(stopped, state);
         if (late) {
           saved = late;
-          history = await historyOf(late.replyId);
+          ({ messages: history } = await historyOf(late.replyId));
         }
       } catch (err) {
         this.limits.release(firstHold); // no call was made
@@ -1147,6 +1123,62 @@ export class Assistant extends Agent<Bindings> {
   }
 
   /**
+   * The model context from a conversation's stored messages, with the files of earlier turns:
+   * newest first while they fit in `budget` bytes and the model can read them. A file left out
+   * was read on its own turn; a file-only message with none of its files left says nothing.
+   */
+  async #modelHistory(
+    past: readonly StoredMessage[],
+    readable: (row: AttachmentRow) => boolean,
+    budget: number,
+  ): Promise<{ messages: ModelMessage[]; fileTokens: number }> {
+    const replayed = new Set<string>();
+    let left = budget;
+    for (const m of past.toReversed()) {
+      if (m.role !== "user") continue;
+      for (const row of m.attachments.filter(readable)) {
+        if (modelBytes(row) > left) continue;
+        left -= modelBytes(row);
+        replayed.add(row.id);
+      }
+    }
+    const messages: ModelMessage[] = [];
+    let fileTokens = 0;
+    for (const m of past) {
+      if (m.role === "user" && m.attachments.length) {
+        const { files, tokens } = await this.#readFiles(
+          m.attachments.filter((row) => replayed.has(row.id)),
+        );
+        fileTokens += tokens;
+        if (!m.content && !files.length) continue;
+        messages.push({
+          role: "user",
+          content: m.content,
+          ...(files.length ? { attachments: files } : {}),
+        });
+      } else if (m.content !== "") {
+        messages.push({ role: m.role, content: m.content });
+      }
+    }
+    return { messages, fileTokens };
+  }
+
+  /** Reads files for the model; one whose object is gone is left out. */
+  async #readFiles(rows: readonly AttachmentRow[]) {
+    const files: ModelAttachment[] = [];
+    const ids = new Set<string>();
+    let tokens = 0;
+    for (const row of rows) {
+      const file = await this.#modelFile(row);
+      if (!file) continue;
+      files.push(file);
+      ids.add(row.id);
+      tokens += fileTokenEstimate(row);
+    }
+    return { files, ids, tokens };
+  }
+
+  /**
    * One file as the model receives it, or `null` when its object is gone. A text file rides as
    * text and is read only as far as the model will see it; an image or PDF goes whole as base64,
    * which the model APIs take, and the caller has already fitted it to the turn's byte budget.
@@ -1229,6 +1261,18 @@ export class Assistant extends Agent<Bindings> {
     return (type, payload) => this.#send(sessionId, turnId, type, payload);
   }
 }
+
+/** The characters a request's messages carry, a text file's included, for its reservation. */
+const messageChars = (messages: readonly ModelMessage[]) =>
+  messages.reduce(
+    (sum, m) =>
+      sum +
+      m.content.length +
+      (m.role === "user"
+        ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
+        : 0),
+    0,
+  );
 
 const pickUsage = (usage: ModelUsage): CallUsage => ({
   inputTokens: usage.inputTokens,

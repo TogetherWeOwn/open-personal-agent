@@ -895,6 +895,67 @@ describe("approvals in the DO host (M3-07a)", () => {
   const completed = (events: HarnessEvent[]) =>
     events.filter((e) => e.type === "turn.completed").length;
 
+  it("resumes on the conversation's own model, with its files still in the context", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const seen: ModelMessage[][] = [];
+    const picks: unknown[] = [];
+    const scripted = replying([{ calls: [["send", { q: "a" }]] }, { text: "Sent" }]);
+    const provider: ModelProvider = {
+      ...scripted,
+      capabilities: () => ({ tools: true, usageInStream: true }),
+      async *stream(request) {
+        seen.push(request.messages);
+        yield* scripted.stream(request);
+      },
+    };
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveModel = async (_env, _scope, _caller, pick) => {
+        picks.push(pick);
+        return { provider, model: "test-model", apiKey: null };
+      };
+    });
+    await useTools(owner, [send.tool]);
+    const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    const uploaded = await workerApp.request(
+      `${ORIGIN}/api/attachments`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          origin: ORIGIN,
+          "content-type": "text/plain",
+          "x-file-name": "notes.txt",
+        },
+        body: new TextEncoder().encode("the file's words"),
+      } as never,
+      browser.bindings,
+    );
+    const { id } = await uploaded.json<{ id: string }>();
+    const tab = await openTab(browser);
+    tab.ws?.send(
+      JSON.stringify({
+        type: "chat.send",
+        conversationId: "conv-files",
+        text: "",
+        attachmentIds: [id],
+      }),
+    );
+    await tab.until?.("approval.requested");
+    const { batchId, approvalId } = asked(tab.events);
+    await decideInD1(batchId, approvalId, "approved");
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeBatch(batchId),
+    );
+    expect(resumed).toBe("resumed");
+    await vi.waitFor(() => expect(completed(tab.events)).toBe(1), SOCKET_WAIT);
+    expect(picks.at(-1)).toEqual({ conversationId: "conv-files" });
+    // The file-only message and its file reach the resumed call as they reached the first.
+    const [first, again] = seen;
+    expect(first?.[0]).toMatchObject({ role: "user", attachments: [{ name: "notes.txt" }] });
+    expect(again?.[0]).toEqual(first?.[0]);
+  });
+
   it("waits in the FIFO behind a running turn, then appends a late approval at the end (AC14)", async () => {
     const { browser, owner } = await claim();
     const send = loopTool("send", "consequential");
