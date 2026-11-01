@@ -18,39 +18,44 @@ const CALLER = "model-settings";
 const TEST_TIMEOUT_MS = 20_000;
 const TEST_PROMPT = [{ role: "user" as const, content: "Reply with one word: ready" }];
 
-type Settings = NonNullable<Awaited<ReturnType<ReturnType<typeof settingsOf>["get"]>>>;
-
-const settingsOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope).settings;
+const userOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope);
+const settingsOf = (c: Ctx) => userOf(c).settings;
 // The vault takes the session's scope too; its own brand keeps it from importing `@opa/db`.
 const vaultScope = (c: Ctx) => c.var.session.scope as unknown as VaultScope;
 
 const text = (value: unknown, max: number): string | null =>
   typeof value === "string" && value.trim() !== "" && value.length <= max ? value.trim() : null;
 
-function view(row: Settings) {
-  // `last4` is null for keys shorter than 8 characters; the join still finds the row. The starter
-  // keeps the key's binding for switching back, but reports none: it uses the AI binding only.
-  const starter = row.modelKind === "workers-ai";
-  const key = row.keyUpdatedAt !== null && !starter;
+/** The settings with the Chat role's model, as onboarding has always read them. */
+async function view(c: Ctx) {
+  const user = userOf(c);
+  const row = await user.settings.get();
+  if (!row) return null;
+  const chat = row.chatProvider ? await user.providers.get(row.chatProvider) : undefined;
+  // `last4` is null for keys shorter than 8 characters; the join still finds the row.
+  const starter = chat?.kind === "workers-ai";
+  const key = chat?.keyUpdatedAt != null && !starter;
   return {
     displayName: row.displayName,
     about: row.about ?? "",
     onboarded: row.onboardedAt !== null,
-    model: row.modelKind && {
-      kind: row.modelKind,
-      // The wire API follows the preset: a saved OpenAI key moves to Responses as it is.
-      api: starter
-        ? "workers-ai"
-        : usesOpenAIResponses(row.providerId, row.baseUrl)
-          ? "openai-responses"
-          : "openai-chat",
-      providerId: starter ? null : row.providerId,
-      baseUrl: starter ? null : row.baseUrl,
-      model: row.model,
-      key: key
-        ? { last4: row.keyLast4, updatedAt: row.keyUpdatedAt, lastUsedAt: row.keyLastUsedAt }
-        : null,
-    },
+    model: chat
+      ? {
+          kind: chat.kind,
+          // The wire API follows the preset: a saved OpenAI key moves to Responses as it is.
+          api: starter
+            ? "workers-ai"
+            : usesOpenAIResponses(chat.providerId, chat.baseUrl)
+              ? "openai-responses"
+              : "openai-chat",
+          providerId: starter ? null : chat.providerId,
+          baseUrl: starter ? null : chat.baseUrl,
+          model: row.chatModel ?? chat.model,
+          key: key
+            ? { last4: chat.keyLast4, updatedAt: chat.keyUpdatedAt, lastUsedAt: chat.keyLastUsedAt }
+            : null,
+        }
+      : null,
   };
 }
 
@@ -75,8 +80,8 @@ settings.use(async (c, next) => {
 });
 
 settings.get("/", async (c) => {
-  const row = await settingsOf(c).get();
-  return row ? c.json(view(row)) : fail(c, 404, "not_found");
+  const body = await view(c);
+  return body ? c.json(body) : fail(c, 404, "not_found");
 });
 
 settings.put("/profile", async (c) => {
@@ -91,11 +96,14 @@ settings.put("/profile", async (c) => {
 
 settings.put("/model", async (c) => {
   const body = await c.req.json().catch(() => null);
-  const store = settingsOf(c);
+  const { settings: store, providers } = userOf(c);
+  const saved = await providers.list();
   if (body?.kind === "workers-ai") {
-    // The provider and base URL stay: they bind the saved key, which is kept for switching back.
-    await store.save({ modelKind: "workers-ai", model: STARTER_MODEL });
-    return c.json(view((await store.get()) as Settings));
+    // Any saved key stays in its own row, for switching back.
+    const starter = saved.find((p) => p.kind === "workers-ai");
+    const id = starter?.id ?? (await providers.add({ kind: "workers-ai", model: STARTER_MODEL }));
+    await store.save({ chatProvider: id, chatModel: STARTER_MODEL });
+    return c.json(await view(c));
   }
   if (body?.kind !== "openai-chat") return fail(c, 400, "invalid_model");
   const providerId = text(body.providerId, 63);
@@ -122,9 +130,12 @@ settings.put("/model", async (c) => {
   } catch {
     return fail(c, 400, "invalid_base_url");
   }
-  const current = await store.get();
-  if (!current) return fail(c, 404, "not_found");
-  let secretId = current.keySecretId;
+  const settings = await store.get();
+  if (!settings) return fail(c, 404, "not_found");
+  // This route edits one key, as onboarding always has: the Chat role's, else the newest saved.
+  const keyed = saved.filter((p) => p.kind === "openai-chat");
+  const current = keyed.find((p) => p.id === settings.chatProvider) ?? keyed.at(-1);
+  let secretId = current?.keySecretId ?? null;
   if (apiKey) {
     if (!c.env.VAULT) return fail(c, 503, "vault_unavailable");
     secretId ??= crypto.randomUUID();
@@ -133,7 +144,7 @@ settings.put("/model", async (c) => {
   } else {
     // A key is bound to its provider and origin: a change means entering it again (ADR 0006 #5).
     // So does a new path, as one host can serve many accounts (an AI Gateway, for one).
-    const { providerId: savedProvider, baseUrl: savedUrl } = current;
+    const { providerId: savedProvider, baseUrl: savedUrl } = current ?? {};
     if (!secretId || !savedProvider || !savedUrl) return fail(c, 400, "key_required");
     if (
       credentialBinding(savedProvider, savedUrl) !== binding ||
@@ -142,14 +153,18 @@ settings.put("/model", async (c) => {
       return fail(c, 400, "key_required");
     }
   }
-  await store.save({
-    modelKind: "openai-chat",
+  const values = {
+    kind: "openai-chat" as const,
     providerId,
     baseUrl,
     model,
-    modelKeySecretId: secretId,
-  });
-  return c.json(view((await store.get()) as Settings));
+    keySecretId: secretId,
+  };
+  let id = current?.id;
+  if (id) await providers.update(id, values);
+  else id = await providers.add(values);
+  await store.save({ chatProvider: id, chatModel: model });
+  return c.json(await view(c));
 });
 
 /** Sends one short prompt with the saved settings; reports latency and tool support. */
@@ -213,7 +228,7 @@ settings.post("/model/test", async (c) => {
 
 settings.post("/onboarded", async (c) => {
   const store = settingsOf(c);
-  if (!(await store.get())?.modelKind) return fail(c, 409, "no_model");
+  if (!(await store.get())?.chatProvider) return fail(c, 409, "no_model");
   await store.save({ onboardedAt: Date.now() });
   return c.body(null, 204);
 });

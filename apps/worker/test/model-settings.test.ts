@@ -273,7 +273,7 @@ describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
     const fetch = vi.spyOn(globalThis, "fetch");
     // Bypass the route's own check: the vault's binding still refuses the key.
     await env.DB.prepare(
-      "UPDATE user_settings SET base_url = 'https://eu.api.openai.com/v1'",
+      "UPDATE model_providers SET base_url = 'https://eu.api.openai.com/v1'",
     ).run();
     const res = await call("/model/test", { method: "POST" });
     expect(res).toEqual({ status: 409, text: '{"error":"key_required"}' });
