@@ -36,6 +36,7 @@ import {
   dataExports,
   grants,
   messages,
+  meters,
   modelProviders,
   secrets,
   tasks,
@@ -104,7 +105,7 @@ export interface DataBindings<Stub, Id> {
     /**
      * R2's listing, a page at a time: the allowance meter (COST-5) sums the whole bucket's sizes
      * with it, and the retention sweep (M3-18) lists a prefix by upload time. Absent where the
-     * store has none (Node); both then leave those objects alone.
+     * store has none; both then leave those objects alone.
      */
     list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
       objects: { key: string; size: number; uploaded: Date }[];
@@ -125,7 +126,7 @@ export interface DataBindings<Stub, Id> {
     }>;
     /**
      * The keys under a prefix, for enumerating the file and task-output stores an export
-     * walks (M3-20 AC1). Absent where the store has no listing (Node); the walk then treats
+     * walks (M3-20 AC1). Absent where the store has no listing; the walk then treats
      * the store as empty. The export Workflow runs on Workers, where R2 always lists.
      */
     list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
@@ -523,6 +524,41 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(usage)
             .where(gte(usage.createdAt, since))
         )[0]?.n ?? 0,
+      /** Adds to a ledger meter's UTC day (M3-16 AC3): one upsert, no read. */
+      addToMeter: async (meter: "workflow_steps" | "do_ms", amount: number, at: number) => {
+        await db
+          .insert(meters)
+          .values({ meter, day: at - (at % 86_400_000), amount })
+          .onConflictDoUpdate({
+            target: [meters.meter, meters.day],
+            set: { amount: sql`${meters.amount} + ${amount}` },
+          });
+      },
+      /** A ledger meter's total over the UTC days from `since`. */
+      meterTotal: async (meter: "workflow_steps" | "do_ms", since: number) =>
+        (
+          await db
+            .select({ n: sql<number>`coalesce(sum(${meters.amount}), 0)`.mapWith(Number) })
+            .from(meters)
+            .where(and(eq(meters.meter, meter), gte(meters.day, since - (since % 86_400_000))))
+        )[0]?.n ?? 0,
+      /** Sets a gauge meter's UTC day to the latest reading (M3-18 AC2): one upsert, no read. */
+      setMeter: async (meter: "d1_bytes", amount: number, at: number) => {
+        await db
+          .insert(meters)
+          .values({ meter, day: at - (at % 86_400_000), amount })
+          .onConflictDoUpdate({ target: [meters.meter, meters.day], set: { amount } });
+      },
+      /** A gauge meter's latest recorded reading, or null before the first. */
+      latestMeter: async (meter: "d1_bytes") =>
+        (
+          await db
+            .select({ amount: meters.amount })
+            .from(meters)
+            .where(eq(meters.meter, meter))
+            .orderBy(desc(meters.day))
+            .limit(1)
+        )[0]?.amount ?? null,
       /**
        * The database's size in bytes (M3-16 AC3): D1 reports it with every result as
        * `meta.size_after`; Node's SQLite doesn't, so there it is pages × page size.
@@ -663,6 +699,31 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           status: role === "assistant" ? "streaming" : "complete",
           content,
         });
+      /**
+       * Batch statements putting the caller's still-unlinked uploads on a message, each marked
+       * with whether the model received it (M3-10 AC2): only the user's own, still-unlinked
+       * uploads move, so a retry can link them again and a dequeue can release them.
+       */
+      const linkAttachments = (
+        conversationId: string,
+        userMessageId: string,
+        sentToModel: boolean,
+        ids: readonly string[],
+      ) =>
+        ids.length
+          ? [
+              db
+                .update(attachments)
+                .set({ messageId: userMessageId, conversationId, sentToModel })
+                .where(
+                  and(
+                    eq(attachments.userId, userId),
+                    inArray(attachments.id, [...ids]),
+                    isNull(attachments.messageId),
+                  ),
+                ),
+            ]
+          : [];
       /**
        * A conversation's rows with the given roles, oldest first, each with its files' sniffed
        * facts (M3-10). Only a user row has files; the others get `[]`.
@@ -903,23 +964,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             linked: readonly { id: string; sentToModel: boolean }[] = [],
           ) => {
             const userMessageId = crypto.randomUUID();
-            const link = (sentToModel: boolean) => {
-              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
-              return ids.length
-                ? [
-                    db
-                      .update(attachments)
-                      .set({ messageId: userMessageId, conversationId, sentToModel })
-                      .where(
-                        and(
-                          eq(attachments.userId, userId),
-                          inArray(attachments.id, ids),
-                          isNull(attachments.messageId),
-                        ),
-                      ),
-                  ]
-                : [];
-            };
+            const link = (sentToModel: boolean) =>
+              linkAttachments(
+                conversationId,
+                userMessageId,
+                sentToModel,
+                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
+              );
             await db.batch([
               message(conversationId, userMessageId, "user", text),
               message(conversationId, replyId, "assistant", ""),
@@ -927,6 +978,142 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ...link(false),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
             ]);
+          },
+          /**
+           * Holds a send that arrived mid-run (M3-09 AC4): opens the conversation when it's new
+           * and writes the user's row with its files and its empty reply row, both, so the
+           * queued text is already in D1 and visible on reload. The pair keeps the thread's
+           * shape — each user row immediately followed by its reply — so the waiting exchange
+           * reads where it will settle. `null` when the ID is someone else's.
+           */
+          enqueue: async (
+            conversationId: string,
+            title: string,
+            text: string,
+            pin: { provider: string; model: string } | undefined,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            const userMessageId = crypto.randomUUID();
+            const replyId = crypto.randomUUID();
+            const link = (sentToModel: boolean) =>
+              linkAttachments(
+                conversationId,
+                userMessageId,
+                sentToModel,
+                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
+              );
+            if (!(await getConversation(conversationId))) {
+              // A conflict is either another user's row or this user's from a concurrent open.
+              await createConversation(conversationId, title, pin).catch(() => {});
+              if (!(await getConversation(conversationId))) return null;
+            }
+            await db.batch([
+              message(conversationId, userMessageId, "user", text),
+              message(conversationId, replyId, "assistant", ""),
+              ...link(true),
+              ...link(false),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+            return { messageId: userMessageId, replyId };
+          },
+          /**
+           * Notes a steer that joined its conversation's running turn (M3-09 AC4): only the
+           * user's row, since the running turn's reply answers it — there is no reply of its
+           * own. The row keeps the steer visible on reload and in later turns' history. `null`
+           * when the ID is missing or someone else's.
+           */
+          steer: async (conversationId: string, text: string) => {
+            if (!(await getConversation(conversationId))) return null;
+            const userMessageId = crypto.randomUUID();
+            await db.batch([
+              message(conversationId, userMessageId, "user", text),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+            return userMessageId;
+          },
+          /**
+           * Starts a queued send's reply (M3-09 AC4): the rows are already stored, so this only
+           * marks each file with whether the now-known reading model receives it (M3-10 AC2).
+           * `false` when the conversation is missing or someone else's.
+           */
+          beginReply: async (
+            conversationId: string,
+            userMessageId: string,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            if (!(await getConversation(conversationId))) return false;
+            const flag = (sentToModel: boolean) => {
+              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
+              return ids.length
+                ? [
+                    db
+                      .update(attachments)
+                      .set({ sentToModel })
+                      .where(
+                        and(
+                          eq(attachments.userId, userId),
+                          eq(attachments.messageId, checkId(userMessageId)),
+                          inArray(attachments.id, [...ids]),
+                        ),
+                      ),
+                  ]
+                : [];
+            };
+            await db.batch([
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+              ...flag(true),
+              ...flag(false),
+            ]);
+            return true;
+          },
+          /**
+           * Cancels a queued send before it starts (M3-09 AC4): deletes the still-waiting pair —
+           * the user row and its still-empty reply — and releases its files back to unlinked, so
+           * a resend can link them again. The host dequeues from memory first, so it never names
+           * a started turn; the empty-reply guard below is defense in depth. `false` when the
+           * rows are already replying, settled, or someone else's.
+           */
+          dropQueued: async (conversationId: string, messageId: string, replyId: string) => {
+            if (!(await getConversation(conversationId))) return false;
+            const row = (
+              await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.id, checkId(messageId)),
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.role, "user"),
+                    eq(messages.userId, userId),
+                  ),
+                )
+                .limit(1)
+            )[0];
+            const reply = (
+              await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.id, checkId(replyId)),
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.role, "assistant"),
+                    eq(messages.status, "streaming"),
+                    eq(messages.userId, userId),
+                  ),
+                )
+                .limit(1)
+            )[0];
+            if (!row || !reply) return false;
+            await db.batch([
+              db.delete(messages).where(eq(messages.id, row.id)),
+              db.delete(messages).where(eq(messages.id, reply.id)),
+              db
+                .update(attachments)
+                .set({ messageId: null, conversationId: null, sentToModel: false })
+                .where(and(eq(attachments.userId, userId), eq(attachments.messageId, row.id))),
+            ]);
+            return true;
           },
           /**
            * A stopped turn's partial reply so far, still `streaming`: what a tab that loads the
@@ -1120,13 +1307,15 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * Every item that can still take a decision (M3-07 AC8): pending, unexpired, and not
            * on a cancelled or finished task. Each with its conversation's title. At most `limit`
            * batches, never part of one (a decision needs every pending item): the batch that
-           * expires soonest first, a batch's items together in their stored order.
+           * expires soonest first, a batch's items together in their stored order. A batch with
+           * a pending item already expired can't take a decision, so none of it is listed.
            */
           pending: (now: number, limit = 100) => {
             const live = and(
               eq(approvals.userId, userId),
               eq(approvals.status, "pending"),
               gt(approvals.expiresAt, now),
+              sql`NOT EXISTS (SELECT 1 FROM approvals stale WHERE stale.batch_id = approvals.batch_id AND stale.status = 'pending' AND stale.expires_at <= ${now})`,
               sql`(${approvals.taskId} IS NULL OR EXISTS (SELECT 1 FROM ${tasks} WHERE ${tasks.id} = ${approvals.taskId} AND ${tasks.status} <> 'cancelled' AND ${tasks.finishedAt} IS NULL))`,
             );
             const batch = db
@@ -1153,6 +1342,39 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 approvals.batchId,
                 approvals.position,
               );
+          },
+          /**
+           * Every item the user decided at or after `since` (for the receipts that outlive a
+           * reload), each with its conversation's title. At most `limit` batches, never part of
+           * one: the latest decided first, a batch's items together in their stored order. What
+           * happened after the decision (a run, a re-check's refusal) doesn't change what the
+           * user answered: the row's `scope` is set exactly when they approved. An expiry also
+           * stamps `decided_at`, so an expired row counts only if they had approved it first.
+           */
+          decided: (since: number, limit = 100) => {
+            const mine = and(
+              eq(approvals.userId, userId),
+              gte(approvals.decidedAt, since),
+              or(sql`${approvals.status} <> 'expired'`, isNotNull(approvals.scope)),
+            );
+            const batch = db
+              .select({
+                batchId: approvals.batchId,
+                at: sql<number>`max(${approvals.decidedAt})`.as("at"),
+              })
+              .from(approvals)
+              .where(mine)
+              .groupBy(approvals.batchId)
+              .orderBy(sql`at desc`, approvals.batchId)
+              .limit(limit)
+              .as("batch");
+            return db
+              .select({ row: approvals, conversationTitle: conversations.title })
+              .from(approvals)
+              .innerJoin(batch, eq(batch.batchId, approvals.batchId))
+              .innerJoin(conversations, eq(conversations.id, approvals.conversationId))
+              .where(mine)
+              .orderBy(sql`${batch.at} desc`, approvals.batchId, approvals.position);
           },
           /**
            * Starts a step-up ceremony over the batch's pending items (W3): the nonce, the digest

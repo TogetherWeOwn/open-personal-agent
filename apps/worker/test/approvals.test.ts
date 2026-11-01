@@ -362,7 +362,27 @@ describe("the pending list (M3-07 AC8)", () => {
     expect(batches.map((b) => b.batchId)).toEqual(["b_live"]);
   });
 
-  it("still lists the rest when a row's taint or scopes can't be read, and keeps it careful", async () => {
+  it("leaves out a whole batch once one of its pending items has expired", async () => {
+    const { browser, owner } = await claim();
+    const insert = (batch: string, position: number, expiresAt: number) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at)
+           VALUES (?, ?, ?, ?, 'c-part', 'turn-1', 'send', ?, 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}_${position}`, position, owner, `c${position}`, expiresAt);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-part', ?)").bind(owner),
+      insert("b_part", 0, Date.now() - 1),
+      insert("b_part", 1, Date.now() + 60_000),
+      insert("b_whole", 0, Date.now() + 60_000),
+      insert("b_whole", 1, Date.now() + 60_000),
+    ]);
+    const { batches } = await (await pending(browser)).json<{ batches: { batchId: string }[] }>();
+    expect(batches.map((b) => b.batchId)).toEqual(["b_whole"]);
+  });
+
+  it("still lists the rest when a row's taint or scopes can't be read: careful, deny only", async () => {
     const { browser, owner } = await claim();
     const insert = (batch: string, taint: string | null, scopes: string) =>
       db
@@ -383,8 +403,41 @@ describe("the pending list (M3-07 AC8)", () => {
     expect(items.b_good).toMatchObject({ scopes: ["once", "hour"] });
     expect(items.b_good?.taint).toBeUndefined();
     expect(items.b_bad).toMatchObject({
-      scopes: ["once"],
+      scopes: [],
       taint: { kind: "tool", label: "a source I couldn't read" },
+    });
+    const decide = (decision: string) =>
+      call(browser, "/api/approvals/b_bad", {
+        decisions: [{ approvalId: "appr_b_bad", decision, scope: "once" }],
+      });
+    expect(await (await decide("approve")).json()).toEqual({ error: "invalid_scope" });
+    expect((await decide("deny")).status).toBe(200);
+  });
+
+  it("shows the target the call is bound to, from the envelope, not the row's copy", async () => {
+    const { browser, owner } = await claim();
+    const insert = (batch: string, target: string | null, canonical: string) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, target, canonical, binding_hash, expires_at)
+           VALUES (?, ?, 0, ?, 'c-t', 'turn-1', 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', ?, ?, 'h', ?)`,
+        )
+        .bind(batch, `appr_${batch}`, owner, target, canonical, Date.now() + 60_000);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-t', ?)").bind(owner),
+      insert("b_bound", "shown.example", '{"args":{},"target":"bound.example"}'),
+      insert("b_none", "shown.example", '{"args":{},"target":null}'),
+      insert("b_damaged", "shown.example", "{not json"),
+    ]);
+    const { batches } = await (await pending(browser)).json<{
+      batches: { batchId: string; items: { target?: string }[] }[];
+    }>();
+    const targets = Object.fromEntries(batches.map((b) => [b.batchId, b.items[0]?.target]));
+    // A damaged envelope keeps the row's copy; execution can't open it, so it is denied anyway.
+    expect(targets).toEqual({
+      b_bound: "bound.example",
+      b_none: undefined,
+      b_damaged: "shown.example",
     });
   });
 
@@ -428,6 +481,113 @@ describe("the pending list (M3-07 AC8)", () => {
       .run();
     expect(await (await pending(await sessionHeaders("b"))).json()).toEqual({ batches: [] });
     expect((await pending({ cookie: "" })).status).toBe(401);
+  });
+});
+
+/** `GET /api/approvals?status=decided`, as the receipts read it after a reload. */
+async function decided(br: Browser | { cookie: string }, since: string | number = 0) {
+  const cookie =
+    "cookies" in br ? [...br.cookies].map(([k, v]) => `${k}=${v}`).join("; ") : br.cookie;
+  const path = `/api/approvals?status=decided&since=${since}`;
+  return workerApp.request(`${ORIGIN}${path}`, { headers: { cookie } }, env);
+}
+
+describe("the decided list (receipts after a reload)", () => {
+  it("lists a decided batch with the user's decisions and when, and nothing that binds", async () => {
+    const { browser, batchId, ids, done } = await stopAt("consequential", 2);
+    const before = Date.now();
+    expect(await (await decided(browser, before)).json()).toEqual({ batches: [] });
+    await call(browser, `/api/approvals/${batchId}`, {
+      decisions: [
+        { approvalId: ids[0], decision: "approve", scope: "hour" },
+        { approvalId: ids[1], decision: "deny" },
+      ],
+    });
+    await done();
+    const res = await decided(browser, before);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const { batches } = await res.json<{ batches: Record<string, unknown>[] }>();
+    expect(batches).toEqual([
+      expect.objectContaining({
+        batchId,
+        conversationId: "conv-1",
+        conversationTitle: "Mail my friend",
+        taskId: null,
+        decidedAt: expect.any(Number),
+        decisions: [
+          { approvalId: ids[0], decision: "approve", scope: "hour" },
+          { approvalId: ids[1], decision: "deny", scope: "once" },
+        ],
+      }),
+    ]);
+    expect(batches[0]?.items).toEqual([
+      expect.objectContaining({ approvalId: ids[0], tool: "send" }),
+      expect.objectContaining({ approvalId: ids[1], tool: "send" }),
+    ]);
+    expect(batches[0]?.decidedAt).toBeGreaterThanOrEqual(before);
+    expect(JSON.stringify(batches)).not.toMatch(/nonce|bindingHash|binding_hash|canonical/);
+    // Decided before `since`: not listed.
+    const later = Number(batches[0]?.decidedAt) + 1;
+    expect(await (await decided(browser, later)).json()).toEqual({ batches: [] });
+  });
+
+  it("leaves out what the user never answered, and the latest decided comes first", async () => {
+    const { browser, owner } = await claim();
+    const insert = (
+      batch: string,
+      status: string,
+      scope: string | null,
+      at: number | null,
+      reason: string | null = null,
+    ) =>
+      db
+        .prepare(
+          `INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at, status, scope, decided_at, reason)
+           VALUES (?, ?, 0, ?, 'c-dec', 'turn-1', 'send', 'c1', 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?, ?, ?, ?, ?)`,
+        )
+        .bind(batch, `appr_${batch}`, owner, Date.now() + 60_000, status, scope, at, reason);
+    await db.batch([
+      db.prepare("INSERT INTO conversations (id, user_id) VALUES ('c-dec', ?)").bind(owner),
+      insert("b_pending", "pending", null, null),
+      // Timed out or expired by a sign-out, unanswered: both stamp `decided_at`.
+      insert("b_expired", "expired", null, 4_000, "expired"),
+      insert("b_signal", "expired", null, 4_000, "signal:sign_out_everywhere"),
+      insert("b_early", "denied", null, 1_000),
+      // Approved, then refused by the re-check: the user still approved it.
+      insert("b_late", "denied", "once", 2_000),
+      // Approved, then expired by a sign-out before it ran: the user still approved it.
+      insert("b_signed_out", "expired", "once", 3_000, "signal:sign_out_everywhere"),
+    ]);
+    const { batches } = await (await decided(browser)).json<{
+      batches: { batchId: string; decisions: { decision: string }[] }[];
+    }>();
+    expect(batches.map((b) => [b.batchId, b.decisions[0]?.decision])).toEqual([
+      ["b_signed_out", "approve"],
+      ["b_late", "approve"],
+      ["b_early", "deny"],
+    ]);
+  });
+
+  it("refuses a missing or malformed `since`, and answers only for the session's user", async () => {
+    const { browser, batchId, approvalId, done } = await stopAt("consequential");
+    await call(browser, `/api/approvals/${batchId}`, {
+      decisions: [{ approvalId, decision: "deny" }],
+    });
+    await done();
+    for (const since of ["", "-1", "1.5", "today"]) {
+      const res = await decided(browser, since);
+      expect([since, res.status, await res.json()]).toEqual([
+        since,
+        400,
+        { error: "invalid_since" },
+      ]);
+    }
+    await db
+      .prepare("INSERT INTO users (id, display_name, role) VALUES ('b', 'B', 'member')")
+      .run();
+    expect(await (await decided(await sessionHeaders("b"))).json()).toEqual({ batches: [] });
+    expect((await decided({ cookie: "" })).status).toBe(401);
   });
 });
 

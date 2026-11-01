@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // A mock OpenAI-compatible model server for local development and tests: `GET /v1/models` and a
 // streaming `POST /v1/chat/completions` that echoes the last user message. No key needed, no cost.
+// When the request offers tools and carries no tool result yet, it calls the first offered tool
+// once (empty arguments) instead of echoing, so a smoke test can run one tool turn.
 import { createServer } from "node:http";
 import { isMain } from "./lib/repo.mjs";
 
@@ -33,6 +35,44 @@ export function startMockOpenAI({ port = 8788, host = "127.0.0.1" } = {}) {
       return res.end(JSON.stringify({ error: { message: "Invalid request body" } }));
     }
     const last = body.messages.findLast((m) => m?.role === "user")?.content ?? "";
+    const tools = Array.isArray(body.tools) ? body.tools : [];
+    const firstTool = tools[0]?.function?.name;
+    // Only a tool result after the latest user message means the current turn already
+    // called a tool: an earlier turn's result stays in the history, and must not block
+    // a later user message from calling a tool again.
+    const lastUserIdx = body.messages.findLastIndex((m) => m?.role === "user");
+    const answeredTool = body.messages
+      .slice(Math.max(lastUserIdx, 0))
+      .some((m) => m?.role === "tool" || (Array.isArray(m?.tool_calls) && m.tool_calls.length > 0));
+    if (typeof firstTool === "string" && firstTool && !answeredTool) {
+      // The CI smoke's one tool call (M3-23a AC2): with tools offered and no tool result yet,
+      // call the first one with empty arguments. The follow-up request carries the tool
+      // result, so it falls through to the echo below.
+      // Note for M3-04+: the mock calls the first offered tool unconditionally, so once
+      // builtin tools register, the first message of every dev (`scripts/dev.mjs`) and e2e
+      // (`test/e2e/stack.mjs`) conversation will call one. `test/e2e/persistence.spec.ts`
+      // expects a plain `You said: …` echo and will need a marker or a name gate then.
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      res.write(
+        chunk([
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                { index: 0, id: "call_1", function: { name: firstTool, arguments: "{}" } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ]),
+      );
+      if (body.stream_options?.include_usage) {
+        const usage = { prompt_tokens: raw.length, completion_tokens: 1 };
+        res.write(chunk([], { ...usage, total_tokens: usage.prompt_tokens + 1 }));
+      }
+      res.end("data: [DONE]\n\n");
+      return;
+    }
     const words = `You said: ${last}`.split(/(?<= )/);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
     res.write(

@@ -72,53 +72,275 @@ const empty = { costMicroUsd: 0, unpricedCalls: 0, groups: [] };
 const allowance = {
   neuronsPerDay: 10_000,
   neuronsUsedHere: 3_200,
+  freeNeuronsUsed: 3_200,
+  billedNeurons: 0,
   resetsAt: Date.UTC(2026, 10, 2),
 };
+const GB = 1_000_000_000;
+const meters = [
+  { id: "d1_cap", used: 1.2 * GB, limit: 10 * GB, unit: "bytes" },
+  { id: "d1_storage", used: 1.2 * GB, limit: 5 * GB, unit: "bytes" },
+  { id: "r2_storage", used: 340_000_000, limit: 10 * GB, unit: "bytes" },
+  { id: "workers_ai_neurons", used: 3_200, limit: 10_000, unit: "neurons" },
+  { id: "workflows_steps", used: 1_250, limit: 500_000, unit: "steps" },
+  { id: "do_duration", used: 164_000, limit: 400_000, unit: "gb_seconds" },
+];
+const limits = {
+  taskBudgetMicroUsd: 500_000,
+  dailyCapMicroUsd: 5_000_000,
+  monthlyBudgetMicroUsd: 20_000_000,
+  hardCapMicroUsd: null,
+};
+const spending = (monthMicroUsd: number, warning: 50 | null = null) => ({
+  settings: limits,
+  defaults: limits,
+  executionLimits: { callsPerMessage: 8, toolCallsPerMessage: 20, stepsPerTask: 200 },
+  todayMicroUsd: 0,
+  monthMicroUsd,
+  warning,
+  hardCapReached: false,
+  month: Date.UTC(2026, 10, 1),
+  userId: "u",
+});
+const none = { status: "none-configured", label: null };
+const categories = (today: number, month: number, projected: number) => [
+  {
+    id: "workers-paid",
+    status: "billed",
+    label: "Billed by Cloudflare",
+    today: null,
+    month: 5_000_000,
+    projected: 5_000_000,
+    priceVerifiedAt: "2026-11-01",
+    stale: false,
+  },
+  { id: "cloudflare", status: "included", label: "Included in Workers Paid" },
+  { id: "storage", status: "included", label: "Included in Workers Paid" },
+  { id: "ai", status: "billed", label: null, today, month, projected },
+  { id: "computers", ...none },
+  { id: "connectors", ...none },
+  { id: "enhanced", ...none },
+];
+const days = Array.from({ length: 10 }, (_, i) => ({
+  date: `2026-11-${String(i + 1).padStart(2, "0")}`,
+  calls: i % 3 === 0 ? 0 : i,
+  costMicroUsd: i % 3 === 0 ? 0 : i * 40_000,
+  unpricedCalls: 0,
+}));
+const breakdowns = {
+  conversation: [
+    { id: "c1", title: "=Plan the trip", calls: 4, costMicroUsd: 3_000_000, unpricedCalls: 0 },
+    { id: null, title: null, calls: 2, costMicroUsd: 400_000, unpricedCalls: 1 },
+  ],
+  task: [
+    { id: "t1", title: "Compare flights", calls: 3, costMicroUsd: 2_000_000, unpricedCalls: 0 },
+    { id: null, title: null, calls: 3, costMicroUsd: 1_400_000, unpricedCalls: 1 },
+  ],
+  day: days,
+};
 
-async function open(page: Page, today: unknown, month: unknown, allowed: unknown = allowance) {
+function body(today: typeof period, month: typeof period, allowed: unknown = allowance) {
+  const projected = month.costMicroUsd * 3;
+  return {
+    currency: "USD",
+    today,
+    month,
+    projected: { costMicroUsd: projected },
+    categories: categories(today.costMicroUsd, month.costMicroUsd, projected),
+    breakdowns: month.groups.length ? breakdowns : { conversation: [], task: [], day: [] },
+    allowance: allowed,
+    meters: allowed ? meters : null,
+    metersVerifiedAt: allowed ? "2026-11-01" : null,
+  };
+}
+
+async function open(page: Page, json: unknown, spent = spending(3_400_000)) {
+  await page.route("/api/settings/spending", (route) => route.fulfill({ json: spent }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
   // The chat stays mounted behind Usage, so its health check runs too.
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
-  await page.route("/api/usage?*", (route) =>
-    route.fulfill({ json: { currency: "USD", today, month, allowance: allowed } }),
-  );
+  if (json !== undefined) await page.route("/api/usage?*", (route) => route.fulfill({ json }));
   await page.goto("/usage");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
 }
 
-test("leads with the totals, labels every cost and flags old and missing prices", async ({
+test("leads with today, the month and its projection, then the seven categories", async ({
   page,
 }) => {
-  await open(page, period, { ...period, costMicroUsd: 3_400_000 });
-  await expect(page.getByText("Today: about $0.12 · This month: about $3.40")).toBeVisible();
-  const openai = page.getByRole("table", { name: "Billed by OpenAI, today" });
+  await open(page, body(period, { ...period, costMicroUsd: 3_400_000 }));
+  const figures = page.locator("dl");
+  await expect(figures).toContainText("Todayabout $0.12");
+  await expect(figures).toContainText("This monthabout $3.40of your $20 budget");
+  await expect(figures.getByRole("meter")).toHaveAttribute(
+    "aria-valuetext",
+    "17% of your $20 budget",
+  );
+  await expect(figures).toContainText("Projected by month-endabout $10.20");
+  const where = page.getByRole("region", { name: "Where it goes" }).getByRole("listitem");
+  await expect(where).toHaveCount(7);
+  await expect(where.nth(0)).toContainText("$5.00 a monthBilled by Cloudflare, price as of Nov 1");
+  await expect(where.nth(1)).toContainText(
+    "Included in Workers PaidWorkers requests aren't counted here",
+  );
+  await expect(where.nth(2)).not.toContainText("Workers requests");
+  await expect(where.nth(3)).toContainText("about $3.40 this month");
+  await expect(where.nth(4)).toContainText("ComputersComputers your assistant can work on.");
+  await expect(where.nth(4)).toContainText("None configured");
+  await expect(
+    page
+      .getByRole("region", { name: "Where it goes" })
+      .getByRole("link", { name: "Check your Cloudflare dashboard (opens in a new tab)" }),
+  ).toHaveAttribute("target", "_blank");
+});
+
+test("labels every cost by model and flags old and missing prices", async ({ page }) => {
+  await open(page, body(period, period));
+  const openai = page.getByRole("table", { name: "Billed by OpenAI, this month" });
   await expect(openai.getByRole("row", { name: /GPT-4.1 mini/ })).toContainText(
-    "about $0.12estimated",
+    "about $0.12estimated, price as of Nov 1, 2026",
   );
   await expect(openai).toContainText("Price last checked Feb 4, 2026. It may have changed.");
-  await expect(page.getByRole("table", { name: "Billed by my-llm, today" })).toContainText(
+  await expect(page.getByRole("table", { name: "Billed by my-llm, this month" })).toContainText(
     "No price on file",
   );
   await expect(page.getByText("< $0.01").first()).toBeVisible();
-  await expect(page.getByRole("meter")).toHaveAttribute(
-    "aria-valuetext",
-    "32% used, resets at 12:00 AM your time",
-  );
   const bill = page.getByRole("link", { name: "See your bill at OpenAI (opens in a new tab)" });
   await expect(bill).toHaveAttribute("target", "_blank");
-  await page.getByRole("radio", { name: "This month" }).click();
-  await expect(page.getByRole("table", { name: "Billed by OpenAI, this month" })).toBeVisible();
+  await page.getByRole("radio", { name: "Today" }).click();
+  await expect(page.getByRole("table", { name: "Billed by OpenAI, today" })).toBeVisible();
 });
 
-test("an empty period offers a chat instead of an empty table; a member has no meter", async ({
+test("a meter per Cloudflare allowance, each an estimate, and no Workers-requests meter", async ({
   page,
 }) => {
-  await open(page, empty, empty, null);
+  await open(page, body(period, period));
+  const region = page.getByRole("region", { name: "Cloudflare allowances" });
+  const rows = region.getByRole("listitem");
+  await expect(rows).toHaveCount(5);
+  await expect(rows.nth(0)).toContainText(
+    "Live chats (Durable Objects)41% of included Estimate164,000 of 400,000 GB-s included in Workers Paid this month",
+  );
+  await expect(rows.nth(1)).toContainText("1.2 GB of 5 GB included in Workers Paid · limit 10 GB");
+  await expect(rows.nth(2)).toContainText("1,250 of 500,000 included in Workers Paid this month");
+  await expect(rows.nth(3)).toContainText("340 MB of 10 GB included in Workers Paid");
+  // Free neurons apart from billed ones (A-Co3).
+  await expect(rows.nth(4)).toContainText("3,200 of 10,000 free today · 0 billed");
+  await expect(region.getByRole("meter", { name: "Database (D1)" })).toHaveAttribute(
+    "aria-valuetext",
+    "24% of included, estimate",
+  );
+  await expect(region).toContainText("for Workers requests, which aren't counted here");
+  await expect(region).toContainText("Included amounts as of Nov 1, 2026.");
+  await expect(
+    region.getByRole("link", { name: "Check your Cloudflare dashboard (opens in a new tab)" }),
+  ).toHaveAttribute("target", "_blank");
+});
+
+test("past an included amount Cloudflare bills it; the neuron line stands without the meters", async ({
+  page,
+}) => {
+  const json = body(period, period);
+  json.categories[2] = {
+    id: "storage",
+    status: "over-allowance",
+    label: "Over the Workers Paid allowance, billed by Cloudflare",
+  };
+  await open(page, { ...json, meters: null, metersVerifiedAt: null });
+  const where = page.getByRole("region", { name: "Where it goes" }).getByRole("listitem");
+  await expect(where.nth(2)).toContainText(
+    "Over the Workers Paid allowance, billed by CloudflareThe amount isn't tracked here",
+  );
+  // The other meters couldn't be read; the Workers AI line doesn't depend on them.
+  const rows = page.getByRole("region", { name: "Cloudflare allowances" }).getByRole("listitem");
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText("3,200 of 10,000 free today · 0 billed");
+});
+
+test("a member sees no allowance meters, and half the budget shows the quiet line", async ({
+  page,
+}) => {
+  await open(page, body(period, period, null), spending(10_000_000, 50));
+  await expect(page.getByRole("region", { name: "Cloudflare allowances" })).toHaveCount(0);
+  await expect(page.getByText("Half of this month's $20 budget used.")).toBeVisible();
+});
+
+test("breaks the month down by conversation, task and day, and exports each as CSV", async ({
+  page,
+}) => {
+  await open(page, body(period, period));
+  await page.getByRole("tab", { name: "Chat" }).click();
+  const chats = page.getByRole("table", { name: "By conversation, this month" });
+  await expect(chats.getByRole("link", { name: "=Plan the trip" })).toHaveAttribute(
+    "href",
+    "/c/c1",
+  );
+  await expect(chats).toContainText("Deleted chats and model tests2about $0.40 + 1 unpriced");
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe("usage-month-by-conversation.csv");
+  const csv = await (await file.createReadStream()).toArray();
+  // A title a spreadsheet would run as a formula is quoted out of it.
+  expect(Buffer.concat(csv).toString()).toBe(
+    "Conversation,Messages,Unpriced messages,Cost (USD)\r\n'=Plan the trip,4,0,3.000000\r\nDeleted chats and model tests,2,1,0.400000\r\n",
+  );
+
+  await page.getByRole("tab", { name: "Task" }).click();
+  await expect(page.getByRole("link", { name: "Compare flights" })).toHaveAttribute(
+    "href",
+    "/activity/tasks/t1",
+  );
+  await page.getByRole("tab", { name: "Day" }).click();
+  await expect(
+    page.getByRole("img", { name: /^Cost by day this month\. Highest: Nov 9, 2026/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show as table" }).click();
+  const byDay = page.getByRole("table", { name: "By day, this month" });
+  await expect(byDay.getByRole("row")).toHaveCount(11);
+  await expect(byDay.getByRole("row", { name: /Nov 2, 2026/ })).toContainText("1about $0.04");
+});
+
+test("an unknown cost is never shown or exported as zero", async ({ page }) => {
+  const unpriced = { ...period, groups: period.groups.filter((g) => g.providerId === "my-llm") };
+  const json = body(unpriced, unpriced);
+  json.breakdowns = {
+    ...json.breakdowns,
+    day: days.map((d) => ({ ...d, costMicroUsd: 0, unpricedCalls: d.calls })),
+  };
+  await open(page, json);
+  await page.getByRole("tab", { name: "Provider" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const csv = await (await (await download).createReadStream()).toArray();
+  expect(Buffer.concat(csv).toString()).toBe(
+    "Billed by,Messages,Unpriced messages,Cost (USD)\r\nmy-llm,1,1,\r\n",
+  );
+  await page.getByRole("tab", { name: "Day" }).click();
+  await expect(
+    page.getByRole("img", { name: /^Cost by day this month\. No priced cost yet\. 6 days have/ }),
+  ).toBeVisible();
+  await expect(page.getByText("6 days have messages with no price on file")).toBeVisible();
+});
+
+test("nothing used yet still shows the plan; a member has no meter", async ({ page }) => {
+  await open(page, body(empty, empty, null));
   await expect(page.getByRole("meter")).toHaveCount(0);
-  await expect(page.getByText("No usage yet.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Nothing used yet this month" })).toBeVisible();
+  await expect(page.getByText("$5.00 a month")).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Start a chat" })).toHaveAttribute("href", "/");
+});
+
+test("a failed load says so and tries again", async ({ page }) => {
+  let calls = 0;
+  await page.route("/api/usage?*", (route) =>
+    ++calls === 1 ? route.fulfill({ status: 500 }) : route.fulfill({ json: body(period, period) }),
+  );
+  await open(page, undefined);
+  await expect(page.getByRole("alert")).toContainText("I couldn't load usage.");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("region", { name: "Where it goes" })).toBeVisible();
 });
 
 test("going to Settings › Spending and back keeps the chat and its unsent draft", async ({
@@ -171,11 +393,17 @@ for (const colorScheme of ["light", "dark"] as const) {
     }) => {
       await page.emulateMedia({ colorScheme });
       await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
-      await open(page, period, period);
+      await open(page, body(period, period));
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       const { violations } = await new AxeBuilder({ page }).analyze();
       expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
       await expect(page).toHaveScreenshot(`usage-${colorScheme}-${width}.png`, { fullPage: true });
+      if (width === 375) {
+        // The by-day chart on the narrowest screen: one bar a day still fits.
+        await page.getByRole("tab", { name: "Day" }).click();
+        const breakdown = page.getByRole("region", { name: "Breakdown" });
+        await expect(breakdown).toHaveScreenshot(`usage-day-${colorScheme}-375.png`);
+      }
     });
   }
 }

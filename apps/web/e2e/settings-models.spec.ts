@@ -142,6 +142,13 @@ test("lists each provider with its key's last 4 and dates, and never the key (M3
     page.getByText("Key ending in QRST · added Oct 20, 2026 · never used yet"),
   ).toBeVisible();
   await expect(page.getByText(/about \$0\.09 per 100 messages/)).toBeVisible();
+  // Every model choice carries its price hint (M3-16 AC5); the button shows the name alone.
+  await page.getByRole("button", { name: /Chat model/ }).click();
+  await expect(page.getByRole("option", { name: /GPT-4.1 mini/ })).toContainText(
+    "about $0.09 per 100 messages",
+  );
+  await expect(page.getByRole("option", { name: /some\/model/ })).toContainText("No price on file");
+  await page.keyboard.press("Escape");
   await expect(page.getByText("Chat model · Background model").first()).toBeVisible();
   expect(await page.content()).not.toContain(KEY);
 });

@@ -37,13 +37,15 @@ type UsageBody = {
   today: Period;
   month: Period;
   projected: { costMicroUsd: number };
-  categories: { id: string; status: string; month?: number | null }[];
+  categories: { id: string; status: string; label: string | null; month?: number | null }[];
   breakdowns: {
     conversation: Breakdown[];
     task: Breakdown[];
     day: { date: string; calls: number; costMicroUsd: number }[];
   };
   allowance: { resetsAt: number; freeNeuronsUsed: number; billedNeurons: number } | null;
+  meters: { id: string; used: number; limit: number; unit: string }[] | null;
+  metersVerifiedAt: string | null;
 };
 const DAY = 86_400_000;
 
@@ -140,10 +142,67 @@ describe("usage ledger", () => {
     // The allowance total includes everyone's calls, so a member doesn't get it.
     const member = { headers: await sessionHeaders("other") };
     const theirs = await workerApp.request(`${ORIGIN}/api/usage`, member, env);
-    expect((await theirs.json<UsageBody>()).allowance).toBeNull();
+    expect(await theirs.json<UsageBody>()).toMatchObject({ allowance: null, meters: null });
+    // A meter that can't be read leaves the rest of the page standing.
+    const broken = {
+      ...env,
+      FILES: Object.assign(Object.create(env.FILES), {
+        list: () => Promise.reject(new Error("R2 down")),
+      }),
+    };
+    const mine = { headers: await sessionHeaders(owner) };
+    const down = await workerApp.request(`${ORIGIN}/api/usage`, mine, broken);
+    expect(down.status).toBe(200);
+    expect(await down.json<UsageBody>()).toMatchObject({
+      meters: null,
+      today: { costMicroUsd: 5 },
+    });
+    // The owner gets every allowance meter, from the list the reconciler's banners read.
+    expect(body.meters?.map((m) => m.id)).toEqual([
+      "d1_cap",
+      "d1_storage",
+      "r2_storage",
+      "workers_ai_neurons",
+      "workflows_steps",
+      "do_duration",
+    ]);
     expect(body.today.groups[0]?.lines).toMatchObject([
       { name: "GPT-4.1", priceVerifiedAt: "2020-01-01", stale: true },
     ]);
+  });
+
+  it("marks a category billed once one of its meters passes the included amount", async () => {
+    const { browser } = await claim();
+    const now = Date.now();
+    // Workflows steps at the month's included 500,000 (prices.json): all of it is still included.
+    await db
+      .prepare("INSERT INTO meters (meter, day, amount) VALUES ('workflow_steps', ?, 500000)")
+      .bind(now - (now % DAY))
+      .run();
+    const at = await (await browser.req("/api/usage")).json<UsageBody>();
+    expect(at.categories[1]).toMatchObject({ id: "cloudflare", status: "included" });
+    // One step past it is billed; storage is still under its own.
+    await db.prepare("UPDATE meters SET amount = 500001 WHERE meter = 'workflow_steps'").run();
+    const body = await (await browser.req("/api/usage")).json<UsageBody>();
+    expect(body.categories.slice(1, 3)).toMatchObject([
+      {
+        id: "cloudflare",
+        status: "over-allowance",
+        label: "Over the Workers Paid allowance, billed by Cloudflare",
+      },
+      { id: "storage", status: "included", label: "Included in Workers Paid" },
+    ]);
+    expect(body.metersVerifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // A member has no meters, so the plan's inclusion is all they're told.
+    await db
+      .prepare("INSERT INTO users (id, display_name, role) VALUES ('other', 'O', 'member')")
+      .run();
+    const member = { headers: await sessionHeaders("other") };
+    const theirs = await (
+      await workerApp.request(`${ORIGIN}/api/usage`, member, env)
+    ).json<UsageBody>();
+    expect(theirs.categories[1]).toMatchObject({ id: "cloudflare", status: "included" });
+    expect(theirs.metersVerifiedAt).toBeNull();
   });
 
   it("takes the client's local midnight, and ignores an implausible one", async () => {

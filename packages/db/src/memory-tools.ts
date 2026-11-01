@@ -5,22 +5,15 @@
 // saves a `user` row (A-Me1), while a fetched page saying "remember the address is X" only files
 // a proposal for the inbox (A-Me2).
 //
-// NOTE (M3-08 AC5): the built-in registry (`builtinToolRegistry` in `packages/tools-builtin`)
-// has not landed, so the `LoopTool` surface it needs is stubbed here structurally. The shapes
-// mirror the M3-08/M3-03 interface (`manifest` with `riskClass`/`destinations`/`scopes`, output
-// with `ok`/`content`/`context`), so registering for real is a type-only swap. `recall` makes no
-// model call: it reads the store through `MemoryService.recall`.
+// The manifest is `@opa/policy`'s, so the tools register in a `ToolRegistry<LoopTool>`; the
+// `LoopTool` surface itself stays structural here, as `@opa/db` doesn't depend on the harness.
+// Hosts register through `registerMemoryTools`, which reads the user's "Learn from our chats"
+// (M3-15 AC5). `recall` makes no model call: it reads the store through `MemoryService.recall`.
+import type { ToolDestination, ToolManifest } from "@opa/policy";
 import type { MemoryKind, MemoryService, MemorySource, Trust, WriteOutcome } from "./memory";
 
-/** The `LoopTool` manifest fields the registry reads (M3-02 AC1). */
-export interface MemoryToolManifest {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  riskClass: "read" | "write_reversible" | "consequential" | "irreversible";
-  destinations: { id: string; kind: string; dataEgress: boolean }[];
-  scopes: string[];
-}
+/** The `LoopTool` manifest the registry reads (M3-02 AC1). */
+export type MemoryToolManifest = ToolManifest;
 
 /** What a result adds to the context, for taint (M3-02 AC3). Omitted, it counts as untrusted. */
 export type MemoryToolContextEvent =
@@ -58,7 +51,7 @@ export interface MemoryToolContext {
 
 export const MEMORY_TOOL_NAMES = ["remember", "recall", "forget"] as const;
 
-const STAY_HOME = [{ id: "memory", kind: "control_plane", dataEgress: false }];
+const STAY_HOME: ToolDestination[] = [{ id: "memory", kind: "control_plane", dataEgress: false }];
 
 const failed = (content: string): MemoryToolOutput => ({
   ok: false,
@@ -279,12 +272,33 @@ export function memoryTools(
   ];
 }
 
-/** Joins the tools to the M3-08 registry (or any `{ register }`) when it lands. */
-export function registerMemoryTools(
-  registry: MemoryToolRegistry,
-  service: MemoryToolService,
+/** What a host holds for the calling user: their scoped `forUser(scope)`, memory and settings. */
+export interface MemoryToolUser {
+  memory: MemoryToolService;
+  settings: { get(): Promise<{ learnFromChats: boolean | null } | undefined> };
+}
+
+/**
+ * The tools for one user's turn, with "Learn from our chats" read from their settings (M3-15
+ * AC5). No settings row reads as the default: on. The setting is read per turn, so turning it
+ * off takes `remember` away from the next turn.
+ */
+export async function userMemoryTools(
+  user: MemoryToolUser,
   context: () => MemoryToolContext,
-  options?: MemoryToolOptions,
-): void {
-  for (const tool of memoryTools(service, context, options)) registry.register(tool);
+): Promise<MemoryTool[]> {
+  const row = await user.settings.get();
+  return memoryTools(user.memory, context, { learn: row?.learnFromChats ?? true });
+}
+
+/**
+ * Joins the user's tools to the M3-08 registry (or any `{ register }`). Hosts register through
+ * here, not `memoryTools`, so none can offer `remember` against the user's setting.
+ */
+export async function registerMemoryTools(
+  registry: MemoryToolRegistry,
+  user: MemoryToolUser,
+  context: () => MemoryToolContext,
+): Promise<void> {
+  for (const tool of await userMemoryTools(user, context)) registry.register(tool);
 }

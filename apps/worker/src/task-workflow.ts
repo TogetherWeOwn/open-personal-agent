@@ -40,7 +40,7 @@ import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
-import { type AssistantTaskRpc, createWorkflowTaskContext } from "./task-context";
+import { type AssistantTaskRpc, createWorkflowTaskContext, stepperFor } from "./task-context";
 
 /** Advisory only: identity comes from the instance's task row, never from these params (AC9). */
 export interface TaskParams {
@@ -93,7 +93,9 @@ export class TaskWorkflow extends WorkflowEntrypoint<Bindings, TaskParams> {
       await this.#composed,
       { resolveModel: this.resolveModel, taskTools: this.taskTools },
       event.instanceId,
-      stepperFor(step),
+      stepperFor(step, () =>
+        createRepository(this.env).deployment.addToMeter("workflow_steps", 1, Date.now()),
+      ),
     );
   }
 }
@@ -388,6 +390,25 @@ async function driveLoop(
         await waitForDecision(ctx, cycle, turn, now);
         continue;
       }
+      // The wait ended with an item expired and still undecided (M3-07 AC1): the Workflow wakes
+      // at the expiry, so this lands here rather than in the reconciler. The undecided rows
+      // expire with their audit rows and the task cancels — the same end as the reconciler's
+      // sweep and the compromise-signal path — instead of carrying on without the call.
+      // Decided here from the recorded rows and read time, so a replay takes the same branch.
+      const undecided = turn.pending?.items.filter((item) => !item.decision) ?? [];
+      if (undecided.length > 0) {
+        await ctx.step(`task:expire:${cycle}`, async () => {
+          for (const item of undecided) {
+            await user.approvals.finish(batchId, `appr_${item.toolCallId}`, {
+              status: "expired",
+              reason: "expired",
+            });
+          }
+          await user.tasks.cancel(taskId);
+          return null;
+        });
+        throw new TaskCancelledError(taskId);
+      }
       host.approvals = {
         // Each a step, so a replay returns what happened instead of claiming again.
         claim: (toolCallId) =>
@@ -477,7 +498,7 @@ async function driveLoop(
 /**
  * Waits for the approvals route's wake-up, then loops: the next load reads what was decided
  * from D1, never this event's payload (M3-12 AC3). A timeout just wakes the loop, which expires
- * the batch itself.
+ * the undecided batch itself and cancels the task (M3-07 AC1).
  */
 async function waitForDecision(
   ctx: TaskContext,
@@ -567,44 +588,6 @@ const nextUtcMonth = (t: number) => {
   const d = new Date(t);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
 };
-
-/** The platform stepper's surface used here, without its serializable-type machinery. */
-type PlatformStepper = {
-  do(name: string, config: Record<string, unknown>, fn: () => Promise<unknown>): Promise<unknown>;
-  sleep(name: string, duration: number): Promise<void>;
-  waitForEvent(
-    name: string,
-    options: { type: string; timeout: number },
-  ): Promise<{ payload: unknown }>;
-};
-
-/** Maps the platform stepper to the port's: ms durations in, step outputs hidden from logs. */
-function stepperFor(step: WorkflowStep): TaskStepper {
-  const platform = step as unknown as PlatformStepper;
-  return {
-    do: (name, config, fn) =>
-      platform.do(
-        name,
-        {
-          ...(config.retries
-            ? {
-                retries: {
-                  limit: config.retries.limit,
-                  delay: config.retries.delayMs,
-                  ...(config.retries.backoff ? { backoff: config.retries.backoff } : {}),
-                },
-              }
-            : {}),
-          ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
-          sensitive: "output", // step outputs are the user's content, not telemetry
-        },
-        () => fn(),
-      ) as never,
-    sleep: (name, durationMs) => platform.sleep(name, durationMs),
-    waitForEvent: (name, options) =>
-      platform.waitForEvent(name, { type: options.type, timeout: options.timeoutMs }) as never,
-  };
-}
 
 function parseState(json: string | null): TaskTurnState | null {
   if (!json) return null;

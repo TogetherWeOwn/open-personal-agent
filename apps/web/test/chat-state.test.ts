@@ -370,6 +370,8 @@ describe("chatReducer", () => {
     const state = run(send, started(), delta("Hel"));
     const waiting = chatReducer(state, ev("approval.requested", { batchId: "b1", items: [] }));
     expect(waiting.pending).toBe(null);
+    // Its card announces itself; "working" no longer holds while the turn waits.
+    expect(waiting.announcement).toBe("");
     // The reply stays streaming: the resumed turn's deltas land in the same message.
     expect(reply(waiting)).toMatchObject({ text: "Hel", status: "streaming" });
     const limited = chatReducer(

@@ -18,6 +18,10 @@ const ALLOWANCES: Record<string, (percent: number) => string> = {
   d1_storage: (p) => `Your database is at ${p}% of the 5 GB included in Workers Paid.`,
   r2_storage: (p) => `Your files are at ${p}% of the 10 GB of storage included in Workers Paid.`,
   workers_ai_neurons: (p) => `Workers AI is at ${p}% of today's free allowance.`,
+  workflows_steps: (p) =>
+    `Background tasks have used about ${p}% of this month's steps included in Workers Paid.`,
+  do_duration: (p) =>
+    `Live chats have used about ${p}% of this month's Durable Objects time included in Workers Paid.`,
 };
 
 /** The dismissal's key: per month and threshold, and per day for 100% and the allowances. */

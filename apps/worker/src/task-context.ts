@@ -18,7 +18,7 @@ import {
   type TaskStepper,
 } from "@opa/core";
 import type { TaskStatus } from "@opa/db/repository";
-import type { CallScope, Refusal, Reservation } from "./limits";
+import type { CallScope, Refusal, Reservation } from "@opa/server/limits";
 
 /** The assistant RPC surface a task may use, structural so tests can stand in for the stub. */
 export interface AssistantTaskRpc {
@@ -237,8 +237,12 @@ type PlatformStepper = {
   ): Promise<{ payload: unknown }>;
 };
 
-/** Maps the platform stepper to the port's: ms durations in, step outputs hidden from logs. */
-export function stepperFor(step: WorkflowStep): TaskStepper {
+/**
+ * Maps the platform stepper to the port's: ms durations in, step outputs hidden from logs. Each
+ * step that runs is counted for the Workflows-steps meter (M3-16 AC3), inside the step so a replay
+ * served from the engine's record isn't counted twice; a retry is, so the meter can run high.
+ */
+export function stepperFor(step: WorkflowStep, counted: () => Promise<void>): TaskStepper {
   const platform = step as unknown as PlatformStepper;
   return {
     do: (name, config, fn) =>
@@ -257,7 +261,10 @@ export function stepperFor(step: WorkflowStep): TaskStepper {
           ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
           sensitive: "output", // step outputs are the user's content, not telemetry
         },
-        () => fn(),
+        async () => {
+          await counted().catch(() => {}); // a meter must never fail the step
+          return fn();
+        },
       ) as never,
     sleep: (name, durationMs) => platform.sleep(name, durationMs),
     waitForEvent: (name, options) =>

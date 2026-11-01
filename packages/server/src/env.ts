@@ -35,9 +35,14 @@ export interface AppPorts extends DataPorts {
   };
   /**
    * Data export runs (M3-20 AC1). The export route creates instances; health reports the
-   * binding by presence only, so it never creates one.
+   * binding by presence only, so it never creates one. Account deletion terminates a running
+   * export's instance through `get` where the runtime offers it (Workers); elsewhere the
+   * failed row alone stops the run.
    */
-  EXPORT_WORKFLOW?: { create(instance: { id: string; params?: unknown }): Promise<unknown> };
+  EXPORT_WORKFLOW?: {
+    create(instance: { id: string; params?: unknown }): Promise<unknown>;
+    get?(id: string): Promise<{ terminate(): Promise<void> }>;
+  };
   OPA_SESSION_SECRET?: string | undefined;
   OPA_SETUP_TOKEN?: string | undefined;
   /** The per-file attachment cap in bytes (M3-10 AC1); unset means the 10 MB default. */

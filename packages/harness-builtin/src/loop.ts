@@ -114,6 +114,12 @@ export type LoopHost = {
   policy(tool: string): { override?: ToolOverride; grants?: readonly StandingGrant[] };
   budget?: Budget;
   taskId?: string;
+  /**
+   * A steer that arrived mid-turn (M3-09 AC4), oldest first. The loop drains it at every step
+   * boundary, so a steer changes the next step without restarting the turn. The host writes
+   * the text to history itself; the loop appends it to the turn's messages and announces it.
+   */
+  takeSteer?: () => { messageId: string; text: string } | null;
   now(): number;
   newId(): string; // step and batch ids
   /**
@@ -437,6 +443,13 @@ export async function* runTurn(
 
   for (;;) {
     if (signal.aborted) return yield* cancelled();
+    // Steers join the turn's messages here, so the next model call reads them (M3-09 AC4). Each
+    // is announced where it lands: a steer that arrives while a limit stops the turn is still
+    // recorded, and the host persists it with the stopped state.
+    for (let steer = host.takeSteer?.(); steer; steer = host.takeSteer?.()) {
+      messages.push({ role: "user", content: steer.text });
+      yield ev("turn.steered", { messageId: steer.messageId, text: steer.text });
+    }
     if (state.counts.calls >= TURN_LIMITS.calls) {
       return yield* limit("calls", `${TURN_LIMITS.calls} model calls`);
     }

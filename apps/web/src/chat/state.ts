@@ -315,20 +315,18 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       return finish(seen, "error", `Something went wrong: ${message}`, code && { failure: code });
     }
     // The turn stopped without settling: it waits in D1 for a decision or a Continue, and its
-    // reply stays `streaming`, so its later deltas stream into the same message. The cards
-    // that act on these come with the timeline (M3-07b); the composer frees up either way.
+    // reply stays `streaming`, so its later deltas stream into the same message. The approval
+    // card reads D1, not this event, and announces itself (approvals/store.ts); the composer
+    // frees up either way, and "working" is no longer true.
     case "approval.requested":
-      return {
-        ...seen,
-        pending: null,
-        announcement: "The assistant is waiting for your approval.",
-      };
+      return { ...seen, pending: null, announcement: "" };
     case "limit.reached":
       return { ...seen, pending: null, announcement: "The assistant stopped at a limit." };
     case "usage.updated":
       return seen;
-    // The remaining M3 events (steps, tools, taint) get their timeline with the cards that
-    // render them; until then they leave the thread as it is.
+    // The remaining M3 events (steps, tools, taint, and the queue's own announcements) get
+    // their timeline with the cards that render them (M3-09b for the queue); until then they
+    // leave the thread as it is.
     case "step.started":
     case "step.completed":
     case "tool.called":
@@ -338,6 +336,9 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     case "task.promoted":
     case "artifact.created":
     case "memory.proposed":
+    case "turn.queued":
+    case "turn.steered":
+    case "turn.dequeued":
       return seen;
   }
 }

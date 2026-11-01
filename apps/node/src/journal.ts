@@ -31,6 +31,13 @@ export interface SqliteJournalDeps {
   now?: () => number;
   /** Pause between event polls in `waitForEvent`. */
   pollIntervalMs?: number;
+  /**
+   * Whether a finished step may persist. Checked after `fn` resolves, before the insert: a
+   * step whose task vanished mid-step (account deletion removes the row) returns its value
+   * without journaling it, so no `task_steps` row — which names no user — survives with no
+   * owner. Absent, every finished step journals, as before.
+   */
+  shouldJournal?: () => Promise<boolean>;
 }
 
 /**
@@ -67,6 +74,7 @@ export function createSqliteJournal(deps: SqliteJournalDeps): TaskStepper {
         .first("output");
       if (typeof replayed === "string") return JSON.parse(replayed) as T;
       const value = await runWithRetries(fn, config);
+      if (deps.shouldJournal && !(await deps.shouldJournal())) return value;
       await deps.db
         .prepare("INSERT INTO task_steps (instance_id, name, output) VALUES (?, ?, ?)")
         .bind(deps.instanceId, name, JSON.stringify(value))
@@ -238,10 +246,15 @@ const TERMINAL: readonly TaskStatus[] = ["succeeded", "failed", "cancelled", "in
  * resume replays the stop instead of re-running the step, and progress never persists.
  */
 export function createSqliteTaskContext(deps: SqliteTaskContextDeps): TaskContext {
+  // Gone, not merely terminal: a cancelled task's mid-step finish still journals (the
+  // contract pins it, and the cascade still owns the row), while a deleted task's step —
+  // account deletion took the row — must persist neither its journal row nor its offload.
+  const taskAlive = async () => (await deps.readStatus()) !== undefined;
   const journal = createSqliteJournal({
     db: deps.db,
     instanceId: deps.instanceId,
     ...(deps.now ? { now: deps.now } : {}),
+    shouldJournal: taskAlive,
   });
   const now = deps.now ?? Date.now;
   const maxSteps = deps.limits?.steps ?? TASK_LIMITS.steps;
@@ -315,6 +328,11 @@ export function createSqliteTaskContext(deps: SqliteTaskContextDeps): TaskContex
           const json = JSON.stringify(value);
           const bytes = new TextEncoder().encode(json).length;
           if (bytes <= STEP_OUTPUT_INLINE_MAX_BYTES) return { value };
+          // Re-checked after `fn`: the task may be gone (account deleted) mid-step, and an
+          // offload would strand a file no user owns. A gone task keeps the value inline —
+          // unjournalled via `shouldJournal` — so the dying run finishes with nothing
+          // persisted.
+          if (!(await taskAlive())) return { value };
           const id = await outputId(idempotencyKey(name));
           await deps.outputs.put(id, json);
           return { ref: id, bytes };

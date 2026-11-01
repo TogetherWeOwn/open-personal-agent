@@ -348,6 +348,22 @@ export const attachments = sqliteTable(
 );
 
 /**
+ * The allowance meters the ledger keeps beyond model calls (M3-16 AC3), summed per UTC day:
+ * `workflow_steps` counts each `step.do` a task runs, and `do_ms` adds each chat turn's
+ * wall-clock, from which the Durable Object duration is estimated. `d1_bytes` is not a sum but
+ * the database's size at the reconciler's latest tick that day (M3-18 AC2). Deployment-wide.
+ */
+export const meters = sqliteTable(
+  "meters",
+  {
+    meter: text("meter", { enum: ["workflow_steps", "do_ms", "d1_bytes"] }).notNull(),
+    day: integer("day").notNull(),
+    amount: integer("amount").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.meter, t.day] })],
+);
+
+/**
  * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
  * table had no price for the model; `cost_source` says whether it was estimated or reported.
  * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls. `task_id`

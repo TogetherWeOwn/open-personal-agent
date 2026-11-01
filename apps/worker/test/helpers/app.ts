@@ -33,7 +33,7 @@ export const db = env.DB;
  */
 export const SOCKET_WAIT = { timeout: 10_000 };
 export const TABLES =
-  "artifacts setup_state used_setup_tokens sessions passkeys recovery_codes webauthn_challenges conversations audit_log exports users";
+  "approvals artifacts attachments audit_log conversations exports grants memories memory_links messages meters model_providers passkeys recovery_codes secrets sessions setup_state task_events task_steps tasks tool_overrides turn_states usage used_setup_tokens user_keys user_settings users webauthn_challenges";
 
 /** Migrates once, then empties the tables before each test. */
 export function freshDatabase() {

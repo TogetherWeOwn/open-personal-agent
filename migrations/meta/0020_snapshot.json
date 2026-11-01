@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8427006a-38f9-4b60-9409-235c7c0212c1",
+  "id": "81080ed9-570e-4717-bbaf-65560d373f3c",
   "prevId": "2a07d2a4-79c0-43ec-a032-94da88624ab0",
   "tables": {
     "approvals": {
@@ -108,13 +108,6 @@
         "taint": {
           "name": "taint",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "cost_micro_usd": {
-          "name": "cost_micro_usd",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -1193,6 +1186,43 @@
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "meters": {
+      "name": "meters",
+      "columns": {
+        "meter": {
+          "name": "meter",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "day": {
+          "name": "day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "meters_meter_day_pk": {
+          "columns": ["meter", "day"],
+          "name": "meters_meter_day_pk"
+        }
+      },
       "uniqueConstraints": {},
       "checkConstraints": {}
     },

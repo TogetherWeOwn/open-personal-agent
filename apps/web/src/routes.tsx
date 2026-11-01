@@ -4,6 +4,7 @@
 // which stays mounted behind the others so drafts and streams survive.
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
+import { ApprovalLink, Inbox } from "./approvals/Inbox";
 import { Memory } from "./memory/Memory";
 import { Waiting } from "./memory/Waiting";
 import { Output, Outputs } from "./outputs/Outputs";
@@ -58,7 +59,7 @@ export const SETTINGS: {
     body: "Your assistant works without one; it just can't browse like a person or run code.",
   },
   { id: "apps", label: "Apps & tools" },
-  { id: "memory", label: "Memory" },
+  { id: "memory", label: "Memory", shipped: true },
   { id: "spending", label: "Spending", shipped: true },
   { id: "privacy", label: "Privacy & security", shipped: true },
   { id: "deployment", label: "Deployment" },
@@ -117,17 +118,8 @@ const waiting = () => (
 export const routes: Route[] = [
   { path: "/", nav: "chat" },
   { path: "/c/:conversationId", nav: "chat" },
-  {
-    path: "/inbox",
-    nav: "inbox",
-    screen: placeholder(
-      "Inbox",
-      "Nothing needs you right now.",
-      undefined,
-      go("/activity", "See Activity"),
-    ),
-  },
-  { path: "/approvals/:approvalId", nav: "inbox", screen: () => <Redirect to="/inbox" /> },
+  { path: "/inbox", nav: "inbox", screen: Inbox },
+  { path: "/approvals/:approvalId", nav: "inbox", screen: ApprovalLink },
   { path: "/activity", nav: "activity", screen: () => <Redirect to="/activity/tasks" /> },
   { path: "/activity/tasks", nav: "activity", screen: Tasks },
   { path: "/activity/tasks/:taskId", nav: "activity", screen: TaskDetails },

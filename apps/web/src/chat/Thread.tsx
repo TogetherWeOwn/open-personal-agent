@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useLayoutEffect, useRef } from "react";
+import { type ReactNode, useLayoutEffect, useRef } from "react";
 import { Link } from "react-aria-components";
 import { type AttachmentKind, cannotReadCopy, formatBytes } from "./attachments";
 import { Markdown } from "./Markdown";
@@ -10,7 +10,17 @@ import type { StoredAttachment } from "./transport";
  * The message log. Its own live region is off so streaming tokens are not read out one by one;
  * the app's status region announces the finished reply instead (UX direction §3.1).
  */
-export function Thread({ conversation }: { conversation: Conversation }) {
+export function Thread({
+  conversation,
+  after,
+  afterCount = 0,
+}: {
+  conversation: Conversation;
+  /** Below the last message: the chat's approval cards and receipts (M3-07b). */
+  after?: ReactNode;
+  /** How many things `after` shows, so a new card scrolls into view as a message would. */
+  afterCount?: number;
+}) {
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const last = conversation.messages.at(-1)?.text;
@@ -20,7 +30,7 @@ export function Thread({ conversation }: { conversation: Conversation }) {
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
-  }, [conversation.messages.length, last]);
+  }, [conversation.messages.length, last, afterCount]);
 
   return (
     <div
@@ -42,6 +52,7 @@ export function Thread({ conversation }: { conversation: Conversation }) {
         {conversation.messages.map((m) => (
           <MessageView key={m.id} message={m} />
         ))}
+        {after}
       </div>
     </div>
   );

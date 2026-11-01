@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, hosts the builtin loop for one chat turn at a time
-// (M3-03c) and sends every event to every tab, so two tabs show the same stream. D1 holds the
-// messages and a stopped turn's resumable state (AC5); the DO holds the running turn and the
+// (M3-03c) and sends every event to every tab, so two tabs show the same stream. A send that
+// arrives mid-run waits in its conversation's FIFO (M3-09) and starts when the turn settles;
+// a steer joins the running turn without restarting it. D1 holds the messages and a stopped
+// turn's resumable state (AC5); the DO holds the running turn and the
 // event log a reconnected tab replays from (AC10).
 import {
   type HarnessEvent,
   type ModelAttachment,
   type ModelMessage,
   type ModelProvider,
-  type ModelUsage,
   TASK_LIMITS,
   type TurnFailure,
   type TurnLimit,
@@ -38,7 +39,41 @@ import {
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
 import type { AllowanceWarnings } from "@opa/server/allowances";
-import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
+import { resolveChatModel } from "@opa/server/chat-model";
+import {
+  base64,
+  type CallUsage,
+  type Emit,
+  fileTokenEstimate,
+  LABEL_CHARS,
+  MAX_ATTACHMENT_TEXT,
+  MAX_TEXT,
+  MODEL_ERRORS,
+  messageChars,
+  messageFileTokens,
+  modelBytes,
+  parse,
+  parseTurnState,
+  pickUsage,
+  QUEUE_KEY,
+  type ResumeResult,
+  readPrefix,
+  reject,
+  replySegments,
+  type TaskProgress,
+  TEXT_READ_BYTES,
+  TURN_FILE_BYTES,
+  UNREAD,
+} from "@opa/server/chat-protocol";
+import {
+  type CallScope,
+  checkSpending,
+  Limits,
+  type Refusal,
+  type Reservation,
+  SPENDING_DEFAULTS,
+  type SpendingSettings,
+} from "@opa/server/limits";
 import {
   Agent,
   type Connection,
@@ -49,32 +84,9 @@ import {
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import { EventLog } from "./event-log";
-import {
-  type CallScope,
-  checkSpending,
-  Limits,
-  type Refusal,
-  type Reservation,
-  SPENDING_DEFAULTS,
-  type SpendingSettings,
-} from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
-const MAX_TEXT = 32_000;
-const MAX_ATTACHMENTS = 10;
-/** How much of a text file one turn carries to the model; the file itself is kept whole in R2. */
-const MAX_ATTACHMENT_TEXT = 100_000;
-/** How far a text file is read: enough bytes for `MAX_ATTACHMENT_TEXT` characters of any UTF-8. */
-const TEXT_READ_BYTES = MAX_ATTACHMENT_TEXT * 4;
-/**
- * The bytes of files one turn hands the model. Images and PDFs go as base64 in one request, so
- * this bounds the Durable Object's memory (128 MB) and the upstream request (about 32 MB at the
- * strictest provider) whatever the conversation holds.
- */
-export const TURN_FILE_BYTES = 16 * 1024 * 1024;
-const IMAGE_TOKENS = 2_500;
-const PDF_MAX_TOKENS = 100_000; // about 100 pages, the providers' usual page limit
 const TAB_RECHECK_MS = 30_000; // how often task progress rechecks the tabs' sessions
 /** A live frame held back from a replaying tab, with what its replay may already have sent. */
 interface HeldFrame {
@@ -86,28 +98,12 @@ interface HeldFrame {
 /** Live frames held back from one replaying tab, at most: far beyond a turn's, as REPLAY_LIMIT. */
 const MAX_HELD_FRAMES = 100_000;
 const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so eviction keeps most
-/** Decided batches waiting for the running turn to end (M3-07 AC14, M3-09 AC4's FIFO). */
-const QUEUE_KEY = "approvals:queue";
-/** How much of the original request a late approval's label quotes. */
-const LABEL_CHARS = 80;
-
-/** What `resumeBatch` did with a decided batch. */
-export type ResumeResult = "resumed" | "waiting" | "queued" | "gone";
-
-type Emit = <T extends HarnessEvent["type"]>(
-  type: T,
-  payload: Extract<HarnessEvent, { type: T }>["payload"],
-) => void;
-
-/** One progress event from a Workflow task (M3-12 AC8), as its driver numbers them. */
-export interface TaskProgress {
-  conversationId: string;
-  turnId: string;
-  taskId: string;
-  seq: number;
-  type: string;
-  payload: unknown;
-}
+/** Sends one conversation may hold behind its running turn (M3-09 AC4); past that the tab waits. */
+const QUEUE_MAX = 10;
+/** Admitted sends still waiting for their turn, oldest first (M3-09 AC4). */
+const SEND_QUEUE_KEY = "sends:queue";
+/** Steers each turn consumed, by turn ID: excluded from that turn's resumed history (M3-09). */
+const STEERS_CONSUMED_KEY = "steers-consumed";
 
 /** A stored message as `listMessages` returns it, with its attachments. */
 type StoredMessage = NonNullable<
@@ -115,7 +111,22 @@ type StoredMessage = NonNullable<
     ReturnType<ReturnType<ReturnType<typeof createRepository>["forUser"]>["chat"]["listMessages"]>
   >
 >[number];
-type CallUsage = { inputTokens: number; outputTokens: number; cachedInputTokens: number };
+
+/**
+ * A send admitted while a turn runs (M3-09 AC4): its user row and files are already in D1,
+ * and this holds what the drain needs to start its reply, oldest first per conversation.
+ */
+interface QueuedSend {
+  conversationId: string;
+  messageId: string;
+  /** The send's empty reply row, already in D1 beside its user row. */
+  replyId: string;
+  text: string;
+  own: { provider: string; model: string } | undefined;
+  attachmentIds: readonly string[];
+  /** When the send was admitted, for the longest-waiting drain across conversations. */
+  at: number;
+}
 
 /**
  * A running turn's eviction checkpoint (the fiber snapshot): plain JSON. The loop's own
@@ -154,10 +165,6 @@ interface TurnCheckpoint {
   stopping?: number;
 }
 
-/** A turn's reply text in its saved state: one segment per model call that spoke. */
-const replySegments = (state: TurnState) =>
-  state.messages.flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []));
-
 /** A resumed batch, for the loop's approval hooks. */
 type ApprovalRun = {
   batchId: string;
@@ -172,6 +179,19 @@ const REFUSED: Record<string, string> = {
   tool_missing: "The tool is no longer available, so the call didn't run.",
   already_claimed: "This approval was already used, so the call didn't run again.",
 };
+
+/** What `#drive` runs a turn with: a new turn's or a resumed one's. */
+interface DriveRun {
+  checkpoint: TurnCheckpoint;
+  stash: (data: TurnCheckpoint) => void;
+  provider: ModelProvider;
+  model: string;
+  firstHold: { id: string; maxOutputTokens: number };
+  history: ModelMessage[];
+  state: TurnState;
+  signal: AbortSignal;
+  approvals?: ApprovalRun;
+}
 
 export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
@@ -189,6 +209,34 @@ export class Assistant extends Agent<Bindings> {
   #running: AbortController | null = null;
   /** Whether a `#drain` owns the resume queue: there is only ever one, so batches keep order. */
   #draining = false;
+  /**
+   * The running turn's address, set with `#running` and cleared with it: `turn.queued` for a
+   * send that waits and `turn.dequeued` for one taken back are logged under this turn, so they
+   * trim with it and replay to a reconnected tab.
+   */
+  #executing: { conversationId: string; turnId: string } | null = null;
+  /**
+   * Sends waiting for their reply, oldest first per conversation (M3-09 AC4). Items survive a
+   * `turn.cancel`: the cancelled turn settles, then the drain starts the next.
+   */
+  readonly #queues = new Map<string, QueuedSend[]>();
+  /**
+   * Steers waiting to join their conversation's running turn (M3-09 AC4). Each text is already
+   * a user row in D1; the loop drains these through `takeSteer` and yields `turn.steered`
+   * where the text enters. Each is bound to the turn ID that owned the run when it was
+   * admitted, so a failed turn's steers never steer the next turn — the rows stay as history.
+   */
+  readonly #steers = new Map<string, { turnId: string; messageId: string; text: string }[]>();
+  /** A drain retry waiting out the rate limit, so one `slow_down` doesn't strand the queue. */
+  #drainTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Admissions serialize here, so queued positions and D1 rows stay in arrival order. */
+  #admissions: Promise<void> = Promise.resolve();
+  /**
+   * A drain a fiber parked for its end: the conversation whose queue waits (M3-09 AC4). The
+   * drain runs outside the fiber so two `chat-turn` fibers never overlap — a recovery would
+   * otherwise settle the finished turn twice.
+   */
+  #drainAfter: string | null = null;
   /** Turn rate and daily spend, in this DO's storage (M2-22). */
   readonly limits = new Limits(this.ctx.storage.kv);
   /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
@@ -201,6 +249,9 @@ export class Assistant extends Agent<Bindings> {
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, withoutMasterKeys(env));
     this.#composed = compose(env);
+    // The queue is mirrored to storage on every change; a new instance settles whatever the
+    // evicted one left waiting, so no admitted pair reads `streaming` forever (M3-09 AC4).
+    this.ctx.blockConcurrencyWhile(() => this.#recoverQueues());
   }
 
   /** Liveness check for `/api/health`. */
@@ -449,54 +500,503 @@ export class Assistant extends Agent<Bindings> {
         })
         .catch(() => connection.close(1011, "session check failed"));
     }
-    if (msg?.type !== "chat.send") return;
+    if (msg?.type === "chat.dequeue") {
+      // A queued send the user took back: drop it before it starts, tell every tab. An unknown
+      // or already-answering ID is nothing to take back, so it stays silent.
+      void this.#sessionLive(connection).then((ok) => {
+        if (ok) void this.#dequeue(msg.conversationId, msg.messageId).catch(() => {});
+      });
+      return;
+    }
+    if (msg?.type !== "chat.send" && msg?.type !== "chat.steer") return;
     const text = msg.text.trim();
-    // One turn at a time is the concurrency limit: a second send waits for the first.
-    if (this.#running) {
-      reject(connection, msg.conversationId, "Another reply is still being written.");
-    } else if (
+    if (
       !isId(msg.conversationId) ||
       (!text && !msg.attachmentIds.length) ||
       text.length > MAX_TEXT
     ) {
       reject(connection, "", "That message can't be sent.");
+    } else if (
+      msg.type === "chat.steer" &&
+      this.#running &&
+      this.#executing?.conversationId === msg.conversationId
+    ) {
+      // A steer for the running turn joins it without restarting: stored to D1 now, then read
+      // by the loop's next step. A steer for any other conversation is a send, below.
+      const admitted = this.#admissions.then(() =>
+        this.#admitSteer(connection, msg.conversationId, text),
+      );
+      this.#admissions = admitted.catch(() => {});
+      void admitted.catch(() =>
+        reject(connection, msg.conversationId, "The reply couldn't be saved."),
+      );
+    } else if (this.#running || this.#queues.get(msg.conversationId)?.length) {
+      // One turn at a time is the concurrency limit: a second send waits behind the first, in
+      // its conversation's FIFO, and every tab sees where it stands. A send also parks when
+      // its conversation still waits — e.g. while the drain waits out the rate limit — so it
+      // never jumps ahead of the parked sends.
+      const admitted = this.#admissions.then(() =>
+        this.#admitQueued(connection, msg.conversationId, text, msg.model, msg.attachmentIds),
+      );
+      this.#admissions = admitted.catch(() => {});
+      void admitted.catch(() =>
+        reject(connection, msg.conversationId, "The reply couldn't be saved."),
+      );
     } else if (!this.limits.startTurn()) {
       const message = "You're sending messages quickly. Wait a minute, then try again.";
       reject(connection, msg.conversationId, message, "slow_down");
     } else {
-      const running = new AbortController();
-      this.#running = running;
-      void this.runFiber("chat-turn", (fiber) =>
-        this.#turn(
-          connection,
-          msg.conversationId,
-          text,
-          msg.model,
-          msg.attachmentIds,
-          running.signal,
-          fiber.stash,
-        ),
-      )
-        // The model's failures are reported in the turn; this is D1 failing.
-        .catch(() => reject(connection, msg.conversationId, "The reply couldn't be saved."))
-        .finally(() => this.#release(running));
+      const turnId = crypto.randomUUID();
+      this.#launch(
+        msg.conversationId,
+        text,
+        msg.model,
+        msg.attachmentIds,
+        turnId,
+        null,
+        (message, reason, code) => reject(connection, msg.conversationId, message, reason, code),
+        connection,
+      );
     }
   }
 
-  async #turn(
+  /**
+   * Claims the turn and runs it in a fiber: the claim is synchronous, so a send arriving
+   * mid-launch queues behind this turn instead of starting another. The guarded end clears
+   * only its own claim, then runs a drain a queued failure or a settled turn parked.
+   */
+  #launch(
+    conversationId: string,
+    text: string,
+    own: { provider: string; model: string } | undefined,
+    attachmentIds: readonly string[],
+    turnId: string,
+    queued: { messageId: string; replyId: string } | null,
+    fail: (message: string, reason?: TurnLimit, code?: TurnFailure) => void,
+    connection: Connection | null,
+  ): void {
+    const running = new AbortController();
+    this.#running = running;
+    this.#executing = { conversationId, turnId };
+    void this.runFiber("chat-turn", (fiber) =>
+      this.#turn(
+        connection,
+        conversationId,
+        text,
+        own,
+        attachmentIds,
+        running.signal,
+        fiber.stash,
+        turnId,
+        queued,
+        fail,
+      ),
+    )
+      // The model's failures are reported in the turn; this is D1 failing.
+      .catch(() => fail("The reply couldn't be saved."))
+      .finally(() => this.#release(running));
+  }
+
+  /**
+   * Holds a send that arrived mid-run (M3-09 AC4): the rate limit and the reply start both
+   * wait for the drain, so this only checks the shape, the cap, and D1. Serialized on
+   * `#admissions`, so positions stay in arrival order. When the turn settled while this
+   * waited, the send starts now instead of waiting behind nothing.
+   */
+  async #admitQueued(
     connection: Connection,
+    conversationId: string,
+    text: string,
+    own: { provider: string; model: string } | undefined,
+    attachmentIds: readonly string[],
+  ): Promise<void> {
+    // A socket outlives logout and revocation: recheck before writing anything, so a dead tab
+    // can't queue sends that get real model turns.
+    if (!(await this.#sessionLive(connection))) return;
+    const waiting = this.#queues.get(conversationId);
+    if (waiting && waiting.length >= QUEUE_MAX) {
+      reject(
+        connection,
+        conversationId,
+        `That conversation already has ${QUEUE_MAX} messages waiting. Wait for the reply, then try again.`,
+      );
+      return;
+    }
+    const title = (text.split("\n", 1)[0] || "").slice(0, 40);
+    const admitted = await this.#chat.enqueue(
+      conversationId,
+      title,
+      text,
+      own,
+      attachmentIds.map((id) => ({ id, sentToModel: false })),
+    );
+    if (!admitted) {
+      reject(connection, conversationId, "That conversation doesn't exist.");
+      return;
+    }
+    const item: QueuedSend = {
+      conversationId,
+      messageId: admitted.messageId,
+      replyId: admitted.replyId,
+      text,
+      own,
+      attachmentIds,
+      at: Date.now(),
+    };
+    this.#parkOrStart(item);
+  }
+
+  /**
+   * Parks an admitted send behind its conversation's queue, or starts it now when nothing runs
+   * and nothing waits. The queue announcement logs under the running turn; with none running
+   * there is no turn to log under, so a parked send stays silent until its `turn.started`.
+   */
+  #parkOrStart(item: QueuedSend): void {
+    if (!this.#running && !this.#queues.get(item.conversationId)?.length) {
+      this.#startQueued(item);
+      return;
+    }
+    const queue = this.#queues.get(item.conversationId) ?? [];
+    queue.push(item);
+    this.#queues.set(item.conversationId, queue);
+    this.#saveQueues();
+    // Logged under the running turn, so it trims with it and replays to a reconnected tab.
+    const ex = this.#executing;
+    if (ex) {
+      this.#send(ex.conversationId, ex.turnId, "turn.queued", {
+        messageId: item.messageId,
+        text: item.text,
+        position: queue.length,
+      });
+    }
+    if (!this.#running) void this.#drain();
+  }
+
+  /**
+   * Joins a steer to its conversation's running turn (M3-09 AC4): the text is already a user
+   * row in D1, and the loop reads it at its next step — no event here, the loop yields
+   * `turn.steered` where the text enters. When the turn settled while this waited, the steer
+   * is heard as the next turn instead of being dropped.
+   */
+  async #admitSteer(connection: Connection, conversationId: string, text: string): Promise<void> {
+    // As above: a dead tab can't inject steers into another tab's running turn.
+    if (!(await this.#sessionLive(connection))) return;
+    if (this.#running && this.#executing?.conversationId === conversationId) {
+      // Joins the running turn, which answers it: only the user row, no reply of its own.
+      const messageId = await this.#chat.steer(conversationId, text);
+      if (!messageId) {
+        reject(connection, conversationId, "That conversation doesn't exist.");
+        return;
+      }
+      const steers = this.#steers.get(conversationId) ?? [];
+      steers.push({ turnId: this.#executing?.turnId ?? "", messageId, text });
+      this.#steers.set(conversationId, steers);
+      return;
+    }
+    // The turn settled while this waited: the steer is heard as the next turn instead of
+    // being dropped, so it needs the queued pair after all.
+    const title = (text.split("\n", 1)[0] || "").slice(0, 40);
+    const admitted = await this.#chat.enqueue(conversationId, title, text, undefined, []);
+    if (!admitted) {
+      reject(connection, conversationId, "That conversation doesn't exist.");
+      return;
+    }
+    this.#parkOrStart({
+      conversationId,
+      messageId: admitted.messageId,
+      replyId: admitted.replyId,
+      text,
+      own: undefined,
+      attachmentIds: [],
+      at: Date.now(),
+    });
+  }
+
+  /**
+   * Starts an admitted send now — the turn settled while it waited, or the drain picked it —
+   * under a fresh turn ID. Failures broadcast to every tab: no single tab owns the send.
+   */
+  #startQueued(item: QueuedSend): void {
+    if (!this.limits.startTurn()) {
+      // Backpressure, not a refusal: the send stays next in line and the drain retries when
+      // the minute passes, instead of stranding the queue.
+      const queue = this.#queues.get(item.conversationId) ?? [];
+      queue.unshift(item);
+      this.#queues.set(item.conversationId, queue);
+      this.#saveQueues();
+      this.#scheduleDrainRetry();
+      return;
+    }
+    const turnId = crypto.randomUUID();
+    this.#launch(
+      item.conversationId,
+      item.text,
+      item.own,
+      item.attachmentIds,
+      turnId,
+      { messageId: item.messageId, replyId: item.replyId },
+      (message, reason, code) => void this.#failQueued(item, turnId, message, reason, code),
+      null,
+    );
+  }
+
+  /**
+   * A queued send's turn that never started (M3-09 AC4): its pair is already in D1, so its
+   * still-empty reply settles `error` with the cause instead of reading `streaming` forever.
+   * No tab owns it, so every tab hears it under a fresh turn ID, its events trim, and the
+   * fiber's end drains what still waits.
+   */
+  async #failQueued(
+    item: QueuedSend,
+    turnId: string,
+    message: string,
+    reason?: TurnLimit,
+    code?: TurnFailure,
+  ): Promise<void> {
+    // First, synchronously: the caller doesn't await this, so the fiber's end would otherwise
+    // drain before the preference lands — and the stale value would steer a later drain.
+    // The broadcast stays after the settle, so a reloading tab never reads the pair mid-write.
+    this.#drainAfter = item.conversationId;
+    await this.#chat.settle({ replyId: item.replyId, reply: message }, "error").catch(() => {});
+    this.#send(item.conversationId, turnId, "turn.failed", {
+      message,
+      ...(reason && { reason }),
+      ...(code && { code }),
+    });
+    this.#events.trim(item.conversationId, turnId);
+  }
+
+  /**
+   * Starts what waits after a turn settles (M3-09 AC4): the preferred conversation's head
+   * first, else the longest-waiting head. Only ever called with no `chat-turn` fiber active,
+   * from the unified drain below — a batch's resume owns the turn while one runs, so sends
+   * wait behind it.
+   */
+  #drainSends(preferred: string | null): void {
+    let cid: string | null = null;
+    if (preferred && this.#queues.get(preferred)?.length) {
+      cid = preferred;
+    } else {
+      let oldestAt = Infinity;
+      for (const [id, queue] of this.#queues) {
+        const first = queue[0];
+        if (first && first.at < oldestAt) {
+          oldestAt = first.at;
+          cid = id;
+        }
+      }
+    }
+    const queue = cid ? this.#queues.get(cid) : undefined;
+    const next = queue?.[0];
+    if (!cid || !queue || !next) return;
+    if (!this.limits.startTurn()) {
+      // Backpressure, not a refusal: the head stays queued with the rest parked, and the
+      // drain retries when the minute passes — nothing is dropped and nothing jumps ahead.
+      this.#scheduleDrainRetry();
+      return;
+    }
+    queue.shift();
+    if (!queue.length) this.#queues.delete(cid);
+    this.#saveQueues();
+    const turnId = crypto.randomUUID();
+    this.#launch(
+      next.conversationId,
+      next.text,
+      next.own,
+      next.attachmentIds,
+      turnId,
+      { messageId: next.messageId, replyId: next.replyId },
+      (message, reason, code) => void this.#failQueued(next, turnId, message, reason, code),
+      null,
+    );
+  }
+
+  /**
+   * Takes a waiting send back (M3-09 AC4): out of the queue first, so it never starts, then
+   * its D1 row. Logged under the running turn, so it trims with it.
+   */
+  async #dequeue(conversationId: string, messageId: string): Promise<void> {
+    const waiting = this.#queues.get(conversationId);
+    const at = waiting?.findIndex((q) => q.messageId === messageId) ?? -1;
+    if (!waiting || at < 0) return;
+    // Out of the queue first, so a drain can't start it mid-drop; back in place when D1
+    // fails, so the send still waits and the take-back stays retryable.
+    const [taken] = waiting.splice(at, 1);
+    if (!waiting.length) this.#queues.delete(conversationId);
+    this.#saveQueues();
+    const dropped = taken
+      ? await this.#chat
+          .dropQueued(conversationId, taken.messageId, taken.replyId)
+          .catch(() => false)
+      : false;
+    if (!dropped) {
+      const now = this.#queues.get(conversationId) ?? [];
+      if (taken) now.splice(Math.min(at, now.length), 0, taken);
+      this.#queues.set(conversationId, now);
+      this.#saveQueues();
+      return;
+    }
+    const ex = this.#executing;
+    if (ex) this.#send(ex.conversationId, ex.turnId, "turn.dequeued", { messageId });
+  }
+
+  /** The running turn's next steer for the loop, oldest first (M3-09 AC4). */
+  #takeSteer(conversationId: string): { messageId: string; text: string } | null {
+    const waiting = this.#steers.get(conversationId);
+    while (waiting?.length) {
+      const next = waiting[0];
+      if (!next) return null;
+      // Another turn's leftovers (a failed turn clears its own, so this is defense in depth):
+      // never hand them to this turn; its resumed history excludes its own consumed steers.
+      if (next.turnId !== this.#executing?.turnId) {
+        waiting.shift();
+        continue;
+      }
+      waiting.shift();
+      if (!waiting.length) this.#steers.delete(conversationId);
+      this.#recordSteerConsumed(next.turnId, next.messageId);
+      return { messageId: next.messageId, text: next.text };
+    }
+    return null;
+  }
+
+  /**
+   * Drops a turn's waiting steers (M3-09 AC4): every `#turn` exit clears its own, so a turn
+   * that failed before `#drive` never steers the next turn. Consumed IDs stay in storage —
+   * the resumed history still needs them — until the turn's row goes.
+   */
+  #clearSteers(conversationId: string, turnId: string): void {
+    const waiting = this.#steers.get(conversationId);
+    if (!waiting) return;
+    const kept = waiting.filter((s) => s.turnId !== turnId);
+    if (kept.length) this.#steers.set(conversationId, kept);
+    else this.#steers.delete(conversationId);
+  }
+
+  /** A turn's consumed steer message IDs, for excluding them from its resumed history. */
+  #consumedSteers(turnId: string): string[] {
+    return this.ctx.storage.kv.get<Record<string, string[]>>(STEERS_CONSUMED_KEY)?.[turnId] ?? [];
+  }
+
+  /** Notes a steer the loop took, so a later resume or Continue doesn't send it twice. */
+  #recordSteerConsumed(turnId: string, messageId: string): void {
+    const all = this.ctx.storage.kv.get<Record<string, string[]>>(STEERS_CONSUMED_KEY) ?? {};
+    const done = all[turnId] ?? [];
+    if (!done.includes(messageId))
+      this.ctx.storage.kv.put(STEERS_CONSUMED_KEY, { ...all, [turnId]: [...done, messageId] });
+  }
+
+  /** Forgets a settled turn's consumed steers with its row, so the map can't grow. */
+  #forgetSteers(turnId: string): void {
+    const all = this.ctx.storage.kv.get<Record<string, string[]>>(STEERS_CONSUMED_KEY) ?? {};
+    if (turnId in all) {
+      const { [turnId]: _, ...rest } = all;
+      this.ctx.storage.kv.put(STEERS_CONSUMED_KEY, rest);
+    }
+  }
+
+  /** Mirrors the waiting sends to storage, so an eviction can't orphan their D1 pairs. */
+  #saveQueues(): void {
+    this.ctx.storage.kv.put(SEND_QUEUE_KEY, [...this.#queues.values()].flat());
+  }
+
+  /**
+   * Settles sends the evicted instance admitted but never started: their pairs are in D1, no
+   * fiber will ever run them, so each still-`streaming` reply is cut `interrupted` and every
+   * tab hears it. Runs before the instance serves anything.
+   */
+  async #recoverQueues(): Promise<void> {
+    const saved = this.ctx.storage.kv.get<QueuedSend[]>(SEND_QUEUE_KEY) ?? [];
+    if (!saved.length) return;
+    this.ctx.storage.kv.put(SEND_QUEUE_KEY, []);
+    for (const item of saved) {
+      const queue = this.#queues.get(item.conversationId) ?? [];
+      queue.push(item);
+      this.#queues.set(item.conversationId, queue);
+    }
+    for (const item of saved) {
+      const status = await this.#chat
+        .interrupt({ replyId: item.replyId, reply: "" })
+        .catch(() => null);
+      if (status === null) continue;
+      const turnId = crypto.randomUUID();
+      this.#send(item.conversationId, turnId, "turn.interrupted", { message: "Retry?" });
+      this.#events.trim(item.conversationId, turnId);
+    }
+    this.#queues.clear();
+  }
+
+  /**
+   * Retries the drain when the rate limit's minute passes. One timer at a time: every turn's
+   * end drains anyway, so this only covers the strand with nothing running.
+   */
+  #scheduleDrainRetry(): void {
+    if (this.#drainTimer !== null) return;
+    const wait = Math.min(Math.max(this.limits.msUntilTurnSlot() + 250, 250), 60_000);
+    this.#drainTimer = setTimeout(() => {
+      this.#drainTimer = null;
+      void this.#drain();
+    }, wait);
+  }
+
+  async #turn(
+    connection: Connection | null,
     conversationId: string,
     text: string,
     own: { provider: string; model: string } | undefined,
     attachmentIds: readonly string[],
     signal: AbortSignal,
     stash: (data: TurnCheckpoint) => void,
+    turnId: string,
+    queued: { messageId: string; replyId: string } | null,
+    fail: (message: string, reason?: TurnLimit, code?: TurnFailure) => void,
   ) {
-    if (!(await this.#sessionLive(connection))) return;
+    // A queued start has no tab of its own; its failures broadcast instead. Either way the
+    // turn goes on after dead tabs are swept below.
+    if (connection && !(await this.#sessionLive(connection))) return;
+    try {
+      return await this.#runTurn(
+        conversationId,
+        text,
+        own,
+        attachmentIds,
+        signal,
+        stash,
+        turnId,
+        queued,
+        fail,
+      );
+    } finally {
+      // This turn's waiting steers never steer the next turn — a failed turn's steers clear
+      // here, a settled turn's in `#drive`. Consumed IDs stay stored for the resumed history.
+      this.#clearSteers(conversationId, turnId);
+    }
+  }
+
+  async #runTurn(
+    conversationId: string,
+    text: string,
+    own: { provider: string; model: string } | undefined,
+    attachmentIds: readonly string[],
+    signal: AbortSignal,
+    stash: (data: TurnCheckpoint) => void,
+    turnId: string,
+    queued: { messageId: string; replyId: string } | null,
+    fail: (message: string, reason?: TurnLimit, code?: TurnFailure) => void,
+  ) {
     const chat = this.#chat;
     // The model context comes from D1, never from memory, so it survives an eviction. A new
-    // conversation has none yet.
-    const history = await chat.listMessages(conversationId);
+    // conversation has none yet. A queued send's pair is already in D1, with the sends behind
+    // it: the drain answers only its own send, so rows still waiting stay out of its history.
+    const stored = await chat.listMessages(conversationId);
+    const waiting = queued
+      ? new Set((this.#queues.get(conversationId) ?? []).flatMap((q) => [q.messageId, q.replyId]))
+      : null;
+    if (waiting && queued) {
+      waiting.add(queued.messageId);
+      waiting.add(queued.replyId);
+    }
+    const history = stored && waiting ? stored.filter((m) => !waiting.has(m.id)) : stored;
     // Picked before `open`, so a send that can't run never creates an empty conversation. A send
     // may name the chat's own model, for a chat picked before the server had it (M3-06 AC3); an
     // existing chat keeps the pin it has, so a newer switch is never overwritten by a send.
@@ -506,7 +1006,7 @@ export class Assistant extends Agent<Bindings> {
     if ("error" in picked) {
       const message = MODEL_ERRORS[picked.error] ?? "The model isn't available right now.";
       const code = picked.error === "vault_reset_required" ? picked.error : undefined;
-      return reject(connection, conversationId, message, undefined, code);
+      return fail(message, undefined, code);
     }
     const { provider, model } = picked;
     // The send's files, scoped: an ID that isn't this user's upload reads as missing, and the
@@ -514,7 +1014,7 @@ export class Assistant extends Agent<Bindings> {
     const user = this.#repo;
     const attached = await user.attachments.getMany(attachmentIds);
     if (attached.length !== new Set(attachmentIds).size) {
-      return reject(connection, conversationId, "One of those files isn't available anymore.");
+      return fail("One of those files isn't available anymore.");
     }
     const caps = provider.capabilities(model);
     // A file goes to the model only where its capability flags allow (M3-10 AC2); `skipped`
@@ -531,12 +1031,13 @@ export class Assistant extends Agent<Bindings> {
     if (budget < 0) {
       const message =
         "Those files are too large to send in one message. Try fewer, or smaller, files.";
-      return reject(connection, conversationId, message);
+      return fail(message);
     }
     const cp: TurnCheckpoint = {
       conversationId,
-      turnId: crypto.randomUUID(),
-      replyId: crypto.randomUUID(),
+      turnId,
+      // A queued start answers into its already-stored reply row.
+      replyId: queued?.replyId ?? crypto.randomUUID(),
       providerId: picked.billingId ?? provider.id,
       model,
       reply: "",
@@ -567,24 +1068,27 @@ export class Assistant extends Agent<Bindings> {
     const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars, fileTokens);
     if (!reservation) {
       const message = "You've reached today's spending limit. It resets at midnight UTC.";
-      return reject(connection, conversationId, message, "limit_reached");
+      return fail(message, "limit_reached");
     }
     cp.holds = [firstHold];
     stash(cp);
     const emit = this.#emitter(conversationId, cp.turnId);
     const title = (text.split("\n", 1)[0] || attached[0]?.name || "").slice(0, 40);
+    const marks = attached.map((row) => ({ id: row.id, sentToModel: sentIds.has(row.id) }));
     try {
-      if (!(await chat.open(conversationId, title, fresh))) {
+      if (queued) {
+        // The admit already opened the conversation and stored this send; the drain only
+        // starts its reply, and marks each file with whether this model reads it (M3-10 AC2).
+        if (!(await chat.beginReply(conversationId, queued.messageId, marks))) {
+          this.limits.release(firstHold);
+          return fail("That conversation doesn't exist.");
+        }
+      } else if (!(await chat.open(conversationId, title, fresh))) {
         this.limits.release(firstHold);
-        return reject(connection, conversationId, "That conversation doesn't exist.");
+        return fail("That conversation doesn't exist.");
       }
       await picked.used?.();
-      await chat.startTurn(
-        conversationId,
-        text,
-        cp.replyId,
-        attached.map((row) => ({ id: row.id, sentToModel: sentIds.has(row.id) })),
-      );
+      if (!queued) await chat.startTurn(conversationId, text, cp.replyId, marks);
     } catch (err) {
       this.limits.release(firstHold); // no call was made
       throw err;
@@ -615,7 +1119,7 @@ export class Assistant extends Agent<Bindings> {
    * reach this through the scoped repository's `assistant()`: this DO is named from the
    * caller's session and every read here is scope-filtered, so a batch ID can only ever
    * address this user's turns. Tabs can't call it — `onMessage` routes only `chat.send`,
-   * `turn.cancel` and `resume`.
+   * `chat.steer`, `chat.dequeue`, `turn.cancel` and `resume`.
    *
    * `waiting` while an item is still undecided; `queued` while another turn runs (the batch
    * resumes when it ends, AC14); `gone` when no stopped turn waits on the batch (a task's
@@ -625,7 +1129,7 @@ export class Assistant extends Agent<Bindings> {
     // Claimed before the first await: D1 and vault I/O don't hold the DO's input gate, so two
     // calls for one batch (a double-clicked Approve, two tabs, a retried request) would
     // otherwise both load the same `awaiting_approval` row. A `chat.send` arriving
-    // mid-resume is rejected the same way.
+    // mid-resume queues behind the resumed turn the same way.
     if (this.#running) return this.#enqueue(batchId);
     const running = new AbortController();
     this.#running = running;
@@ -637,6 +1141,10 @@ export class Assistant extends Agent<Bindings> {
       if (!turnId) return "gone";
       const saved = await repo.turns.load(turnId);
       if (saved?.status !== "awaiting_approval") return "gone";
+      // The resumed turn is the running turn from here: a send arriving mid-resume queues
+      // behind it and announces itself under it. (`#resume` re-points this if a late approval
+      // moves the turn; every exit releases the claim, which clears it.)
+      this.#executing = { conversationId: saved.conversationId, turnId: saved.turnId };
       const state = parseTurnState(saved.state);
       if (!state) {
         await this.#dropCorrupt(saved);
@@ -667,11 +1175,14 @@ export class Assistant extends Agent<Bindings> {
 
   /**
    * Releases a claim on the turn slot, then resumes whatever queued behind it: a batch decided
-   * while this claim was held waits on that, whether or not a fiber ever started.
+   * while this claim was held waits on that, whether or not a fiber ever started — and so does
+   * a send or steer admitted mid-run (M3-09 AC4). Batches first: an approval continues its turn,
+   * while a send starts a new one.
    */
   #release(running: AbortController): void {
     if (this.#running !== running) return;
     this.#running = null;
+    this.#executing = null;
     void this.#drain();
   }
 
@@ -683,15 +1194,23 @@ export class Assistant extends Agent<Bindings> {
   }
 
   /**
-   * Resumes the next queued batch, if no turn runs. Called as every turn's fiber ends. A resume
-   * that fails releases its claim before this drain puts its batch back, so a second drain then
-   * would run the next batch first; instead the one running re-checks the slot after each resume.
+   * Resumes whatever queued behind the turn that just settled: decided batches first, then the
+   * longest-waiting send (same conversation as the settled turn first). Called as every turn's
+   * fiber ends, and by an admit with nothing running. A batch's resume owns the turn while it
+   * runs, so sends wait behind it; its end drains again. A resume that fails releases its claim
+   * before this drain puts its batch back, so a second drain then would run the next batch
+   * first; instead the one running re-checks the slot after each resume.
    */
   async #drain(): Promise<void> {
     if (this.#draining) return;
     this.#draining = true;
     try {
       await this.#drainQueue();
+      // A batch's resume owns the turn now; its end drains again.
+      if (this.#running) return;
+      const after = this.#drainAfter;
+      this.#drainAfter = null;
+      this.#drainSends(after);
     } finally {
       this.#draining = false;
     }
@@ -724,7 +1243,13 @@ export class Assistant extends Agent<Bindings> {
    */
   async #late(saved: SavedTurn, state: TurnState): Promise<SavedTurn | null> {
     const repo = this.#repo;
-    const thread = (await repo.chat.listMessages(saved.conversationId)) ?? [];
+    // Steer rows sort after the running turn's reply without moving the conversation on, so
+    // they neither force the approval late nor join the moved turn's history twice (the loop
+    // still carries them in `state.messages`).
+    const steers = new Set(this.#consumedSteers(saved.turnId));
+    const thread = ((await repo.chat.listMessages(saved.conversationId)) ?? []).filter(
+      (m) => !steers.has(m.id),
+    );
     const at = thread.findIndex((m) => m.id === saved.replyId);
     if (at < 0 || at === thread.length - 1) return null;
     const asked = thread.slice(0, at).findLast((m) => m.role === "user")?.content ?? "";
@@ -746,6 +1271,13 @@ export class Assistant extends Agent<Bindings> {
       ...calls,
     ];
     const next: SavedTurn = { ...saved, turnId: crypto.randomUUID(), replyId: crypto.randomUUID() };
+    // The moved turn resumes with the same loop state, so its consumed steers move with it:
+    // a later stop's resume must exclude them too.
+    const moved = this.#consumedSteers(saved.turnId);
+    if (moved.length) {
+      const all = this.ctx.storage.kv.get<Record<string, string[]>>(STEERS_CONSUMED_KEY) ?? {};
+      this.ctx.storage.kv.put(STEERS_CONSUMED_KEY, { ...all, [next.turnId]: moved });
+    }
     const old = thread[at];
     await repo.turns.supersede({
       old: { turnId: saved.turnId, replyId: saved.replyId, reply: old?.content ?? "" },
@@ -753,6 +1285,8 @@ export class Assistant extends Agent<Bindings> {
       replyId: next.replyId,
       line: { id: crypto.randomUUID(), content: `Approved later: ${tools}, from "${quote}"` },
     });
+    // The old row is gone; its entry moved above.
+    this.#forgetSteers(saved.turnId);
     // The old turn is settled; tabs showing it learn so before the new one starts.
     this.#emitter(saved.conversationId, saved.turnId)("turn.completed", {});
     this.#events.trim(saved.conversationId, saved.turnId);
@@ -771,6 +1305,7 @@ export class Assistant extends Agent<Bindings> {
     try {
       const saved = await this.#repo.turns.load(turnId);
       if (saved?.status !== "limit_reached") return false;
+      this.#executing = { conversationId: saved.conversationId, turnId: saved.turnId };
       const state = parseTurnState(saved.state);
       if (!state) {
         await this.#dropCorrupt(saved);
@@ -807,12 +1342,15 @@ export class Assistant extends Agent<Bindings> {
     const caps = provider.capabilities(model);
     const readable = (row: AttachmentRow) =>
       row.kind === "text" || (row.kind === "image" ? caps.imageInput : caps.pdfInput) === true;
-    // History is D1's, as at the turn's start, files included, minus the still-streaming reply:
-    // its text so far is inside `state`, where the loop left it.
+    // History is D1's, as at the turn's start, files included, minus the still-streaming reply
+    // (its text so far is inside `state`, where the loop left it) and minus the steers this
+    // turn consumed: the loop carries them in `state.messages` too, so keeping their rows
+    // would steer the resumed turn twice.
+    const steers = new Set(this.#consumedSteers(stopped.turnId));
     const historyOf = async (replyId: string) =>
       this.#modelHistory(
         ((await repo.chat.listMessages(stopped.conversationId)) ?? []).filter(
-          (m) => m.id !== replyId,
+          (m) => m.id !== replyId && !steers.has(m.id),
         ),
         readable,
         TURN_FILE_BYTES,
@@ -872,6 +1410,8 @@ export class Assistant extends Agent<Bindings> {
       callUsage: null,
       resumed: true,
     };
+    // The resumed turn is the running turn now: queued and dequeued sends log under it.
+    this.#executing = { conversationId: saved.conversationId, turnId: saved.turnId };
     void this.runFiber("chat-turn", async (fiber) => {
       fiber.stash(cp);
       await this.#sweepTabs();
@@ -902,6 +1442,7 @@ export class Assistant extends Agent<Bindings> {
       () => false,
     );
     await repo.turns.remove(saved.turnId).catch(() => {});
+    this.#forgetSteers(saved.turnId);
     this.#emitter(saved.conversationId, saved.turnId)("turn.interrupted", { message: "Retry?" });
     if (settled) this.#events.trim(saved.conversationId, saved.turnId);
   }
@@ -912,17 +1453,20 @@ export class Assistant extends Agent<Bindings> {
    * settled to D1 before its terminal event is sent, or, at an approval or limit, saved to D1
    * to resume later (its event log stays, so a reconnect still replays the whole turn).
    */
-  async #drive(run: {
-    checkpoint: TurnCheckpoint;
-    stash: (data: TurnCheckpoint) => void;
-    provider: ModelProvider;
-    model: string;
-    firstHold: { id: string; maxOutputTokens: number };
-    history: ModelMessage[];
-    state: TurnState;
-    signal: AbortSignal;
-    approvals?: ApprovalRun;
-  }): Promise<void> {
+  async #drive(run: DriveRun): Promise<void> {
+    const began = Date.now();
+    try {
+      await this.#driveTurn(run);
+    } finally {
+      // The turn's wall-clock, for the Durable Object duration estimate (M3-16 AC3). A meter
+      // that can't be written never holds up or fails the reply.
+      void createRepository(this.env)
+        .deployment.addToMeter("do_ms", Date.now() - began, Date.now())
+        .catch(() => {});
+    }
+  }
+
+  async #driveTurn(run: DriveRun): Promise<void> {
     const { checkpoint: cp, stash, state, signal } = run;
     const { conversationId, turnId, replyId } = cp;
     const repo = this.#repo;
@@ -974,6 +1518,8 @@ export class Assistant extends Agent<Bindings> {
       now: Date.now,
       newId: () => crypto.randomUUID(),
       ...(run.approvals ? { approvals: this.#approvalHooks(run.approvals) } : {}),
+      // A steer admitted mid-run joins at the next step (M3-09 AC4); leftovers clear at settle.
+      takeSteer: () => this.#takeSteer(conversationId),
     };
 
     // The reply's text: one segment per model call that spoke, joined as paragraphs. A resumed
@@ -1069,11 +1615,20 @@ export class Assistant extends Agent<Bindings> {
           } catch {
             await failSave();
             await gen.return("failed");
+            // Even unsettled, the queue moves on: parked for the fiber's end, below.
+            this.#drainAfter = conversationId;
             return;
           }
           emit(event);
           // The turn is in D1 now, so its events leave the log; a later tab reloads from D1.
           this.#events.trim(conversationId, turnId);
+          // A steer the loop never read stays a history row only, never steering the next
+          // turn; its consumed IDs are done too, now the turn's row is gone.
+          this.#clearSteers(conversationId, turnId);
+          this.#forgetSteers(turnId);
+          // The queue survives every ending, even a cancel: parked for the fiber's end, which
+          // starts what waits, same conversation first.
+          this.#drainAfter = conversationId;
           continue;
         }
         if (event.type === "approval.requested" || event.type === "limit.reached") {
@@ -1329,6 +1884,7 @@ export class Assistant extends Agent<Bindings> {
     // its row and its end frame not yet done, and then that end stands and is sent now.
     const status = await repo.chat.interrupt({ replyId: cp.replyId, reply: cp.reply });
     await repo.turns.remove(cp.turnId);
+    this.#forgetSteers(cp.turnId);
     const emit = this.#emitter(cp.conversationId, cp.turnId);
     if (status === "complete") emit("turn.completed", {});
     else if (status === "error") emit("turn.failed", { message: "The reply couldn't be saved." });
@@ -1365,193 +1921,4 @@ export class Assistant extends Agent<Bindings> {
   #emitter(sessionId: string, turnId: string): Emit {
     return (type, payload) => this.#send(sessionId, turnId, type, payload);
   }
-}
-
-/** The characters a request's messages carry, a text file's included, for its reservation. */
-const messageChars = (messages: readonly ModelMessage[]) =>
-  messages.reduce(
-    (sum, m) =>
-      sum +
-      m.content.length +
-      (m.role === "user"
-        ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
-        : 0),
-    0,
-  );
-
-const pickUsage = (usage: ModelUsage): CallUsage => ({
-  inputTokens: usage.inputTokens,
-  outputTokens: usage.outputTokens,
-  cachedInputTokens: usage.cachedInputTokens,
-});
-
-/**
- * A saved `TurnState` back from D1, or `null` if it isn't one. The row is only ever written by
- * this host, so this is defense in depth: anything unexpected closes the turn instead of
- * running the loop over it (`#dropCorrupt`).
- */
-function parseTurnState(json: string): TurnState | null {
-  try {
-    const s = JSON.parse(json) as Partial<TurnState> | null;
-    if (!s || typeof s !== "object") return null;
-    const counts = s.counts;
-    const taint = s.taint;
-    const usage = s.usage;
-    if (!counts || typeof counts.calls !== "number" || typeof counts.tools !== "number")
-      return null;
-    if (!taint || (taint.taint !== "trusted" && taint.taint !== "untrusted")) return null;
-    if (!Array.isArray(taint.sources)) return null;
-    if (!usage || typeof usage.inputTokens !== "number") return null;
-    if (!Array.isArray(s.messages)) return null;
-    for (const m of s.messages) {
-      if (!m || typeof m !== "object" || typeof m.content !== "string") return null;
-      if (m.role !== "user" && m.role !== "assistant" && m.role !== "tool" && m.role !== "system")
-        return null;
-    }
-    const pending = s.pending;
-    if (pending !== null) {
-      if (!pending || typeof pending.batchId !== "string" || !Array.isArray(pending.items))
-        return null;
-    }
-    return s as TurnState;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * What a tab may send: `chat.send`, with the chat's own model if it names one and any uploaded
- * files by ID, `turn.cancel`, or `resume`. Anything else is ignored.
- */
-function parse(message: WSMessage) {
-  if (typeof message !== "string") return null;
-  try {
-    const msg = JSON.parse(message) as Partial<Record<string, unknown>>;
-    if (msg.type === "turn.cancel") return { type: "turn.cancel" } as const;
-    if (msg.type === "resume") {
-      const { conversationId, turnId, afterSeq } = msg;
-      const at = typeof afterSeq === "number" && Number.isSafeInteger(afterSeq) && afterSeq >= 0;
-      return isId(conversationId) && isId(turnId) && at
-        ? ({ type: "resume", conversationId, turnId, afterSeq } as const)
-        : null;
-    }
-    const conversationId = String(msg.conversationId);
-    if (msg.type === "chat.send" && typeof msg.text === "string") {
-      const { provider, model } = (msg.model ?? {}) as Partial<Record<string, unknown>>;
-      const own =
-        typeof provider === "string" && typeof model === "string" && provider && model
-          ? { provider, model }
-          : undefined;
-      const ids = Array.isArray(msg.attachmentIds) ? msg.attachmentIds.filter(isId) : [];
-      return {
-        type: "chat.send",
-        conversationId,
-        text: msg.text,
-        model: own,
-        attachmentIds: [...new Set(ids)].slice(0, MAX_ATTACHMENTS),
-      } as const;
-    }
-  } catch {}
-  return null;
-}
-
-/** m3-ux §3.2, for a file the chosen model can't read. The file is kept with the message. */
-const UNREAD = {
-  image: "This model can't see images. I'll keep the file in Outputs, but it won't read it.",
-  pdf: "This model can't read PDFs. I'll keep the file in Outputs, but it won't read it.",
-} as const;
-
-/** Encoded in slices a multiple of 3 bytes long, so no binary string of the whole file is built. */
-function base64(bytes: Uint8Array): string {
-  const slices: string[] = [];
-  for (let i = 0; i < bytes.length; i += 0x6000)
-    slices.push(btoa(String.fromCharCode(...bytes.subarray(i, i + 0x6000))));
-  return slices.join("");
-}
-
-/** Up to `limit` bytes from the start of a stream, and whether it held more; the rest is not read. */
-async function readPrefix(body: ReadableStream<Uint8Array>, limit: number) {
-  const bytes = new Uint8Array(limit);
-  let filled = 0;
-  let more = false;
-  const reader = body.getReader();
-  for (let next = await reader.read(); !next.done; next = await reader.read()) {
-    const take = Math.min(next.value.byteLength, limit - filled);
-    bytes.set(next.value.subarray(0, take), filled);
-    filled += take;
-    if (take < next.value.byteLength || filled === limit) {
-      more = take < next.value.byteLength || !(await reader.read()).done;
-      break;
-    }
-  }
-  await reader.cancel().catch(() => {});
-  return { bytes: bytes.subarray(0, filled), more };
-}
-
-/** What a file costs the turn's byte budget: a text file only as far as it is read. */
-const modelBytes = (row: AttachmentRow) =>
-  row.kind === "text" ? Math.min(row.sizeBytes, TEXT_READ_BYTES) : row.sizeBytes;
-
-/**
- * A file's input tokens for the spend reservation; its text is counted as characters. The
- * providers scale an image down to a bounded size, so it costs at most a few thousand tokens; a
- * PDF is read page by page, so it is counted by size up to the providers' page limit.
- */
-const fileTokenEstimate = (row: AttachmentRow) =>
-  row.kind === "image"
-    ? IMAGE_TOKENS
-    : row.kind === "pdf"
-      ? Math.min(PDF_MAX_TOKENS, Math.ceil(row.sizeBytes / 4))
-      : 0;
-
-/**
- * A history's files for a later call's spend reservation. Text rides in `chars`, as in the first
- * call; a PDF is measured from its base64, which decodes to about three quarters of its length.
- */
-const messageFileTokens = (messages: readonly ModelMessage[]) =>
-  messages.reduce(
-    (sum, m) =>
-      sum +
-      (m.role === "user"
-        ? (m.attachments ?? []).reduce(
-            (n, f) =>
-              n +
-              (f.kind === "image"
-                ? IMAGE_TOKENS
-                : f.kind === "pdf"
-                  ? Math.min(PDF_MAX_TOKENS, Math.ceil(((f.data?.length ?? 0) * 3) / 16))
-                  : 0),
-            0,
-          )
-        : 0),
-    0,
-  );
-
-const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
-  no_model: "Pick a model in Settings first.",
-  key_required: "Enter your model key again in Settings.",
-  vault_reset_required:
-    "Your saved keys can't be opened. Reset them in Settings, then enter your key again.",
-};
-
-/**
- * Fails a send for the tab that made it only. No turn started, so it has no turn ID, and `seq` 0
- * keeps it outside the sequence of a turn the tab may be receiving.
- */
-function reject(
-  connection: Connection,
-  sessionId: string,
-  message: string,
-  reason?: TurnLimit,
-  code?: TurnFailure,
-) {
-  const event: HarnessEvent = {
-    v: 1,
-    seq: 0,
-    sessionId,
-    turnId: "",
-    type: "turn.failed",
-    payload: { message, ...(reason && { reason }), ...(code && { code }) },
-  };
-  connection.send(JSON.stringify(event));
 }

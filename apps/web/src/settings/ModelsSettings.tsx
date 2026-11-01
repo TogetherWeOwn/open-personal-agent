@@ -273,7 +273,10 @@ function RoleSelect({
     >
       <Label>{label}</Label>
       <Button className={selectButton}>
-        <SelectValue />
+        {/* The name alone: the options carry the price hint, the button doesn't repeat it. */}
+        <SelectValue>
+          {({ selectedText, defaultChildren }) => selectedText ?? defaultChildren}
+        </SelectValue>
         <span aria-hidden="true">▾</span>
       </Button>
       <p className="text-sm text-text-muted">{description}</p>
@@ -292,6 +295,7 @@ function RoleSelect({
               className={option}
             >
               <ModelLabel row={row} />
+              <span className="block text-sm text-text-muted">{priceLine(row)}</span>
             </ListBoxItem>
           ))}
         </ListBox>
