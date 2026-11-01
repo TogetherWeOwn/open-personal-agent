@@ -326,7 +326,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ),
           /**
            * Sets or clears one tool's override and writes its audit row, both or neither. `result`
-           * is `denied` for a loosening refused without a step-up: only the audit row is written.
+           * is `denied` for a refused change (a loosening without a step-up, or an irreversible
+           * tool to `auto`): only the audit row is written.
            */
           setOverride: async (change: OverrideChange, result: "ok" | "denied" = "ok") => {
             const { tool, to } = change;

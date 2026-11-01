@@ -43,13 +43,15 @@ toolSettings.put("/tools/:name", async (c) => {
   const body = await c.req.json().catch(() => null);
   const to = body?.override as ToolOverride | null;
   if (!OVERRIDES.includes(to)) return c.json({ error: "invalid_override" }, 400);
-  if (to === "auto" && manifest.riskClass === "irreversible") {
-    return c.json({ error: "floor_irreversible" }, 400);
-  }
   const policy = policyOf(c);
   const from = (await policy.overrides()).get(manifest.name) ?? null;
-  if (from === to) return c.json(view(manifest, to));
   const change = { tool: manifest.name, from, to, riskClass: manifest.riskClass };
+  if (to === "auto" && manifest.riskClass === "irreversible") {
+    // An attempted floor breach is the highest-signal refusal: audit it like the others.
+    await policy.setOverride(change, "denied");
+    return c.json({ error: "floor_irreversible" }, 400);
+  }
+  if (from === to) return c.json(view(manifest, to));
   if (loosens(manifest.riskClass, from, to) && !hasStepUp(c.var.session)) {
     await policy.setOverride(change, "denied");
     return c.json({ error: "step_up_required" }, 403);

@@ -60,9 +60,15 @@ export async function currentSession(c: Context<AppEnv>): Promise<Session | null
   return { id: row.id, userId: row.user_id, scope: row.scope, stepUpAt: row.step_up_at };
 }
 
-/** Whether the session confirmed a passkey within the account step-up window. */
-export const hasStepUp = (session: Session, now = Date.now()) =>
-  session.stepUpAt !== null && now - session.stepUpAt < auth.STEP_UP_MS;
+/**
+ * Whether the session confirmed a passkey within the account step-up window. A future stamp
+ * fails closed: without the lower bound it would stay valid until stamp + the window.
+ */
+export const hasStepUp = (session: Session, now = Date.now()) => {
+  if (session.stepUpAt === null) return false;
+  const age = now - session.stepUpAt;
+  return age >= 0 && age < auth.STEP_UP_MS;
+};
 
 export const authRoutes = new Hono<AppEnv>();
 

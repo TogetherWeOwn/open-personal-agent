@@ -4,6 +4,7 @@ import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { type TaintState, type ToolManifest, TRUSTED } from "@opa/policy";
 import { beforeAll, describe, expect, it } from "vitest";
 import { CHALLENGE_COOKIE, STEP_UP_MS } from "../src/auth";
+import { hasStepUp } from "../src/session";
 import { builtinTools } from "../src/tools";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
@@ -128,6 +129,15 @@ describe("tool overrides", () => {
     await stepUp(browser, key);
     const locked = await setOverride(browser, "probe_delete", "auto");
     expect([locked.status, await locked.json()]).toEqual([400, { error: "floor_irreversible" }]);
+    // The floor refusal is audited like a refused loosening, and writes no override.
+    expect(await overrideAudit()).toEqual([
+      {
+        result: "denied",
+        target_id: "probe_delete",
+        detail: { tool: "probe_delete", from: null, to: "auto", riskClass: "irreversible" },
+      },
+    ]);
+    expect(await count("tool_overrides", "tool = 'probe_delete'")).toBe(0);
     expect((await setOverride(browser, "probe_delete", "never")).status).toBe(200);
     expect((await setOverride(browser, "probe_send", "yes")).status).toBe(400);
     expect((await setOverride(browser, "probe_send", undefined)).status).toBe(400);
@@ -136,6 +146,19 @@ describe("tool overrides", () => {
 });
 
 describe("account step-up", () => {
+  it("fails closed on a future step-up stamp", () => {
+    const now = 1_000_000;
+    const at = (stepUpAt: number | null) =>
+      hasStepUp({ id: "s", userId: "u", scope: scopeFromSession({ userId: "u" }), stepUpAt }, now);
+    expect(at(null)).toBe(false);
+    expect(at(now)).toBe(true);
+    expect(at(now - STEP_UP_MS + 1)).toBe(true);
+    expect(at(now - STEP_UP_MS)).toBe(false);
+    // A future stamp must not extend the window to stamp + 5 minutes.
+    expect(at(now + 1)).toBe(false);
+    expect(at(now + STEP_UP_MS)).toBe(false);
+  });
+
   it("offers only the user's own passkeys and uses a challenge once", async () => {
     const { browser, key } = await claim();
     const res = await browser.req("/api/auth/step-up/options", { body: {} });
