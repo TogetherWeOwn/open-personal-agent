@@ -14,7 +14,7 @@ const SECRETS = {
   OPA_SESSION_SECRET: "test-session-secret",
   OPA_SETUP_TOKEN: "test-setup-token",
 };
-const TABLES = `attachments audit_log conversations exports grants memories memories_fts
+const TABLES = `artifacts attachments audit_log conversations exports grants memories memories_fts
   memories_fts_config memories_fts_data memories_fts_docsize memories_fts_idx memory_links messages
   model_providers passkeys recovery_codes schema_version secrets sessions setup_state task_events
   task_steps tasks
