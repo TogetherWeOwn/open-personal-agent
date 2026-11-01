@@ -11,6 +11,7 @@ import {
   databaseContract,
   memoryContract,
   memoryGateContract,
+  memoryRecallContract,
   usageLedgerContract,
 } from "../../../test/contract/storage";
 import {
@@ -43,6 +44,7 @@ blobStoreContract("local files", () => localBlobStore(join(dir, "files")));
 usageLedgerContract("SQLite", migrated);
 memoryContract("SQLite", migrated);
 memoryGateContract("SQLite", migrated);
+memoryRecallContract("SQLite", migrated);
 taskStoreContract("SQLite", migrated, () => localBlobStore(join(dir, "files")));
 
 let taskSeq = 0;

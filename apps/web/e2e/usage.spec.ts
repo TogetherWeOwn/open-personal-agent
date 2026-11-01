@@ -121,7 +121,9 @@ test("an empty period offers a chat instead of an empty table; a member has no m
   await expect(page.getByRole("link", { name: "Start a chat" })).toHaveAttribute("href", "/");
 });
 
-test("going to Usage and back keeps the chat and its unsent draft", async ({ page }) => {
+test("going to Settings › Spending and back keeps the chat and its unsent draft", async ({
+  page,
+}) => {
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
@@ -130,10 +132,15 @@ test("going to Usage and back keeps the chat and its unsent draft", async ({ pag
   );
   await page.goto("/");
   await page.getByRole("textbox", { name: "Message" }).fill("Half a thought");
-  await page.getByRole("link", { name: "Usage" }).click();
+  await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("link", { name: "Spending" }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
   await expect(page).toHaveURL(/\/usage$/);
-  await page.getByRole("link", { name: "Chats" }).click();
+  await expect(page.getByRole("link", { name: "Settings" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await page.getByRole("link", { name: "Chat", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("Half a thought");
   await page.goBack();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Usage");
