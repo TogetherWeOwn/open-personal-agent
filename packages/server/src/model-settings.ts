@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Onboarding answers and model settings (M2-15, M3-06). Keys arrive in a request body, go straight
 // into the vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
-import type { ModelProvider, ModelUsage } from "@opa/core";
+import {
+  type ModelProvider,
+  type ModelUsage,
+  SETUP_STEPS,
+  type SetupState,
+  type SetupStep,
+} from "@opa/core";
 import { type AuditRow, createRepository, type ProviderValues } from "@opa/db/repository";
 import { findPrice, isStale, providerInfo } from "@opa/pricing";
 import {
@@ -108,6 +114,16 @@ const removedAudit = (row: Provider): AuditRow => ({
 const text = (value: unknown, max: number): string | null =>
   typeof value === "string" && value.trim() !== "" && value.length <= max ? value.trim() : null;
 
+const isStep = (value: unknown): value is SetupStep => SETUP_STEPS.includes(value as SetupStep);
+
+type SettingsStore = User["settings"];
+type SettingsRow = NonNullable<Awaited<ReturnType<SettingsStore["get"]>>>;
+
+const setupOf = (row: SettingsRow): SetupState => ({
+  skipped: row.setupSkipped ? SETUP_STEPS.filter((s) => row.setupSkipped?.includes(s)) : null,
+  hidden: row.setupHidden ?? false,
+});
+
 /** The dated price hint (COST-7), from the table; null when it has no price for the model. */
 function priceHint(billingId: string, model: string | null) {
   const price = model ? findPrice(billingId, model) : undefined;
@@ -179,6 +195,7 @@ async function view(c: Ctx) {
     displayName: row.displayName,
     about: row.about ?? "",
     onboarded: row.onboardedAt !== null,
+    setup: setupOf(row),
     // The Chat role's model, in the shape onboarding has always read.
     model: chat
       ? {
@@ -354,9 +371,31 @@ settings.put("/profile", async (c) => {
     {
       displayName,
       audit: audit("settings.profile", was, { displayName, about: about.trim() }, ["about"]),
+      // A profile saved in Settings › Assistant finishes "About you" wherever it was skipped.
+      finish: "about",
     },
   );
   return c.body(null, 204);
+});
+
+/**
+ * The setup checklist (M3-24 AC1, A-O2): `{ skip }` puts an onboarding step on it, `{ done }`
+ * takes one off, and `{ hidden }` takes the card off the chat's empty state or puts it back.
+ */
+settings.post("/setup", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const store = userOf(c).settings;
+  if (typeof body?.hidden === "boolean") {
+    await store.save({ setupHidden: body.hidden });
+  } else if (isStep(body?.skip)) {
+    await store.skipSetup(body.skip);
+  } else if (isStep(body?.done)) {
+    await store.finishSetup(body.done);
+  } else {
+    return fail(c, 400, "invalid_setup");
+  }
+  const saved = await store.get();
+  return saved ? c.json(setupOf(saved)) : fail(c, 404, "not_found");
 });
 
 /** Onboarding's one model: saves it and makes it the Chat role. */

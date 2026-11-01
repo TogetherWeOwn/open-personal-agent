@@ -399,6 +399,7 @@ describe("A-M3: no saved key is ever returned to the browser", () => {
     await call("u1", "PUT", "/settings/profile", { displayName: "A", about: "" });
     await call("u1", "PUT", "/settings/model", { ...OPENAI, model: "m", apiKey: KEYS[0] });
     await call("u1", "POST", "/settings/onboarded");
+    await call("u1", "POST", "/settings/setup", { skip: "about" });
     const routes = settings.routes
       .filter((r) => r.method !== "ALL")
       .map((r) => `${r.method} ${r.path === "/" ? "" : r.path}`);

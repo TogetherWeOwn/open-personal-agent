@@ -117,5 +117,7 @@ spendingRoutes.put("/", async (c) => {
       return c.json({ error: "not_saved" }, 500);
     }
   }
+  // Saving the limits finishes onboarding's "Costs and limits" if it was skipped (M3-24 AC1).
+  await user.settings.finishSetup("costs");
   return c.json({ settings: after });
 });
