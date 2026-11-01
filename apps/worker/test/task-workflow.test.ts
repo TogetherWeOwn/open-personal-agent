@@ -251,6 +251,9 @@ describe("task workflow", () => {
     expect(JSON.parse(row?.state ?? "{}").turn.messages.at(-1).content).toContain("all done");
     const totals = await alice.usage.totals(0);
     expect(totals.reduce((s, t) => s + t.calls, 0)).toBeGreaterThan(0);
+    // The ledger rows name the task and its conversation, for the Usage breakdowns.
+    const { byTask } = await alice.usage.breakdowns(0);
+    expect(byTask.map((t) => t.id)).toContain(taskId);
   });
 
   it("takes identity from the instance's row alone, touching no other user's task", async () => {

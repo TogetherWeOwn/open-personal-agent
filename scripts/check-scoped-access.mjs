@@ -30,7 +30,7 @@ export const RULES = [
   ],
   [
     "scope-minting",
-    /^(?:packages\/db\/|apps\/worker\/src\/assistant\.ts$)/,
+    /^(?:packages\/db\/|apps\/worker\/src\/assistant\.ts$|apps\/node\/src\/assistant\.ts$)/,
     /\bscopeForAssistant\b/g,
     "only the assistant scopes itself, by the name the session gave it (ADR 0010 D3)",
   ],

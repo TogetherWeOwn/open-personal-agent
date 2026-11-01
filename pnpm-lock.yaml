@@ -47,6 +47,12 @@ importers:
       '@opa/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@opa/harness-builtin':
+        specifier: workspace:*
+        version: link:../../packages/harness-builtin
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
       '@opa/server':
         specifier: workspace:*
         version: link:../../packages/server
@@ -59,6 +65,9 @@ importers:
       undici:
         specifier: 7.30.1
         version: 7.30.1
+      ws:
+        specifier: 8.21.0
+        version: 8.21.0
     devDependencies:
       '@opa/db':
         specifier: workspace:*
@@ -69,6 +78,9 @@ importers:
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
 
   apps/web:
     dependencies:
@@ -215,6 +227,9 @@ importers:
       '@opa/db':
         specifier: workspace:*
         version: link:../db
+      '@opa/harness-builtin':
+        specifier: workspace:*
+        version: link:../harness-builtin
       '@opa/log':
         specifier: workspace:*
         version: link:../log
@@ -1547,6 +1562,9 @@ packages:
 
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@ungap/structured-clone@1.4.0':
     resolution: {integrity: sha512-1mEZtMKPM09vDmQt5y7YvmN2+DFTP7Tg0EWXdic8/C6VRnpb33e4ghisCIE3WZjsE2N8mf+QV1Zqh7ZFYLWInQ==}
@@ -3773,6 +3791,10 @@ snapshots:
   '@types/unist@2.0.11': {}
 
   '@types/unist@3.0.3': {}
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 22.20.5
 
   '@ungap/structured-clone@1.4.0': {}
 

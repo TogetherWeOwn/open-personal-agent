@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Waiting for you (M3-15 AC2; m3-ux §3.7, Flow C).
+// Waiting for you, export and Settings › Memory (M3-15 AC2, AC4, AC5; m3-ux §3.7, §3.9).
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
@@ -46,17 +46,105 @@ const fresh = {
 };
 
 interface Stub {
+  learn: boolean;
+  /** The retention settings as the server holds them; each PUT body is kept too. */
+  retention: { messageDays: number | null; toolOutputDays: number | null; memoryInboxDays: number };
+  retentionPuts: unknown[];
   decisions: string[];
+  /** Whether the session has stepped up; export answers `step_up_required` until it has. */
+  steppedUp: boolean;
   /** What the list returns; the conflict and the new fact by default. */
   proposals: Record<string, unknown>[];
   /** The next list request fails, once. */
   listFails?: boolean;
 }
 
+const b64 = (s: string) => btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+
+/** A platform authenticator holding one passkey for this site, as the claim left it. */
+async function passkey(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+  await page.evaluate(async () => {
+    const bytes = (s: string) => new TextEncoder().encode(s);
+    await navigator.credentials.create({
+      publicKey: {
+        rp: { name: "Open Personal Agent", id: "localhost" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: { residentKey: "required", userVerification: "required" },
+        attestation: "none",
+        challenge: bytes("c"),
+        user: { id: bytes("owner-id"), name: "owner", displayName: "owner" },
+      },
+    });
+  });
+}
+
 async function stub(page: Page): Promise<Stub> {
-  const state: Stub = { decisions: [], proposals: [conflict, fresh] };
+  const state: Stub = {
+    learn: true,
+    retention: { messageDays: null, toolOutputDays: 30, memoryInboxDays: 14 },
+    retentionPuts: [],
+    decisions: [],
+    steppedUp: false,
+    proposals: [conflict, fresh],
+  };
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: { onboarded: true, providers: [], roles: { chat: null, background: null } },
+    }),
+  );
+  await page.route("/api/settings/memory", async (route) => {
+    if (route.request().method() === "PUT") {
+      state.learn = (route.request().postDataJSON() as { learnFromChats: boolean }).learnFromChats;
+    }
+    await route.fulfill({ json: { learnFromChats: state.learn } });
+  });
+  await page.route("/api/settings/retention", async (route) => {
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON();
+      state.retentionPuts.push(body);
+      state.retention = { ...state.retention, ...body };
+    }
+    await route.fulfill({
+      json: {
+        ...state.retention,
+        defaults: { messageDays: null, toolOutputDays: 30, memoryInboxDays: 14 },
+        bounds: {
+          messageDays: { min: 7, max: 3650 },
+          toolOutputDays: { min: 1, max: 3650 },
+          memoryInboxDays: { min: 1, max: 90 },
+        },
+      },
+    });
+  });
+  await page.route("/api/auth/step-up/session**", async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith("/options")) {
+      return route.fulfill({
+        json: {
+          options: {
+            challenge: b64("step-up-challenge"),
+            rpId: "localhost",
+            userVerification: "required",
+          },
+        },
+      });
+    }
+    state.steppedUp = true;
+    await route.fulfill({ json: { ok: true, expiresAt: Date.now() + 300_000 } });
+  });
   await page.route("/api/memory**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/memory/proposals") {
@@ -75,6 +163,15 @@ async function stub(page: Page): Promise<Stub> {
       return decision === "reject"
         ? route.fulfill({ status: 204 })
         : route.fulfill({ json: { memory: { ...conflict, op: "update" } } });
+    }
+    if (path === "/api/memory/export") {
+      if (!state.steppedUp) {
+        return route.fulfill({ status: 403, json: { error: "step_up_required" } });
+      }
+      return route.fulfill({
+        headers: { "content-disposition": 'attachment; filename="memory.opa-memory.json"' },
+        json: { format: "opa-memory-export/v1", memories: [] },
+      });
     }
     const accepted = state.decisions.includes("p1:accept");
     return route.fulfill({
@@ -130,6 +227,94 @@ test("keeps both, or discards with Undo before anything is sent", async ({ page 
   await expect(page.getByText("Nothing is waiting for you.")).toBeVisible();
   expect(state.decisions).toEqual(["p1:keep-both", "p2:reject"]);
   await axe(page);
+});
+
+test("exports as Markdown in a sheet and, after a passkey step-up, as an opa-memory-export/v1 download", async ({
+  page,
+}) => {
+  const state = await stub(page);
+  await page.goto("/memory");
+  await passkey(page);
+  await page.getByRole("button", { name: "Export" }).click();
+  await page.getByRole("menuitem", { name: "View what my assistant knows about me" }).click();
+  const sheet = page.getByRole("dialog", { name: "What my assistant knows about me" });
+  await expect(sheet.getByRole("heading", { name: "Notes" })).toBeVisible();
+  await expect(sheet).toContainText("Sam lives in Leeds (you told me; From a chat;");
+  await axe(page);
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Export" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("menuitem", { name: "Download JSON" }).click();
+  expect((await download).suggestedFilename()).toBe("memory.opa-memory.json");
+  expect(state.steppedUp).toBe(true);
+});
+
+test("turns Learn from our chats off, and Memory says so", async ({ page }) => {
+  const state = await stub(page);
+  await page.goto("/settings/memory");
+  const toggle = page.getByRole("switch", { name: "Learn from our chats" });
+  await expect(toggle).toBeChecked();
+  await axe(page);
+  // RAC hides the input itself; a person presses the label.
+  await page.locator("label").filter({ hasText: "Learn from our chats" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+  await expect(toggle).not.toBeChecked();
+  expect(state.learn).toBe(false);
+  await page.getByRole("link", { name: "Memory", exact: true }).last().click();
+  await expect(page.getByText("I'm not saving new memories.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Turn this on in Settings." })).toHaveAttribute(
+    "href",
+    "/settings/memory",
+  );
+});
+
+test("sets how long chats, tool outputs and suggestions are kept, each with its default", async ({
+  page,
+}) => {
+  const state = await stub(page);
+  await page.goto("/settings/memory");
+  const card = page.getByRole("region", { name: "How long I keep things" });
+  await expect(card.getByText("Default: kept forever.")).toBeVisible();
+  await expect(card.getByText("Default: 30 days.")).toBeVisible();
+  await expect(card.getByText("Default: 14 days.")).toBeVisible();
+  const chats = page.getByRole("switch", { name: "Delete old chats" });
+  await expect(chats).not.toBeChecked();
+  await expect(page.getByRole("switch", { name: "Remove old tool outputs" })).toBeChecked();
+  const inbox = page.getByRole("textbox", { name: "Forget unconfirmed suggestions after (days)" });
+  await expect(inbox).toHaveValue("14");
+  await axe(page);
+
+  // Kept forever until switched on; then it needs a number of days in range.
+  await card.locator("label").filter({ hasText: "Delete old chats" }).click();
+  const chatDays = page.getByRole("textbox", { name: /Delete a chat after/ });
+  await chatDays.fill("3");
+  await expect(card.getByText("Enter a whole number from 7 to 3650.")).toBeVisible();
+  await expect(card.getByRole("button", { name: "Save" })).toBeDisabled();
+  await chatDays.fill("90");
+  await inbox.fill("30");
+  await card.getByRole("button", { name: "Save" }).click();
+  await expect(card.getByRole("status")).toHaveText("Saved.");
+  // Only the fields changed here, so a change made elsewhere to the others stands.
+  expect(state.retentionPuts).toEqual([{ messageDays: 90, memoryInboxDays: 30 }]);
+
+  // Switched off again, tool outputs are kept forever.
+  await card.locator("label").filter({ hasText: "Remove old tool outputs" }).click();
+  await card.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => state.retentionPuts.at(-1)).toEqual({ toolOutputDays: null });
+  await expect(page.getByRole("switch", { name: "Remove old tool outputs" })).not.toBeChecked();
+});
+
+test("says so when Memory can't check the Learn from our chats setting", async ({ page }) => {
+  await stub(page);
+  await page.route("/api/settings/memory", (route) =>
+    route.fulfill({ status: 500, json: { error: "internal_error" } }),
+  );
+  await page.goto("/memory");
+  await expect(page.getByText("I couldn't check whether I'm saving new memories.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Check in Settings." })).toHaveAttribute(
+    "href",
+    "/settings/memory",
+  );
 });
 
 test("a change to a note edited since offers to add it as a new note", async ({ page }) => {

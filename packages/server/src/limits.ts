@@ -57,8 +57,15 @@ const DAY = 86_400_000;
  */
 const TASK_TTL = 40 * DAY;
 
-/** The Durable Object's synchronous storage, or a `Map` in tests. */
-export type Kv = Pick<SyncKvStorage, "get" | "put">;
+/**
+ * The synchronous key-value storage `Limits` counts in: the assistant's own on Workers (one per
+ * user, so the counts are exact), a SQLite table on Node, or a `Map` in tests. Structural on
+ * purpose: `@opa/server` names no runtime's types.
+ */
+export interface Kv {
+  get<T = unknown>(key: string): T | undefined;
+  put<T>(key: string, value: T): void;
+}
 
 interface Spend {
   /** The UTC day's start; a new day starts from zero. */
@@ -162,6 +169,18 @@ export class Limits {
   /** Counts a turn, or returns `false` if the user has started too many in the last minute. */
   startTurn(): boolean {
     return this.#rate("turns", TURNS_PER_MINUTE);
+  }
+
+  /**
+   * Milliseconds until `startTurn` would allow a turn; 0 when one is allowed now. The drain
+   * waits this long (plus a buffer) before retrying after a `slow_down`, instead of dropping
+   * the waiting sends.
+   */
+  msUntilTurnSlot(): number {
+    const now = this.now();
+    const recent = (this.kv.get<number[]>("turns") ?? []).filter((t) => now - t < MINUTE);
+    if (recent.length < TURNS_PER_MINUTE) return 0;
+    return Math.min(...recent.map((t) => t + MINUTE - now));
   }
 
   /**
@@ -386,6 +405,11 @@ export class Limits {
   /** Drops a call's reservation without a charge: it never called the model. */
   release(holdId: string) {
     this.#end(holdId, () => 0);
+  }
+
+  /** The IDs of calls still holding budget, for a restart sweep. */
+  heldIds(): string[] {
+    return Object.keys(this.#spend().held);
   }
 
   /** Today's and this month's settled spend, and what calls running now hold. */

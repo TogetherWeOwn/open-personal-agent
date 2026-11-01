@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { Ellipsis } from "lucide-react";
+import { Ellipsis, Hand } from "lucide-react";
 import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Heading, Link } from "react-aria-components";
+import { ApprovalCard, focusApproval } from "./approvals/ApprovalCard";
+import { ApprovalReceipt } from "./approvals/ItemBody";
+import { approvalEvent, refreshApprovals, useApprovals } from "./approvals/store";
 import {
   type AttachmentConfig,
   DEFAULT_CONFIG,
@@ -37,10 +40,10 @@ import {
   settingsApi,
 } from "./models/settings-api";
 import { NavShell } from "./NavShell";
-import { hasNavigated, match, navigate, usePath } from "./router";
+import { hasNavigated, match, navigate, resolveChatAddress, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { SpendingBanners } from "./settings/SpendingBanners";
-import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet } from "./ui";
+import { APP_NAME, Banner, Button, Menu, MenuItem, pageTitle, Sheet, setInboxCount } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -97,6 +100,9 @@ export function App({ transport }: AppProps) {
   if (!active) throw new Error("no conversation");
 
   const [healthy, setHealthy] = useState(true);
+  // True once the conversation list has loaded (or failed and stayed down): only then can a
+  // `/c/:conversationId` address be judged unknown instead of merely not-yet-loaded.
+  const [listed, setListed] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
@@ -168,11 +174,15 @@ export function App({ transport }: AppProps) {
             pendingPins.current.delete(id);
           }
           dispatch({ type: "listed", conversations });
+          setListed(true);
         })
+        // A failed load leaves `listed` false: a `/c/:conversationId` address then waits
+        // instead of misjudging its chat unknown.
         .catch(() => {});
     const connected = () => {
       dispatch({ type: "connected" });
       void list();
+      void refreshApprovals();
     };
     return transport.connect((event) => {
       if (event.type === "turn.started") {
@@ -182,8 +192,56 @@ export function App({ transport }: AppProps) {
         pendingPins.current.delete(event.sessionId);
       }
       dispatch({ type: "event", event });
+      approvalEvent(event);
     }, connected);
   }, [transport]);
+
+  // A task's conversation link names its chat in the address bar; adopt it once the list
+  // holding it loads. Each address is adopted once, so switching chats in place (which leaves
+  // the address behind) never yanks the open chat back. Adopting opens the thread the way a
+  // tap would: on phones the thread panel stays hidden until `threadOpen` is set, so selecting
+  // alone would leave the Chats list showing. An unknown chat after the load can't open
+  // anything, so the address falls back to chat.
+  const handledChatAddress = useRef<string | null>(null);
+  const chatConversationId =
+    matched?.route.path === "/c/:conversationId" ? matched.params.conversationId : undefined;
+  useEffect(() => {
+    if (!chatConversationId) {
+      handledChatAddress.current = null;
+      return;
+    }
+    if (chatConversationId === handledChatAddress.current) return;
+    const resolution = resolveChatAddress(
+      chatConversationId,
+      state.conversations,
+      state.activeId,
+      listed,
+    );
+    if (resolution.action === "wait") return;
+    handledChatAddress.current = chatConversationId;
+    if (resolution.action === "select") {
+      dispatch({ type: "select", id: resolution.id });
+      setThreadOpen(true);
+    } else if (resolution.action === "none") setThreadOpen(true);
+    else if (resolution.action === "redirect") navigate("/", true);
+  }, [chatConversationId, state.conversations, state.activeId, listed]);
+
+  // Approvals live in D1 (M3-07 AC9): read them on load and whenever the tab comes back, so one
+  // asked for while this tab slept, or by a background task, shows without a reload.
+  const approvals = useApprovals();
+  useEffect(() => {
+    void refreshApprovals();
+    const back = () => document.visibilityState === "visible" && void refreshApprovals();
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("focus", back);
+    return () => {
+      document.removeEventListener("visibilitychange", back);
+      window.removeEventListener("focus", back);
+    };
+  }, []);
+  // A multi-action card counts as one item (m3-ux §3.4).
+  const inboxCount = approvals.batches.length;
+  useEffect(() => setInboxCount(inboxCount), [inboxCount]);
 
   // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
   // whose last events were missed while disconnected.
@@ -426,6 +484,9 @@ export function App({ transport }: AppProps) {
     void save.then(() => saves.current.get(id) === save && saves.current.delete(id));
   };
 
+  const waiting = approvals.batches.filter((b) => b.conversationId === active.id);
+  const receipts = approvals.receipts.filter((r) => r.batch.conversationId === active.id);
+
   const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
 
   const chats = (
@@ -442,7 +503,13 @@ export function App({ transport }: AppProps) {
   );
 
   return (
-    <NavShell current={matched?.route.nav} sidebar={chats} hideTabs={composing} fit={chat}>
+    <NavShell
+      current={matched?.route.nav}
+      inboxCount={inboxCount}
+      sidebar={chats}
+      hideTabs={composing}
+      fit={chat}
+    >
       {/* Above every screen, and on a phone above both the Chats list and a thread. */}
       <SpendingBanners />
       {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
@@ -496,7 +563,37 @@ export function App({ transport }: AppProps) {
               Your assistant's server isn't responding properly, so replies may fail.
             </Banner>
           )}
-          <Thread key={active.id} conversation={active} />
+          <Thread
+            key={active.id}
+            conversation={active}
+            afterCount={waiting.length + receipts.length}
+            after={
+              <>
+                {[...receipts].reverse().map((r) => (
+                  <ApprovalReceipt key={r.batch.batchId} receipt={r} />
+                ))}
+                {waiting.map((b) => (
+                  <ApprovalCard key={b.batchId} batch={b} />
+                ))}
+              </>
+            }
+          />
+          {waiting[0] && (
+            <div className="mx-auto flex w-full max-w-[720px] items-center gap-2 px-4 pb-2 text-sm">
+              <Hand aria-hidden="true" size={16} className="text-status-warning" />
+              <span>
+                {waiting.length === 1
+                  ? "1 approval waiting"
+                  : `${waiting.length} approvals waiting`}
+              </span>
+              <Button
+                variant="quiet"
+                onPress={() => focusApproval(`approval-${waiting[0]?.batchId}`)}
+              >
+                Go to it
+              </Button>
+            </div>
+          )}
           {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
           <Composer
             onFocusChange={setComposing}
@@ -528,8 +625,10 @@ export function App({ transport }: AppProps) {
         </Sheet>
       </div>
       {!chat && <Screen params={matched?.params ?? {}} />}
+      {/* The chat's polite region, approvals' news included; other screens have their own. */}
       <div role="status" className="sr-only" hidden={!chat}>
         {state.announcement}
+        {approvals.announcement && <span> {approvals.announcement}</span>}
       </div>
     </NavShell>
   );

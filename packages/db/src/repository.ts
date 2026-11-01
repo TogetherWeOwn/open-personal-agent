@@ -663,6 +663,31 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           content,
         });
       /**
+       * Batch statements putting the caller's still-unlinked uploads on a message, each marked
+       * with whether the model received it (M3-10 AC2): only the user's own, still-unlinked
+       * uploads move, so a retry can link them again and a dequeue can release them.
+       */
+      const linkAttachments = (
+        conversationId: string,
+        userMessageId: string,
+        sentToModel: boolean,
+        ids: readonly string[],
+      ) =>
+        ids.length
+          ? [
+              db
+                .update(attachments)
+                .set({ messageId: userMessageId, conversationId, sentToModel })
+                .where(
+                  and(
+                    eq(attachments.userId, userId),
+                    inArray(attachments.id, [...ids]),
+                    isNull(attachments.messageId),
+                  ),
+                ),
+            ]
+          : [];
+      /**
        * A conversation's rows with the given roles, oldest first, each with its files' sniffed
        * facts (M3-10). Only a user row has files; the others get `[]`.
        */
@@ -902,23 +927,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             linked: readonly { id: string; sentToModel: boolean }[] = [],
           ) => {
             const userMessageId = crypto.randomUUID();
-            const link = (sentToModel: boolean) => {
-              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
-              return ids.length
-                ? [
-                    db
-                      .update(attachments)
-                      .set({ messageId: userMessageId, conversationId, sentToModel })
-                      .where(
-                        and(
-                          eq(attachments.userId, userId),
-                          inArray(attachments.id, ids),
-                          isNull(attachments.messageId),
-                        ),
-                      ),
-                  ]
-                : [];
-            };
+            const link = (sentToModel: boolean) =>
+              linkAttachments(
+                conversationId,
+                userMessageId,
+                sentToModel,
+                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
+              );
             await db.batch([
               message(conversationId, userMessageId, "user", text),
               message(conversationId, replyId, "assistant", ""),
@@ -926,6 +941,142 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ...link(false),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
             ]);
+          },
+          /**
+           * Holds a send that arrived mid-run (M3-09 AC4): opens the conversation when it's new
+           * and writes the user's row with its files and its empty reply row, both, so the
+           * queued text is already in D1 and visible on reload. The pair keeps the thread's
+           * shape — each user row immediately followed by its reply — so the waiting exchange
+           * reads where it will settle. `null` when the ID is someone else's.
+           */
+          enqueue: async (
+            conversationId: string,
+            title: string,
+            text: string,
+            pin: { provider: string; model: string } | undefined,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            const userMessageId = crypto.randomUUID();
+            const replyId = crypto.randomUUID();
+            const link = (sentToModel: boolean) =>
+              linkAttachments(
+                conversationId,
+                userMessageId,
+                sentToModel,
+                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
+              );
+            if (!(await getConversation(conversationId))) {
+              // A conflict is either another user's row or this user's from a concurrent open.
+              await createConversation(conversationId, title, pin).catch(() => {});
+              if (!(await getConversation(conversationId))) return null;
+            }
+            await db.batch([
+              message(conversationId, userMessageId, "user", text),
+              message(conversationId, replyId, "assistant", ""),
+              ...link(true),
+              ...link(false),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+            return { messageId: userMessageId, replyId };
+          },
+          /**
+           * Notes a steer that joined its conversation's running turn (M3-09 AC4): only the
+           * user's row, since the running turn's reply answers it — there is no reply of its
+           * own. The row keeps the steer visible on reload and in later turns' history. `null`
+           * when the ID is missing or someone else's.
+           */
+          steer: async (conversationId: string, text: string) => {
+            if (!(await getConversation(conversationId))) return null;
+            const userMessageId = crypto.randomUUID();
+            await db.batch([
+              message(conversationId, userMessageId, "user", text),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+            return userMessageId;
+          },
+          /**
+           * Starts a queued send's reply (M3-09 AC4): the rows are already stored, so this only
+           * marks each file with whether the now-known reading model receives it (M3-10 AC2).
+           * `false` when the conversation is missing or someone else's.
+           */
+          beginReply: async (
+            conversationId: string,
+            userMessageId: string,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            if (!(await getConversation(conversationId))) return false;
+            const flag = (sentToModel: boolean) => {
+              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
+              return ids.length
+                ? [
+                    db
+                      .update(attachments)
+                      .set({ sentToModel })
+                      .where(
+                        and(
+                          eq(attachments.userId, userId),
+                          eq(attachments.messageId, checkId(userMessageId)),
+                          inArray(attachments.id, [...ids]),
+                        ),
+                      ),
+                  ]
+                : [];
+            };
+            await db.batch([
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+              ...flag(true),
+              ...flag(false),
+            ]);
+            return true;
+          },
+          /**
+           * Cancels a queued send before it starts (M3-09 AC4): deletes the still-waiting pair —
+           * the user row and its still-empty reply — and releases its files back to unlinked, so
+           * a resend can link them again. The host dequeues from memory first, so it never names
+           * a started turn; the empty-reply guard below is defense in depth. `false` when the
+           * rows are already replying, settled, or someone else's.
+           */
+          dropQueued: async (conversationId: string, messageId: string, replyId: string) => {
+            if (!(await getConversation(conversationId))) return false;
+            const row = (
+              await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.id, checkId(messageId)),
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.role, "user"),
+                    eq(messages.userId, userId),
+                  ),
+                )
+                .limit(1)
+            )[0];
+            const reply = (
+              await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.id, checkId(replyId)),
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.role, "assistant"),
+                    eq(messages.status, "streaming"),
+                    eq(messages.userId, userId),
+                  ),
+                )
+                .limit(1)
+            )[0];
+            if (!row || !reply) return false;
+            await db.batch([
+              db.delete(messages).where(eq(messages.id, row.id)),
+              db.delete(messages).where(eq(messages.id, reply.id)),
+              db
+                .update(attachments)
+                .set({ messageId: null, conversationId: null, sentToModel: false })
+                .where(and(eq(attachments.userId, userId), eq(attachments.messageId, row.id))),
+            ]);
+            return true;
           },
           /**
            * A stopped turn's partial reply so far, still `streaming`: what a tab that loads the
@@ -1115,6 +1266,46 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .where(and(eq(approvals.batchId, batchId), eq(approvals.userId, userId)))
                   .orderBy(approvals.position)
               : Promise.resolve([]),
+          /**
+           * Every item that can still take a decision (M3-07 AC8): pending, unexpired, and not
+           * on a cancelled or finished task. Each with its conversation's title. At most `limit`
+           * batches, never part of one (a decision needs every pending item): the batch that
+           * expires soonest first, a batch's items together in their stored order. A batch with
+           * a pending item already expired can't take a decision, so none of it is listed.
+           */
+          pending: (now: number, limit = 100) => {
+            const live = and(
+              eq(approvals.userId, userId),
+              eq(approvals.status, "pending"),
+              gt(approvals.expiresAt, now),
+              sql`NOT EXISTS (SELECT 1 FROM approvals stale WHERE stale.batch_id = approvals.batch_id AND stale.status = 'pending' AND stale.expires_at <= ${now})`,
+              sql`(${approvals.taskId} IS NULL OR EXISTS (SELECT 1 FROM ${tasks} WHERE ${tasks.id} = ${approvals.taskId} AND ${tasks.status} <> 'cancelled' AND ${tasks.finishedAt} IS NULL))`,
+            );
+            const batch = db
+              .select({
+                batchId: approvals.batchId,
+                soonest: sql<number>`min(${approvals.expiresAt})`.as("soonest"),
+                newest: sql<number>`max(${approvals.createdAt})`.as("newest"),
+              })
+              .from(approvals)
+              .where(live)
+              .groupBy(approvals.batchId)
+              .orderBy(sql`soonest`, sql`newest desc`, approvals.batchId)
+              .limit(limit)
+              .as("batch");
+            return db
+              .select({ row: approvals, conversationTitle: conversations.title })
+              .from(approvals)
+              .innerJoin(batch, eq(batch.batchId, approvals.batchId))
+              .innerJoin(conversations, eq(conversations.id, approvals.conversationId))
+              .where(live)
+              .orderBy(
+                sql`${batch.soonest}`,
+                sql`${batch.newest} desc`,
+                approvals.batchId,
+                approvals.position,
+              );
+          },
           /**
            * Starts a step-up ceremony over the batch's pending items (W3): the nonce, the digest
            * it was issued for, its expiry and the session that asked, on every pending row,
@@ -1456,6 +1647,52 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .where(and(eq(usage.userId, userId), gte(usage.createdAt, since)))
               .groupBy(usage.providerId, usage.model, usage.costSource)
               .orderBy(usage.providerId, usage.model),
+          /**
+           * The month's calls by conversation, by task and by day (M3-16 AC2). Titles come from
+           * this user's own rows only; a deleted conversation or task, or a call outside one,
+           * groups under a null ID. Days come as quarter-hour buckets (`bucket` × 15 min since
+           * the epoch), so the caller can place them on any time zone's calendar, DST included.
+           */
+          breakdowns: async (since: number) => {
+            const mine = and(eq(usage.userId, userId), gte(usage.createdAt, since));
+            const cost = {
+              calls: count(),
+              costMicroUsd: sql<number>`coalesce(sum(${usage.costMicroUsd}), 0)`.mapWith(Number),
+              unpricedCalls:
+                sql<number>`sum(case when ${usage.costSource} is null then 1 else 0 end)`.mapWith(
+                  Number,
+                ),
+            };
+            // Quarter hours fit every UTC offset, including the :30 and :45 ones. The time is cast
+            // first: the default `created_at` and a bound number can be REAL.
+            const bucket = sql<number>`cast(${usage.createdAt} as integer) / 900000`;
+            const [byConversation, byTask, byBucket] = await Promise.all([
+              db
+                .select({ id: conversations.id, title: conversations.title, ...cost })
+                .from(usage)
+                .leftJoin(
+                  conversations,
+                  and(eq(conversations.id, usage.conversationId), eq(conversations.userId, userId)),
+                )
+                .where(mine)
+                .groupBy(conversations.id)
+                .orderBy(desc(cost.costMicroUsd)),
+              db
+                .select({ id: tasks.id, title: tasks.title, ...cost })
+                .from(usage)
+                .leftJoin(tasks, and(eq(tasks.id, usage.taskId), eq(tasks.userId, userId)))
+                .where(mine)
+                .groupBy(tasks.id)
+                .orderBy(desc(cost.costMicroUsd)),
+              db
+                .select({ bucket: bucket.mapWith(Number), ...cost })
+                .from(usage)
+                .where(mine)
+                .groupBy(bucket)
+                .orderBy(bucket),
+            ]);
+            return { byConversation, byTask, byBucket };
+          },
           /**
            * One model call's ledger row (one row per call, PRD §17), written when the call
            * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
@@ -1889,23 +2126,28 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          * run's next write simply matches no row and reports `false`.
          */
         tasks: {
-          /** `false` when the conversation isn't the user's. The row starts `queued`. */
+          /**
+           * `false` when the conversation isn't the user's. The row starts `queued`. A row the
+           * `task` tool files has no Workflow instance yet (promotion creates it in M3-12b),
+           * so the instance id is optional and stays null until then.
+           */
           create: async (input: {
             id: string;
             conversationId: string;
-            workflowInstanceId: string;
+            workflowInstanceId?: string | null;
             kind: string;
             mode: TaskRow["mode"];
             title?: string | null;
             state?: string | null;
           }): Promise<boolean> => {
-            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
+            if (input.workflowInstanceId != null && !isInstanceId(input.workflowInstanceId))
+              throw new Error("invalid instance id");
             if (!(await getConversation(input.conversationId))) return false;
             await db.insert(tasks).values({
               id: checkId(input.id),
               userId,
               conversationId: input.conversationId,
-              workflowInstanceId: input.workflowInstanceId,
+              workflowInstanceId: input.workflowInstanceId ?? null,
               kind: input.kind,
               mode: input.mode,
               title: input.title ?? null,
@@ -2016,9 +2258,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 limitKind: tasks.limitKind,
                 error: tasks.error,
                 costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                // The left join's null usage row is not a call: without it a task with no
+                // usage would report one unpriced call alongside zero calls.
                 unpriced: sql<
                   number | null
-                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
+                >`sum(case when ${usage.id} is not null and ${usage.costMicroUsd} is null then 1 else 0 end)`.as(
+                  "unpriced",
+                ),
                 calls: count(usage.id).as("calls"),
                 createdAt: tasks.createdAt,
                 updatedAt: tasks.updatedAt,

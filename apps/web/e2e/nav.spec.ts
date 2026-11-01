@@ -6,6 +6,9 @@ import { expect, type Page, test } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/approvals?status=pending", (route) =>
+    route.fulfill({ json: { batches: [] } }),
+  );
   // The table serves the real Settings screens, so the stub carries the shape they read.
   await page.route("/api/settings", (route) =>
     route.fulfill({
@@ -29,7 +32,7 @@ async function axe(page: Page, width: number) {
 // Every M3 address lands somewhere real; IDs are placeholders until their screens exist.
 const PAGES: [path: string, heading: string, url?: RegExp][] = [
   ["/inbox", "Inbox"],
-  ["/approvals/a1", "Inbox", /\/inbox$/],
+  ["/approvals/a1", "This request isn't waiting anymore"],
   ["/activity", "Tasks", /\/activity\/tasks$/],
   ["/activity/tasks/t1", "Task"],
   ["/activity/outputs", "Outputs"],

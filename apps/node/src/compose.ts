@@ -4,12 +4,12 @@
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { app } from "@opa/server/app";
+import { createApp } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
-import { runRetention } from "@opa/server/retention";
-import { runRotation } from "@opa/server/vault-rotation";
+import { reconcile, reconcilerParts } from "@opa/server/reconciler";
 import { Hono } from "hono";
+import { NodeAssistant, nodeRoutes } from "./assistant";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
 import { modelFetch } from "./egress";
@@ -56,6 +56,15 @@ export interface NodeApp {
   /** The Worker's cron (every 10 minutes): `main.ts` runs it on a timer. */
   scheduled(): Promise<void>;
   db: DatabaseSync;
+  /** The user's in-process assistant, one per user, as `/api/chat` and the routes reach it. */
+  assistantFor(userId: string): NodeAssistant;
+  /**
+   * Refuses new turns, closes every chat tab and interrupts running turns, resolving once they
+   * have settled. Shutdown awaits it before closing the database, since upgraded sockets are
+   * not tracked by `server.close`. Assistants created after shutdown starts are born closing,
+   * so their turns can't outlive the database close.
+   */
+  shutdown(): Promise<void>;
 }
 
 /**
@@ -73,12 +82,40 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   const assets = new Hono()
     .use(serveStatic({ root: assetsDir }))
     .use(serveStatic({ root: assetsDir, path: "index.html" }));
+  // The user's in-process assistant, one per user like the Worker's Durable Object. The
+  // database outlives them; a restart drops only the sockets, which reconnect and resume.
+  const assistants = new Map<string, NodeAssistant>();
+  // Set before the shutdown snapshot: an assistant created while the drain runs starts already
+  // closing, so no new turn can outlive the database close.
+  let closing = false;
+  const { assistantFor } = {
+    assistantFor(userId: string): NodeAssistant {
+      let assistant = assistants.get(userId);
+      if (!assistant) {
+        assistant = new NodeAssistant(userId, { db, getEnv: () => env });
+        assistants.set(userId, assistant);
+        if (closing) {
+          // Born mid-drain, after the shutdown snapshot: refuse new turns at once. It holds no
+          // tabs and no running turn, so there is nothing to await.
+          void assistant.shutdown().catch(() => {});
+        } else {
+          // Settle what a restart left behind (streaming replies, dead budget holds) before the
+          // first turn needs to; the sweep runs once per process and never raises unhandled.
+          void assistant.recover().catch(() => {});
+        }
+      }
+      return assistant;
+    },
+  };
   const raw: AppPorts & MasterKeys = {
     DB: sqliteD1(db),
     FILES: localBlobStore(join(dataDir, "files")),
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
-    // The per-user assistant, in process. It has no state until the chat transport lands.
-    ASSISTANT: { idFromName: (name: string) => name, get: () => ({ ping: async () => "pong" }) },
+    ASSISTANT: {
+      idFromName: (name: string) => name,
+      get: (name: string) =>
+        name.startsWith("u:") ? assistantFor(name.slice(2)) : { ping: async () => "pong" },
+    },
     MODEL_FETCH: modelFetch({ allowPrivate }),
     MODEL_PRIVATE_HOSTS: allowPrivate,
     UNAVAILABLE: ["workflow", "ai"],
@@ -94,6 +131,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   };
   // As on Workers: only `compose` sees the master keys, and it hands the app the vault.
   const env = compose(raw);
+  const nodeApp = createApp(nodeRoutes(assistantFor));
   return {
     fetch: async (request, bindings) => {
       const url = new URL(request.url);
@@ -107,13 +145,24 @@ export function createNodeApp(options: NodeOptions): NodeApp {
         const address = bindings?.incoming?.socket?.remoteAddress;
         if (address) forwarded.headers.set(SOCKET_ADDRESS_HEADER, address);
       }
-      return app.fetch(forwarded, await env);
+      // Over the bindings `@hono/node-server` passes in: on an upgrade they carry its symbols,
+      // which `upgradeWebSocket` reads from the env. A new object would drop them, and with them
+      // the tab's socket (the symbols link the route's reply to the upgrade).
+      return nodeApp.fetch(forwarded, Object.assign(bindings ?? {}, await env));
     },
+    // The Worker's reconciler without the parts that need its bindings: the owner's assistant
+    // and the export Workflow.
     scheduled: async () => {
-      const app = await env;
-      await runRotation(app);
-      await runRetention(app);
+      const { rotation, retention, approvals } = reconcilerParts;
+      await Promise.all(reconcile(env, Date.now(), { rotation, retention, approvals }));
     },
     db,
+    assistantFor,
+    shutdown: async () => {
+      // Gate first: the listener still accepts upgrades during the drain, and any assistant
+      // created after this point starts already closing (see `assistantFor`).
+      closing = true;
+      await Promise.all([...assistants.values()].map((assistant) => assistant.shutdown()));
+    },
   };
 }

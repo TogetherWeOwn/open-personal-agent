@@ -54,11 +54,39 @@ function AccountItems({ onSignOutError }: { onSignOutError: () => void }) {
   );
 }
 
+/** The Inbox count on its icon, seen only; the link says it in words (`Waiting`). */
+function Badge({ count }: { count: number }) {
+  if (!count) return null;
+  return (
+    <span
+      aria-hidden="true"
+      className="absolute -top-1.5 -right-2 min-w-5 rounded-full bg-accent px-1 text-center text-xs leading-5 font-semibold text-accent-contrast"
+    >
+      {count > 99 ? "99+" : count}
+    </span>
+  );
+}
+
+/** ", 2 waiting" after the Inbox's name, for screen readers. */
+const Waiting = ({ count }: { count: number }) =>
+  count ? <span className="sr-only">, {count} waiting</span> : null;
+
+/** The destination's icon, with the Inbox badge on it. */
+function NavIcon({ Icon, count }: { Icon: LucideIcon; count: number }) {
+  return (
+    <span className="relative shrink-0">
+      <Icon aria-hidden="true" size={20} />
+      <Badge count={count} />
+    </span>
+  );
+}
+
 const item =
   "flex min-h-11 items-center gap-3 rounded-lg px-3 font-medium hover:bg-surface-raised aria-[current=page]:bg-surface-raised aria-[current=page]:text-accent";
 
 export function NavShell({
   current,
+  inboxCount = 0,
   sidebar,
   hideTabs = false,
   fit = false,
@@ -68,6 +96,8 @@ export function NavShell({
    * scroll the page, with the nav kept in place. */
   fit?: boolean;
   current?: Destination | undefined;
+  /** Approvals waiting: the Inbox badge (M3-07 AC8). */
+  inboxCount?: number;
   /** Shown under the destinations from 1024 px: the chat's New chat and conversation list. */
   sidebar?: ReactNode;
   /** Hides the phone tab bar, so the keyboard doesn't squeeze the thread while typing. */
@@ -85,8 +115,9 @@ export function NavShell({
             {DESTINATIONS.map(([id, label, href, Icon]) => (
               <li key={id}>
                 <Link href={href} aria-current={here(id)} className={item}>
-                  <Icon aria-hidden="true" size={20} className="shrink-0" />
+                  <NavIcon Icon={Icon} count={id === "inbox" ? inboxCount : 0} />
                   <span className="sm:max-lg:sr-only">{label}</span>
+                  <Waiting count={id === "inbox" ? inboxCount : 0} />
                 </Link>
               </li>
             ))}
@@ -134,8 +165,9 @@ export function NavShell({
             aria-current={here(id)}
             className={`${item} flex-col gap-0.5 py-1 text-xs`}
           >
-            <Icon aria-hidden="true" size={20} />
+            <NavIcon Icon={Icon} count={id === "inbox" ? inboxCount : 0} />
             {label}
+            <Waiting count={id === "inbox" ? inboxCount : 0} />
           </Link>
         ))}
         <Menu

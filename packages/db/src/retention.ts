@@ -2,13 +2,15 @@
 // Retention (COST-10, M3-18): the user's settings, the daily sweep that applies them, and the
 // reconciler's garbage collection of temporary R2 objects. The sweep reads D1 and R2 only, so it
 // never wakes a Durable Object, and it records what it removed as audit rows (AC1). A chat with a
-// task that is still queued, running, waiting or paused is never deleted (AC3).
-import { and, eq, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
+// task that is still queued, running, waiting or paused, or with an approval still waiting for
+// the user, is never deleted (AC3).
+import { and, eq, gt, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { openD1 } from "./index";
 import { memoryService } from "./memory";
 import type { DataBindings } from "./repository";
 import {
+  approvals,
   attachments,
   auditLog,
   conversations,
@@ -113,12 +115,13 @@ export function retentionStore({ DB, FILES }: Bindings) {
   const attachmentKey = (userId: string, id: string) => `u/${userId}/attachments/${id}`;
 
   /**
-   * Deletes the user's chats idle since `cutoff`, never one with a live task or reply. A reply
-   * still `streaming` is live unless its turn stopped (approval, limit) and has waited since
-   * before `cutoff`: an unanswered stop doesn't keep a chat past the setting, and its saved state
-   * goes with the chat, by cascade.
+   * Deletes the user's chats idle since `cutoff`, never one with a live task or reply, or with
+   * an approval still pending and unexpired: a stopped turn waits on the user with no task row.
+   * A reply still `streaming` is live unless its turn stopped (approval, limit) and has waited
+   * since before `cutoff`: an unanswered stop doesn't keep a chat past the setting, and its saved
+   * state goes with the chat, by cascade.
    */
-  const sweepConversations = async (userId: string, cutoff: number) => {
+  const sweepConversations = async (userId: string, cutoff: number, now: number) => {
     let total = 0;
     for (let round = 0; round < SWEEP_ROUNDS; round++) {
       const stale = db
@@ -136,6 +139,19 @@ export function retentionStore({ DB, FILES }: Bindings) {
                   and(
                     eq(tasks.conversationId, conversations.id),
                     inArray(tasks.status, [...LIVE_TASK_STATUSES]),
+                  ),
+                ),
+            ),
+            notExists(
+              db
+                .select({ x: sql`1` })
+                .from(approvals)
+                .where(
+                  and(
+                    eq(approvals.conversationId, conversations.id),
+                    eq(approvals.userId, userId),
+                    eq(approvals.status, "pending"),
+                    gt(approvals.expiresAt, now),
                   ),
                 ),
             ),
@@ -303,6 +319,7 @@ export function retentionStore({ DB, FILES }: Bindings) {
             counts.conversations = await sweepConversations(
               userId,
               now - settings.messageDays * DAY_MS,
+              now,
             );
           }
           if (settings.toolOutputDays) {
