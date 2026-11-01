@@ -48,6 +48,6 @@ describe("workers-ai-binding", () => {
   it("lists text-generation models by name", async () => {
     const { p } = binding("");
     expect(await p.listModels()).toEqual([{ id: MODEL, label: MODEL }]);
-    expect(p.capabilities(MODEL)).toEqual({ tools: false, usageInStream: true });
+    expect(p.capabilities(MODEL)).toEqual({ tools: true, usageInStream: true });
   });
 });

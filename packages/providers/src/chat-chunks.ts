@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Normalizes OpenAI-style chat-completion stream chunks. Shared by `openai-chat` and by
 // Workers AI models that answer in the same shape.
-import type { FinishReason, ModelErrorCode, ModelEvent, ModelUsage } from "@opa/core";
+import type {
+  FinishReason,
+  ModelErrorCode,
+  ModelEvent,
+  ModelToolCall,
+  ModelUsage,
+} from "@opa/core";
 
 interface RawUsage {
   prompt_tokens?: number;
@@ -12,11 +18,29 @@ interface RawUsage {
   prompt_cache_hit_tokens?: number;
 }
 
+/** One fragment of a streamed call; fragments with the same `index` belong together. */
+interface RawToolCallDelta {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/**
+ * A whole call at the top level of a Workers AI chunk: the OpenAI shape, or the older one with
+ * `arguments` as an object and no id.
+ */
+type RawWholeToolCall = RawToolCallDelta & { name?: string; arguments?: unknown };
+
+export interface RawChatDelta {
+  content?: string | null;
+  reasoning_content?: string | null;
+  reasoning?: string;
+  tool_calls?: RawToolCallDelta[] | null;
+}
+
 export interface RawChatChunk {
-  choices?: {
-    delta?: { content?: string | null; reasoning_content?: string | null; reasoning?: string };
-    finish_reason?: string | null;
-  }[];
+  choices?: { delta?: RawChatDelta; finish_reason?: string | null }[];
+  tool_calls?: RawWholeToolCall[] | null;
   usage?: RawUsage | null;
   error?: { message?: string };
 }
@@ -31,10 +55,15 @@ export function error(code: ModelErrorCode, message: string, status?: number): M
 
 export const aborted = () => error("aborted", "The request was cancelled");
 
+/** Hosts that send no call id get one, so a tool result can always name its call. */
+const callId = () => `call_${crypto.randomUUID().replaceAll("-", "")}`;
+
 /** Feed chunks in order with `push`, then call `finish` once the stream ends. */
 export class ChatChunkAccumulator {
   private usage: ModelUsage | undefined;
   private finishReason: FinishReason | undefined;
+  private calls: ModelToolCall[] = [];
+  private byIndex = new Map<number, ModelToolCall>();
 
   /** The reply is complete: a finish reason arrived, plus usage when it was requested. */
   complete(expectUsage: boolean): boolean {
@@ -57,18 +86,64 @@ export class ChatChunkAccumulator {
       const reasoning = delta.reasoning_content || delta.reasoning;
       if (reasoning) events.push({ type: "reasoning.delta", text: reasoning });
       if (delta.content) events.push({ type: "text.delta", text: delta.content });
+      for (const part of delta.tool_calls ?? []) this.addFragment(part);
       if (finish_reason) {
         this.finishReason = FINISH_REASONS.includes(finish_reason)
           ? (finish_reason as FinishReason)
           : "other";
       }
     }
+    for (const call of chunk.tool_calls ?? []) {
+      const fn = call.function;
+      const args = fn ? fn.arguments : call.arguments;
+      this.calls.push({
+        id: call.id ?? "",
+        name: fn?.name ?? call.name ?? "",
+        arguments: typeof args === "string" ? args : args === undefined ? "" : JSON.stringify(args),
+      });
+    }
     return events;
   }
 
+  private addFragment(part: RawToolCallDelta) {
+    // Fragments of one call share an index; without one, they continue the last call.
+    let call = part.index === undefined ? this.calls.at(-1) : this.byIndex.get(part.index);
+    // A different id is a different call, even at the same index (some hosts reuse index 0).
+    if (call && part.id && call.id && part.id !== call.id) call = undefined;
+    if (!call) {
+      call = { id: part.id ?? "", name: "", arguments: "" };
+      this.calls.push(call);
+    }
+    if (part.index !== undefined) this.byIndex.set(part.index, call);
+    if (part.id) call.id = part.id;
+    // The name comes whole, once; some hosts repeat it on every fragment.
+    if (part.function?.name && !call.name) call.name = part.function.name;
+    if (part.function?.arguments) call.arguments += part.function.arguments;
+  }
+
   finish(): ModelEvent[] {
-    const done: ModelEvent = { type: "done", finishReason: this.finishReason ?? "stop" };
-    return this.usage ? [{ type: "usage", usage: this.usage }, done] : [done];
+    // The model was billed whatever happens to its calls, so usage is always reported.
+    const events: ModelEvent[] = this.usage ? [{ type: "usage", usage: this.usage }] : [];
+    const toolCalls: ModelToolCall[] = [];
+    // A reply cut off at the output limit may hold a call with half its arguments: never run it.
+    const calls = this.finishReason === "length" ? [] : this.calls;
+    for (const call of calls) {
+      // A call with no name can't be run or answered.
+      if (!call.name) {
+        events.push(error("bad_response", "The provider sent a tool call with no name"));
+        return events;
+      }
+      toolCalls.push({
+        id: call.id || callId(),
+        name: call.name,
+        arguments: call.arguments || "{}",
+      });
+    }
+    // Some hosts report `stop` even when the reply is tool calls.
+    let finishReason = this.finishReason ?? "stop";
+    if (toolCalls.length && finishReason === "stop") finishReason = "tool_calls";
+    const called = toolCalls.map((toolCall): ModelEvent => ({ type: "tool_call", toolCall }));
+    return [...called, ...events, { type: "done", finishReason }];
   }
 }
 
