@@ -43,6 +43,7 @@ import {
 } from "./models/settings-api";
 import { NavShell } from "./NavShell";
 import { takePrefill } from "./onboarding/prefill";
+import { SetupChecklist } from "./onboarding/SetupChecklist";
 import { hasNavigated, match, navigate, resolveChatAddress, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { getShowWork } from "./settings/assistant-api";
@@ -600,6 +601,14 @@ export function App({ transport }: AppProps) {
             showWork={showWork}
             prices={prices}
             afterCount={waiting.length + receipts.length}
+            empty={
+              <SetupChecklist
+                place="chat"
+                // Loads again each time the chat shows, so a step finished in Settings is Done.
+                reload={Number(chat)}
+                onPrompt={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
+              />
+            }
             after={
               <>
                 {[...receipts].reverse().map((r) => (

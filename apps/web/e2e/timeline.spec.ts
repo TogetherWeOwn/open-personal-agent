@@ -144,17 +144,19 @@ test("Settings › Assistant saves the Show-work choice", async ({ page, baseURL
   const { writes } = await stub(page, baseURL, "collapsed");
   await page.goto("/settings/assistant");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
-  await expect(page.getByRole("heading", { name: "Show work" })).toBeVisible();
+  // The page also holds About you with its own Save, so everything here stays in this card.
+  const card = page.getByRole("region", { name: "Show work" });
+  await expect(card).toBeVisible();
   // The real input hides behind its label, so the click goes to the label's text.
-  await page.getByText("Expanded", { exact: true }).click();
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Saved.");
+  await card.getByText("Expanded", { exact: true }).click();
+  await card.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(card.getByRole("status")).toContainText("Saved.");
   expect(writes).toEqual([{ showWork: "expanded" }]);
   // Picking another choice unsaves the form: the old confirmation goes, and Save enables
   // again for the choice that isn't saved yet.
-  await page.getByText("Collapsed", { exact: true }).click();
-  await expect(page.getByRole("status")).not.toContainText("Saved.");
-  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await card.getByText("Collapsed", { exact: true }).click();
+  await expect(card.getByRole("status")).not.toContainText("Saved.");
+  await expect(card.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
 });

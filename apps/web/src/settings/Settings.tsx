@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings (m3-ux §3.9): one screen, a page per axis. M3-06b ships Models and the read-only
 // Agent engine page, M3-09b the Assistant page, M3-15 the Memory page, M3-17 Spending, M3-19
-// the Computer and Apps & tools pages, TWO-674 Privacy & security; the other axes arrive
-// with their own cards. The tabs keep the order of the settings list in routes.tsx.
+// the Computer and Apps & tools pages, TWO-674 Privacy & security, M3-24a the setup checklist
+// and About you on Assistant; the other axes arrive with their own cards. The tabs keep the
+// order of the settings list in routes.tsx.
 import { useEffect, useRef } from "react";
 import { Heading, Link } from "react-aria-components";
 import { hasNavigated } from "../router";

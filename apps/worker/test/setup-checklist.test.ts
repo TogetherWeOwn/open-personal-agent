@@ -97,6 +97,8 @@ describe("setup checklist", () => {
       settings: Record<string, number | null>;
     }>();
     expect(settings.dailyCapMicroUsd).toBe(5_000_000);
+    // Activity must not claim the reverted change happened.
+    expect(await count("audit_log", "action = 'settings.spending'")).toBe(0);
   });
 
   it("leaves a refused Spending save on the list", async () => {
