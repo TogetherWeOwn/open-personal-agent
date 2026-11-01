@@ -38,9 +38,11 @@ const countSecrets = async () =>
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  await env.DB.prepare(
-    "INSERT INTO users (id, display_name, role) VALUES ('u1', 'A', 'owner')",
-  ).run();
+  // A claimed deployment, so the claim guard lets `/api/*` through.
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO users (id, display_name, role) VALUES ('u1', 'A', 'owner')"),
+    env.DB.prepare("INSERT INTO setup_state (id, claimed_by_user_id) VALUES (1, 'u1')"),
+  ]);
 });
 
 describe("V4: the env filter", () => {

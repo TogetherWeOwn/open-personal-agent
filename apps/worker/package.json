@@ -12,6 +12,7 @@
     "@opa/db": "workspace:*",
     "@opa/providers": "workspace:*",
     "@opa/vault": "workspace:*",
+    "@simplewebauthn/server": "14.0.3",
     "hono": "4.13.14"
   }
 }
