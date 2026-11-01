@@ -32,6 +32,7 @@ import {
   secrets,
   tasks,
   toolOverrides,
+  turnStates,
   usage,
   userSettings,
   users,
@@ -193,6 +194,23 @@ export interface TurnRecord {
 
 /** One model call for the ledger. `providerId` is who bills it (`billingProviderId`). */
 export type LedgerCall = Pick<TurnRecord, "providerId" | "model" | "usage">;
+
+/** Why a saved turn stopped, and so how it can resume (M3-03 AC5). */
+export type TurnStatus = "awaiting_approval" | "limit_reached";
+
+/**
+ * A stopped turn's row in `turn_states`. `state` is the loop's `TurnState` as JSON: the host
+ * owns its shape, the repository only keeps it. `providerId` is who bills the turn's calls.
+ */
+export interface SavedTurn {
+  turnId: string;
+  conversationId: string;
+  replyId: string;
+  providerId: string;
+  model: string;
+  status: TurnStatus;
+  state: string;
+}
 
 /** A call's ledger values, priced from the table; the cost columns stay null without a price. */
 function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
@@ -514,6 +532,46 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]);
           },
         },
+        /**
+         * Stopped turns' resumable state (M3-03 AC5). A row exists only while its turn waits
+         * for an approval decision or a Continue: saving one is what lets the turn survive the
+         * DO's hibernation, eviction and redeploy, and removing it is part of settling.
+         */
+        turns: {
+          /** Saves (or refreshes) a stopped turn; `false` if the conversation isn't the user's. */
+          save: async (turn: SavedTurn) => {
+            if (!(await getConversation(turn.conversationId))) return false;
+            const set = { ...turn, updatedAt: Date.now() };
+            await db
+              .insert(turnStates)
+              .values({ ...set, userId })
+              .onConflictDoUpdate({ target: turnStates.turnId, set });
+            return true;
+          },
+          /** A stopped turn by ID, or `undefined` when it is missing or someone else's. */
+          load: async (turnId: string) =>
+            (
+              await db
+                .select({
+                  turnId: turnStates.turnId,
+                  conversationId: turnStates.conversationId,
+                  replyId: turnStates.replyId,
+                  providerId: turnStates.providerId,
+                  model: turnStates.model,
+                  status: turnStates.status,
+                  state: turnStates.state,
+                })
+                .from(turnStates)
+                .where(and(eq(turnStates.turnId, turnId), eq(turnStates.userId, userId)))
+                .limit(1)
+            )[0],
+          /** Drops a turn's saved state as it settles. Another user's row is untouched. */
+          remove: async (turnId: string) => {
+            await db
+              .delete(turnStates)
+              .where(and(eq(turnStates.turnId, turnId), eq(turnStates.userId, userId)));
+          },
+        },
         /** The ledger the Usage page reads (PRD §17). */
         usage: {
           /** Calls since `since`, per provider, model and cost source; one query. */
@@ -533,9 +591,18 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .where(and(eq(usage.userId, userId), gte(usage.createdAt, since)))
               .groupBy(usage.providerId, usage.model, usage.costSource)
               .orderBy(usage.providerId, usage.model),
-          /** A call outside a chat turn, such as the settings Test button. */
-          record: async (call: LedgerCall) => {
-            await db.insert(usage).values({ ...ledgerValues(call), userId });
+          /**
+           * One model call's ledger row (one row per call, PRD §17), written when the call
+           * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
+           * such as the settings Test button, names neither.
+           */
+          record: async (call: LedgerCall & { conversationId?: string; messageId?: string }) => {
+            await db.insert(usage).values({
+              ...ledgerValues(call),
+              userId,
+              conversationId: call.conversationId ?? null,
+              messageId: call.messageId ?? null,
+            });
           },
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
