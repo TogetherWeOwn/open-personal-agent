@@ -23,7 +23,12 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
     listModels: () => listModels(http),
 
     capabilities() {
-      return { tools: compat.supportsTools, usageInStream: compat.supportsUsageInStreaming };
+      return {
+        tools: compat.supportsTools,
+        usageInStream: compat.supportsUsageInStreaming,
+        imageInput: compat.supportsImageInput,
+        pdfInput: compat.supportsPdfInput,
+      };
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {

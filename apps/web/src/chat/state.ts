@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { HarnessEvent, TurnFailure, TurnLimit } from "@opa/core";
-import type { ConversationSummary, StoredMessage } from "./transport";
+import type { ConversationSummary, StoredAttachment, StoredMessage } from "./transport";
 
 /** The statuses D1 stores, so a loaded message keeps its own. */
 type Status = StoredMessage["status"];
@@ -15,6 +15,7 @@ export type Message = {
   status: Status;
   /** Why a failed reply failed, when the fix is elsewhere (a vault reset in Settings). */
   failure?: TurnFailure;
+  attachments?: StoredAttachment[];
 };
 /** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
 export type Conversation = {
@@ -40,13 +41,26 @@ export interface ChatState {
    * The last send a limit refused (M2-22), until the next send. It wrote nothing, so its message
    * leaves the chat and its text goes back to the composer.
    */
-  limit: { reason: TurnLimit; message: string; conversationId: string; text: string } | null;
+  limit: {
+    reason: TurnLimit;
+    message: string;
+    conversationId: string;
+    text: string;
+    attachments: StoredAttachment[];
+  } | null;
 }
 
 export type ChatAction =
   | { type: "new"; id: string }
   | { type: "select"; id: string }
-  | { type: "send"; id: string; text: string }
+  | {
+      type: "send";
+      id: string;
+      // Named, not "the active chat": a send that waited on uploads may go after a switch.
+      conversationId: string;
+      text: string;
+      attachments?: StoredAttachment[];
+    }
   | { type: "event"; event: HarnessEvent }
   | { type: "connected" }
   | { type: "listed"; conversations: ConversationSummary[] }
@@ -94,21 +108,32 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, activeId: action.id };
     case "send": {
       const text = action.text.trim();
-      if (state.pending || !text) return state;
+      const attachments = action.attachments ?? [];
+      // Files alone are a message too; their first name titles a new chat, as the server's does.
+      if (state.pending || (!text && !attachments.length)) return state;
       const pending = {
-        conversationId: state.activeId,
+        conversationId: action.conversationId,
         turnId: null,
         messageId: `${action.id}-reply`,
       };
+      const firstLine = text.split("\n", 1)[0] ?? "";
+      const sent: Message = {
+        id: action.id,
+        role: "user",
+        text,
+        status: "complete",
+        ...(attachments.length ? { attachments } : {}),
+      };
       return {
         ...toTop(state, pending.conversationId, (c) => ({
-          // The first message names the chat; a model switch before it doesn't count.
+          // The first message names the chat (or its first file); a model switch before it
+          // doesn't count.
           title: c.messages.some((m) => m.role === "user")
             ? c.title
-            : (text.split("\n", 1)[0]?.slice(0, 40) ?? text),
+            : (firstLine || (attachments[0]?.name ?? "")).slice(0, 40) || c.title,
           messages: [
             ...c.messages,
-            { id: action.id, role: "user", text, status: "complete" },
+            sent,
             { id: pending.messageId, role: "assistant", text: "", status: "streaming" },
           ],
         })),
@@ -203,13 +228,15 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     if (pending?.turnId !== null) return state;
     const { conversationId } = pending;
     const chat = state.conversations.find((c) => c.id === conversationId);
-    const text = chat?.messages.at(-2)?.text ?? "";
+    const sent = chat?.messages.at(-2);
+    const text = sent?.text ?? "";
+    const attachments = sent?.attachments ?? [];
     const next = update(state, conversationId, (c) => {
       const messages = c.messages.slice(0, -2);
       return { messages, ...(messages.some((m) => m.role === "user") ? {} : { title: NEW_TITLE }) };
     });
     const { reason, message } = event.payload;
-    const limit = { reason, message, conversationId, text };
+    const limit = { reason, message, conversationId, text, attachments };
     return { ...next, pending: null, limit, announcement: message };
   }
   // A rejection (`seq` 0) answers this tab's send before any turn started.
@@ -258,11 +285,11 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   if (!current) return state;
   const local = new Map(current.messages.map((m) => [m.id, m]));
   // D1 holds a streaming reply's text only once it ends; the stream here is ahead.
-  const messages = stored.map(({ id, role, status, content }): Message => {
+  const messages = stored.map(({ id, role, status, content, attachments }): Message => {
     const m = local.get(id);
     return m?.status === "streaming" && status === "streaming"
       ? m
-      : { id, role, status, text: content };
+      : { id, role, status, text: content, ...(attachments?.length ? { attachments } : {}) };
   });
   const mine = pending?.conversationId === id ? pending : null;
   const reply = mine && stored.find((s) => s.id === mine.messageId);

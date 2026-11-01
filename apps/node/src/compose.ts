@@ -85,6 +85,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,
     OPA_SETUP_TOKEN: vars.OPA_SETUP_TOKEN,
+    OPA_ATTACHMENT_MAX_BYTES: vars.OPA_ATTACHMENT_MAX_BYTES,
     // No proxy header named: key per-address limits on the socket, never on a header the client
     // sends, such as CF-Connecting-IP, which only Cloudflare sets.
     OPA_CLIENT_IP_HEADER: proxyHeader || SOCKET_ADDRESS_HEADER,

@@ -9,7 +9,7 @@ const ev = (type: HarnessEvent["type"], payload = {}, turnId = "t1", sessionId =
 const started = (turnId = "t1", sessionId = "c1") =>
   ev("turn.started", { messageId: `r-${turnId}` }, turnId, sessionId);
 const run = (...actions: ChatAction[]) => actions.reduce(chatReducer, initialState("c1"));
-const send: ChatAction = { type: "send", id: "m1", text: "Plan my week" };
+const send: ChatAction = { type: "send", id: "m1", conversationId: "c1", text: "Plan my week" };
 const msg = (id: string, content: string, status: StoredMessage["status"] = "complete") =>
   ({ id, role: id.startsWith("u") ? "user" : "assistant", content, status }) as const;
 const load = (id: string, ...messages: StoredMessage[]): ChatAction => ({
@@ -44,11 +44,14 @@ describe("chatReducer", () => {
   });
 
   it("titles a chat from its first message only, and moves a chat it sends in to the top", () => {
-    const first: ChatAction = { type: "send", id: "m1", text: "New chat" };
+    const first: ChatAction = { type: "send", id: "m1", conversationId: "c1", text: "New chat" };
     const state = run(first, started(), ev("turn.completed"), { ...send, id: "m2" });
     expect(state.conversations[0]?.title).toBe("New chat");
     expect(state.conversations[0]?.messages).toHaveLength(4);
-    expect(run(list("c9"), { type: "select", id: "c9" }, send).conversations[0]?.id).toBe("c9");
+    expect(
+      run(list("c9"), { type: "select", id: "c9" }, { ...send, conversationId: "c9" })
+        .conversations[0]?.id,
+    ).toBe("c9");
   });
 
   it("marks an interrupted, failed or rejected reply, and ignores sends while one streams", () => {
@@ -141,6 +144,7 @@ describe("chatReducer", () => {
       message,
       conversationId: "c1",
       text: "Plan my week",
+      attachments: [],
     });
     expect(state.announcement).toBe(message);
     expect(chatReducer(state, { ...send, id: "m2" }).limit).toBe(null);
@@ -264,5 +268,79 @@ describe("chatReducer", () => {
     // A limit refusing that first message gives the title back.
     const refused = ev("turn.failed", { message: "Slow down.", reason: "slow_down" }, "");
     expect(run(switched, send, refused).conversations[0]?.title).toBe("New chat");
+  });
+
+  it("sends into the chat the send names, not whichever is open", () => {
+    // A send that waited on uploads may go after the user switched chats (M3-10).
+    const state = run(list("c9"), { ...send, conversationId: "c9" });
+    expect(state.activeId).toBe("c1");
+    expect(state.pending?.conversationId).toBe("c9");
+    expect(state.conversations.find((c) => c.id === "c9")?.messages[0]?.text).toBe("Plan my week");
+    expect(state.conversations.find((c) => c.id === "c1")?.messages).toEqual([]);
+  });
+
+  it("sends files alone, titles the chat from the first file, and keeps them on a refusal", () => {
+    const file = {
+      id: "f1",
+      name: "cat.png",
+      mediaType: "image/png",
+      kind: "image",
+      sizeBytes: 16,
+      sentToModel: false,
+    } as const;
+    const withFile: ChatAction = {
+      type: "send",
+      id: "m1",
+      conversationId: "c1",
+      text: "",
+      attachments: [file],
+    };
+    const sent = run(withFile);
+    expect(sent.pending).not.toBeNull();
+    expect(sent.conversations[0]?.title).toBe("cat.png");
+    expect(sent.conversations[0]?.messages[0]).toMatchObject({ text: "", attachments: [file] });
+    // An empty send with no files is still nothing.
+    expect(run({ type: "send", id: "m9", conversationId: "c1", text: "  " }).pending).toBeNull();
+
+    // A limit refusal hands the files back with the text, for the composer.
+    const refused = ev("turn.failed", { message: "Limit.", reason: "limit_reached" }, "");
+    expect(run(withFile, refused).limit?.attachments).toEqual([file]);
+
+    // A reload carries the server's record of what the model was given.
+    const done = run(
+      withFile,
+      started(),
+      ev("turn.completed"),
+      load(
+        "c1",
+        { ...msg("u1", ""), attachments: [{ ...file, sentToModel: true }] },
+        msg("r-t1", "A cat."),
+      ),
+    );
+    expect(done.conversations[0]?.messages[0]?.attachments?.[0]?.sentToModel).toBe(true);
+
+    // A reload of a chat with a saved model switch keeps both the file and the switch line.
+    const mixed = chatReducer(
+      done,
+      load(
+        "c1",
+        { ...msg("u1", ""), attachments: [{ ...file, sentToModel: true }] },
+        msg("r-t1", "A cat."),
+        {
+          id: "s1",
+          role: "system",
+          status: "complete",
+          content: "Switched to Other.",
+          attachments: [],
+        },
+      ),
+    );
+    expect(
+      mixed.conversations[0]?.messages.map((m) => [m.role, m.attachments?.length ?? 0]),
+    ).toEqual([
+      ["user", 1],
+      ["assistant", 0],
+      ["system", 0],
+    ]);
   });
 });

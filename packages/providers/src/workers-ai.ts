@@ -53,6 +53,16 @@ const TOOL_MODELS: ReadonlySet<string> = new Set([
   "@cf/zai-org/glm-5.3-flash",
 ]);
 
+/**
+ * Models whose input schema takes `image_url` content parts with a data URI, from
+ * `@cloudflare/workers-types` 5.20261031 (M3-10 AC2). No Workers AI chat model takes a PDF.
+ */
+const IMAGE_MODELS: ReadonlySet<string> = new Set([
+  "@cf/google/gemma-3-12b-it",
+  "@cf/meta/llama-3.2-11b-vision-instruct",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct",
+]);
+
 export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
   return {
     id: WORKERS_AI_PROVIDER_ID,
@@ -63,7 +73,12 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
     },
 
     capabilities(model) {
-      return { tools: TOOL_MODELS.has(model), usageInStream: true };
+      return {
+        tools: TOOL_MODELS.has(model),
+        usageInStream: true,
+        imageInput: IMAGE_MODELS.has(model),
+        pdfInput: false,
+      };
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {
