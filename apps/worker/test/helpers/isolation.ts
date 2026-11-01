@@ -41,8 +41,10 @@ export interface Seeded {
   secret: string;
   grant: string;
   usage: string;
-  /** A pending approval batch for the task's irreversible call. */
+  /** A pending approval batch, for an irreversible call of the second task. */
   batch: string;
+  /** The second task, waiting on that batch. */
+  approvalTask: string;
   /** The plaintext of the user's model key, which no response may carry. */
   apiKey: string;
   /** Every ID and every piece of content above: none may reach another user. */
@@ -265,6 +267,7 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     grant,
     usage,
     batch: `batch-${tag}`,
+    approvalTask: `approval-task-${tag}`,
   };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
