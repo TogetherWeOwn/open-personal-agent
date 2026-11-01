@@ -36,4 +36,4 @@ CREATE TABLE `approvals` (
 --> statement-breakpoint
 CREATE INDEX `approvals_user_status_idx` ON `approvals` (`user_id`,`status`,`expires_at`);--> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (11);
+INSERT INTO `schema_version` (`version`) VALUES (12);
