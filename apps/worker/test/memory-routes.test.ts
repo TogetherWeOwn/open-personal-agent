@@ -3,7 +3,16 @@
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { describe, expect, it } from "vitest";
 import { workerApp } from "../src/worker-app";
-import { Browser, claim, db, env, freshDatabase, ORIGIN, sessionHeaders } from "./helpers/app";
+import {
+  Browser,
+  claim,
+  db,
+  env,
+  freshDatabase,
+  ORIGIN,
+  type passkey,
+  sessionHeaders,
+} from "./helpers/app";
 
 freshDatabase();
 
@@ -145,9 +154,28 @@ describe("memory proposals", () => {
   });
 });
 
+type Options = Parameters<ReturnType<typeof passkey>["get"]>[0];
+
+async function stepUp(br: Browser, key: ReturnType<typeof passkey>) {
+  const res = await br.req("/api/auth/step-up/session/options", { body: {} });
+  const { options } = await res.json<{ options: Options }>();
+  const done = await br.req("/api/auth/step-up/session", {
+    body: { credential: await key.get(options) },
+  });
+  expect(done.status).toBe(200);
+}
+
 describe("memory export", () => {
+  it("needs a recent passkey step-up, not just the session", async () => {
+    const { browser } = await claim();
+    const res = await browser.req("/api/memory/export");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "step_up_required" });
+  });
+
   it("downloads every version with its supersede links and never a proposal", async () => {
-    const { browser, owner } = await claim();
+    const { browser, owner, key } = await claim();
+    await stepUp(browser, key);
     const old = await add(browser, "Sam lives in Leeds");
     const edited = await browser.req(`/api/memory/${old.id}`, {
       method: "PUT",
