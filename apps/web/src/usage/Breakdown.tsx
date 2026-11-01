@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-// Usage breakdowns (M3-16 AC2, m3-ux §3.10): by model (the v0 statement, the default) and by
-// provider, for today or this month.
+// Usage breakdowns (M3-16 AC2, m3-ux §3.10): by model (the v0 statement, the default), provider,
+// conversation, task and day. By day is a bar chart with the same data as a table one toggle away
+// (m3-ux §4.6), and every tab downloads as CSV.
 // `\uFE0E` keeps the ⚠ and ↗ glyphs as text, not colour emoji.
 import { type Key, type ReactNode, useState } from "react";
 import { Heading, Link, ToggleButton, ToggleButtonGroup } from "react-aria-components";
-import { Tabs } from "../ui";
+import { Button, Tabs } from "../ui";
 import {
   compact,
+  csvUsd,
+  type Day,
   dateWords,
   type Group,
   type Line,
   messages,
   money,
   num,
+  type Share,
+  toCsv,
   type UsageData,
 } from "./usage-data";
 
@@ -208,6 +213,124 @@ function shareCost(s: { costMicroUsd: number; unpricedCalls: number; calls: numb
   return s.unpricedCalls > 0 ? `${amount} + ${num.format(s.unpricedCalls)} unpriced` : amount;
 }
 
+const KIND = {
+  conversation: {
+    first: "Conversation",
+    untitled: "Untitled chat",
+    none: "Deleted chats and model tests",
+    href: (id: string) => `/c/${encodeURIComponent(id)}`,
+  },
+  task: {
+    first: "Task",
+    untitled: "Untitled task",
+    none: "Chat replies outside a task",
+    href: (id: string) => `/activity/tasks/${encodeURIComponent(id)}`,
+  },
+};
+
+const shareName = (s: Share, kind: keyof typeof KIND) =>
+  s.id === null ? KIND[kind].none : s.title || KIND[kind].untitled;
+
+function Shares({
+  shares,
+  kind,
+  currency,
+}: {
+  shares: Share[];
+  kind: keyof typeof KIND;
+  currency: string;
+}) {
+  if (shares.length === 0) return <Empty period="this month" />;
+  return (
+    <SimpleTable
+      caption={`By ${kind}, this month`}
+      first={KIND[kind].first}
+      rows={shares.map((s) => ({
+        key: s.id ?? "",
+        name:
+          s.id === null ? (
+            <span className="text-text-muted">{KIND[kind].none}</span>
+          ) : (
+            <Link href={KIND[kind].href(s.id)} className={link}>
+              {shareName(s, kind)}
+            </Link>
+          ),
+        calls: s.calls,
+        cost: shareCost(s, currency),
+      }))}
+    />
+  );
+}
+
+function Days({ days, currency }: { days: Day[]; currency: string }) {
+  const [asTable, setAsTable] = useState(false);
+  const top = Math.max(...days.map((d) => d.costMicroUsd), 0);
+  // With no priced cost at all, no day is the highest: unknown costs aren't zero.
+  const busiest = top > 0 ? days.find((d) => d.costMicroUsd === top) : undefined;
+  const used = days.some((d) => d.calls > 0);
+  const unpricedDays = days.filter((d) => d.unpricedCalls > 0).length;
+  const unpricedNote =
+    unpricedDays > 0 &&
+    `${num.format(unpricedDays)} ${unpricedDays === 1 ? "day has" : "days have"} messages with no price on file, left out of the bars.`;
+  return (
+    <div className="flex flex-col gap-3">
+      <ToggleButton
+        isSelected={asTable}
+        onChange={setAsTable}
+        className="min-h-11 self-start rounded-lg border border-border-strong px-4 font-medium data-selected:bg-accent data-selected:text-accent-contrast"
+      >
+        Show as table
+      </ToggleButton>
+      {!used ? (
+        <Empty period="this month" />
+      ) : asTable ? (
+        <SimpleTable
+          caption="By day, this month"
+          first="Day"
+          rows={days.map((d) => ({
+            key: d.date,
+            name: dateWords(d.date),
+            calls: d.calls,
+            cost: d.calls === 0 ? money(0, currency) : shareCost(d, currency),
+          }))}
+        />
+      ) : (
+        <figure className="flex flex-col gap-2">
+          {/* One image to a screen reader, named by its summary; Show as table has every day. */}
+          <div
+            role="img"
+            aria-label={`Cost by day this month. ${
+              busiest
+                ? `Highest: ${dateWords(busiest.date)}, about ${money(top, currency)}.`
+                : "No priced cost yet."
+            }${unpricedNote ? ` ${unpricedNote}` : ""} Show as table for every day.`}
+            className="flex h-40 items-end gap-px border-b border-border-strong"
+          >
+            {days.map((d) => (
+              <div
+                key={d.date}
+                title={`${dateWords(d.date)}: about ${money(d.costMicroUsd, currency)}`}
+                className="flex-1 rounded-t-sm bg-accent"
+                style={{ height: top > 0 ? `${(d.costMicroUsd / top) * 100}%` : 0 }}
+              />
+            ))}
+          </div>
+          <figcaption className="flex justify-between text-sm text-text-muted">
+            <span>{dateWords(days[0]?.date ?? "", "short")}</span>
+            <span>
+              {busiest
+                ? `Highest about ${money(top, currency)}, ${dateWords(busiest.date, "short")}`
+                : "No priced cost yet"}
+            </span>
+            <span>{dateWords(days.at(-1)?.date ?? "", "short")}</span>
+          </figcaption>
+          {unpricedNote && <p className="text-sm">{unpricedNote}</p>}
+        </figure>
+      )}
+    </div>
+  );
+}
+
 /** A provider's lines summed for the By provider tab. */
 const groupShare = (g: Group) => ({
   costMicroUsd: g.costMicroUsd,
@@ -215,7 +338,59 @@ const groupShare = (g: Group) => ({
   unpricedCalls: g.lines.reduce((n, l) => n + (l.costMicroUsd === null ? l.calls : 0), 0),
 });
 
-type TabId = "model" | "provider";
+/** A row's cost for the CSV: blank when every message in it is unpriced, never a made-up zero. */
+const csvCost = (s: { calls: number; unpricedCalls: number; costMicroUsd: number }) =>
+  s.calls > 0 && s.unpricedCalls === s.calls ? "" : csvUsd(s.costMicroUsd);
+
+type TabId = "model" | "provider" | "conversation" | "task" | "day";
+
+function csvFor(tab: TabId, data: UsageData, key: "today" | "month") {
+  const { breakdowns: b } = data;
+  const lines = data[key].groups;
+  switch (tab) {
+    case "model":
+      return toCsv([
+        ["Billed by", "Model", "Messages", "Tokens in", "Tokens out", "Cost (USD)", "Price as of"],
+        ...lines.flatMap((g) =>
+          g.lines.map((l) => [
+            g.name,
+            l.model,
+            l.calls,
+            l.inputTokens,
+            l.outputTokens,
+            csvUsd(l.costMicroUsd),
+            l.priceVerifiedAt ?? "",
+          ]),
+        ),
+      ]);
+    case "provider":
+      return toCsv([
+        ["Billed by", "Messages", "Unpriced messages", "Cost (USD)"],
+        ...lines.map((g) => {
+          const s = groupShare(g);
+          return [g.name, s.calls, s.unpricedCalls, csvCost(s)];
+        }),
+      ]);
+    case "conversation":
+    case "task":
+      return toCsv([
+        [KIND[tab].first, "Messages", "Unpriced messages", "Cost (USD)"],
+        ...b[tab].map((s) => [shareName(s, tab), s.calls, s.unpricedCalls, csvCost(s)]),
+      ]);
+    case "day":
+      return toCsv([
+        ["Day", "Messages", "Unpriced messages", "Cost (USD)"],
+        ...b.day.map((d) => [d.date, d.calls, d.unpricedCalls, csvCost(d)]),
+      ]);
+  }
+}
+
+function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 export function Breakdown({ data }: { data: UsageData }) {
   const [tab, setTab] = useState<TabId>("model");
@@ -256,12 +431,23 @@ export function Breakdown({ data }: { data: UsageData }) {
       {period.groups.length === 0 ? <Empty period={label} /> : body}
     </div>
   );
+  const month = tab === "conversation" || tab === "task" || tab === "day";
   return (
     <section aria-labelledby="breakdown-heading" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Heading id="breakdown-heading" level={2} className="text-xl font-semibold">
           Breakdown
         </Heading>
+        <Button
+          onPress={() =>
+            download(
+              `usage-${month ? "month" : key}-by-${tab}.csv`,
+              csvFor(tab, data, month ? "month" : key),
+            )
+          }
+        >
+          Export CSV
+        </Button>
       </div>
       <Tabs
         label="Break down by"
@@ -305,6 +491,27 @@ export function Breakdown({ data }: { data: UsageData }) {
                 })}
               />,
             ),
+          },
+          {
+            id: "conversation",
+            label: "Chat",
+            content: (
+              <Shares
+                shares={data.breakdowns.conversation}
+                kind="conversation"
+                currency={data.currency}
+              />
+            ),
+          },
+          {
+            id: "task",
+            label: "Task",
+            content: <Shares shares={data.breakdowns.task} kind="task" currency={data.currency} />,
+          },
+          {
+            id: "day",
+            label: "Day",
+            content: <Days days={data.breakdowns.day} currency={data.currency} />,
           },
         ]}
       />
