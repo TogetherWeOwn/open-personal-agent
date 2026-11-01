@@ -8,6 +8,7 @@ import type { Memory, WriteOutcome } from "@opa/db/memory";
 import { createRepository, isId } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
 import type { AppEnv } from "./env";
+import { hasStepUp } from "./session";
 
 type Ctx = Context<AppEnv>;
 const userOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope);
@@ -130,8 +131,12 @@ memoryRoutes.post("/proposals/:id/:decision", async (c) => {
   return reply(c, await decisions[decision](user.memory, id), await titlesOf(user));
 });
 
-/** The `opa-memory-export/v1` download, behind the session like every route (M3-20 AC1). */
+/**
+ * The `opa-memory-export/v1` download. Export is an account action, so like M3-20's it needs the
+ * 5-minute passkey step-up on top of the session: a stolen cookie alone can't take everything.
+ */
 memoryRoutes.get("/export", async (c) => {
+  if (!hasStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
   const { rows, links } = await userOf(c).memory.dump();
   const exportedAt = new Date().toISOString();
   c.header(
