@@ -91,7 +91,19 @@ describe("supply chain", () => {
     const lax = yaml.replace("esbuild", "esbuild\n  - sharp").replace("1440", "60");
     expect(checkPnpmPolicy(lax.replace("strictDepBuilds: true", ""))).toHaveLength(3);
     expect(checkRenovatePolicy('{"minimumReleaseAge":"3 days"}')).toEqual([]);
+    expect(checkRenovatePolicy('{"minimumReleaseAge":"24 hours"}')).toEqual([]);
     expect(checkRenovatePolicy("{}")).toHaveLength(1);
+    // Too short, unreadable, only on some packages, or lowered by a rule.
+    for (const age of ['"1 minute"', '"12 hours"', '"soon"', "3"]) {
+      expect(checkRenovatePolicy(`{"minimumReleaseAge":${age}}`)).toHaveLength(1);
+    }
+    const narrow = { packageRules: [{ matchPackageNames: ["x"], minimumReleaseAge: "3 days" }] };
+    expect(checkRenovatePolicy(JSON.stringify(narrow))).toHaveLength(1);
+    const lowered = {
+      minimumReleaseAge: "3 days",
+      packageRules: [{ minimumReleaseAge: "1 hour" }],
+    };
+    expect(checkRenovatePolicy(JSON.stringify(lowered))).toHaveLength(1);
   });
 
   it("requires SHA pins, read-only permissions and no privileged PR trigger", () => {
@@ -122,6 +134,33 @@ describe("supply chain", () => {
     expect(
       checkWorkflow("ci.yml", `on: [push, ${trigger}]\npermissions:\n  contents: read\n`),
     ).toEqual(["ci.yml: uses pull_request_target"]);
+    // Triggers that run with the base repository's secrets on events outsiders can cause.
+    for (const t of [
+      "workflow_run",
+      "issue_comment",
+      "pull_request_review",
+      join("pull_request_review", "_comment"),
+    ]) {
+      const text = `on:\n  ${t}:\n    types: [created]\npermissions:\n  contents: read\n`;
+      expect(checkWorkflow("ci.yml", text)).toEqual([`ci.yml: uses ${t}`]);
+    }
+  });
+
+  it("requires container and service images pinned by digest", () => {
+    const digest = `@sha256:${"a".repeat(64)}`;
+    const wf = (job: string) => `on: push\npermissions:\n  contents: read\njobs:\n  a:\n${job}`;
+    const pinned = wf(
+      `    container:\n      image: mcr.microsoft.com/playwright${digest}\n` +
+        `    services:\n      db:\n        image: postgres${digest}\n`,
+    );
+    expect(checkWorkflow("ci.yml", pinned)).toEqual([]);
+    expect(checkWorkflow("ci.yml", wf("    container: node:22\n"))).toEqual([
+      'ci.yml: jobs.a.container uses "node:22", which is not pinned to a sha256 digest',
+    ]);
+    const service = wf("    services:\n      db:\n        image: postgres:17\n");
+    expect(checkWorkflow("ci.yml", service)).toEqual([
+      'ci.yml: jobs.a.services.db uses "postgres:17", which is not pinned to a sha256 digest',
+    ]);
   });
 
   it("lists the packages in the Worker bundle and flags unreviewed ones", () => {
