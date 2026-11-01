@@ -2,9 +2,12 @@
 import { Hono } from "hono";
 import type { Env } from "./env";
 import { checkHealth } from "./health";
+import { claimGuard, setup, setupOpen } from "./setup";
 import { finishSetupPage } from "./setup-page";
 
 export const app = new Hono<{ Bindings: Env }>();
+
+app.use(claimGuard);
 
 app.get("/api/health", async (c) => {
   const health = await checkHealth(c.env);
@@ -12,15 +15,19 @@ app.get("/api/health", async (c) => {
   return c.json(health, health.status === "ok" ? 200 : 503);
 });
 
-// The claim flow (M2-09) takes over `/setup` once the deployment is ready; until then the SPA
-// serves it.
+// The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 app.get("/setup", async (c) => {
   const health = await checkHealth(c.env);
-  if (health.status !== "setup_required") return c.env.ASSETS.fetch(c.req.raw);
   c.header("Cache-Control", "no-store");
-  c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
-  return c.html(finishSetupPage(health), 503);
+  if (health.status === "setup_required") {
+    c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
+    return c.html(finishSetupPage(health), 503);
+  }
+  if (!(await setupOpen(c.env))) return c.json({ error: "already_claimed" }, 403);
+  return c.env.ASSETS.fetch(c.req.raw);
 });
+
+app.route("/setup", setup);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 

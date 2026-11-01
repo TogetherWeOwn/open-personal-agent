@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Default rules, plus: fake credentials in test files whose value contains "canary".
+# Default rules, plus: fake credentials in test files whose value contains "canary", and two
+# library class names in the built Worker that the generic-api-key rule mistakes for keys.
 [extend]
 useDefault = true
 
@@ -8,3 +9,9 @@ description = "Test canaries"
 condition = "AND"
 paths = ['''(?:^|/)test/''', '''\.test\.[cm]?[jt]sx?$''']
 regexes = ['''(?i)canary''']
+
+# Exact secret matches only: an AND with `paths` here would allowlist every finding in the path.
+[[allowlists]]
+description = "ASN.1 class names from @peculiar (via @simplewebauthn/server) in the built Worker"
+regexTarget = "secret"
+regexes = ['''^RecipientEncryptedKeys_1$''', '''^PKCS8ShroudedKeyBag$''']
