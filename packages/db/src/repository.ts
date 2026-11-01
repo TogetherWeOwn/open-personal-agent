@@ -681,6 +681,22 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         return keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
       };
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
+      /** Takes `step` off the setup checklist (M3-24 AC1); a no-op when it isn't on it. */
+      const finishSetup = (step: string, updatedAt: number) => {
+        const list = userSettings.setupSkipped;
+        return db
+          .update(userSettings)
+          .set({
+            setupSkipped: sql`(SELECT json_group_array(value) FROM json_each(${list}) WHERE value <> ${step})`,
+            updatedAt,
+          })
+          .where(
+            and(
+              eq(userSettings.userId, userId),
+              sql`EXISTS (SELECT 1 FROM json_each(${list}) WHERE value = ${step})`,
+            ),
+          );
+      };
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
       const getConversation = async (id: string) =>
         (await db.select().from(conversations).where(own(id)).limit(1))[0];
@@ -1845,12 +1861,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .limit(1)
             )[0],
           /**
-           * Saves the fields, and with them, in one batch, a new display name and the change's
-           * audit row (M3-19 AC3): a change the log can't record isn't made.
+           * Saves the fields, and with them, in one batch, a new display name, the change's audit
+           * row (M3-19 AC3) and the setup step it finishes (M3-24 AC1): a change the log can't
+           * record isn't made, and a saved profile can't leave About you on the checklist.
            */
           save: async (
             values: SettingsUpdate,
-            o: { displayName?: string; audit?: AuditRow | undefined } = {},
+            o: { displayName?: string; audit?: AuditRow | undefined; finish?: string } = {},
           ) => {
             const now = Date.now();
             const set = { ...values, updatedAt: now };
@@ -1868,6 +1885,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                       .where(eq(users.id, userId)),
                   ]),
               ...(o.audit ? [db.insert(auditLog).values(auditValues(userId, o.audit))] : []),
+              ...(o.finish === undefined ? [] : [finishSetup(o.finish, now)]),
             ]);
           },
           /**
@@ -1888,19 +1906,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /** Takes a step off the checklist in one statement; the last one leaves an empty list. */
           finishSetup: async (step: string) => {
-            const list = userSettings.setupSkipped;
-            await db
-              .update(userSettings)
-              .set({
-                setupSkipped: sql`(SELECT json_group_array(value) FROM json_each(${list}) WHERE value <> ${step})`,
-                updatedAt: Date.now(),
-              })
-              .where(
-                and(
-                  eq(userSettings.userId, userId),
-                  sql`EXISTS (SELECT 1 FROM json_each(${list}) WHERE value = ${step})`,
-                ),
-              );
+            await finishSetup(step, Date.now());
           },
           keyUsed: async (secretId: string) => {
             await db

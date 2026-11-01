@@ -2,7 +2,7 @@
 // The setup checklist's API (M3-24 AC1, A-O2): a skipped onboarding step stays on the list until
 // the user finishes it, wherever that happens, and Hide only takes the card off the chat.
 import { describe, expect, it } from "vitest";
-import { claim, freshDatabase } from "./helpers/app";
+import { claim, count, db, freshDatabase } from "./helpers/app";
 
 freshDatabase();
 
@@ -54,6 +54,22 @@ describe("setup checklist", () => {
     const body = { displayName: "Sam", about: "I garden." };
     expect((await browser.req("/api/settings/profile", { method: "PUT", body })).status).toBe(204);
     expect((await setup()).skipped).toEqual(["costs"]);
+  });
+
+  it("saves none of the profile when finishing About you fails", async () => {
+    const { browser, setup, post } = await signedIn();
+    await post({ skip: "about" });
+    await db.exec(
+      "CREATE TRIGGER fail_finish BEFORE UPDATE OF setup_skipped ON user_settings BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    );
+    const body = { displayName: "Sam", about: "I garden." };
+    const res = await browser.req("/api/settings/profile", { method: "PUT", body });
+    await db.exec("DROP TRIGGER fail_finish");
+    expect(res.status).toBe(500);
+    expect((await setup()).skipped).toEqual(["about"]);
+    expect(await count("users", "display_name = 'Sam'")).toBe(0);
+    expect(await count("user_settings", "about = 'I garden.'")).toBe(0);
+    expect(await count("audit_log", "action = 'settings.profile'")).toBe(0);
   });
 
   it("finishes Costs and limits when Spending is saved", async () => {

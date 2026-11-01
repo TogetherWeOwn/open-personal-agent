@@ -371,10 +371,10 @@ settings.put("/profile", async (c) => {
     {
       displayName,
       audit: audit("settings.profile", was, { displayName, about: about.trim() }, ["about"]),
+      // A profile saved in Settings › Assistant finishes "About you" wherever it was skipped.
+      finish: "about",
     },
   );
-  // A profile saved in Settings › Assistant finishes "About you" wherever it was skipped.
-  await user.settings.finishSetup("about");
   return c.body(null, 204);
 });
 
