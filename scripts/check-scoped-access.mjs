@@ -74,7 +74,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const args = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"];
   const paths = execFileSync("git", args, { encoding: "utf8" }).split("\0");
   const files = paths
-    .filter((p) => SOURCE.test(p))
+    .filter((p) => SOURCE.test(p) && existsSync(p)) // a deleted file stays listed until staged
     .map((path) => ({ path, text: readFileSync(path, "utf8") }));
   const problems = findViolations(files);
   if (existsSync(VAULT_PACKAGE)) {
