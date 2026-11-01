@@ -52,7 +52,7 @@ async function call(
 
 const sse = (...lines: string[]) => new Response(lines.map((line) => `data: ${line}\n\n`).join(""));
 /** Answers in text, and calls the probe's tool when offered tools; or refuses tools outright. */
-const answer = (tools: "call" | "refuse" = "call") =>
+const answer = (tools: "call" | "refuse" | "limit" = "call") =>
   vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
     if (!JSON.parse(String(init?.body)).tools) {
       return sse(JSON.stringify({ choices: [{ delta: { content: "ready" } }] }), "[DONE]");
@@ -60,6 +60,8 @@ const answer = (tools: "call" | "refuse" = "call") =>
     if (tools === "refuse") {
       return Response.json({ error: { message: "tools are not supported" } }, { status: 400 });
     }
+    if (tools === "limit")
+      return Response.json({ error: { message: "slow down" } }, { status: 429 });
     const call = { index: 0, id: "c1", function: { name: "report_ready", arguments: "{}" } };
     return sse(JSON.stringify({ choices: [{ delta: { tool_calls: [call] } }] }), "[DONE]");
   });
@@ -175,10 +177,18 @@ describe("several providers", () => {
     expect(listed[0].key.lastUsedAt).toBeTypeOf("number");
   });
 
-  it("reports a host that refuses tools, and still passes the text test", async () => {
-    answer("refuse");
+  it("tells a host that refuses tools from a probe that didn't get to ask", async () => {
+    const fetch = answer("refuse");
     const tested = await call("u1", "POST", `/settings/providers/${first}/test`, {});
     expect(tested.body).toMatchObject({ ok: true, tools: false, toolProbe: "rejected" });
+    // Room for a reasoning model to think before it calls; the cap counts those tokens.
+    expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body)).max_completion_tokens).toBe(1024);
+    vi.restoreAllMocks();
+    answer("limit");
+    const limited = await call("u1", "POST", `/settings/providers/${first}/test`, {});
+    expect(limited.body).toMatchObject({ ok: true, tools: false, toolProbe: "failed" });
+    // The total covers both calls; latency is the prompt's alone.
+    expect(limited.body.totalMs).toBeGreaterThanOrEqual(limited.body.latencyMs);
   });
 
   it("pins a conversation to a model, and back to the Chat role", async () => {

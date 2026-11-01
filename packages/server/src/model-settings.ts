@@ -33,7 +33,9 @@ const PROBE_TOOL = {
 const TOOL_PROBE = {
   messages: [{ role: "user" as const, content: "Call the report_ready tool now." }],
   tools: [PROBE_TOOL],
-  maxOutputTokens: 64,
+  // Reasoning models spend output tokens before they call, and a reply cut at the cap drops its
+  // calls. This leaves room for that and still bounds the probe at about a cent.
+  maxOutputTokens: 1024,
 };
 
 type Ctx = Context<AppEnv>;
@@ -336,6 +338,16 @@ settings.put("/roles", async (c) => {
 type Call = Parameters<ModelProvider["stream"]>[0];
 
 /**
+ * What a probe without the call says about tools. Only a refused request (400) or a text answer
+ * is evidence against them; a rate limit, outage or timeout means the probe didn't get to ask.
+ */
+function probeOutcome(failure: string | undefined) {
+  if (!failure) return "ignored"; // answered in text
+  if (failure === "bad_request") return "rejected";
+  return failure === "timeout" ? "timeout" : "failed";
+}
+
+/**
  * One model call under the Test deadline: the time to its first output, the text, any tool
  * calls, usage, and the failure if it had one. Some providers never settle once they stall, so
  * the deadline doesn't wait for the stream.
@@ -415,16 +427,9 @@ async function test(c: Ctx, pick: ModelPick) {
   return c.json({
     ok: true,
     latencyMs: first.firstOutputMs ?? first.totalMs,
-    totalMs: first.totalMs,
+    totalMs: first.totalMs + probe.totalMs,
     tools: called,
-    // "rejected": the host refused a request with tools; "ignored": it answered without the call.
-    toolProbe: called
-      ? "called"
-      : probe.failure?.code === "timeout"
-        ? "timeout"
-        : probe.failure
-          ? "rejected"
-          : "ignored",
+    toolProbe: called ? "called" : probeOutcome(probe.failure?.code),
     price: priceHint(billingId, model),
     reply: first.reply.slice(0, 200),
   });
