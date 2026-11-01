@@ -3,9 +3,16 @@
 // the month-end projection, the seven PRD §15 cost categories and the month's breakdowns, with
 // labels, subtotals and staleness worked out here, so the page does no arithmetic.
 import { createRepository } from "@opa/db/repository";
-import { findPrice, isStale, providerInfo, workersAiAllowance, workersPaid } from "@opa/pricing";
+import {
+  cloudflareAllowances,
+  findPrice,
+  isStale,
+  providerInfo,
+  workersAiAllowance,
+  workersPaid,
+} from "@opa/pricing";
 import { Hono } from "hono";
-import { allowanceMeters } from "./allowances";
+import { type AllowanceMeter, allowanceMeters, type MeterId } from "./allowances";
 import type { AppEnv } from "./env";
 
 type Usage = ReturnType<ReturnType<typeof createRepository>["forUser"]>["usage"];
@@ -137,11 +144,25 @@ export function breakdowns(rows: Breakdowns, first: string, last: string, dateOf
 
 /**
  * PRD §15's seven categories in its order (A-Co4). Only AI models are in the ledger; Cloudflare's
- * own services are included in Workers Paid, and their meters come from M3-16 AC3's sources.
+ * own services are included in Workers Paid until a meter (M3-16 AC3) passes its included amount;
+ * past it Cloudflare bills the excess, at a cost the app can't see. `meters` is null for a member,
+ * or when they can't be read, and then the plan's inclusion is all Usage can say.
  */
-function categories(ai: { today: number; month: number; projected: number }, now: number) {
+function categories(
+  ai: { today: number; month: number; projected: number },
+  meters: AllowanceMeter[] | null,
+  now: number,
+) {
   const plan = Math.round(workersPaid.usdPerMonth * 1e6);
   const none = { status: "none-configured" as const, label: null };
+  // d1_cap is a hard limit, not an included amount, and Workers AI's overage is the AI category's.
+  const covered = (ids: MeterId[]) =>
+    meters?.some((m) => ids.includes(m.id) && m.used >= m.limit)
+      ? {
+          status: "over-allowance" as const,
+          label: "Over the Workers Paid allowance, billed by Cloudflare",
+        }
+      : { status: "included" as const, label: "Included in Workers Paid" };
   return [
     {
       id: "workers-paid",
@@ -153,8 +174,8 @@ function categories(ai: { today: number; month: number; projected: number }, now
       priceVerifiedAt: workersPaid.verifiedAt,
       stale: isStale(workersPaid.verifiedAt, now),
     },
-    { id: "cloudflare", status: "included" as const, label: "Included in Workers Paid" },
-    { id: "storage", status: "included" as const, label: "Included in Workers Paid" },
+    { id: "cloudflare", ...covered(["workflows_steps", "do_duration"]) },
+    { id: "storage", ...covered(["d1_storage", "r2_storage"]) },
     { id: "ai", status: "billed" as const, label: null, ...ai },
     { id: "computers", ...none },
     { id: "connectors", ...none },
@@ -216,10 +237,13 @@ usageRoutes.get("/", async (c) => {
     projected: { costMicroUsd: projected },
     categories: categories(
       { today: todayPeriod.costMicroUsd, month: monthPeriod.costMicroUsd, projected },
+      meters,
       now,
     ),
     breakdowns: breakdowns(breakdownRows, first, last, dateOf),
     allowance: allowanceView,
     meters,
+    // The date the included amounts were checked, which every meter's line gives (AC3).
+    metersVerifiedAt: meters && cloudflareAllowances.verifiedAt,
   });
 });

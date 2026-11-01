@@ -4,7 +4,7 @@
 // points to the Cloudflare dashboard for the exact figure. There is no Workers-requests meter: the
 // app can't count them, so the dashboard link stands in.
 import { Heading, Label, Link, Meter } from "react-aria-components";
-import { type AllowanceMeter, num, type UsageData } from "./usage-data";
+import { type AllowanceMeter, dateWords, num, type UsageData } from "./usage-data";
 
 const link = "font-medium text-accent underline underline-offset-2";
 const DASHBOARD = "https://dash.cloudflare.com/?to=/:account/workers-and-pages";
@@ -59,7 +59,7 @@ function rows(meters: AllowanceMeter[], allowance: UsageData["allowance"]): Row[
   if (duration)
     out.push({
       name: "Live chats (Durable Objects)",
-      detail: `${num.format(duration.used)} of ${num.format(duration.limit)} GB-s included this month`,
+      detail: `${num.format(duration.used)} of ${num.format(duration.limit)} GB-s included in Workers Paid this month`,
       used: duration.used,
       max: duration.limit,
       included: duration.limit,
@@ -69,7 +69,7 @@ function rows(meters: AllowanceMeter[], allowance: UsageData["allowance"]): Row[
   if (d1)
     out.push({
       name: "Database (D1)",
-      detail: `${bytes(d1.used)} of ${bytes(d1.limit)} included${cap ? ` · limit ${bytes(cap.limit)}` : ""}`,
+      detail: `${bytes(d1.used)} of ${bytes(d1.limit)} included in Workers Paid${cap ? ` · limit ${bytes(cap.limit)}` : ""}`,
       used: d1.used,
       max: cap?.limit ?? d1.limit,
       included: d1.limit,
@@ -79,7 +79,7 @@ function rows(meters: AllowanceMeter[], allowance: UsageData["allowance"]): Row[
   if (steps)
     out.push({
       name: "Background task steps (Workflows)",
-      detail: `${num.format(steps.used)} of ${num.format(steps.limit)} included this month`,
+      detail: `${num.format(steps.used)} of ${num.format(steps.limit)} included in Workers Paid this month`,
       used: steps.used,
       max: steps.limit,
       included: steps.limit,
@@ -88,7 +88,7 @@ function rows(meters: AllowanceMeter[], allowance: UsageData["allowance"]): Row[
   if (files)
     out.push({
       name: "Files (R2)",
-      detail: `${bytes(files.used)} of ${bytes(files.limit)} included`,
+      detail: `${bytes(files.used)} of ${bytes(files.limit)} included in Workers Paid`,
       used: files.used,
       max: files.limit,
       included: files.limit,
@@ -108,9 +108,11 @@ function rows(meters: AllowanceMeter[], allowance: UsageData["allowance"]): Row[
 export function Meters({
   meters,
   allowance,
+  verifiedAt,
 }: {
   meters: AllowanceMeter[];
   allowance: UsageData["allowance"];
+  verifiedAt: string | null;
 }) {
   const reset =
     allowance && new Date(allowance.resetsAt).toLocaleTimeString(undefined, { timeStyle: "short" });
@@ -127,6 +129,7 @@ export function Meters({
           <span className="sr-only"> (opens in a new tab)</span>
         </Link>{" "}
         for the exact figures, and for Workers requests, which aren't counted here.
+        {verifiedAt && ` Included amounts as of ${dateWords(verifiedAt)}.`}
       </p>
       <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-surface-raised">
         {rows(meters, allowance).map((r) => (

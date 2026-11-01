@@ -113,6 +113,13 @@ function CategoryFigures({ category: k, currency }: { category: Category; curren
   if (k.status === "none-configured")
     return <span className="text-text-muted">None configured</span>;
   if (k.status === "included") return <span>Included in Workers Paid</span>;
+  if (k.status === "over-allowance")
+    return (
+      <span>
+        {k.label}
+        <span className="block text-sm text-text-muted">The amount isn't tracked here</span>
+      </span>
+    );
   if (k.id === "workers-paid") {
     return (
       <span className="tabular-nums">
@@ -218,7 +225,14 @@ export function Usage() {
           </EmptyState>
         ))}
       {data && <Categories categories={data.categories} currency={data.currency} />}
-      {data?.meters && <Meters meters={data.meters} allowance={data.allowance} />}
+      {/* The neuron line stands even when the other meters can't be read. */}
+      {(data?.meters || data?.allowance) && (
+        <Meters
+          meters={data.meters ?? []}
+          allowance={data.allowance}
+          verifiedAt={data.metersVerifiedAt}
+        />
+      )}
       {data && used && <Breakdown data={data} />}
     </Page>
   );

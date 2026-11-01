@@ -150,6 +150,7 @@ function body(today: typeof period, month: typeof period, allowed: unknown = all
     breakdowns: month.groups.length ? breakdowns : { conversation: [], task: [], day: [] },
     allowance: allowed,
     meters: allowed ? meters : null,
+    metersVerifiedAt: allowed ? "2026-11-01" : null,
   };
 }
 
@@ -215,11 +216,11 @@ test("a meter per Cloudflare allowance, each an estimate, and no Workers-request
   const rows = region.getByRole("listitem");
   await expect(rows).toHaveCount(5);
   await expect(rows.nth(0)).toContainText(
-    "Live chats (Durable Objects)41% of included Estimate164,000 of 400,000 GB-s included this month",
+    "Live chats (Durable Objects)41% of included Estimate164,000 of 400,000 GB-s included in Workers Paid this month",
   );
-  await expect(rows.nth(1)).toContainText("1.2 GB of 5 GB included · limit 10 GB");
-  await expect(rows.nth(2)).toContainText("1,250 of 500,000 included this month");
-  await expect(rows.nth(3)).toContainText("340 MB of 10 GB included");
+  await expect(rows.nth(1)).toContainText("1.2 GB of 5 GB included in Workers Paid · limit 10 GB");
+  await expect(rows.nth(2)).toContainText("1,250 of 500,000 included in Workers Paid this month");
+  await expect(rows.nth(3)).toContainText("340 MB of 10 GB included in Workers Paid");
   // Free neurons apart from billed ones (A-Co3).
   await expect(rows.nth(4)).toContainText("3,200 of 10,000 free today · 0 billed");
   await expect(region.getByRole("meter", { name: "Database (D1)" })).toHaveAttribute(
@@ -227,9 +228,30 @@ test("a meter per Cloudflare allowance, each an estimate, and no Workers-request
     "24% of included, estimate",
   );
   await expect(region).toContainText("for Workers requests, which aren't counted here");
+  await expect(region).toContainText("Included amounts as of Nov 1, 2026.");
   await expect(
     region.getByRole("link", { name: "Check your Cloudflare dashboard (opens in a new tab)" }),
   ).toHaveAttribute("target", "_blank");
+});
+
+test("past an included amount Cloudflare bills it; the neuron line stands without the meters", async ({
+  page,
+}) => {
+  const json = body(period, period);
+  json.categories[2] = {
+    id: "storage",
+    status: "over-allowance",
+    label: "Over the Workers Paid allowance, billed by Cloudflare",
+  };
+  await open(page, { ...json, meters: null, metersVerifiedAt: null });
+  const where = page.getByRole("region", { name: "Where it goes" }).getByRole("listitem");
+  await expect(where.nth(2)).toContainText(
+    "Over the Workers Paid allowance, billed by CloudflareThe amount isn't tracked here",
+  );
+  // The other meters couldn't be read; the Workers AI line doesn't depend on them.
+  const rows = page.getByRole("region", { name: "Cloudflare allowances" }).getByRole("listitem");
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText("3,200 of 10,000 free today · 0 billed");
 });
 
 test("a member sees no allowance meters, and half the budget shows the quiet line", async ({
