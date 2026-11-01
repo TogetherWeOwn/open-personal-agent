@@ -179,7 +179,8 @@ function unsafeInteger(value: unknown): boolean {
  * Parses the JSON text the model wrote for a call and validates it. The input of a tool is always
  * an object (the manifest's schema is `type: "object"`). Input that an approval couldn't bind
  * exactly is refused before the schema runs: duplicate keys, integers past 2^53, lone surrogates,
- * and values nested too deeply or too large (M3-07 AC1, crypto review C3).
+ * and values nested too deeply (M3-07 AC1, crypto review C3). Size is the schema's business here;
+ * a gated call too large to approve is refused when it would ask.
  */
 export function parseInput(
   schema: Schema,
@@ -198,7 +199,7 @@ export function parseInput(
   }
   if (!strict) {
     try {
-      jcs(input);
+      jcs(input, Number.POSITIVE_INFINITY);
     } catch (e) {
       if (!(e instanceof CanonicalError)) throw e;
       strict = e.message;
@@ -219,4 +220,4 @@ export function parseInput(
  * Canonical JSON (RFC 8785): the `tool.called` and approval payloads use it, so the same
  * arguments always read, and hash (M3-07), the same. Only parsed input reaches it.
  */
-export const canonical = (value: unknown): string => jcs(value);
+export const canonical = (value: unknown): string => jcs(value, Number.POSITIVE_INFINITY);

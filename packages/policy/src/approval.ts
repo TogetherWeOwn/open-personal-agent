@@ -15,8 +15,13 @@ export class CanonicalError extends Error {
   }
 }
 
-/** How deep and how large a canonical value may be; the model controls tool arguments. */
-export const CANONICAL_LIMITS = { depth: 32, bytes: 64 * 1024 } as const;
+/**
+ * How deep and how large a canonical value may be; the model controls tool arguments. `bytes`
+ * caps what an approval binds, a gated call's arguments and target; `envelope` adds room for
+ * the envelope's own fields, so arguments under `bytes` always bind. Tool input that no
+ * approval binds is only held to its schema.
+ */
+export const CANONICAL_LIMITS = { depth: 32, bytes: 64 * 1024, envelope: 72 * 1024 } as const;
 
 // With the `u` flag a surrogate pair is one code point, so this matches only a lone half.
 const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
@@ -55,13 +60,20 @@ function encode(value: unknown, depth: number): string {
   throw new CanonicalError(`a ${typeof value} has no JSON value`);
 }
 
-/** RFC 8785 JSON Canonicalization Scheme. Throws `CanonicalError` rather than change a value. */
-export function jcs(value: unknown): string {
+/**
+ * RFC 8785 JSON Canonicalization Scheme. Throws `CanonicalError` rather than change a value, or
+ * when the text is longer than `maxBytes` in UTF-8.
+ */
+export function jcs(value: unknown, maxBytes: number = CANONICAL_LIMITS.bytes): string {
   const text = encode(value, 0);
-  if (utf8.encode(text).length > CANONICAL_LIMITS.bytes) {
-    throw new CanonicalError("the value is too large");
-  }
+  if (utf8.encode(text).length > maxBytes) throw new CanonicalError("the value is too large");
   return text;
+}
+
+/** Whether an approval can bind these arguments and target (C3): within `CANONICAL_LIMITS.bytes`. */
+export function fitsApproval(args: Record<string, unknown>, target: string | null): boolean {
+  const bytes = utf8.encode(jcs(args, Number.POSITIVE_INFINITY)).length;
+  return bytes + utf8.encode(target ?? "").length <= CANONICAL_LIMITS.bytes;
 }
 
 const utf8 = new TextEncoder();
@@ -114,17 +126,23 @@ export async function bindApproval(
   input: ApprovalBindingInput,
 ): Promise<{ canonical: string; bindingHash: string }> {
   const { context } = input;
-  const canonical = jcs({
-    v: 1,
-    domain: APPROVAL_DOMAIN,
-    user_id: input.userId,
-    tool: input.manifest.name,
-    tool_def_sha256: await toolDefinitionHash(input.manifest),
-    args: input.args,
-    target: input.target,
-    context: { kind: context.kind, id: context.id, conversation_id: context.conversationId },
-    tool_call_id: input.toolCallId,
-  });
+  if (!fitsApproval(input.args, input.target)) {
+    throw new CanonicalError("the arguments are too large to approve");
+  }
+  const canonical = jcs(
+    {
+      v: 1,
+      domain: APPROVAL_DOMAIN,
+      user_id: input.userId,
+      tool: input.manifest.name,
+      tool_def_sha256: await toolDefinitionHash(input.manifest),
+      args: input.args,
+      target: input.target,
+      context: { kind: context.kind, id: context.id, conversation_id: context.conversationId },
+      tool_call_id: input.toolCallId,
+    },
+    CANONICAL_LIMITS.envelope,
+  );
   return { canonical, bindingHash: toBase64Url(await sha256(utf8.encode(canonical))) };
 }
 
@@ -151,7 +169,12 @@ export async function openApproval(
     const actual = toBase64Url(await sha256(utf8.encode(canonical)));
     if (actual !== bindingHash) return null;
     const e = JSON.parse(canonical) as Record<string, unknown>;
-    if (jcs(e) !== canonical || e.v !== 1 || e.domain !== APPROVAL_DOMAIN) return null;
+    if (
+      jcs(e, CANONICAL_LIMITS.envelope) !== canonical ||
+      e.v !== 1 ||
+      e.domain !== APPROVAL_DOMAIN
+    )
+      return null;
     const ctx = e.context as Record<string, unknown> | null;
     const args = e.args;
     if (

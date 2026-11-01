@@ -5,7 +5,9 @@ import {
   type BatchDecisionItem,
   batchDigest,
   bindApproval,
+  CANONICAL_LIMITS,
   CanonicalError,
+  fitsApproval,
   fromBase64Url,
   jcs,
   openApproval,
@@ -104,6 +106,20 @@ describe("jcs (RFC 8785)", () => {
     for (let i = 0; i < 40; i++) deep = [deep];
     expect(() => jcs(deep)).toThrow(/nested/);
     expect(() => jcs("x".repeat(70_000))).toThrow(/too large/);
+    expect(jcs("x".repeat(70_000), Number.POSITIVE_INFINITY)).toHaveLength(70_002);
+  });
+});
+
+describe("fitsApproval", () => {
+  it("binds arguments up to the limit, envelope and all, and refuses them past it", async () => {
+    // `{"body":"…"}` is the string plus 11 bytes: this leaves exactly the target's 11.
+    const near = { body: "x".repeat(CANONICAL_LIMITS.bytes - 22) };
+    expect(fitsApproval(near, "example.com")).toBe(true);
+    await expect(hashOf({ args: near })).resolves.toMatch(/^[\w-]{43}$/);
+    expect(fitsApproval(near, "example.com.")).toBe(false);
+    const over = { body: "x".repeat(CANONICAL_LIMITS.bytes) };
+    expect(fitsApproval(over, null)).toBe(false);
+    await expect(hashOf({ args: over })).rejects.toThrow(/too large to approve/);
   });
 });
 

@@ -14,6 +14,7 @@ import {
   addContext,
   type ContextEvent,
   decide,
+  fitsApproval,
   type PolicyDecision,
   type RegisteredTool,
   type StandingGrant,
@@ -299,7 +300,10 @@ export async function* runTurn(
           }
           yield* skip(run.call, refused, "denied");
         } else if (d?.outcome === "ask" && !approved) {
-          asks.push({ ...run, d });
+          // An approval binds the arguments exactly; past its limit there is nothing to ask.
+          if (fitsApproval(run.input, run.tool.target?.(run.input) ?? null))
+            asks.push({ ...run, d });
+          else yield* skip(run.call, TOO_LARGE_TO_APPROVE, "error");
         } else {
           const id = host.newId();
           const began = host.now();
@@ -524,6 +528,9 @@ export async function* runTurn(
     }
   }
 }
+
+const TOO_LARGE_TO_APPROVE =
+  "The arguments are too large to ask the user to approve, so the call didn't run.";
 
 const CUT_SHORT = {
   length: "The reply was cut off at the output limit.",
