@@ -59,6 +59,17 @@ const CASES: Record<string, Case> = {
   // The task is resumed, then put back: no Workflow instance runs in the test to wake ("ended").
   "POST /api/tasks/:id/continue": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
   "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
+  // The approval needs a step-up: the owner gets a challenge, and a decision without its assertion.
+  "POST /api/approvals/:batchId/options": {
+    params: (v) => ({ batchId: v.batch }),
+    body: () => ({ decisions: [{ approvalId: "approval-1", decision: "approve" }] }),
+    own: 200,
+  },
+  "POST /api/approvals/:batchId": {
+    params: (v) => ({ batchId: v.batch }),
+    body: () => ({ decisions: [{ approvalId: "approval-1", decision: "approve" }] }),
+    own: 403,
+  },
   // A tool name, not an item: the attacker sets their own override, and the victim's stays.
   "PUT /api/settings/tools/:name": {
     params: () => ({ name: TOOL }),
