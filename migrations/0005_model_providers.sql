@@ -13,6 +13,7 @@ CREATE TABLE `model_providers` (
 );
 --> statement-breakpoint
 CREATE INDEX `model_providers_user_idx` ON `model_providers` (`user_id`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `model_providers_key_idx` ON `model_providers` (`key_secret_id`);--> statement-breakpoint
 -- Hand-edited: drizzle-kit drops the ON DELETE clause from an added column's reference.
 ALTER TABLE `conversations` ADD `model_provider` text REFERENCES model_providers(id) ON DELETE set null;--> statement-breakpoint
 ALTER TABLE `conversations` ADD `model` text;--> statement-breakpoint

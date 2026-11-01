@@ -347,6 +347,11 @@
           "name": "model_providers_user_idx",
           "columns": ["user_id", "created_at"],
           "isUnique": false
+        },
+        "model_providers_key_idx": {
+          "name": "model_providers_key_idx",
+          "columns": ["key_secret_id"],
+          "isUnique": true
         }
       },
       "foreignKeys": {

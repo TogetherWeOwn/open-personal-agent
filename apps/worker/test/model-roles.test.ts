@@ -125,6 +125,9 @@ describe("model roles", () => {
       model: "gpt-4.1-mini",
       row: { id: mini },
     });
+    // A key belongs to one provider, so removing that provider can remove its key.
+    const shared = { kind: "openai-chat" as const, providerId: "openai", baseUrl: OPENAI };
+    await expect(keyed.providers.add({ ...shared, keySecretId: "s-keyed" })).rejects.toThrow();
     // Removing the provider puts the conversation back on the Chat role.
     expect(await keyed.providers.remove(mini)).toBe(true);
     expect((await pickModel(env, scope("keyed"), pinned))?.model).toBe("gpt-4.1");
