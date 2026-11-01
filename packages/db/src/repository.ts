@@ -1,12 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
+import type { StandingGrant, TaintState, ToolOverride } from "@opa/policy";
 import { estimate, findPrice } from "@opa/pricing";
-import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
-import { conversations, messages, secrets, usage, userSettings, users } from "./schema";
+import {
+  auditLog,
+  conversations,
+  grants,
+  messages,
+  secrets,
+  toolOverrides,
+  usage,
+  userSettings,
+  users,
+} from "./schema";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
@@ -56,6 +67,17 @@ export interface DataBindings<Stub, Id> {
 export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
 >;
+
+/** An override change as the audit log records it (M3-02 AC7): the tool, both values, its risk. */
+export interface OverrideChange {
+  tool: string;
+  from: ToolOverride | null;
+  to: ToolOverride | null;
+  riskClass: string;
+}
+
+/** A standing grant as the store keeps it; `id` is what Settings revokes. */
+export type StoredGrant = StandingGrant & { id: string; createdAt: number };
 
 /** A conversation ID comes from the client, so it is checked before it reaches a query. */
 export const isId = (id: unknown): id is string =>
@@ -288,6 +310,120 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .update(secrets)
               .set({ lastUsedAt: Date.now() })
               .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
+          },
+        },
+        /** The per-tool overrides and standing grants the policy engine reads (M3-02). */
+        policy: {
+          /** Each tool's override; a tool with none is missing from the map. */
+          overrides: async () =>
+            new Map(
+              (
+                await db
+                  .select({ tool: toolOverrides.tool, decision: toolOverrides.decision })
+                  .from(toolOverrides)
+                  .where(eq(toolOverrides.userId, userId))
+              ).map((r) => [r.tool, r.decision]),
+            ),
+          /**
+           * Sets or clears one tool's override and writes its audit row, both or neither. `result`
+           * is `denied` for a loosening refused without a step-up: only the audit row is written.
+           */
+          setOverride: async (change: OverrideChange, result: "ok" | "denied" = "ok") => {
+            const { tool, to } = change;
+            const audit = db.insert(auditLog).values({
+              userId,
+              action: "policy.override",
+              module: "policy",
+              targetId: tool,
+              result,
+              detail: JSON.stringify(change),
+            });
+            if (result === "denied") return void (await audit);
+            const own = and(eq(toolOverrides.userId, userId), eq(toolOverrides.tool, tool));
+            const set = { decision: to as ToolOverride, updatedAt: Date.now() };
+            await db.batch([
+              to === null
+                ? db.delete(toolOverrides).where(own)
+                : db
+                    .insert(toolOverrides)
+                    .values({ userId, tool, ...set })
+                    .onConflictDoUpdate({
+                      target: [toolOverrides.userId, toolOverrides.tool],
+                      set,
+                    }),
+              audit,
+            ]);
+          },
+          /** Grants not revoked and not expired at `now`, newest first; all tools unless `tool`. */
+          grants: async (now: number, tool?: string): Promise<StoredGrant[]> => {
+            const rows = await db
+              .select()
+              .from(grants)
+              .where(
+                and(
+                  eq(grants.userId, userId),
+                  tool === undefined ? undefined : eq(grants.tool, tool),
+                  isNull(grants.revokedAt),
+                  or(isNull(grants.expiresAt), gt(grants.expiresAt, now)),
+                ),
+              )
+              .orderBy(desc(grants.createdAt));
+            return rows.map((g) => ({
+              id: g.id,
+              tool: g.tool,
+              scope: g.scope,
+              createdAt: g.createdAt,
+              ...(g.taskId === null ? {} : { taskId: g.taskId }),
+              ...(g.destination === null ? {} : { destination: g.destination }),
+              ...(g.expiresAt === null ? {} : { expiresAt: g.expiresAt }),
+            }));
+          },
+          /**
+           * Stores a standing grant and its audit row. Refused from a tainted context (M3-02 AC2):
+           * the context's taint is a required argument, so no caller can skip the check.
+           */
+          grant: async (grant: StandingGrant, context: TaintState) => {
+            if (context.taint !== "trusted") throw new Error("grant from a tainted context");
+            const id = crypto.randomUUID();
+            await db.batch([
+              db.insert(grants).values({
+                id,
+                userId,
+                tool: grant.tool,
+                scope: grant.scope,
+                taskId: grant.taskId ?? null,
+                destination: grant.destination ?? null,
+                expiresAt: grant.expiresAt ?? null,
+              }),
+              db.insert(auditLog).values({
+                userId,
+                action: "policy.grant",
+                module: "policy",
+                targetId: id,
+                result: "ok",
+                detail: JSON.stringify(grant),
+              }),
+            ]);
+            return id;
+          },
+          /** Revokes one of the user's own live grants; `false` if it is missing or someone else's. */
+          revoke: async (id: string) => {
+            // One transaction, as a session revoke: `changes()` is the update's row count, so the
+            // audit row records what the update did.
+            const [update] = await db.batch([
+              db
+                .update(grants)
+                .set({ revokedAt: Date.now() })
+                .where(and(eq(grants.id, id), eq(grants.userId, userId), isNull(grants.revokedAt))),
+              db.insert(auditLog).values({
+                userId,
+                action: "policy.revoke",
+                module: "policy",
+                targetId: checkId(id),
+                result: sql`CASE WHEN changes() > 0 THEN 'ok' ELSE 'denied' END`,
+              }),
+            ]);
+            return update.meta.changes > 0;
           },
         },
         getFile: (id: string) => FILES.get(fileKey(id)),

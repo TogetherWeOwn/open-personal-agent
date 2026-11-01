@@ -3,4 +3,5 @@
 // runtime-agnostic, so the Worker, the Node root and Workflow steps share one implementation.
 export * from "./decide";
 export * from "./manifest";
+export * from "./override";
 export * from "./taint";

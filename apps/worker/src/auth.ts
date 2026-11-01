@@ -14,6 +14,8 @@ export const CHALLENGE_COOKIE = "__Host-opa_webauthn";
 export const COOKIE_OPTIONS = { path: "/", secure: true, httpOnly: true, sameSite: "Lax" } as const;
 export const SESSION_ABSOLUTE_MS = 90 * 86_400_000;
 export const CHALLENGE_TTL_MS = 5 * 60_000;
+/** The account step-up window: export, credential changes, deletion, loosening a tool. */
+export const STEP_UP_MS = 5 * 60_000;
 export const RECOVERY_CODE_COUNT = 10;
 
 const encoder = new TextEncoder();

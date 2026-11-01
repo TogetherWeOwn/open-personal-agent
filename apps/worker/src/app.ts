@@ -13,6 +13,7 @@ import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
+import { toolSettings } from "./tool-settings";
 import { usageRoutes } from "./usage";
 
 /** The routes both runtimes serve. `createApp` puts them behind the guards. */
@@ -41,6 +42,7 @@ shared.use("/api/secrets/*", async (c, next) => {
 });
 
 shared.route("/api/settings", settings);
+shared.route("/api/settings", toolSettings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 shared.get("/setup", async (c) => {

@@ -115,6 +115,9 @@ importers:
       '@opa/log':
         specifier: workspace:*
         version: link:../../packages/log
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
       '@opa/pricing':
         specifier: workspace:*
         version: link:../../packages/pricing
@@ -138,6 +141,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../policy
       '@opa/pricing':
         specifier: workspace:*
         version: link:../pricing
