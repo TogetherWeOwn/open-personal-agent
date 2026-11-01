@@ -51,12 +51,18 @@ async function call(
 }
 
 const sse = (...lines: string[]) => new Response(lines.map((line) => `data: ${line}\n\n`).join(""));
-const answer = () =>
-  vi
-    .spyOn(globalThis, "fetch")
-    .mockImplementation(async () =>
-      sse(JSON.stringify({ choices: [{ delta: { content: "ready" } }] }), "[DONE]"),
-    );
+/** Answers in text, and calls the probe's tool when offered tools; or refuses tools outright. */
+const answer = (tools: "call" | "refuse" = "call") =>
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    if (!JSON.parse(String(init?.body)).tools) {
+      return sse(JSON.stringify({ choices: [{ delta: { content: "ready" } }] }), "[DONE]");
+    }
+    if (tools === "refuse") {
+      return Response.json({ error: { message: "tools are not supported" } }, { status: 400 });
+    }
+    const call = { index: 0, id: "c1", function: { name: "report_ready", arguments: "{}" } };
+    return sse(JSON.stringify({ choices: [{ delta: { tool_calls: [call] } }] }), "[DONE]");
+  });
 
 let first = "";
 let second = "";
@@ -154,6 +160,7 @@ describe("several providers", () => {
     expect(tested.body).toMatchObject({
       ok: true,
       tools: true,
+      toolProbe: "called",
       price: { inputUsdPerMTok: 0.4 },
     });
     expect(fetch.mock.calls[0]?.[0]).toBe("https://api.openai.com/v1/chat/completions");
@@ -162,9 +169,16 @@ describe("several providers", () => {
     expect(JSON.parse(init?.body as string).model).toBe("gpt-4.1-mini");
     // Test on the Chat role goes to its own provider and model.
     await call("u1", "POST", "/settings/model/test");
-    expect(fetch.mock.calls[1]?.[0]).toBe("https://openrouter.ai/api/v1/chat/completions");
+    // Each Test is two calls: the prompt, then the tool probe.
+    expect(fetch.mock.calls[2]?.[0]).toBe("https://openrouter.ai/api/v1/chat/completions");
     const listed = (await call("u1", "GET", "/settings")).body.providers;
     expect(listed[0].key.lastUsedAt).toBeTypeOf("number");
+  });
+
+  it("reports a host that refuses tools, and still passes the text test", async () => {
+    answer("refuse");
+    const tested = await call("u1", "POST", `/settings/providers/${first}/test`, {});
+    expect(tested.body).toMatchObject({ ok: true, tools: false, toolProbe: "rejected" });
   });
 
   it("pins a conversation to a model, and back to the Chat role", async () => {
