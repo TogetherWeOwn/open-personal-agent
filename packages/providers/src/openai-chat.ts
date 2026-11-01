@@ -3,6 +3,7 @@
 // Fetch only, no SDK.
 import type { ModelErrorCode, ModelEvent, ModelProvider, ModelRequest } from "@opa/core";
 import { aborted, error, replayChunks } from "./chat-chunks";
+import { chatMessages, chatTools } from "./chat-request";
 import { type OpenAIChatCompat, resolveCompat } from "./compat";
 import { canonicalOrigin } from "./credential-binding";
 import { sseData } from "./sse";
@@ -61,11 +62,17 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {
+      const tools = request.tools ?? [];
+      if (tools.length && !compat.supportsTools) {
+        yield error("bad_request", "This provider is set up without tool support");
+        return;
+      }
       const body: Record<string, unknown> = {
         model: request.model,
-        messages: request.messages,
+        messages: chatMessages(request.messages),
         stream: true,
       };
+      if (tools.length) body.tools = chatTools(tools);
       if (compat.supportsUsageInStreaming) body.stream_options = { include_usage: true };
       if (request.maxOutputTokens !== undefined) {
         body[compat.maxTokensField] = request.maxOutputTokens;

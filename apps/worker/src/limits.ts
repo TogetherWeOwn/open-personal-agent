@@ -28,7 +28,13 @@ interface Spend {
   day: number;
   spentMicroUsd: number;
   /** Reservations of calls still running, by turn ID. */
-  held: Record<string, number>;
+  held: Record<string, Hold>;
+}
+
+interface Hold {
+  microUsd: number;
+  /** When the call reserved it. */
+  at: number;
 }
 
 export interface Reservation {
@@ -68,11 +74,24 @@ export class Limits {
     return true;
   }
 
+  /**
+   * Today's spend. A new UTC day starts from zero but keeps the reservations of calls still
+   * running, so a call that started before midnight is charged when it settles: to the new day,
+   * since nothing is left to limit on the old one. No call runs for a day, so an older hold was
+   * lost with its turn and is dropped rather than carried forever.
+   */
   #spend(): Spend {
     const now = this.now();
     const day = now - (now % DAY);
     const spend = this.kv.get<Spend>("spend");
-    return spend?.day === day ? spend : { day, spentMicroUsd: 0, held: {} };
+    // Holds stored before they kept a time are plain amounts; count them as made now.
+    const holds = Object.entries(spend?.held ?? {}).map(([turnId, hold]): [string, Hold] => [
+      turnId,
+      typeof hold === "number" ? { microUsd: hold, at: now } : hold,
+    ]);
+    if (spend?.day === day) return { ...spend, held: Object.fromEntries(holds) };
+    const live = holds.filter(([, hold]) => now - hold.at < DAY);
+    return { day, spentMicroUsd: 0, held: Object.fromEntries(live) };
   }
 
   /**
@@ -84,14 +103,15 @@ export class Limits {
     const price = findPrice(providerId, model);
     if (!price) return { maxOutputTokens: MAX_OUTPUT_TOKENS, reservedMicroUsd: 0 };
     const spend = this.#spend();
-    const held = Object.values(spend.held).reduce((sum, n) => sum + n, 0);
+    const held = Object.values(spend.held).reduce((sum, hold) => sum + hold.microUsd, 0);
     const input = cost(price, inputTokens(chars), 0);
     const left = DAILY_SPEND_CAP_MICRO_USD - spend.spentMicroUsd - held - input;
     const affordable = Math.floor(left / price.outputUsdPerMTok);
     const maxOutputTokens = Math.min(MAX_OUTPUT_TOKENS, affordable);
     if (maxOutputTokens < MIN_OUTPUT_TOKENS) return null;
     const reservedMicroUsd = cost(price, inputTokens(chars), maxOutputTokens);
-    this.kv.put("spend", { ...spend, held: { ...spend.held, [turnId]: reservedMicroUsd } });
+    const hold = { microUsd: reservedMicroUsd, at: this.now() };
+    this.kv.put("spend", { ...spend, held: { ...spend.held, [turnId]: hold } });
     return { maxOutputTokens, reservedMicroUsd };
   }
 
@@ -99,7 +119,7 @@ export class Limits {
    * Releases a turn's reservation and counts what the call cost. With no usage reported, the
    * whole reservation counts, so a provider that reports none can't spend past the cap. Only a
    * held reservation is charged, so settling twice (a recovery after the turn settled) charges
-   * once, and a call that started before midnight UTC is charged to its own day, not the next.
+   * once.
    */
   settle(
     turnId: string,
@@ -121,9 +141,10 @@ export class Limits {
   #end(turnId: string, charge: (reserved: number) => number) {
     this.#calls.delete(turnId);
     const spend = this.#spend();
-    const { [turnId]: reserved, ...held } = spend.held;
-    if (reserved === undefined) return;
-    this.kv.put("spend", { ...spend, spentMicroUsd: spend.spentMicroUsd + charge(reserved), held });
+    const { [turnId]: hold, ...held } = spend.held;
+    if (hold === undefined) return;
+    const spentMicroUsd = spend.spentMicroUsd + charge(hold.microUsd);
+    this.kv.put("spend", { ...spend, spentMicroUsd, held });
   }
 }
 
