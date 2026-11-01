@@ -60,6 +60,12 @@ export const RULES = [
     "only the Workflow entrypoint scopes a task, from its D1 row (M3-12 AC9)",
   ],
   [
+    "scope-minting",
+    /^(?:packages\/db\/|apps\/worker\/src\/export-workflow\.ts$)/,
+    /\bscopeForExport\b/g,
+    "only the Workflow entrypoint scopes an export, from its D1 row (M3-20 AC1)",
+  ],
+  [
     "master-key",
     /^(?:packages\/vault\/|(?:apps\/(?:worker|node)|packages\/server)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,

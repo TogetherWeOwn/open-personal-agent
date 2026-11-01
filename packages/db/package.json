@@ -6,6 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./export": "./src/export.ts",
+    "./export-zip": "./src/export-zip.ts",
     "./memory": "./src/memory.ts",
     "./memory-tools": "./src/memory-tools.ts",
     "./repository": "./src/repository.ts",

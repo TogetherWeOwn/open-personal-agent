@@ -179,6 +179,62 @@ export type ProviderValues = Pick<
 /** R2's smallest multipart part, except the last: an upload streams through in parts this size. */
 const PART_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Stores a stream body whose length is not known up front: through `FixedLengthStream` where
+ * the caller declares it, else a multipart upload in bounded parts — the body is never buffered
+ * whole on any path (M3-10 AC1). A store with no multipart (Node) streams any body. R2's `put`
+ * takes only a known-length stream, so callers never put a stream directly.
+ */
+async function putStreamed(
+  files: DataBindings<unknown, unknown>["FILES"],
+  key: string,
+  body: ReadableStream,
+  options: { httpMetadata: { contentType: string } },
+  knownLength?: number,
+): Promise<void> {
+  const FixedLengthStream = (
+    globalThis as { FixedLengthStream?: new (length: number) => TransformStream }
+  ).FixedLengthStream;
+  if (knownLength !== undefined && FixedLengthStream) {
+    await files.put(key, body.pipeThrough(new FixedLengthStream(knownLength)), options);
+    return;
+  }
+  if (files.createMultipartUpload) {
+    const upload = await files.createMultipartUpload(key, options);
+    try {
+      // R2 wants every part but the last the same size, so each is cut at exactly
+      // `PART_BYTES` and a chunk that straddles the cut carries into the next part.
+      const parts: UploadedPart[] = [];
+      let part = new Uint8Array(PART_BYTES);
+      let filled = 0;
+      const reader = body.getReader();
+      for (let next = await reader.read(); !next.done; next = await reader.read()) {
+        let chunk = next.value;
+        while (chunk.byteLength) {
+          const take = Math.min(chunk.byteLength, PART_BYTES - filled);
+          part.set(chunk.subarray(0, take), filled);
+          filled += take;
+          chunk = chunk.subarray(take);
+          if (filled === PART_BYTES) {
+            parts.push(await upload.uploadPart(parts.length + 1, part));
+            part = new Uint8Array(PART_BYTES);
+            filled = 0;
+          }
+        }
+      }
+      if (filled || !parts.length) {
+        parts.push(await upload.uploadPart(parts.length + 1, part.slice(0, filled)));
+      }
+      await upload.complete(parts);
+    } catch (err) {
+      await upload.abort().catch(() => {});
+      throw err;
+    }
+    return;
+  }
+  await files.put(key, body, options);
+}
+
 /** A conversation ID comes from the client, so it is checked before it reaches a query. */
 export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
@@ -379,6 +435,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
       const memory = memoryService(db, userId);
       const attachmentKey = (id: string) => `u/${userId}/attachments/${checkId(id)}`;
+      const exportZipKey = (id: string) => `u/${userId}/exports/${checkId(id)}.zip`;
+      const exportStagedPrefix = (id: string) => `u/${userId}/exports/${checkId(id)}/staged/`;
+      /**
+       * One staged item file's key, under the export's own directory. Each path segment is
+       * flattened to safe characters (R2 keys are opaque, so `..` could never escape, but a
+       * staged tree with dot segments parses badly), keeping the key under the prefix.
+       */
+      const exportStagedKey = (id: string, name: string) =>
+        `${exportStagedPrefix(id)}${name
+          .split("/")
+          .map((part) => part.replace(/[^A-Za-z0-9._-]/g, "_"))
+          .map((part) => (/^\.+$/.test(part) || part === "" ? "_" : part))
+          .join("/")}`;
+      /**
+       * Every key under a prefix, in order, following cursors. `[]` where the store has no
+       * listing (Node); the export Workflow runs on Workers, where R2 always lists.
+       * The prefix must stay inside the user's namespace, like `getObject`: a caller can
+       * only name its own objects, never another user's.
+       */
+      const listR2Prefix = async (prefix: string): Promise<{ key: string; size: number }[]> => {
+        if (!prefix.startsWith(`u/${userId}/`)) throw new Error("invalid prefix");
+        if (!FILES.list) return [];
+        const keys: { key: string; size: number }[] = [];
+        let cursor: string | undefined;
+        for (;;) {
+          const page = await FILES.list({
+            prefix,
+            limit: 1000,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          for (const o of page.objects) keys.push({ key: o.key, size: o.size });
+          if (!page.truncated) break;
+          cursor = page.cursor;
+        }
+        return keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      };
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
       const getConversation = async (id: string) =>
@@ -1042,51 +1134,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             body: ReadableStream<Uint8Array>,
             contentType: string,
             knownLength?: number,
-          ) => {
-            const key = attachmentKey(id);
-            const options = { httpMetadata: { contentType } };
-            const FixedLengthStream = (
-              globalThis as { FixedLengthStream?: new (length: number) => TransformStream }
-            ).FixedLengthStream;
-            if (knownLength !== undefined && FixedLengthStream) {
-              await FILES.put(key, body.pipeThrough(new FixedLengthStream(knownLength)), options);
-              return;
-            }
-            if (FILES.createMultipartUpload) {
-              const upload = await FILES.createMultipartUpload(key, options);
-              try {
-                // R2 wants every part but the last the same size, so each is cut at exactly
-                // `PART_BYTES` and a chunk that straddles the cut carries into the next part.
-                const parts: UploadedPart[] = [];
-                let part = new Uint8Array(PART_BYTES);
-                let filled = 0;
-                const reader = body.getReader();
-                for (let next = await reader.read(); !next.done; next = await reader.read()) {
-                  let chunk = next.value;
-                  while (chunk.byteLength) {
-                    const take = Math.min(chunk.byteLength, PART_BYTES - filled);
-                    part.set(chunk.subarray(0, take), filled);
-                    filled += take;
-                    chunk = chunk.subarray(take);
-                    if (filled === PART_BYTES) {
-                      parts.push(await upload.uploadPart(parts.length + 1, part));
-                      part = new Uint8Array(PART_BYTES);
-                      filled = 0;
-                    }
-                  }
-                }
-                if (filled || !parts.length) {
-                  parts.push(await upload.uploadPart(parts.length + 1, part.slice(0, filled)));
-                }
-                await upload.complete(parts);
-              } catch (err) {
-                await upload.abort().catch(() => {});
-                throw err;
-              }
-              return;
-            }
-            await FILES.put(key, body, options);
-          },
+          ) =>
+            putStreamed(
+              FILES,
+              attachmentKey(id),
+              body,
+              { httpMetadata: { contentType } },
+              knownLength,
+            ),
           /** The stored bytes, or `null` when the object is gone. */
           getObject: (id: string) => FILES.get(attachmentKey(id)),
           /** Removes a stored object whose row was never (or is no longer) written. */
@@ -1333,34 +1388,65 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          */
         exports: {
           /** The final ZIP's key; `checkId` keeps it inside the user's exports prefix. */
-          key: (id: string) => `u/${userId}/exports/${checkId(id)}.zip`,
+          key: exportZipKey,
           /** One staged item file's key, under the export's own directory. */
-          stagedKey: (id: string, name: string) =>
-            `u/${userId}/exports/${checkId(id)}/staged/${name.replace(/[^A-Za-z0-9._-]/g, "_")}`,
+          stagedKey: exportStagedKey,
           /** The export's directory: the final ZIP beside it is not staged, so it is excluded. */
-          stagedPrefix: (id: string) => `u/${userId}/exports/${checkId(id)}/staged/`,
+          stagedPrefix: exportStagedPrefix,
+          /** Every key under a prefix, in order, following cursors (`[]` without a listing). */
+          listPrefix: listR2Prefix,
           /**
-           * Every key under a prefix, in order, following cursors. `[]` where the store has no
-           * listing (Node); the export Workflow runs on Workers, where R2 always lists.
-           * The prefix must stay inside the user's namespace, like `getObject` below: a
-           * caller can only name its own objects, never another user's.
+           * The user's other R2 stores the export's artifacts step walks (and M3-20b's deletion
+           * walks): the tool artifacts under `files/` and the offloaded task outputs under
+           * `task-outputs/`, both opaque objects with no D1 index, each with its ZIP directory.
            */
-          listPrefix: async (prefix: string): Promise<{ key: string; size: number }[]> => {
-            if (!prefix.startsWith(`u/${userId}/`)) throw new Error("invalid prefix");
-            if (!FILES.list) return [];
-            const keys: { key: string; size: number }[] = [];
-            let cursor: string | undefined;
-            for (;;) {
-              const page = await FILES.list({
-                prefix,
-                limit: 1000,
-                ...(cursor === undefined ? {} : { cursor }),
-              });
-              for (const o of page.objects) keys.push({ key: o.key, size: o.size });
-              if (!page.truncated) break;
-              cursor = page.cursor;
-            }
-            return keys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+          artifactStores: () =>
+            [
+              { prefix: `u/${userId}/files/`, dir: "artifacts/files" },
+              { prefix: `u/${userId}/task-outputs/`, dir: "artifacts/task-outputs" },
+            ] as const,
+          /**
+           * One of the user's R2 objects as a stream, by full key: a staged file, an
+           * attachment, or an object from a store the export walks. `null` when it is gone;
+           * keys outside the user's prefix are rejected, so no call names another's objects.
+           */
+          getObject: (key: string) => {
+            if (!key.startsWith(`u/${userId}/`)) throw new Error("invalid key");
+            return FILES.get(key);
+          },
+          /**
+           * Stages one item file under the export's directory. Bodies stream through, never
+           * buffer: a string for the JSON manifests, a stream for attachment and artifact bytes
+           * (through a multipart upload — R2's `put` takes only a known-length stream).
+           */
+          putStaged: (
+            id: string,
+            name: string,
+            body: string | ReadableStream,
+            contentType: string,
+          ) => {
+            const key = exportStagedKey(id, name);
+            const options = { httpMetadata: { contentType } };
+            return typeof body === "string"
+              ? FILES.put(key, body, options)
+              : putStreamed(FILES, key, body, options);
+          },
+          /** Deletes the export's staged files once the ZIP is built (or the run failed). */
+          removeStaged: async (id: string) => {
+            for (const object of await listR2Prefix(exportStagedPrefix(id)))
+              await FILES.delete(object.key);
+          },
+          /**
+           * A multipart upload for the final ZIP. Throws where the store streams any body
+           * (Node): an export only ever runs on Workers, where R2 always offers it.
+           */
+          createZipUpload: async (id: string) => {
+            const create = FILES.createMultipartUpload;
+            if (!create) throw new Error("multipart upload is unavailable");
+            // Bound to FILES: the binding's methods reject a detached call.
+            return create.call(FILES, exportZipKey(id), {
+              httpMetadata: { contentType: "application/zip" },
+            });
           },
           /**
            * Creates the row a run fills; the instance id names it for `scopeForExport`. `false`
