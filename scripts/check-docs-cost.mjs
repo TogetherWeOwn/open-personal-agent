@@ -57,7 +57,7 @@ export function checkDocsCost({ readme, config, permissions }) {
   // service, included allowance and overage rate. `\|` is a literal pipe inside a cell.
   const costRows = new Set();
   for (const [, first, rest] of section.matchAll(/^\| `([^`]+)` +\|(.*)\|$/gm)) {
-    const cells = rest.split(/(?<!\\)\|/);
+    const cells = rest.replace(/\\./g, "_").split("|"); // masks `\|`, but `\\|` still splits
     if (cells.length === 3 && cells.every((cell) => cell.trim())) costRows.add(first);
   }
   const permitted = new Set(permissions.permissions.flatMap((p) => p.bindings ?? []));
