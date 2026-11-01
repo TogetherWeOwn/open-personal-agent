@@ -14,7 +14,9 @@ import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
+import { spendingRoutes } from "./spending";
 import { stepUpRoutes } from "./step-up";
+import { taskRoutes } from "./tasks";
 import { toolSettings } from "./tool-settings";
 import { usageRoutes } from "./usage";
 import { vaultRoutes } from "./vault-reset";
@@ -45,6 +47,7 @@ shared.use("/api/secrets/*", async (c, next) => {
 });
 
 shared.route("/api/settings/vault", vaultRoutes);
+shared.route("/api/settings/spending", spendingRoutes);
 shared.route("/api/settings", settings);
 shared.route("/api/settings", toolSettings);
 
@@ -71,6 +74,7 @@ shared.route("/api/sessions", sessionRoutes);
 shared.route("/api", chatRoutes);
 shared.route("/api/attachments", attachmentRoutes);
 shared.route("/api/usage", usageRoutes);
+shared.route("/api/tasks", taskRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */
 shared.get("/api/me", async (c) => {

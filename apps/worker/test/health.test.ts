@@ -17,10 +17,9 @@ const SECRETS = {
 const TABLES =
   `approvals attachments audit_log conversations grants memories memories_fts memories_fts_config
   memories_fts_data memories_fts_docsize memories_fts_idx memory_links messages model_providers
-  passkeys recovery_codes schema_version secrets sessions setup_state tasks tool_overrides
-  turn_states usage used_setup_tokens user_keys user_settings users webauthn_challenges`.split(
-    /\s+/,
-  );
+  passkeys recovery_codes schema_version secrets sessions setup_state task_events task_steps tasks
+  tool_overrides turn_states usage used_setup_tokens user_keys user_settings users
+  webauthn_challenges`.split(/\s+/);
 
 async function health(bindings: WorkerEnv = env): Promise<[number, Health]> {
   const res = await app.request("/api/health", {}, await compose(bindings));
