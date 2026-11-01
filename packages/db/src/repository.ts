@@ -248,6 +248,7 @@ export type StepUpCeremony = {
 /** How an approved call ended: it ran, it failed, or the re-check refused it (M3-07 AC12). */
 export type ApprovalOutcome =
   | { status: "executed" | "failed" }
+  | { status: "failed"; reason: string }
   | { status: "denied" | "expired"; reason: string };
 
 /** The audit row for an approval change; `action` is NULL, breaking NOT NULL, unless `guard`. */
@@ -880,18 +881,39 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .returning()
             )[0],
           /**
-           * Ends an approval's life: a claimed call `executed` or `failed`; an approved call the
-           * re-check refused `denied` (AC12); an undecided one past its expiry `expired`. With
-           * its audit row; `false` (and nothing written) if the row wasn't in the state that
-           * outcome ends.
+           * Marks a claimed call as handed to its tool, `executing` to `dispatched`, as the first
+           * thing its durable step does (crypto review W3). `false` when the row is past
+           * `executing`: an engine crash reran the step after the call may already have acted,
+           * so it must not run again.
+           */
+          dispatch: async (batchId: string, approvalId: string) => {
+            const rows = await db
+              .update(approvals)
+              .set({ status: "dispatched" })
+              .where(
+                and(
+                  eq(approvals.batchId, batchId),
+                  eq(approvals.approvalId, approvalId),
+                  eq(approvals.userId, userId),
+                  eq(approvals.status, "executing"),
+                ),
+              )
+              .returning({ approvalId: approvals.approvalId });
+            return rows.length === 1;
+          },
+          /**
+           * Ends an approval's life: a claimed or dispatched call `executed` or `failed`; an
+           * approved call the re-check refused `denied` (AC12); an undecided one past its expiry
+           * `expired`. With its audit row; `false` (and nothing written) if the row wasn't in the
+           * state that outcome ends.
            */
           finish: async (batchId: string, approvalId: string, outcome: ApprovalOutcome) => {
-            const from =
+            const from: (typeof approvals.$inferSelect.status)[] =
               outcome.status === "executed" || outcome.status === "failed"
-                ? "executing"
+                ? ["executing", "dispatched"]
                 : outcome.status === "denied"
-                  ? "approved"
-                  : "pending";
+                  ? ["approved"]
+                  : ["pending"];
             const reason = "reason" in outcome ? outcome.reason : null;
             const result =
               outcome.status === "executed"
@@ -917,7 +939,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                       eq(approvals.batchId, batchId),
                       eq(approvals.approvalId, approvalId),
                       eq(approvals.userId, userId),
-                      eq(approvals.status, from),
+                      inArray(approvals.status, from),
                     ),
                   ),
                 db

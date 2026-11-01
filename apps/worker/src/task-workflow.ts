@@ -54,6 +54,9 @@ export interface TaskTurnState {
   turnId: string;
 }
 
+/** What an approved call returns when a rerun step finds it may already have acted. */
+const OUTCOME_UNKNOWN =
+  "The call may already have run, and its outcome is unknown, so it wasn't run again.";
 const DAILY_LIMIT_MESSAGE = "You've reached today's spending limit. It resets at midnight UTC.";
 type ScopedUser = ReturnType<ReturnType<typeof createRepository>["forUser"]>;
 
@@ -255,21 +258,33 @@ async function driveLoop(
       })(),
   };
 
+  // The batch whose approved calls this segment runs, and those that came back unknown.
+  let batch: string | null = null;
+  const unknown = new Set<string>();
   const registry = new ToolRegistry<LoopTool>();
   for (const tool of taskTools) {
     registry.register({
       manifest: tool.manifest,
       ...(tool.target ? { target: tool.target } : {}),
-      execute: async (input) => {
+      execute: async (input, _signal, call) => {
         toolSeq += 1;
-        // Only a read retries: a write that acted and then failed must not act again. (Steps
-        // are still at-least-once: an engine crash mid-step reruns it.)
-        const out = await ctx.step(
+        const under = call?.approved && batch ? { batchId: batch, id: call.toolCallId } : null;
+        // Only a read retries: a write that acted and then failed must not act again. Steps are
+        // still at-least-once (an engine crash mid-step reruns it), so an approved call first
+        // marks its row dispatched inside this step: a rerun finds it so and doesn't run the
+        // call again (crypto review W3). A step that completed replays from its record.
+        const out = (await ctx.step(
           `tool:${toolSeq}`,
-          async () => tool.execute(input, new AbortController().signal),
+          async () => {
+            if (under && !(await user.approvals.dispatch(under.batchId, `appr_${under.id}`))) {
+              return { ok: false, content: OUTCOME_UNKNOWN } satisfies ToolOutput;
+            }
+            return tool.execute(input, new AbortController().signal);
+          },
           tool.manifest.riskClass === "read" ? undefined : { retries: { limit: 0, delayMs: 0 } },
-        );
-        return out as ToolOutput;
+        )) as ToolOutput;
+        if (under && !out.ok && out.content === OUTCOME_UNKNOWN) unknown.add(under.id);
+        return out;
       },
     });
   }
@@ -302,6 +317,7 @@ async function driveLoop(
     // M3-12 AC3): the decisions, and the arguments bound in each row's envelope.
     if (turn.pending) {
       const { batchId } = turn.pending;
+      batch = batchId;
       const rows = await ctx.step(`task:decisions:${cycle}`, async () =>
         (await user.approvals.batch(batchId)).map(storedApproval),
       );
@@ -325,12 +341,16 @@ async function driveLoop(
           }),
         finish: async (toolCallId, outcome) => {
           await ctx.step(`task:approval-end:${cycle}:${toolCallId}`, async () => {
-            await user.approvals.finish(batchId, `appr_${toolCallId}`, outcome);
+            const ended = unknown.has(toolCallId)
+              ? { status: "failed" as const, reason: "outcome_unknown" }
+              : outcome;
+            await user.approvals.finish(batchId, `appr_${toolCallId}`, ended);
             return null;
           });
         },
       };
     } else {
+      batch = null;
       delete host.approvals;
     }
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
