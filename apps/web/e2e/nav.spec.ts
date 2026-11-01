@@ -145,6 +145,17 @@ test("a sign out the server refuses stays put and says so", async ({ page }) => 
   await expect(page).toHaveURL(/\/inbox$/);
 });
 
+test("a sign out on an expired session redirects home", async ({ page }) => {
+  await page.route("/api/auth/logout", (route) =>
+    route.fulfill({ status: 401, json: { error: "unauthenticated" } }),
+  );
+  await page.goto("/inbox");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
 test("on a phone the You menu marks the active destination", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 667 });
   await page.goto("/usage");

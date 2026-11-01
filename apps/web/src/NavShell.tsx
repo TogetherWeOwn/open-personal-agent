@@ -27,21 +27,29 @@ const DESTINATIONS: [Destination, string, string, LucideIcon][] = [
 ];
 
 /**
- * Theme and sign out; on phones Memory and Settings join them. Sign out redirects only after
- * the server clears the session — on failure the user stays put and the shell shows why.
+ * Theme and sign out; on phones Memory and Settings join them. Sign out redirects once the
+ * session is gone — a 401 means the session is already dead, so it redirects too. Only other
+ * failures keep the user put with a banner.
  */
 function AccountItems({ onSignOutError }: { onSignOutError: () => void }) {
   const dark = isDark();
+  const signOut = () =>
+    post("/api/auth/logout").then(
+      () => window.location.assign("/"),
+      (e: unknown) => {
+        if ((e as Error | undefined)?.message === "unauthenticated") {
+          window.location.assign("/");
+          return;
+        }
+        onSignOutError();
+      },
+    );
   return (
     <>
       <MenuItem onAction={() => setDark(!dark)}>
         {dark ? "Switch to light theme" : "Switch to dark theme"}
       </MenuItem>
-      <MenuItem
-        onAction={() =>
-          post("/api/auth/logout").then(() => window.location.assign("/"), onSignOutError)
-        }
-      >
+      <MenuItem onAction={signOut}>
         Sign out
       </MenuItem>
     </>
