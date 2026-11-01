@@ -13,17 +13,20 @@
 // nobody remains, and handed to a survivor when somebody does. `used_setup_tokens` stays: a
 // spent token must never reopen `/setup` again.
 //
-// Ordering: R2 first, then one D1 batch. R2 has no transactions, so a failed object delete
-// aborts before any row moves and a retry finds the rows still there; a D1 failure after a
-// finished R2 purge still retries clean, because object deletes are idempotent. Running task
-// and export Workflows are terminated by the route after the batch (row first, terminate
-// best-effort, as the task cancel route): their rows are gone or terminal, so a run the
-// terminate misses still finds no scope and stops.
+// Ordering: stop the work first, purge R2, then one D1 batch, then purge again. Active tasks
+// go cancelled and running exports fail before any object moves, so a run the best-effort
+// termination misses still finds a terminal row at its next step and stops without writing
+// (tasks M3-12 AC3, exports M3-20 AC1). The final pass catches what a step already past its
+// re-read wrote between the two purges — object deletes are idempotent, so a D1 failure
+// between the purges still retries clean. R2 has no transactions, so a failed object delete
+// throws before any row moves and a retry finds the rows still there; without a listing the
+// purge cannot prove the prefix empty, so the delete refuses rather than strand objects.
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { openD1 } from "./index";
 import { type DataBindings, isId } from "./repository";
 import {
   auditLog,
+  dataExports,
   setupState,
   taskEvents,
   taskSteps,
@@ -39,13 +42,58 @@ const ACTIVE_TASK = ["queued", "running", "waiting_for_approval", "budget_limite
 export interface DeletionResult {
   /** True when no users remain and the deployment is claimable again. */
   unclaimed: boolean;
-  /** Workflow instances of the user's still-active tasks, for best-effort termination. */
-  terminatedInstances: string[];
+  /** Workflow instances of the user's stopped task runs, for best-effort termination. */
+  taskInstances: string[];
+  /** Workflow instances of the user's failed export runs, for best-effort termination. */
+  exportInstances: string[];
+}
+
+/**
+ * What the deletion screen shows before the passkey ceremony: whether deleting this account
+ * returns the deployment to the unclaimed first-run screen. `null` when the user is gone.
+ */
+export async function deletionPreview(
+  bindings: Pick<DataBindings<unknown, unknown>, "DB">,
+  userId: string,
+): Promise<{ isOnlyOwner: boolean } | null> {
+  if (!isId(userId)) throw new Error("invalid user id");
+  const db = openD1(bindings.DB);
+  const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1);
+  if (!user) return null;
+  const [other] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(ne(users.id, userId))
+    .limit(1);
+  return { isOnlyOwner: other === undefined };
+}
+
+/** Removes every object under the user's prefix, failing closed without a listing. */
+async function purgeUserPrefix(
+  files: DataBindings<unknown, unknown>["FILES"],
+  userId: string,
+): Promise<void> {
+  if (typeof files.list !== "function") throw new Error("account deletion needs object listing");
+  const prefix = `u/${userId}/`;
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await files.list({
+      prefix,
+      limit: 1000,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    for (const object of page.objects) keys.push(object.key);
+    if (!page.truncated) break;
+    cursor = page.cursor;
+  }
+  // The keys are collected first so deletes never run under an open listing.
+  for (const key of keys.sort()) await files.delete(key);
 }
 
 /**
  * Deletes the user's account and everything it owns. Returns `null` when the user does not
- * exist, so the route answers 404. Throws when an R2 delete fails, before any row moves.
+ * exist, so the route answers 404. Throws when the R2 purge cannot run, before any row moves.
  */
 export async function deleteUserData(
   bindings: Pick<DataBindings<unknown, unknown>, "DB" | "FILES">,
@@ -75,40 +123,53 @@ export async function deleteUserData(
       : undefined;
   const promote = successor !== undefined && !remaining.some((r) => r.role === "owner");
 
+  // The still-active runs, for the best-effort termination after the batch.
   const ownedTasks = await db
     .select({ instanceId: tasks.workflowInstanceId, status: tasks.status })
     .from(tasks)
     .where(eq(tasks.userId, userId));
-  const instanceIds = ownedTasks.flatMap((t) => (t.instanceId ? [t.instanceId] : []));
-  const terminatedInstances = ownedTasks.flatMap((t) =>
+  const taskInstances = ownedTasks.flatMap((t) =>
     t.instanceId && (ACTIVE_TASK as readonly string[]).includes(t.status) ? [t.instanceId] : [],
   );
 
+  // Stop the work first: a run the termination misses still finds a terminal row at its next
+  // step and stops without writing, so nothing lands under the prefix after the purge.
+  await db.batch([
+    db
+      .update(tasks)
+      .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+      .where(and(eq(tasks.userId, userId), inArray(tasks.status, [...ACTIVE_TASK]))),
+    db
+      .update(dataExports)
+      .set({ status: "failed", error: "account deleted" })
+      .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running"))),
+  ]);
+
   // Every object under the user's prefix: files, attachments, task outputs, export ZIPs and
   // staged item files. One listing covers all four stores; nothing under `u/{userId}/` survives.
-  const prefix = `u/${userId}/`;
-  if (bindings.FILES.list) {
-    let cursor: string | undefined;
-    const keys: string[] = [];
-    for (;;) {
-      const page = await bindings.FILES.list({
-        prefix,
-        limit: 1000,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      for (const object of page.objects) keys.push(object.key);
-      if (!page.truncated) break;
-      cursor = page.cursor;
-    }
-    for (const key of keys.sort()) await bindings.FILES.delete(key);
-  }
+  await purgeUserPrefix(bindings.FILES, userId);
+
+  // Fresh snapshot after the purge, so a run that started in between still has its journals
+  // deleted and its export instance terminated below.
+  const freshTasks = await db
+    .select({ instanceId: tasks.workflowInstanceId })
+    .from(tasks)
+    .where(eq(tasks.userId, userId));
+  const instanceIds = freshTasks.flatMap((t) => (t.instanceId ? [t.instanceId] : []));
+  const runningExports = await db
+    .select({ instanceId: dataExports.workflowInstanceId })
+    .from(dataExports)
+    .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running")));
+  const exportInstances = runningExports.flatMap((r) => (r.instanceId ? [r.instanceId] : []));
 
   // The cascade from the user row takes every user-data table (sessions, passkeys, DEKs,
   // secrets, conversations and their messages, approvals, attachments rows, usage, providers,
   // tasks, exports rows, artifacts, settings, overrides, grants, memories and their links —
   // the FTS triggers follow the memory cascade). What it cannot reach goes first, in the same
   // batch: the owner reference would otherwise block the user delete, and the audit row lands
-  // with a null user so the trail survives without naming one.
+  // with a null user and no target, so the trail survives without naming the deleted account.
+  // A running export row the stop above failed is already terminal; its ZIP and staged files
+  // are gone from the purge above, and its Workflow finds no scope and stops.
   await db.batch([
     db
       .update(tasks)
@@ -121,8 +182,6 @@ export async function deleteUserData(
         ]
       : []),
     db.delete(webauthnChallenges).where(eq(webauthnChallenges.userId, userId)),
-    // A running export row of the user cascades with the user row below; its ZIP and staged
-    // files are already gone from the purge above, and its Workflow finds no scope and stops.
     // The claim moves before the user row goes: the reference has no `onDelete`, so deleting
     // the holder first would violate it.
     ...(unclaimed ? [db.delete(setupState)] : []),
@@ -137,11 +196,14 @@ export async function deleteUserData(
       userId: null,
       action: "account.delete",
       module: "account",
-      targetId: userId,
       result: "ok",
       detail: JSON.stringify({ unclaimed }),
     }),
   ]);
 
-  return { unclaimed, terminatedInstances };
+  // The final pass: a step already past its row re-read may have written after the first
+  // purge, and an export Workflow is never terminated before here. Deletes are idempotent.
+  await purgeUserPrefix(bindings.FILES, userId);
+
+  return { unclaimed, taskInstances, exportInstances };
 }

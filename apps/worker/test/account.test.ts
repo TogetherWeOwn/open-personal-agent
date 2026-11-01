@@ -3,6 +3,7 @@
 // no row with the `user_id` (including `approvals`), nothing under `u/{userId}/` in R2 and
 // no DEK — while the audit trail survives with a null user. Deleting the only owner returns
 // the deployment to the unclaimed state; deleting one of two users leaves setup claimed.
+import { deleteUserData } from "@opa/db/deletion";
 import { describe, expect, it } from "vitest";
 import {
   Browser,
@@ -122,6 +123,11 @@ async function seedUser(userId: string) {
       .bind(id("e1"), userId, id("inst-e1"), Date.now() + 3_600_000),
     db
       .prepare(
+        "INSERT INTO exports (id, user_id, workflow_instance_id, status, expires_at) VALUES (?, ?, ?, 'running', ?)",
+      )
+      .bind(id("e-run"), userId, id("inst-e-run"), Date.now() + 3_600_000),
+    db
+      .prepare(
         "INSERT INTO approvals (batch_id, approval_id, position, user_id, conversation_id, turn_id, tool, tool_call_id, risk, rule, step_up, scopes, canonical, binding_hash, expires_at) VALUES (?, ?, 0, ?, ?, ?, 'web_fetch', ?, 'read', 'ask', 0, '[]', '{}', 'h', ?)",
       )
       .bind(id("b1"), id("a1"), userId, id("c1"), id("t1"), id("c1"), Date.now() + 60_000),
@@ -187,6 +193,44 @@ describe("DELETE /api/account", () => {
     expect(await userR2Keys(owner)).toHaveLength(5);
   });
 
+  it("previews whether deleting returns the deployment to unclaimed", async () => {
+    const { browser, owner } = await claim();
+    await seedUser(owner);
+    // No step-up yet: the screen reads this before the passkey ceremony.
+    expect(await (await browser.req("/api/account")).json()).toEqual({ isOnlyOwner: true });
+    await db
+      .prepare("INSERT INTO users (id, display_name, role) VALUES ('u2', 'B', 'member')")
+      .run();
+    expect(await (await browser.req("/api/account")).json()).toEqual({ isOnlyOwner: false });
+  });
+
+  it("a write racing the purge still leaves no objects behind", async () => {
+    const { owner } = await claim();
+    await seedUser(owner);
+    // A step already past its row re-read writes once, mid-purge: the final pass removes it.
+    let planted = false;
+    const racing = new Proxy(env.FILES, {
+      get(target, prop, receiver) {
+        if (prop === "delete")
+          return async (key: string) => {
+            await (target.delete as (key: string) => Promise<unknown>).call(target, key);
+            if (!planted) {
+              planted = true;
+              await target.put(`u/${owner}/task-outputs/sneaky`, "{}", {
+                httpMetadata: { contentType: "application/json" },
+              });
+            }
+          };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await deleteUserData({ DB: env.DB, FILES: racing }, owner);
+    expect(result).toMatchObject({ unclaimed: true });
+    expect(planted).toBe(true);
+    expect(await userR2Keys(owner)).toEqual([]);
+  });
+
   it("deletes the only owner: no rows, no R2, no DEK, deployment unclaimed", async () => {
     const { browser, key, owner } = await claim();
     await seedUser(owner);
@@ -208,11 +252,14 @@ describe("DELETE /api/account", () => {
     expect(await count("setup_state")).toBe(0);
     expect(await count("used_setup_tokens")).toBe(1);
     const trail = await db
-      .prepare("SELECT user_id, action, result FROM audit_log WHERE action = 'account.delete'")
-      .all<{ user_id: string | null; action: string; result: string }>();
+      .prepare(
+        "SELECT user_id, target_id, action, result FROM audit_log WHERE action = 'account.delete'",
+      )
+      .all<{ user_id: string | null; target_id: string | null; action: string; result: string }>();
     expect(trail.results).toHaveLength(1);
     expect(trail.results[0]).toMatchObject({
       user_id: null,
+      target_id: null,
       action: "account.delete",
       result: "ok",
     });
