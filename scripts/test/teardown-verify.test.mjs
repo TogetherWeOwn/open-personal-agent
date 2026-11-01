@@ -101,7 +101,7 @@ function verifySetup({ changes, inventory = ONE_EACH } = {}) {
   const steps = {
     inventory,
     deploy: async (_argv, deps) => {
-      calls.push(`deploy ${fs.readdirSync(path.join(root, "migrations"))}`);
+      calls.push(`deploy ${fs.readdirSync(path.join(root, "migrations")).sort()}`);
       deps.stdout(`Using fallback value in non-interactive context: yes\n${url}\n`);
       return { changed: plan[calls.length - 1], url };
     },
@@ -127,7 +127,7 @@ describe("verify:cloudflare", () => {
       upgrade,
       `teardown --name ${P} --confirm ${P}`,
     ]);
-    expect(fs.readdirSync(path.join(t.root, "migrations")).join()).toBe(base);
+    expect(fs.readdirSync(path.join(t.root, "migrations")).sort().join()).toBe(base);
     const report = t.report();
     for (const line of ["Result: **PASS**", "had to answer: 3", `\`${mig}\``, "## Cannot prove"]) {
       expect(report).toContain(line);
