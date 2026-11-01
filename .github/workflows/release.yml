@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: Apache-2.0
+# Release with calendar versions (vYYYY.MDD.P), after the gates pass (docs/releases.md).
+# Manual dispatch only. scripts/release-request.mjs proves the commit: green CI on main and a
+# successful deploy-verify run at that exact commit whose receipt artifact binds the SHA.
+# The shared releaser (TogetherWeOwn/.github actions/calver, policy production-promotion) then
+# allocates the version from tag history, tags that commit and publishes a GitHub Release,
+# Latest, whose notes group the Conventional Commit subjects since the previous stable tag.
+# No release commit or version-bump PR. A commit that already carries a stable tag, or one
+# older than the newest stable (a rollback), skips green without a tag. Dispatch with dry_run
+# to rehearse, or repair to recreate a missing Release for a tag the same verify attempt
+# already published; both need the same evidence.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-hex commit on main that deploy-verify certified"
+        type: string
+        required: true
+      verify_run_id:
+        description: "Certifying deploy-verify run ID (optional selector, not proof)"
+        type: string
+        required: false
+      verify_run_attempt:
+        description: "Certifying attempt number (required with run ID, not proof)"
+        type: string
+        required: false
+      dry_run:
+        description: "Run every check and print the version without publishing"
+        type: boolean
+        default: false
+      repair:
+        description: "Create the missing GitHub Release for a tag this verify attempt published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  tag-release:
+    name: tag-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Reviewed exception in scripts/check-supply-chain.mjs (REVIEWED_WRITE_JOBS): this job
+    # alone may write, and only to create the tag and its GitHub Release.
+    permissions:
+      actions: read # Read only this repository's verify and CI evidence.
+      contents: write # Create the tag and its GitHub Release.
+    # One release at a time; a queued dispatch waits instead of racing the tag.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          # Full history: the proof checks the release SHA is on main.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove the commit was certified
+        id: request
+        run: node scripts/release-request.mjs
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+          VERIFY_RUN_ID: ${{ inputs.verify_run_id }}
+          VERIFY_RUN_ATTEMPT: ${{ inputs.verify_run_attempt }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+      # Plan and publish run in this one serialized job, both pinned to the same reviewed
+      # TogetherWeOwn/.github commit. Plan is read-only.
+      - name: Plan the CalVer release
+        id: plan
+        uses: TogetherWeOwn/.github/actions/calver@cf983076f568407ce2dceb6eeabd1beb2e1e28c6 # shared CalVer releaser
+        with:
+          request: ${{ steps.request.outputs.request }}
+          runs-on-json: '"ubuntu-latest"'
+      - name: Build the publish request
+        id: publish-request
+        if: steps.plan.outputs.skipped != 'true'
+        run: |
+          node -e '
+            const request = { phase: "publish", plan: JSON.parse(process.env.PLAN),
+              dryRun: process.env.DRY_RUN === "true", repair: process.env.REPAIR === "true" };
+            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `request=${JSON.stringify(request)}\n`);
+          '
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+          DRY_RUN: ${{ inputs.dry_run == true }}
+          REPAIR: ${{ inputs.repair == true }}
+      - name: Tag the certified commit and publish its release
+        if: steps.plan.outputs.skipped != 'true'
+        uses: TogetherWeOwn/.github/actions/calver@cf983076f568407ce2dceb6eeabd1beb2e1e28c6 # shared CalVer releaser
+        with:
+          request: ${{ steps.publish-request.outputs.request }}
+          runs-on-json: '"ubuntu-latest"'

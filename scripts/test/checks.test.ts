@@ -143,6 +143,32 @@ describe("supply chain", () => {
       "    permissions:\n      contents: read # never write\n\n      actions: write\n",
     );
     expect(checkWorkflow("ci.yml", jobWrite)).toEqual(['ci.yml: job "a" grants write']);
+    // The one reviewed write job: exact permissions, exact workflow path, exact job name.
+    const release = (perms: string, job = "tag-release") =>
+      `on: workflow_dispatch\npermissions:\n  contents: read\njobs:\n  ${job}:\n    permissions:\n${perms}    steps: []\n`;
+    const reviewed = release("      actions: read\n      contents: write\n");
+    expect(checkWorkflow(".github/workflows/release.yml", reviewed)).toEqual([]);
+    expect(checkWorkflow("release.yml", reviewed)).toEqual([
+      'release.yml: job "tag-release" grants write',
+    ]);
+    expect(
+      checkWorkflow(
+        ".github/workflows/release.yml",
+        release("      actions: write\n      contents: write\n"),
+      ),
+    ).toEqual(['.github/workflows/release.yml: job "tag-release" grants write']);
+    expect(
+      checkWorkflow(
+        ".github/workflows/release.yml",
+        release("      actions: read\n      contents: write\n      issues: write\n"),
+      ),
+    ).toEqual(['.github/workflows/release.yml: job "tag-release" grants write']);
+    expect(
+      checkWorkflow(
+        ".github/workflows/release.yml",
+        release("      actions: read\n      contents: write\n", "other"),
+      ),
+    ).toEqual(['.github/workflows/release.yml: job "other" grants write']);
     expect(checkWorkflow("ci.yml", wf("    permissions: write-all\n"))).toHaveLength(1);
     expect(checkWorkflow("ci.yml", wf("    permissions: { contents: read } # no write\n"))).toEqual(
       [],

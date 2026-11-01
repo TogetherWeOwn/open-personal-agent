@@ -165,6 +165,25 @@ const grantsWrite = (perms) =>
     ? perms.includes("write")
     : Object.values(perms ?? {}).includes("write");
 
+/**
+ * The only jobs that may grant write, each with exactly these permissions and nothing else.
+ * The release job creates the release tag and its GitHub Release (docs/releases.md); it is
+ * manually dispatched, reads only this repository's run evidence, and holds no other
+ * credential. Extending this list needs a Security Engineer review, like REVIEWED_RUNTIME.
+ */
+export const REVIEWED_WRITE_JOBS = {
+  ".github/workflows/release.yml": {
+    "tag-release": { actions: "read", contents: "write" },
+  },
+};
+
+const exactPermissions = (actual, expected) =>
+  actual !== null &&
+  typeof actual === "object" &&
+  !Array.isArray(actual) &&
+  Object.keys(actual).length === Object.keys(expected).length &&
+  Object.entries(expected).every(([key, value]) => actual[key] === value);
+
 export function checkWorkflow(path, text) {
   const wf = parse(text) ?? {};
   const problems = [];
@@ -177,7 +196,11 @@ export function checkWorkflow(path, text) {
     problems.push(`${path}: top-level permissions must be exactly "contents: read"`);
   }
   for (const [name, job] of Object.entries(wf.jobs ?? {})) {
-    if (grantsWrite(job?.permissions)) problems.push(`${path}: job "${name}" grants write`);
+    if (!grantsWrite(job?.permissions)) continue;
+    const reviewed = REVIEWED_WRITE_JOBS[path]?.[name];
+    if (!reviewed || !exactPermissions(job.permissions, reviewed)) {
+      problems.push(`${path}: job "${name}" grants write`);
+    }
   }
   return [...problems, ...checkPins(path, wf), ...checkImages(path, wf)];
 }
