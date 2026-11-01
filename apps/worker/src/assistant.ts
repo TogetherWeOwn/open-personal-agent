@@ -13,7 +13,8 @@ import {
   type WSMessage,
 } from "agents";
 import { chatStore, isConversationId, type TurnRecord } from "./chat-store";
-import type { Env } from "./env";
+import { withoutMasterKeys } from "./compose";
+import type { Bindings } from "./env";
 
 /** The Durable Object name for a user. Only server code calls this, with the session's user. */
 export const assistantName = (userId: string) => `u:${userId}`;
@@ -36,7 +37,7 @@ type Emit = <T extends HarnessEvent["type"]>(
   payload: Extract<HarnessEvent, { type: T }>["payload"],
 ) => void;
 
-export class Assistant extends Agent<Env> {
+export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
   static override options = { sendIdentityOnConnect: false };
   /** The model for chat turns. Tests replace it with a scripted provider. */
@@ -45,6 +46,10 @@ export class Assistant extends Agent<Env> {
     model: DEFAULT_MODEL,
   };
   #running: AbortController | null = null;
+
+  constructor(ctx: DurableObjectState, env: Bindings) {
+    super(ctx, withoutMasterKeys(env));
+  }
 
   /** Liveness check for `/api/health`. */
   ping(): string {

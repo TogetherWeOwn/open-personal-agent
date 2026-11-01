@@ -11,10 +11,22 @@ export class MemoryStore implements VaultStore {
   async userKeys(userId: string) {
     return this.keys.filter((k) => k.userId === userId);
   }
+  async userKeysAt(kekVersion: number, limit: number) {
+    return this.keys.filter((k) => k.kekVersion === kekVersion).slice(0, limit);
+  }
+  async countUserKeys(kekVersion: number) {
+    return this.keys.filter((k) => k.kekVersion === kekVersion).length;
+  }
   async insertUserKey(row: WrappedDek) {
-    if (!this.keys.some((k) => k.userId === row.userId && k.kekVersion === row.kekVersion)) {
+    if (!this.keys.some((k) => k.userId === row.userId || k.kekVersion > row.kekVersion)) {
       this.keys.push(row);
     }
+  }
+  async replaceUserKey(row: WrappedDek, oldKekVersion: number) {
+    const mine = (version: number) => (k: WrappedDek) =>
+      k.userId === row.userId && k.kekVersion === version;
+    if (this.keys.some(mine(row.kekVersion))) throw new Error("primary key conflict");
+    this.keys = this.keys.map((k) => (mine(oldKekVersion)(k) ? row : k));
   }
   async getSecret(userId: string, secretId: string) {
     return this.secrets.find((s) => s.userId === userId && s.id === secretId) ?? null;

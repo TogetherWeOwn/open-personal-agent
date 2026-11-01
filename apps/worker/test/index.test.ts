@@ -6,7 +6,7 @@ import {
 } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "../src/env";
+import type { WorkerEnv } from "../src/compose";
 import worker from "../src/index";
 
 describe("worker", () => {
@@ -19,7 +19,11 @@ describe("worker", () => {
 
   it("runs the scheduled stub", async () => {
     const ctx = createExecutionContext();
-    await worker.scheduled(createScheduledController({ cron: "*/10 * * * *" }), {} as Env, ctx);
+    await worker.scheduled(
+      createScheduledController({ cron: "*/10 * * * *" }),
+      {} as WorkerEnv,
+      ctx,
+    );
     await waitOnExecutionContext(ctx);
   });
 });

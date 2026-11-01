@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "pnpm --filter @opa/web build",
-    "dev": "pnpm build && wrangler dev --local",
+    "dev": "pnpm build && node scripts/dev.mjs",
     "dev:web": "pnpm --filter @opa/web dev",
     "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
@@ -28,7 +28,8 @@
     "test:worker": "vitest run --project worker",
     "test:harness": "vitest run --project harness",
     "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs",
-    "notices": "node scripts/generate-notices.mjs"
+    "notices": "node scripts/generate-notices.mjs",
+    "dev:mock-model": "node scripts/mock-openai.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",

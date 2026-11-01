@@ -12,7 +12,8 @@ export const TOKEN = "setup-token-0123456789abcdefghijklmn";
 const base = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
 export const env: Env = {
   ...base,
-  OPA_MASTER_KEY: "test-master-key",
+  VAULT: null,
+  VAULT_STATUS: "ok",
   OPA_SESSION_SECRET: "test-session-secret",
   OPA_SETUP_TOKEN: TOKEN,
   ASSETS: { fetch: async () => new Response("spa") } as unknown as Fetcher,
