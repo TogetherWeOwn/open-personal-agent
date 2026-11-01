@@ -1904,9 +1904,20 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .values({ userId, setupSkipped: [step], updatedAt: set.updatedAt })
               .onConflictDoUpdate({ target: userSettings.userId, set });
           },
-          /** Takes a step off the checklist in one statement; the last one leaves an empty list. */
-          finishSetup: async (step: string) => {
-            await finishSetup(step, Date.now());
+          /**
+           * Takes a step off the checklist in one statement; the last one leaves an empty list.
+           * With an audit row — for a change that lives outside D1, like the Spending limits —
+           * the two go in one batch, so a finish that fails leaves no row claiming the change.
+           */
+          finishSetup: async (step: string, audit?: AuditRow) => {
+            const now = Date.now();
+            if (!audit) await finishSetup(step, now);
+            else {
+              await db.batch([
+                db.insert(auditLog).values(auditValues(userId, audit)),
+                finishSetup(step, now),
+              ]);
+            }
           },
           keyUsed: async (secretId: string) => {
             await db

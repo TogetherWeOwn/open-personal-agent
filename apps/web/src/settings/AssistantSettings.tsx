@@ -28,6 +28,14 @@ export function AssistantSettings() {
     );
   }, []);
 
+  // Editing after a save makes its outcome stale: neither "Saved" nor its error describes the
+  // text now in the fields, so both go as soon as either field changes.
+  const edit = (next: { displayName: string; about: string }) => {
+    setProfile(next);
+    setStatus("");
+    setError(null);
+  };
+
   const save = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!profile) return;
@@ -58,7 +66,7 @@ export function AssistantSettings() {
               <TextField
                 isRequired
                 value={profile.displayName}
-                onChange={(displayName) => setProfile({ ...profile, displayName })}
+                onChange={(displayName) => edit({ ...profile, displayName })}
                 className={field}
               >
                 <Label>What should your assistant call you?</Label>
@@ -66,7 +74,7 @@ export function AssistantSettings() {
               </TextField>
               <TextField
                 value={profile.about}
-                onChange={(about) => setProfile({ ...profile, about })}
+                onChange={(about) => edit({ ...profile, about })}
                 className={field}
               >
                 <Label>Anything it should know about you? (optional)</Label>

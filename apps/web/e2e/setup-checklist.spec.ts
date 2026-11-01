@@ -96,6 +96,23 @@ test("Hide takes it off the chat; Settings › Assistant keeps it and finishes A
   expect(bodies).toContainEqual({ displayName: "Sam", about: "I garden." });
 });
 
+test("editing About you after a save clears Saved and a failed save's error", async ({ page }) => {
+  await stub(page, { skipped: null, hidden: false });
+  await page.goto("/settings/assistant");
+  await page.getByLabel("Anything it should know about you? (optional)").fill("I garden.");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+  await page.getByLabel("Anything it should know about you? (optional)").fill("I garden a lot.");
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toHaveCount(0);
+
+  await page.route("/api/settings/profile", (route) => route.fulfill({ status: 500 }));
+  await page.getByRole("button", { name: "Save" }).click();
+  const failed = page.getByRole("alert").filter({ hasText: "That didn't save." });
+  await expect(failed).toHaveText("That didn't save. Check your name and try again.");
+  await page.getByLabel("What should your assistant call you?").fill("Sammy");
+  await expect(failed).toHaveCount(0);
+});
+
 test("nothing skipped shows no checklist anywhere", async ({ page }) => {
   await stub(page, { skipped: null, hidden: false });
   await page.goto("/");

@@ -4,7 +4,6 @@
 // there by RPC; the assistant checks a change. This month's spend for the soft cap comes from the
 // ledger, as the Usage page's does, so the two never disagree.
 import { createRepository } from "@opa/db/repository";
-import { systemStore } from "@opa/db/system";
 import { Hono } from "hono";
 import { type AllowanceWarnings, WARNINGS_TTL_MS } from "./allowances";
 import type { AppEnv } from "./env";
@@ -93,36 +92,25 @@ spendingRoutes.put("/", async (c) => {
   const saved = await rpc.setSpending(body);
   if (!saved) return c.json({ error: "invalid_spending" }, 400);
   const { before, after, write } = saved;
-  // Settings changes are in the Activity log (M3-19 AC3), with the old and new values. The
-  // limits live in the assistant and the log in D1, so the two can't commit together: a change
-  // whose audit row can't be written is put back (unless a later change replaced it since), and
-  // the request fails.
+  // Settings changes are in the Activity log (M3-19 AC3), with the old and new values, and
+  // saving the limits finishes onboarding's "Costs and limits" if it was skipped (M3-24 AC1).
+  // The limits live in the assistant and both of those in D1, so they can't commit together:
+  // the audit row and the finish go in one D1 batch, and a save that batch can't record is
+  // put back (unless a later change replaced it since) and fails — neither a new budget
+  // behind a failure, nor an Activity row claiming a change that was put back. A revert that
+  // itself fails surfaces as a 500.
   const changed = Object.keys(after).filter(
     (k) => before[k as keyof Limits] !== after[k as keyof Limits],
   ) as (keyof Limits)[];
-  if (changed.length) {
-    const detail = JSON.stringify(
-      Object.fromEntries(changed.map((k) => [k, { from: before[k], to: after[k] }])),
-    );
-    try {
-      await systemStore(c.env).audit(
-        c.var.session.scope.userId,
-        "settings.spending",
-        "settings",
-        "ok",
-        detail,
-      );
-    } catch {
-      await rpc.revertSpending(write, before);
-      return c.json({ error: "not_saved" }, 500);
-    }
-  }
-  // Saving the limits finishes onboarding's "Costs and limits" if it was skipped (M3-24 AC1).
-  // That write is in D1 too, so it gets the audit row's recovery: a save that can't finish the
-  // step puts the change back (same conditional revert) and fails, rather than reporting
-  // failure with the new budgets already live. A revert that itself fails surfaces as a 500.
+  const audit = changed.length
+    ? {
+        action: "settings.spending",
+        module: "settings",
+        detail: Object.fromEntries(changed.map((k) => [k, { from: before[k], to: after[k] }])),
+      }
+    : undefined;
   try {
-    await user.settings.finishSetup("costs");
+    await user.settings.finishSetup("costs", audit);
   } catch {
     if (changed.length) await rpc.revertSpending(write, before);
     return c.json({ error: "not_saved" }, 500);
