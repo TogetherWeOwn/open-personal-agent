@@ -70,9 +70,11 @@ describe("model settings", () => {
     expect(await dump("secrets")).toBe("[]");
   });
 
-  it("rejects plain-HTTP base URLs", async () => {
-    const res = await put("/model", { ...OPENAI, baseUrl: "http://x.test", apiKey: CANARY });
-    expect(res.status).toBe(400);
+  it("rejects plain-HTTP base URLs, and ones the adapter can't call", async () => {
+    for (const baseUrl of ["http://x.test", "https://x.test/v1?a=1", "https://x.test/v1#f"]) {
+      const res = await put("/model", { ...OPENAI, baseUrl, model: "m", apiKey: CANARY });
+      expect(res).toEqual({ status: 400, text: '{"error":"invalid_base_url"}' });
+    }
   });
 
   it("encrypts the key and only ever returns its last 4 characters", async () => {
@@ -107,6 +109,16 @@ describe("model settings", () => {
     expect(JSON.parse((await call("")).text).model.key.lastUsedAt).toBeTypeOf("number");
   });
 
+  it("never returns a provider error that echoes part of the key", async () => {
+    const echo = `Incorrect API key provided: ${CANARY.slice(0, 16)}****`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({ error: { message: echo } }, { status: 401 }),
+    );
+    const res = await call("/model/test", { method: "POST" });
+    expect(JSON.parse(res.text)).toMatchObject({ ok: false, error: { code: "auth" } });
+    expect(res.text).not.toContain(CANARY.slice(0, 8));
+  });
+
   it("starts on Workers AI without a key, then finishes onboarding", async () => {
     const saved = JSON.parse((await put("/model", { kind: "workers-ai" })).text);
     expect(saved.model).toMatchObject({ kind: "workers-ai", model: STARTER_MODEL });
@@ -121,5 +133,9 @@ describe("model settings", () => {
     expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
+  });
+
+  it("keeps the saved key for switching back from the starter", async () => {
+    expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
   });
 });
