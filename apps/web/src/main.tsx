@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { createMockTransport } from "./chat/mock-transport";
+import { Onboarding } from "./onboarding/Onboarding";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
@@ -13,6 +14,6 @@ const transport = createMockTransport();
 
 createRoot(root).render(
   <StrictMode>
-    <App transport={transport} />
+    {window.location.pathname === "/onboarding" ? <Onboarding /> : <App transport={transport} />}
   </StrictMode>,
 );

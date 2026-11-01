@@ -33,6 +33,13 @@ export function App({ transport }: { transport: ChatTransport }) {
         else setHealthy(body.status === "ok");
       })
       .catch(() => setHealthy(false));
+    // A signed-in user who hasn't finished onboarding goes there first.
+    fetch("/api/settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { onboarded?: boolean } | null) => {
+        if (body?.onboarded === false) window.location.replace("/onboarding");
+      })
+      .catch(() => {});
   }, []);
 
   const open = (action: ChatAction) => {
