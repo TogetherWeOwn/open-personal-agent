@@ -94,21 +94,25 @@ const r2 = (name) => ({ kind: "r2", name, item: {} });
 const ONE_EACH = async () => [d1("u1"), r2("b")];
 
 /** verify:cloudflare with the deploy, teardown and inventory steps faked. */
-function verifySetup({ changes, inventory = ONE_EACH } = {}) {
+function verifySetup({ changes, inventory = ONE_EACH, link = true } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
   fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
   fs.mkdirSync(path.join(root, "migrations"));
   fs.writeFileSync(path.join(root, "migrations", "0000_schema_v0.sql"), "");
   const [calls, out] = [[], []];
+  let deploys = 0;
   const plan = changes ?? [["worker", "migrations", "secrets"], [], ["worker", "migrations"]];
   const url = `https://${P}.owner-sub.workers.dev`;
   const steps = {
     inventory,
     deploy: async (_argv, deps) => {
+      deploys++;
       calls.push(`deploy ${fs.readdirSync(path.join(root, "migrations")).sort()}`);
       deps.stdout(`Using fallback value in non-interactive context: yes\n${url}\n`);
-      return { changed: plan[calls.length - 1], url };
+      if (link && deploys === 1) deps.tty(deps.env)?.(`Link: ${url}/setup#token=tok/+=\n`);
+      return { changed: plan[deploys - 1], url };
     },
+    firstRun: async (base, token) => calls.push(`first run ${base === url} ${token}`),
     teardown: async (argv) =>
       calls.push(`teardown ${argv.join(" ")}`) && { deleted: [], skipped: [] },
   };
@@ -126,6 +130,7 @@ describe("verify:cloudflare", () => {
     const [base, mig] = ["0000_schema_v0.sql", "0001_verify_upgrade.sql"];
     expect(t.calls).toEqual([
       `deploy ${base}`,
+      "first run true tok/+=",
       `deploy ${base}`,
       `deploy ${base},${mig}`,
       `teardown --name ${P} --confirm ${P}`,
@@ -136,6 +141,10 @@ describe("verify:cloudflare", () => {
       expect(report).toContain(line);
     }
     expect(report).toContain("| `workers-ai` | Workers AI Read | not in the token, not needed |");
+    expect(report).toMatch(/\| F-2\.1 AC1: fresh deploy \| .* \| 0\.0 min, 1 prompts \| met \|/);
+    expect(report).toMatch(/\| A-O1: deploy to a first answer \| ≤ 15 min \| 0\.0 min \| met \|/);
+    expect(report).toContain("| Claim, onboard, first answer |");
+    expect(t.out.join("")).not.toContain("tok/+=");
     expect(report).not.toMatch(/\{\{|owner-sub/);
     expect(t.out.join("")).not.toContain("owner-sub");
   });
@@ -145,6 +154,13 @@ describe("verify:cloudflare", () => {
     await expect(t.run()).rejects.toThrow("Re-run (up to date): expected [], changed [worker]");
     expect(t.calls.at(-1)).toBe(`teardown --name ${P} --confirm ${P}`);
     expect(t.report()).toContain("Result: **FAIL**");
+  });
+
+  it("fails without a setup link, and still tears down", async () => {
+    const t = verifySetup({ link: false });
+    await expect(t.run()).rejects.toThrow("the fresh deploy printed no setup link");
+    expect(t.calls).toEqual([`deploy 0000_schema_v0.sql`, `teardown --name ${P} --confirm ${P}`]);
+    expect(t.report()).toContain("| A-O1: deploy to a first answer | ≤ 15 min | not reached |");
   });
 
   it("fails when a re-deploy binds a different bucket", async () => {

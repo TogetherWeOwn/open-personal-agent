@@ -15,6 +15,8 @@ export default defineConfig({
   projects: [
     { name: "e2e", testDir: "test/e2e" },
     { name: "acceptance", testDir: "acceptance", use: { baseURL } },
+    // Claims the deployment, so it runs on its own local stack, or one `verify:cloudflare` made.
+    { name: "first-run", testDir: "test/first-run" },
   ],
   webServer: process.env.BASE_URL
     ? []

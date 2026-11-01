@@ -29,7 +29,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: Verify (deploy, re-run, upgrade, health, teardown)
+      - name: Install Chromium for the first run in the browser
+        if: env.TEARDOWN_PREFIX == ''
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify (deploy, first run, re-run, upgrade, health, teardown)
         if: env.TEARDOWN_PREFIX == ''
         run: pnpm verify:cloudflare --report "$RUNNER_TEMP/verify-report/report.md"
       - name: Teardown only
