@@ -145,10 +145,11 @@ export function Onboarding() {
             // The saved key is gone, so the form stops offering to keep it.
             setSettings(await api<ModelSettings>(""));
           }}
-          onRefresh={() => {
+          onRefresh={async () => {
             setLocked(false);
             setError("");
             setNotice("Your saved keys open again. Nothing was deleted. Save again to continue.");
+            setSettings(await api<ModelSettings>(""));
           }}
         />
       )}

@@ -190,6 +190,9 @@ test("a chat refused for unopenable keys links to the reset panel", async ({ pag
   await expect(panel(page)).toHaveCount(0);
   await expect(page.getByText("No key saved. Enter its API key again to use it.")).toBeVisible();
   expect(posts(s, "/api/settings/vault/reset")).toHaveLength(1);
+  // The keyless form keeps a way out besides a new key: Remove, with the chat-model guard.
+  await page.getByRole("button", { name: "Remove GPT-4.1 mini · OpenAI" }).click();
+  await expect(page.getByRole("alert")).toContainText("This provider is your chat model.");
 });
 
 test("reset_not_required refreshes the state; vault_unavailable and a cancelled passkey delete nothing", async ({

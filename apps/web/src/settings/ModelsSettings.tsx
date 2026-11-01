@@ -106,6 +106,16 @@ function ProviderCard({ row, badges, isChat, onChanged, onVaultLocked }: CardPro
   };
 
   const name = `${row.modelName ?? row.model} · ${row.providerName}`;
+  const askRemove = () => {
+    if (isChat) {
+      setError(
+        "This provider is your chat model. Choose a different chat model first, then remove it.",
+      );
+      return;
+    }
+    setEditing(null);
+    setConfirmingRemove(true);
+  };
   return (
     <li className={cardClass}>
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -152,7 +162,17 @@ function ProviderCard({ row, badges, isChat, onChanged, onVaultLocked }: CardPro
             >
               Save
             </Button>
-            {!needsKey && (
+            {needsKey ? (
+              // Without a key the form has no Cancel, so it offers the way out a card normally has.
+              <Button
+                className={secondary}
+                isDisabled={busy}
+                aria-label={`Remove ${name}`}
+                onPress={askRemove}
+              >
+                Remove
+              </Button>
+            ) : (
               <Button className={secondary} isDisabled={busy} onPress={() => setEditing(null)}>
                 Cancel
               </Button>
@@ -212,13 +232,7 @@ function ProviderCard({ row, badges, isChat, onChanged, onVaultLocked }: CardPro
             className={secondary}
             isDisabled={busy}
             aria-label={`Remove ${name}`}
-            onPress={() =>
-              isChat
-                ? setError(
-                    "This provider is your chat model. Choose a different chat model first, then remove it.",
-                  )
-                : setConfirmingRemove(true)
-            }
+            onPress={askRemove}
           >
             Remove
           </Button>
