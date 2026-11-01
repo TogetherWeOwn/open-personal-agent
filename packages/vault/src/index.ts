@@ -266,6 +266,8 @@ export interface VaultStatus {
   previousEpoch: number | null;
   /** DEKs still under PREV. */
   remaining: number;
+  /** PREV is configured but this vault no longer uses it: `retireEpoch` ran. */
+  retired: boolean;
   /** `user_keys` and `secrets` rows of users with no DEK under an epoch this vault holds. */
   orphanedRows: number;
 }
@@ -274,12 +276,13 @@ export async function vaultStatus(vault: Vault): Promise<VaultStatus> {
   const { current, previous, keks, store } = stateOf(vault);
   const orphanedRows = await store.countOrphans([...keks.keys()]);
   if (previous === null) {
-    return { rotation: "none", previousEpoch: null, remaining: 0, orphanedRows };
+    return { rotation: "none", previousEpoch: null, remaining: 0, retired: false, orphanedRows };
   }
   const remaining = await store.countUserKeys(previous);
   const barrier = remaining === 0 && (await store.countUserKeys(current.version)) > 0;
   const rotation = barrier ? "complete" : "pending";
-  return { rotation, previousEpoch: previous, remaining, orphanedRows };
+  const retired = !keks.has(previous);
+  return { rotation, previousEpoch: previous, remaining, retired, orphanedRows };
 }
 
 /**

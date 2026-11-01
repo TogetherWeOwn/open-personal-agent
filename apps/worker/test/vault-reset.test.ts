@@ -225,22 +225,44 @@ describe("the rotation runner", () => {
     });
   });
 
-  it("keeps PREV on a deployment with no DEK yet, writing nothing, until one lands", async () => {
-    const { browser } = await claim();
+  it("keeps PREV on a deployment with no DEK yet, writing nothing, then retires it once one lands", async () => {
+    const { browser, owner } = await claim();
     const raw: WorkerEnv = {
       ...env,
       OPA_MASTER_KEY: `2:${newKey()}`,
       OPA_MASTER_KEY_PREV: newKey(),
     };
-    const ctx = createExecutionContext();
-    await worker.scheduled({} as ScheduledController, raw, ctx);
-    await waitOnExecutionContext(ctx);
+    const tick = async () => {
+      const ctx = createExecutionContext();
+      await worker.scheduled({} as ScheduledController, raw, ctx);
+      await waitOnExecutionContext(ctx);
+    };
+    const vaultHealth = async () => {
+      const res = await as(browser, await compose(raw)).req("/api/health");
+      return (await res.json<{ vault: unknown }>()).vault;
+    };
+    await tick();
     expect(await count("audit_log", "action LIKE 'vault.%'")).toBe(0);
-    const res = await as(browser, await compose(raw)).req("/api/health");
     // An old instance of the rolling deploy could still enrol a first user under PREV.
-    expect((await res.json<{ vault: unknown }>()).vault).toEqual({
-      rotation: "pending",
+    expect(await vaultHealth()).toEqual({ rotation: "pending", orphanedRows: 0 });
+
+    // The first DEK lands under epoch 2: nothing to re-key, and the epoch retires on the next tick.
+    const vault = (await compose(raw)).VAULT as Vault;
+    const ref = {
+      secretId: "s",
+      purpose: "model_api_key",
+      binding: BINDING,
+      caller: "test",
+    } as const;
+    await encrypt(vault, { userId: owner } as UserScope, { ...ref, plaintext: CANARY });
+    await tick();
+    await tick();
+    expect(await count("audit_log", "action = 'vault.retire_epoch'")).toBe(1);
+    expect(await count("audit_log", "action = 'vault.rewrap'")).toBe(0);
+    expect(await vaultHealth()).toEqual({
+      rotation: "complete",
       orphanedRows: 0,
+      action: "delete OPA_MASTER_KEY_PREV",
     });
   });
 });

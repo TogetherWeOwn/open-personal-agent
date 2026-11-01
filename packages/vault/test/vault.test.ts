@@ -545,6 +545,7 @@ describe("rotation status and per-user reset (crypto review C-1)", () => {
       rotation: "none",
       previousEpoch: null,
       remaining: 0,
+      retired: false,
       orphanedRows: 0,
     });
     await put(vault);
@@ -558,11 +559,12 @@ describe("rotation status and per-user reset (crypto review C-1)", () => {
       rotation: "complete",
       previousEpoch: 1,
       remaining: 0,
+      retired: false,
       orphanedRows: 0,
     });
     // Retiring the epoch doesn't make the rotation look unconfigured: PREV is still set.
     await retireEpoch(migrating, 1, { caller });
-    expect((await vaultStatus(migrating)).rotation).toBe("complete");
+    expect(await vaultStatus(migrating)).toMatchObject({ rotation: "complete", retired: true });
   });
 
   it("stays pending on an empty deployment until a DEK under the new epoch blocks old enrolment", async () => {

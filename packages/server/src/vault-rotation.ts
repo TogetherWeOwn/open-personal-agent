@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The rotation runner (crypto review C-1). While the previous master key is set, each scheduled tick
-// re-keys a batch of the users still under it; the tick that moves the last one retires the epoch.
-// Health then says to delete PREV. The Worker's cron and Node's timer both call it.
+// re-keys a batch of the users still under it. Once none is left and one is under the new epoch,
+// the tick retires the old epoch and health says to delete PREV. The Worker's cron and Node's timer both call it.
 import { log } from "@opa/log";
 import { retireEpoch, rewrap, vaultStatus } from "@opa/vault";
 import type { Env } from "./env";
@@ -14,15 +14,19 @@ export async function runRotation(env: Pick<Env, "VAULT">): Promise<void> {
   const vault = env.VAULT;
   if (!vault) return;
   try {
-    const before = await vaultStatus(vault);
-    if (before.rotation !== "pending" || before.remaining === 0) return;
-    const { rewrapped } = await rewrap(vault, { caller: CALLER, limit: ROTATION_BATCH });
-    // Retired only once a DEK under the new epoch stops old instances enrolling under PREV.
-    const { rotation, previousEpoch } = await vaultStatus(vault);
-    if (rotation === "complete" && previousEpoch !== null) {
-      await retireEpoch(vault, previousEpoch, { caller: CALLER });
+    let status = await vaultStatus(vault);
+    if (status.rotation === "none") return;
+    let rewrapped = 0;
+    if (status.remaining > 0) {
+      ({ rewrapped } = await rewrap(vault, { caller: CALLER, limit: ROTATION_BATCH }));
+      status = await vaultStatus(vault);
     }
-    log.info("vault.rotation", { count: rewrapped, status: rotation });
+    // Retired only once a DEK under the new epoch stops old instances enrolling under PREV. Each
+    // instance retires it from its own vault once, with an audit row, until PREV is deleted.
+    const { rotation, previousEpoch, retired } = status;
+    const retire = rotation === "complete" && previousEpoch !== null && !retired;
+    if (retire) await retireEpoch(vault, previousEpoch, { caller: CALLER });
+    if (rewrapped > 0 || retire) log.info("vault.rotation", { count: rewrapped, status: rotation });
   } catch (error) {
     // The next tick tries again; health keeps saying `pending` meanwhile. A vault error's code is
     // fixed text, such as `rewrap_conflict`.
