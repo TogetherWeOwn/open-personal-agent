@@ -74,8 +74,14 @@ function wireMessages(
   const push = (role: WireMessage["role"], content: WireBlock[]) => {
     if (!content.length) return;
     const last = out.at(-1);
-    if (last?.role === role) last.content.push(...content);
-    else out.push({ role, content });
+    if (last?.role !== role) out.push({ role, content });
+    else if (role === "user") last.content.push(...content);
+    else {
+      // Two replies in a row become one. Only the later one's thinking may still be needed (a
+      // reply with no tool result after it needs none), and dropping the earlier one's keeps
+      // each signed run next to the answer it came with.
+      last.content = [...last.content.filter((b) => !isThinking(b)), ...content];
+    }
   };
   for (const m of messages) {
     if (m.role === "assistant") {
@@ -95,6 +101,8 @@ function wireMessages(
 }
 
 const textBlock = (text: string): WireBlock => ({ type: "text", text });
+
+const isThinking = (b: { type: string }) => b.type === "thinking" || b.type === "redacted_thinking";
 
 const toolUse = (call: ModelToolCall): WireBlock => {
   let input: unknown;
@@ -145,7 +153,7 @@ function assistantContent(
     }
   }
   if (!split && rest) {
-    const at = out.findIndex((b) => b.type !== "thinking" && b.type !== "redacted_thinking");
+    const at = out.findIndex((b) => !isThinking(b));
     out.splice(at === -1 ? out.length : at, 0, textBlock(rest));
   }
   for (const call of calls) if (!placed.has(call.id)) out.push(toolUse(call));
