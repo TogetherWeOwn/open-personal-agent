@@ -4,7 +4,6 @@
 // back from the server, only its last 4 characters.
 import { type ReactNode, useEffect, useState } from "react";
 import {
-  Button,
   Form,
   Heading,
   Input,
@@ -30,13 +29,10 @@ import {
 } from "../models/settings-api";
 import { TestResultView } from "../models/TestResult";
 import { VaultReset } from "../settings/VaultReset";
+import { Button } from "../ui";
 
 const STEPS = ["Claim", "About you", "Choose a model", "Test", "Costs and limits", "First chat"];
 
-const button =
-  "min-h-11 rounded-lg px-4 font-medium data-disabled:opacity-50 data-pressed:opacity-90";
-const primary = `${button} bg-accent text-accent-contrast`;
-const secondary = `${button} border border-border-strong`;
 const field = "flex flex-col gap-1";
 const input =
   "min-h-11 rounded-lg border border-border-strong bg-surface-raised px-3 py-2 placeholder:text-text-muted";
@@ -131,7 +127,7 @@ export function Onboarding() {
         <Label>Anything it should know about you? (optional)</Label>
         <TextArea className={input} rows={3} maxLength={2000} />
       </TextField>
-      <Button type="submit" isDisabled={busy} className={`${primary} self-start`}>
+      <Button type="submit" isDisabled={busy} variant="primary" className="self-start">
         Continue
       </Button>
     </Form>,
@@ -193,7 +189,8 @@ export function Onboarding() {
       <Button
         onPress={saveModel}
         isDisabled={busy || choice === "subscription"}
-        className={`${primary} self-start`}
+        variant="primary"
+        className="self-start"
       >
         Save and continue
       </Button>
@@ -205,16 +202,14 @@ export function Onboarding() {
       <Button
         onPress={run(async () => setTest(await api<TestResult>("/model/test", "POST")))}
         isDisabled={busy}
-        className={`${secondary} self-start`}
+        className="self-start"
       >
         {busy ? "Testing…" : "Test"}
       </Button>
       {test && <TestResultView test={test} />}
       <div className="flex gap-2">
-        <Button onPress={() => setStep(2)} className={secondary}>
-          Change model
-        </Button>
-        <Button onPress={next} isDisabled={!test?.ok} className={primary}>
+        <Button onPress={() => setStep(2)}>Change model</Button>
+        <Button onPress={next} isDisabled={!test?.ok} variant="primary">
           Continue
         </Button>
       </div>
@@ -234,7 +229,7 @@ export function Onboarding() {
         </li>
         <li>Providers also set their own rate limits; a busy model may ask you to wait.</li>
       </ul>
-      <Button onPress={next} className={`${primary} self-start`}>
+      <Button onPress={next} variant="primary" className="self-start">
         Got it
       </Button>
     </div>,
@@ -246,7 +241,8 @@ export function Onboarding() {
           window.location.assign("/");
         })}
         isDisabled={busy}
-        className={`${primary} self-start`}
+        variant="primary"
+        className="self-start"
       >
         Start chatting
       </Button>

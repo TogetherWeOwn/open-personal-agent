@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import "./styles.css";
-import { StrictMode, useEffect, useState } from "react";
+import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
 import { RouterProvider } from "react-aria-components";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
@@ -59,6 +59,12 @@ async function route(): Promise<View | null> {
   return "onboarding";
 }
 
+// The component kit's gallery, for the e2e suite's axe run. A real build drops this branch.
+const Gallery =
+  import.meta.env.VITE_MOCK_CHAT === "1" && window.location.pathname === "/__kit"
+    ? lazy(() => import("./ui/Gallery").then((m) => ({ default: m.Gallery })))
+    : null;
+
 function Root() {
   // The server opens `/setup` only while the deployment can be claimed or recovered.
   const [view, setView] = useState<View | null>(
@@ -108,6 +114,12 @@ function Shell({ initialPath }: { initialPath: string }) {
 
 createRoot(root).render(
   <StrictMode>
-    <Root />
+    {Gallery ? (
+      <Suspense>
+        <Gallery />
+      </Suspense>
+    ) : (
+      <Root />
+    )}
   </StrictMode>,
 );
