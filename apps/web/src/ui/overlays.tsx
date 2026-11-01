@@ -37,7 +37,11 @@ export function Dialog({ title, children, isDismissable = true, ...props }: Over
   );
 }
 
-/** A yes/no dialog. `danger` for anything that deletes; the safe choice comes first. */
+/**
+ * A yes/no dialog. `danger` for anything that deletes; the safe choice comes first.
+ * Confirming closes the dialog (via the `close` slot), then `onConfirm` runs — keep it
+ * fire-and-forget; a caller that must show progress or an error does that outside the dialog.
+ */
 export function ConfirmDialog({
   title,
   children,
@@ -60,6 +64,7 @@ export function ConfirmDialog({
       <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
         <Button slot="close">{cancel}</Button>
         <Button
+          slot="close"
           variant={danger ? "danger" : "primary"}
           isDisabled={isConfirmDisabled}
           onPress={onConfirm}

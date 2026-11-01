@@ -32,7 +32,16 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(dialog).toBeVisible();
       await axe(page);
       // A destructive dialog isn't dismissed by a click outside; Cancel closes it.
+      await page.mouse.click(2, 2);
+      await expect(dialog).toBeVisible();
       await dialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toBeHidden();
+      await expect(page.getByRole("button", { name: "Approve" })).toBeFocused();
+      // Confirming runs the action and closes the dialog too.
+      await page.getByRole("button", { name: "Approve" }).click();
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Delete" }).click();
+      await expect(page.getByText("Deleted.")).toBeVisible();
       await expect(dialog).toBeHidden();
       await expect(page.getByRole("button", { name: "Approve" })).toBeFocused();
 

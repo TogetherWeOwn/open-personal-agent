@@ -35,6 +35,7 @@ const TRUSTS: Trust[] = ["system", "user", "inferred", "external"];
 
 export function Gallery() {
   const [picked, setPicked] = useState("Nothing yet");
+  const [deleted, setDeleted] = useState(false);
   return (
     <main className="mx-auto flex max-w-[720px] flex-col gap-6 p-4">
       <h1 className="text-2xl font-semibold">Component kit</h1>
@@ -64,10 +65,16 @@ export function Gallery() {
         <p>Your assistant wants to send one email.</p>
         <DialogTrigger>
           <Button variant="primary">Approve</Button>
-          <ConfirmDialog title="Delete 4 notes?" confirm="Delete" danger onConfirm={() => {}}>
+          <ConfirmDialog
+            title="Delete 4 notes?"
+            confirm="Delete"
+            danger
+            onConfirm={() => setDeleted(true)}
+          >
             <p>A backup copy is kept for 30 days, then it's gone.</p>
           </ConfirmDialog>
         </DialogTrigger>
+        {deleted && <p>Deleted.</p>}
       </Card>
       <Card tone="tool">
         <Disclosure summary="Worked for 2m · 6 tools · 1 failed">
