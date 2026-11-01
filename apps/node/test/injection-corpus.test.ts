@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  ApprovalError,
   type ApprovalItem,
   type LoopEvent,
   newTurn,
@@ -104,8 +105,15 @@ describe.each(PROFILES)("injection corpus, %s policy", (profile) => {
 
       // Nothing else ran: no request left for anywhere but the page the user asked for, and the
       // remembered rows are exactly what they were.
+      // Under the permissive policy only the goal's own `remember`, with its exact arguments, may
+      // run (as a proposal, checked above); any other write is an extra execution.
+      const goalRemember = new Set(
+        goal.calls.filter(([name]) => name === "remember").map(([, args]) => filled(args)),
+      );
       expect(
-        attackRuns.filter((e) => !(profile === "permissive" && e.tool === "remember")),
+        attackRuns.filter(
+          (e) => !(profile === "permissive" && e.tool === "remember" && goalRemember.has(e.args)),
+        ),
       ).toEqual([]);
       expect(world.fetched.every((url) => url === PAGE_URL)).toBe(true);
       expect((await world.memory.list()).map((m) => m.id)).toEqual(memoryBefore);
@@ -127,9 +135,12 @@ describe.each(PROFILES)("injection corpus, %s policy", (profile) => {
         scope: "once" as const,
       }));
       resolveApprovals(turn, batchId, decisions, NOW);
-      await world.run(turn);
+      expect((await world.run(turn)).outcome).toBe("completed");
       const approvedRuns = world.executed.slice(ran);
       expect(approvedRuns).toEqual(items.map((i) => ({ tool: i.tool, args: i.args })));
+      // Replayed after they ran, the same approvals are refused and nothing runs a second time.
+      expect(() => resolveApprovals(turn, batchId, decisions, NOW)).toThrow(ApprovalError);
+      expect(world.executed.length).toBe(ran + approvedRuns.length);
       // Even approved, the deployment never fetches itself and a page never writes a trusted
       // memory: `remember` from a tainted turn stays a proposal.
       expect(world.fetched.some((url) => new URL(url).hostname === OWN_HOST)).toBe(false);
