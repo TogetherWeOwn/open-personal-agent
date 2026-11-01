@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Data export downloads (M3-20 AC1, m3-ux §3.11): the session's own rows only, as with every
-// other route. POST starts one export — a second while one runs answers 409 with the running
-// row, so the Settings screen's "already being made" state has an answer to show — and the
-// Workflow instance starts after the row is claimed, so a start that fails still ends the row
-// as failed instead of leaving it running. The list is the row history newest first; the
-// download serves a ready row's ZIP as an attachment, never past its expiry.
-import { createRepository, type ExportRow, isId } from "@opa/db/repository";
+// other route. POST starts one export — exporting is an account action, so it needs a passkey
+// step-up within the last 5 minutes, as with loosening a tool. A second start while one runs
+// answers 409 with the running row, so the Settings screen's "already being made" state has an
+// answer to show — and the Workflow instance starts after the row is claimed, so a start that
+// fails still ends the row as failed instead of leaving it running. The list is the row history
+// newest first; GET /:id serves a ready row's ZIP as an attachment, never past its expiry.
+import { createRepository, type ExportRow, isId, isUniqueViolation } from "@opa/db/repository";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { userContent } from "./security";
+import { hasStepUp } from "./session";
 
 /** How long an export stays downloadable: stamped at creation, swept after (PR1). */
 export const EXPORT_TTL_MS = 3_600_000;
@@ -29,6 +31,8 @@ function present(row: ExportRow) {
 }
 
 exportRoutes.post("/", async (c) => {
+  // The gate is first, so a refused start claims no row and starts no Workflow run.
+  if (!hasStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const inFlight = await user.exports.running();
   if (inFlight) {
@@ -42,11 +46,22 @@ exportRoutes.post("/", async (c) => {
     return c.json({ error: "workflow_unavailable" }, 503);
   const id = crypto.randomUUID();
   const instanceId = crypto.randomUUID();
-  const claimed = await user.exports.create({
-    id,
-    workflowInstanceId: instanceId,
-    expiresAt: Date.now() + EXPORT_TTL_MS,
-  });
+  let claimed: boolean;
+  try {
+    claimed = await user.exports.create({
+      id,
+      workflowInstanceId: instanceId,
+      expiresAt: Date.now() + EXPORT_TTL_MS,
+    });
+  } catch (error) {
+    // A racing second POST passed the check above, then lost the one-running unique index:
+    // answer like the check did. Anything else is a real failure, so it still throws.
+    if (!isUniqueViolation(error)) throw error;
+    const raced = await user.exports.running();
+    c.header("Cache-Control", "no-store");
+    if (raced) return c.json({ error: "already_running", export: present(raced) }, 409);
+    return c.json({ error: "conflict" }, 409);
+  }
   if (!claimed) return c.json({ error: "conflict" }, 409);
   try {
     // Called on the binding: its methods reject a detached call.
@@ -68,7 +83,7 @@ exportRoutes.get("/", async (c) => {
   return c.json({ exports: rows.map(present) });
 });
 
-exportRoutes.get("/:id/download", async (c) => {
+exportRoutes.get("/:id", async (c) => {
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const row = isId(c.req.param("id")) ? await user.exports.get(c.req.param("id")) : undefined;
   if (!row) return c.json({ error: "not_found" }, 404);

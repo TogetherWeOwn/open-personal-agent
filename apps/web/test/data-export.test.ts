@@ -55,5 +55,59 @@ describe("startExport", () => {
     await expect(startExport()).rejects.toThrow("workflow_unavailable");
     stubFetch(409, { error: "conflict" });
     await expect(startExport()).rejects.toThrow("conflict");
+    stubFetch(403, { error: "step_up_required" });
+    await expect(startExport()).rejects.toThrow("step_up_required");
+  });
+});
+
+vi.mock("@simplewebauthn/browser", () => ({
+  startAuthentication: async () => ({ id: "credential" }),
+}));
+
+describe("startExport step-up", () => {
+  it("runs the passkey step-up and retries the start", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/step-up/session/options"))
+          return new Response(JSON.stringify({ options: {} }), { status: 200 });
+        if (String(url).endsWith("/step-up/session"))
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        if (calls.filter((u) => u === "/api/exports").length === 1)
+          return new Response(JSON.stringify({ error: "step_up_required" }), { status: 403 });
+        return new Response(JSON.stringify({ id: "e1", status: "running" }), { status: 201 });
+      }),
+    );
+    await expect(startExport()).resolves.toEqual({ id: "e1", status: "running" });
+    expect(calls).toEqual([
+      "/api/exports",
+      "/api/auth/step-up/session/options",
+      "/api/auth/step-up/session",
+      "/api/exports",
+    ]);
+  });
+
+  it("retries once, then surfaces the refusal", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/step-up/session/options"))
+          return new Response(JSON.stringify({ options: {} }), { status: 200 });
+        if (String(url).endsWith("/step-up/session"))
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        return new Response(JSON.stringify({ error: "step_up_required" }), { status: 403 });
+      }),
+    );
+    await expect(startExport()).rejects.toThrow("step_up_required");
+    expect(calls).toEqual([
+      "/api/exports",
+      "/api/auth/step-up/session/options",
+      "/api/auth/step-up/session",
+      "/api/exports",
+    ]);
   });
 });

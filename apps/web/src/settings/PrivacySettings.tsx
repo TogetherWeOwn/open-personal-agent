@@ -12,6 +12,7 @@ const ERRORS: Record<string, string> = {
   workflow_unavailable: "Exports aren't available on this server right now. Try again later.",
   start_failed: "The export couldn't start. Try again in a moment.",
   conflict: "The export couldn't start. Try again in a moment.",
+  step_up_required: "Confirm it's you with your passkey first, then try again.",
 };
 
 function when(timestamp: number): string {
@@ -44,7 +45,7 @@ function ExportRow({ row }: { row: DataExport }) {
         )}
       </div>
       {row.status === "ready" && (
-        <Link href={`/api/exports/${row.id}/download`} className={buttonClass("secondary")}>
+        <Link href={`/api/exports/${row.id}`} className={buttonClass("secondary")}>
           Download
         </Link>
       )}

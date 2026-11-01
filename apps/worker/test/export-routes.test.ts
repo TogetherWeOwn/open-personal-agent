@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-// The export routes (M3-20 AC1, m3-ux §3.11): starting an export claims a row and starts its
-// Workflow run, a second start while one runs answers 409 with it, the list shows only the
-// session's own rows, and the download serves a ready row's ZIP as an attachment — never
-// another user's, never before it is ready, never past its expiry.
-import { SESSION_COOKIE } from "@opa/server/auth";
+// The export routes (M3-20 AC1, m3-ux §3.11): starting an export needs a fresh step-up,
+// then claims a row and starts its Workflow run. A second start while one runs answers 409
+// with it, the list shows only the session's own rows, and GET /:id serves a ready row's
+// ZIP as an attachment — never another user's, never before it is ready, never past expiry.
+import { SESSION_COOKIE, STEP_UP_MS } from "@opa/server/auth";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Browser, claim, db, env, freshDatabase, sessionHeaders } from "./helpers/app";
+import {
+  Browser,
+  claim,
+  count,
+  db,
+  env,
+  freshDatabase,
+  type passkey,
+  sessionHeaders,
+} from "./helpers/app";
 
 freshDatabase();
 afterEach(() => vi.restoreAllMocks());
@@ -38,6 +47,15 @@ async function postExport(browser: Browser) {
   return browser.req("/api/exports", { method: "POST", body: {} });
 }
 
+/** A passkey step-up in this session, as the account actions require. */
+async function stepUp(br: Browser, key: ReturnType<typeof passkey>) {
+  const res = await br.req("/api/auth/step-up/session/options", { body: {} });
+  const { options } = await res.json<{ options: { challenge: string } }>();
+  return br.req("/api/auth/step-up/session", {
+    body: { credential: await key.get(options) },
+  });
+}
+
 /** Polls the list until `id` reads `status`, through the real Workflow run. */
 async function waitFor(browser: Browser, id: string, status: string) {
   const deadline = Date.now() + 15_000;
@@ -52,8 +70,33 @@ async function waitFor(browser: Browser, id: string, status: string) {
 }
 
 describe("POST /api/exports", () => {
-  it("claims a running export and starts its run", async () => {
+  it("refuses without a fresh step-up, claiming nothing and starting nothing", async () => {
     const { browser } = await claim();
+    const create = vi.spyOn(env.EXPORT_WORKFLOW, "create");
+    const res = await postExport(browser);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "step_up_required" });
+    // No row to mint a run from, and no run was started.
+    expect(await count("exports")).toBe(0);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses once the step-up window passes", async () => {
+    const { browser, key } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
+    await db
+      .prepare("UPDATE sessions SET step_up_at = ?")
+      .bind(Date.now() - STEP_UP_MS)
+      .run();
+    const res = await postExport(browser);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "step_up_required" });
+    expect(await count("exports")).toBe(0);
+  });
+
+  it("claims a running export and starts its run", async () => {
+    const { browser, key } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
     const res = await postExport(browser);
     expect(res.status).toBe(201);
     const row = await res.json<{
@@ -78,7 +121,8 @@ describe("POST /api/exports", () => {
   });
 
   it("answers 409 with the running export while one runs", async () => {
-    const { browser, owner } = await claim();
+    const { browser, key, owner } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
     await insertRow(owner, "r1", "running", Date.now() + 3_600_000);
     const res = await postExport(browser);
     expect(res.status).toBe(409);
@@ -92,7 +136,8 @@ describe("POST /api/exports", () => {
   });
 
   it("answers 503 where no Workflow binding runs it", async () => {
-    const { browser } = await claim();
+    const { browser, key } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
     const noWorkflow = new Browser({ ...env, EXPORT_WORKFLOW: undefined as never });
     noWorkflow.cookies.set(SESSION_COOKIE, browser.cookies.get(SESSION_COOKIE) as string);
     const res = await postExport(noWorkflow);
@@ -129,13 +174,14 @@ describe("GET /api/exports", () => {
   });
 });
 
-describe("GET /api/exports/:id/download", () => {
+describe("GET /api/exports/:id", () => {
   it("serves the ready ZIP as a download, and nothing else", async () => {
-    const { browser } = await claim();
+    const { browser, key } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
     const created = await (await postExport(browser)).json<{ id: string }>();
     await waitFor(browser, created.id, "ready");
 
-    const res = await browser.req(`/api/exports/${created.id}/download`);
+    const res = await browser.req(`/api/exports/${created.id}`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/octet-stream");
     expect(res.headers.get("content-disposition")).toContain(`export-${created.id}.zip`);
@@ -155,19 +201,19 @@ describe("GET /api/exports/:id/download", () => {
     await insertRow(owner, "gone", "expired", now - 1_000);
     await insertRow(owner, "stale", "ready", now - 1_000);
 
-    expect((await browser.req("/api/exports/nope/download")).status).toBe(404);
-    expect(await (await browser.req("/api/exports/run/download")).json()).toEqual({
+    expect((await browser.req("/api/exports/nope")).status).toBe(404);
+    expect(await (await browser.req("/api/exports/run")).json()).toEqual({
       error: "not_ready",
     });
-    expect((await browser.req("/api/exports/run/download")).status).toBe(409);
-    expect(await (await browser.req("/api/exports/bad/download")).json()).toEqual({
+    expect((await browser.req("/api/exports/run")).status).toBe(409);
+    expect(await (await browser.req("/api/exports/bad")).json()).toEqual({
       error: "export_failed",
     });
     // Expired rows are gone, even a ready one the sweep hasn't moved yet.
-    expect((await browser.req("/api/exports/gone/download")).status).toBe(410);
-    expect((await browser.req("/api/exports/stale/download")).status).toBe(410);
+    expect((await browser.req("/api/exports/gone")).status).toBe(410);
+    expect((await browser.req("/api/exports/stale")).status).toBe(410);
     // A traversal-flavoured id never reaches a key.
-    expect((await browser.req(`/api/exports/..%2F..%2F${owner}/download`)).status).toBe(404);
+    expect((await browser.req(`/api/exports/..%2F..%2F${owner}`)).status).toBe(404);
   });
 
   it("answers 404 for another user's export", async () => {
@@ -178,7 +224,7 @@ describe("GET /api/exports/:id/download", () => {
       .prepare("INSERT INTO users (id, display_name, role) VALUES ('u2', 'B', 'member')")
       .run();
     const other = await sessionHeaders("u2");
-    expect((await asUser(other, "/api/exports/mine/download")).status).toBe(404);
+    expect((await asUser(other, "/api/exports/mine")).status).toBe(404);
     expect((await asUser(other, "/api/exports")).status).toBe(200);
   });
 });

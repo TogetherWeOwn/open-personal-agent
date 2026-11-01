@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // The data export API (M3-20 AC1, m3-ux §3.11): the row history newest first, and starting an
-// export. A start while one runs answers 409 with the running row, which this client adopts
+// export. Exporting is an account action: the first 403 runs the passkey step-up and retries,
+// once. A start while one runs answers 409 with the running row, which this client adopts
 // rather than reports — the screen's "already being made" state is that row.
+import {
+  type PublicKeyCredentialRequestOptionsJSON,
+  startAuthentication,
+} from "@simplewebauthn/browser";
+
 export interface DataExport {
   id: string;
   status: "running" | "ready" | "failed" | "expired";
@@ -25,9 +31,44 @@ export async function listExports(): Promise<DataExport[]> {
   return ((await res.json()) as { exports: DataExport[] }).exports;
 }
 
+/** A passkey step-up in this session, for the account actions that require one. */
+export async function stepUpSession(): Promise<void> {
+  const res = await fetch("/api/auth/step-up/session/options", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  const json = (await res.json().catch(() => ({}))) as {
+    options?: PublicKeyCredentialRequestOptionsJSON;
+    error?: string;
+  };
+  if (!res.ok || !json.options) throw new Error(json.error ?? "unknown");
+  const credential = await startAuthentication({ optionsJSON: json.options });
+  const verify = await fetch("/api/auth/step-up/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ credential }),
+  });
+  if (!verify.ok)
+    throw new Error(
+      ((await verify.json().catch(() => ({}))) as { error?: string }).error ?? "unknown",
+    );
+}
+
 /** Starts an export, adopting the running one when the server says one is being made. */
-export async function startExport(): Promise<DataExport> {
+export async function startExport(retried = false): Promise<DataExport> {
   const res = await fetch("/api/exports", { method: "POST" });
+  if (res.status === 403) {
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      export?: DataExport;
+    };
+    if (body.error === "step_up_required" && !retried) {
+      await stepUpSession();
+      return startExport(true);
+    }
+    throw err(body);
+  }
   if (res.status === 409) {
     const body = (await res.json().catch(() => ({}))) as {
       error?: string;
