@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The `HarnessEvent` v1 envelope (ADR 0005 #1) and the subset the M2 chat turn emits: `turn.*`,
 // `message.*`, `usage.updated` and `status`. Tool and approval events join in M3.
-
 import type { ModelUsage } from "./model-provider";
 
 type Envelope<T extends string, P> = {

@@ -20,6 +20,8 @@ export interface TurnRecord {
   model: string;
   reply: string;
   usage: ModelUsage | null;
+  /** The model call has started. */
+  called: boolean;
 }
 
 export function chatStore(db: D1Database, userId: string) {
@@ -46,38 +48,26 @@ export function chatStore(db: D1Database, userId: string) {
      * Creates the conversation on its first message. Returns `false` when the ID already belongs
      * to someone else, so a client can't append to a conversation it doesn't own.
      */
-    async openConversation(conversationId: string, title: string): Promise<boolean> {
-      await db
+    // On conflict, the no-op update runs, and so returns a row, only for the owner.
+    openConversation: async (conversationId: string, title: string) =>
+      (await db
         .prepare(
-          "INSERT INTO conversations (id, user_id, title) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING",
+          `INSERT INTO conversations (id, user_id, title) VALUES (?, ?, ?) ON CONFLICT(id)
+           DO UPDATE SET updated_at = updated_at WHERE user_id = excluded.user_id RETURNING id`,
         )
         .bind(conversationId, userId, title)
-        .run();
-      const owner = await db
-        .prepare("SELECT user_id FROM conversations WHERE id = ?")
-        .bind(conversationId)
-        .first<string>("user_id");
-      return owner === userId;
-    },
+        .first("id")) !== null,
 
-    /** Appends a message after the conversation's last one and bumps `updated_at`. */
-    async append(conversationId: string, id: string, role: "user" | "assistant", content = "") {
-      await db.batch([
-        db
-          .prepare(
-            `INSERT INTO messages (id, user_id, conversation_id, seq, role, status, content)
-             SELECT ?1, ?2, ?3, coalesce(max(seq), 0) + 1, ?4, ?5, ?6 FROM messages
-             WHERE conversation_id = ?3`,
-          )
-          // A user message is complete when written; a reply streams until `settle`.
-          .bind(
-            id,
-            userId,
-            conversationId,
-            role,
-            role === "user" ? "complete" : "streaming",
-            content,
-          ),
+    /** Writes the user's message and the empty streaming reply after it, both or neither. */
+    startTurn(conversationId: string, text: string, replyId: string) {
+      const insert = db.prepare(
+        `INSERT INTO messages (id, user_id, conversation_id, seq, role, status, content)
+         SELECT ?1, ?2, ?3, coalesce(max(seq), 0) + 1, ?4, ?5, ?6 FROM messages
+         WHERE conversation_id = ?3`,
+      );
+      return db.batch([
+        insert.bind(crypto.randomUUID(), userId, conversationId, "user", "complete", text),
+        insert.bind(replyId, userId, conversationId, "assistant", "streaming", ""),
         db
           .prepare("UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?")
           .bind(Date.now(), conversationId, userId),
@@ -104,23 +94,28 @@ export function chatStore(db: D1Database, userId: string) {
         db
           .prepare("UPDATE messages SET status = ?, content = ? WHERE id = ? AND user_id = ?")
           .bind(status, turn.reply, turn.replyId, userId),
-        db
-          .prepare(
-            `INSERT INTO usage (id, user_id, conversation_id, message_id, provider_id, model,
+        // No ledger row for a call that never started.
+        ...(!turn.called
+          ? []
+          : [
+              db
+                .prepare(
+                  `INSERT INTO usage (id, user_id, conversation_id, message_id, provider_id, model,
              input_tokens, output_tokens, cached_input_tokens)
              VALUES (?, ?2, ?, (SELECT id FROM messages WHERE id = ? AND user_id = ?2), ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            crypto.randomUUID(),
-            userId,
-            turn.conversationId,
-            turn.replyId,
-            turn.providerId,
-            turn.model,
-            turn.usage?.inputTokens ?? 0,
-            turn.usage?.outputTokens ?? 0,
-            turn.usage?.cachedInputTokens ?? 0,
-          ),
+                )
+                .bind(
+                  crypto.randomUUID(),
+                  userId,
+                  turn.conversationId,
+                  turn.replyId,
+                  turn.providerId,
+                  turn.model,
+                  turn.usage?.inputTokens ?? 0,
+                  turn.usage?.outputTokens ?? 0,
+                  turn.usage?.cachedInputTokens ?? 0,
+                ),
+            ]),
       ]),
   };
 }

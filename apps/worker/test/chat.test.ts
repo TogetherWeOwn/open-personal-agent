@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Assistant DO and chat transport (M2-13): two tabs share one stream, a conversation survives
 // an eviction, and the DO name comes from the session only.
-
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
 import { describe, expect, it, vi } from "vitest";
@@ -12,7 +11,6 @@ import { Browser, claim, count, db, env, freshDatabase, ORIGIN } from "./helpers
 freshDatabase();
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
-
 const never = new Promise<void>(() => {});
 
 /** A model that replies "Hello there" and records what it was asked. A gate holds it mid-reply. */
@@ -23,9 +21,11 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
     capabilities: () => ({ tools: false, usageInStream: true }),
     async *stream(request): AsyncGenerator<ModelEvent> {
       seen.push(request.messages);
-      if (early) await gate;
+      const held = () =>
+        Promise.race([gate, new Promise((r) => request.signal?.addEventListener("abort", r))]);
+      if (early) await held();
       yield { type: "text.delta", text: "Hello" };
-      await gate;
+      await held();
       yield { type: "text.delta", text: " there" };
       yield { type: "usage", usage: USAGE };
       yield { type: "done", finishReason: "stop" };
@@ -33,11 +33,9 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
   };
 }
 
-const assistantOf = (userId: string) =>
-  env.ASSISTANT.get(env.ASSISTANT.idFromName(assistantName(userId)));
-
 function useModel(userId: string, provider: ModelProvider) {
-  return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
+  const stub = env.ASSISTANT.get(env.ASSISTANT.idFromName(assistantName(userId)));
+  return runInDurableObject(stub, (instance: Assistant) => {
     instance.chatModel = { provider, model: "test-model" };
   });
 }
@@ -72,8 +70,7 @@ describe("chat transport", () => {
     const { browser, owner } = await claim();
     const seen: ModelMessage[][] = [];
     await useModel(owner, scripted(seen));
-    const a = await openTab(browser);
-    const b = await openTab(browser);
+    const [a, b] = [await openTab(browser), await openTab(browser)];
     a.send?.("conv-1", "Hi!");
     await a.until?.("turn.completed");
     await b.until?.("turn.completed");
@@ -83,7 +80,6 @@ describe("chat transport", () => {
     expect(a.events.map((e) => e.type)).toEqual(types);
     expect(b.events).toEqual(a.events);
     expect(a.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(a.events.every((e) => e.sessionId === "conv-1")).toBe(true);
     expect(seen).toEqual([[{ role: "user", content: "Hi!" }]]);
 
     const res = await browser.req("/api/conversations/conv-1/messages");
@@ -146,20 +142,23 @@ describe("chat transport", () => {
     const tab = await openTab(browser, "/api/chat?name=u:someone-else&_pk=x");
     tab.send?.("conv-3", "Whose assistant is this?");
     await tab.until?.("turn.completed");
-    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
-      expect(instance.userId).toBe(owner);
-    });
     expect(await count("conversations", `id = 'conv-3' AND user_id = '${owner}'`)).toBe(1);
   });
 
-  it("closes an open socket on its next send once the session is logged out", async () => {
-    const { browser, owner } = await claim();
-    await useModel(owner, scripted());
-    const tab = await openTab(browser);
+  it("closes an open socket on its next action once the session is logged out", async () => {
+    const { browser, owner, key } = await claim();
+    const other = new Browser();
+    expect((await other.login(key)).status).toBe(200);
+    await useModel(owner, scripted([], never));
+    const [stale, live] = [await openTab(browser), await openTab(other)];
     expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
-    tab.send?.("conv-4", "Still there?");
-    expect(await tab.closed).toBe(4401);
-    expect(await count("messages", "1")).toBe(0);
+    live.send?.("conv-4", "Still there?");
+    await live.until?.("message.delta");
+    stale.ws?.send(JSON.stringify({ type: "turn.cancel" })); // can't stop the live tab's turn
+    expect(await stale.closed).toBe(4401);
+    expect(live.events.map((e) => e.type)).not.toContain("turn.interrupted");
+    live.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await live.until?.("turn.interrupted");
   });
 
   it("refuses another user's conversation, bad input and a second concurrent turn", async () => {

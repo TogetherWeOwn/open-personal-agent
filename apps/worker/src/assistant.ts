@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// The per-user assistant (ADR 0002): one Durable Object per user, named `u:<userId>` by the
-// server. It owns the hibernating WebSockets of all the user's tabs and runs one chat turn at a
-// time. Every event goes to every tab, so two tabs show the same stream. D1 holds the messages;
-// the DO keeps only what a turn needs while it runs.
+// The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
+// WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
+// tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
 import type { HarnessEvent, ModelProvider } from "@opa/core";
 import { createWorkersAIProvider } from "@opa/providers";
 import {
@@ -77,7 +76,7 @@ export class Assistant extends Agent<Bindings> {
 
   override onMessage(connection: Connection, message: WSMessage): void {
     const msg = parse(message);
-    if (msg?.type === "turn.cancel") this.#running?.abort();
+    if (msg?.type === "turn.cancel") void this.#cancel(connection);
     if (msg?.type !== "chat.send") return;
     if (this.#running) {
       reject(connection, msg.conversationId, "Another reply is still being written.");
@@ -106,37 +105,34 @@ export class Assistant extends Agent<Bindings> {
     signal: AbortSignal,
     stash: (data: TurnRecord) => void,
   ) {
+    if (!(await this.#sessionLive(connection))) return;
     const store = chatStore(this.env.DB, this.userId);
-    // A socket outlives logout and revocation, so each turn rechecks the session it was opened with.
-    const { sessionId } = (connection.state ?? {}) as { sessionId?: string | null };
-    if (!sessionId || !(await store.sessionLive(sessionId))) {
-      return connection.close(4401, "unauthenticated");
-    }
     const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
     if (!(await store.openConversation(conversationId, title))) {
       return reject(connection, conversationId, "That conversation doesn't exist.");
     }
     const { provider, model } = this.chatModel;
-    const turnId = crypto.randomUUID();
     const turn: TurnRecord = {
       conversationId,
-      turnId,
+      turnId: crypto.randomUUID(),
       replyId: crypto.randomUUID(),
       providerId: provider.id,
       model,
       reply: "",
       usage: null,
+      called: false,
     };
     // Checkpoint before the first write, so a recovery can always name the turn.
     stash(turn);
-    const emit = this.#emitter(conversationId, turnId);
-    await store.append(conversationId, crypto.randomUUID(), "user", text);
+    const emit = this.#emitter(conversationId, turn.turnId);
+    await store.startTurn(conversationId, text, turn.replyId);
     // The model context comes from D1, never from memory, so it survives an eviction.
     const messages = ((await store.listMessages(conversationId)) ?? [])
       .filter((m) => m.content !== "")
       .map(({ role, content }) => ({ role, content }));
-    await store.append(conversationId, turn.replyId, "assistant");
     emit("turn.started", { messageId: turn.replyId });
+    turn.called = true;
+    stash(turn);
 
     let failure: string | null = null;
     let stashedAt = 0;
@@ -173,6 +169,20 @@ export class Assistant extends Agent<Bindings> {
       emit("message.completed", { text: turn.reply });
       emit("turn.completed", {});
     }
+  }
+
+  /** Stops the running turn, for a tab whose session is still live. */
+  async #cancel(connection: Connection) {
+    if (await this.#sessionLive(connection)) this.#running?.abort();
+  }
+
+  /** A socket outlives logout and revocation, so each action rechecks the session it opened with. */
+  async #sessionLive(connection: Connection): Promise<boolean> {
+    const { sessionId } = (connection.state ?? {}) as { sessionId?: string | null };
+    if (sessionId && (await chatStore(this.env.DB, this.userId).sessionLive(sessionId)))
+      return true;
+    connection.close(4401, "unauthenticated");
+    return false;
   }
 
   /**
