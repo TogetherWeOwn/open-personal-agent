@@ -137,6 +137,16 @@ function checkId(id: string): string {
 
 export type MessageStatus = "complete" | "streaming" | "interrupted" | "error";
 
+/** One `search_history` match: a window of the message around the text that matched. */
+export type HistoryHit = {
+  conversationId: string;
+  conversationTitle: string | null;
+  messageId: string;
+  role: "user" | "assistant";
+  snippet: string;
+  createdAt: number;
+};
+
 /** A running chat turn: also its eviction checkpoint, so it is plain JSON. */
 export interface TurnRecord {
   conversationId: string;
@@ -336,6 +346,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             (await getConversation(conversationId))
               ? thread(conversationId, ["user", "assistant", "system"])
               : null,
+          /**
+           * The caller's own messages containing `query` (M3-08 AC2), newest first. The query is
+           * matched literally (LIKE's wildcards are escaped), and the conversation join is bound
+           * to the same `user_id`, so a row can never surface through someone else's conversation.
+           * Case-insensitively for A–Z only: SQLite LIKE has no Unicode folding, so other scripts
+           * match exactly as typed (the tool description says so).
+           */
+          searchHistory: (query: string, limit: number): Promise<HistoryHit[]> => {
+            const like = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+            return db
+              .select({
+                conversationId: messages.conversationId,
+                conversationTitle: conversations.title,
+                messageId: messages.id,
+                role: sql<"user" | "assistant">`${messages.role}`, // the filter below
+                snippet: sql<string>`substr(${messages.content}, max(1, instr(lower(${messages.content}), lower(${query})) - 80), 240)`,
+                createdAt: messages.createdAt,
+              })
+              .from(messages)
+              .innerJoin(
+                conversations,
+                and(
+                  eq(conversations.id, messages.conversationId),
+                  eq(conversations.userId, userId),
+                ),
+              )
+              .where(
+                and(
+                  eq(messages.userId, userId),
+                  inArray(messages.role, ["user", "assistant"]),
+                  sql`${messages.content} LIKE ${like} ESCAPE '\\'`,
+                ),
+              )
+              .orderBy(desc(messages.createdAt))
+              .limit(Math.min(Math.max(Math.trunc(limit) || 1, 1), 50));
+          },
           /** Creates the conversation on its first message; `false` if the ID is someone else's. */
           /** Opens a conversation, creating it, with its own model if one is given, when it's new. */
           open: async (id: string, title: string, pin?: { provider: string; model: string }) => {

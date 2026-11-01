@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // `builtin-loop` (M3-03b, ADR 0005 #7, M2-16 note): our own tool loop over the ModelProvider port.
 // It holds no storage: everything a turn needs to resume is plain data in `TurnState`, which the
-// host persists with the turn (M3-03c), so a turn can stop and go on in another process.
+// host persists with the turn (M3-03c). Approvals are stop-and-resume: the run ends at the approval,
+// and the decision resumes it on a later request, possibly in another process.
 import type {
   FinishReason,
   ModelMessage,
@@ -23,11 +24,15 @@ import {
   type ToolRegistry,
   TRUSTED,
 } from "@opa/policy";
-import type { LimitKind, LoopEvent, TurnOutcome } from "./events";
+import type { ApprovalDecision, ApprovalItem, LimitKind, LoopEvent, TurnOutcome } from "./events";
 import { canonical, parseInput } from "./schema";
 
 /** COST-1 per-turn limits (M3-03 AC7). They replace M2's one call a turn. */
 export const TURN_LIMITS = { calls: 8, tools: 20 } as const;
+/** How long an interactive approval waits (M3-07 AC1, ADR 0010 D9). */
+export const APPROVAL_TTL_MS = 24 * 3_600_000;
+/** What a gated call's result reads while it waits, so the history stays valid for every provider. */
+export const WAITING_FOR_APPROVAL = "Waiting for the user's approval.";
 const PREVIEW_CHARS = 200;
 
 export type ToolOutput = {
@@ -36,6 +41,9 @@ export type ToolOutput = {
   // What the result adds to the context, for taint. Omitted, it counts as an untrusted tool result;
   // a tool whose result is only its own text says `{ kind: "system" }`.
   context?: ContextEvent;
+  // A file the call created (M3-08 AC3): the loop announces it with `artifact.created`, so the
+  // transcript and Outputs learn about it from the event log, not from the tool's text.
+  artifact?: { artifactId: string; name: string; type: string; bytes: number };
 };
 
 export interface LoopTool extends RegisteredTool {
@@ -44,12 +52,15 @@ export interface LoopTool extends RegisteredTool {
   execute(input: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput>;
 }
 
+export type PendingItem = ApprovalItem & { toolCallId: string; decision?: ApprovalDecision };
+
 /** A turn's resumable state. Plain JSON, so the host can store it (in D1, M3-03c). */
 export type TurnState = {
   messages: ModelMessage[]; // this turn's messages, after the history the host passes in
   taint: TaintState;
   counts: { calls: number; tools: number }; // persist with the turn, so a resume doesn't reset them
   usage: ModelUsage; // summed over the turn's calls, for the ledger
+  pending: { batchId: string; items: PendingItem[] } | null;
 };
 
 export type Budget = {
@@ -73,6 +84,16 @@ export type LoopHost = {
   newId(): string; // step and batch ids
 };
 
+export class ApprovalError extends Error {
+  constructor(
+    readonly code: "unknown" | "duplicate" | "stale" | "scope",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApprovalError";
+  }
+}
+
 const ZERO: ModelUsage = {
   inputTokens: 0,
   outputTokens: 0,
@@ -81,7 +102,38 @@ const ZERO: ModelUsage = {
 };
 
 export function newTurn(taint: TaintState = TRUSTED): TurnState {
-  return { messages: [], taint, counts: { calls: 0, tools: 0 }, usage: { ...ZERO } };
+  return { messages: [], taint, counts: { calls: 0, tools: 0 }, usage: { ...ZERO }, pending: null };
+}
+
+/**
+ * Records decisions on the pending batch. It checks every decision first and throws before
+ * changing anything, so an unknown, stale or duplicate id never touches the history (M3-03 AC4).
+ */
+export function resolveApprovals(
+  state: TurnState,
+  batchId: string,
+  decisions: readonly ApprovalDecision[],
+  now: number,
+): void {
+  const batch = state.pending;
+  if (!batch || batch.batchId !== batchId) throw new ApprovalError("unknown", "no such batch");
+  const seen = new Set<string>();
+  for (const d of decisions) {
+    const item = batch.items.find((i) => i.approvalId === d.approvalId);
+    if (!item) throw new ApprovalError("unknown", `no pending approval ${d.approvalId}`);
+    if (item.decision || seen.has(d.approvalId)) {
+      throw new ApprovalError("duplicate", `${d.approvalId} is already decided`);
+    }
+    if (now >= item.expiresAt) throw new ApprovalError("stale", `${d.approvalId} has expired`);
+    if (d.decision === "approve" && !item.scopes.includes(d.scope)) {
+      throw new ApprovalError("scope", `${d.approvalId} can't be approved for "${d.scope}"`);
+    }
+    seen.add(d.approvalId);
+  }
+  for (const d of decisions) {
+    const item = batch.items.find((i) => i.approvalId === d.approvalId) as PendingItem;
+    item.decision = { approvalId: d.approvalId, decision: d.decision, scope: d.scope };
+  }
 }
 
 /** The user's Continue after `limit.reached{calls|tools}`: a fresh allowance for the same turn. */
@@ -96,6 +148,8 @@ type Run = {
   manifest: ToolManifest;
   input: Record<string, unknown>;
 };
+
+type Asked = Run & { d: Extract<PolicyDecision, { outcome: "ask" }> };
 
 const ev = <T extends LoopEvent["type"]>(
   type: T,
@@ -176,8 +230,8 @@ export async function* runTurn(
    * together; any other call starts after everything before it has finished. Returns the calls
    * that ask; with `approved`, the user already said yes, so an `ask` runs.
    */
-  async function* execute(runs: Run[], approved = false): AsyncGenerator<LoopEvent, Run[]> {
-    const asks: Run[] = [];
+  async function* execute(runs: Run[], approved = false): AsyncGenerator<LoopEvent, Asked[]> {
+    const asks: Asked[] = [];
     for (let i = 0; i < runs.length && !signal.aborted; ) {
       let end = i + 1;
       const isRead = (r: Run | undefined) => r?.manifest.riskClass === "read";
@@ -188,7 +242,7 @@ export async function* runTurn(
         if (!d || d.outcome === "deny") {
           yield* skip(run.call, deniedText(d, approved), "denied");
         } else if (d.outcome === "ask" && !approved) {
-          asks.push(run);
+          asks.push({ ...run, d });
         } else {
           const id = host.newId();
           const began = host.now();
@@ -204,6 +258,7 @@ export async function* runTurn(
         const o = await out;
         stepId = id;
         yield* result(run.call, o.ok, o.content);
+        if (o.ok && o.artifact) yield ev("artifact.created", o.artifact);
         const was = state.taint.taint;
         state.taint = addContext(state.taint, o.context ?? { kind: "tool", label: run.call.name });
         const source = state.taint.sources[0];
@@ -225,12 +280,13 @@ export async function* runTurn(
     const last = messages.findLast((m) => m.role === "assistant");
     for (const call of (last?.role === "assistant" && last.toolCalls) || []) {
       const done = messages.find((m) => m.role === "tool" && m.toolCallId === call.id);
-      if (!done) yield* result(call, false, content);
+      if (!done || done.content === WAITING_FOR_APPROVAL) yield* result(call, false, content);
     }
   }
 
   function* cancelled(): Generator<LoopEvent, TurnOutcome> {
     yield* closeOpen("Cancelled by the user.");
+    state.pending = null;
     yield ev("turn.cancelled", {});
     return "cancelled";
   }
@@ -238,6 +294,39 @@ export async function* runTurn(
   function* limit(kind: LimitKind, detail: string): Generator<LoopEvent, TurnOutcome> {
     yield ev("limit.reached", { kind, detail });
     return "limit_reached";
+  }
+
+  if (signal.aborted) return yield* cancelled();
+  // Resume once every call in the batch is decided. An approval that expired undecided counts as
+  // denied. An approved call is checked again against the tool's current schema and policy.
+  if (state.pending) {
+    const { batchId, items } = state.pending;
+    const now = host.now();
+    if (items.some((i) => !i.decision && now < i.expiresAt)) return "awaiting_approval";
+    const decisions = items.map(
+      (i): ApprovalDecision =>
+        i.decision ?? { approvalId: i.approvalId, decision: "deny", scope: "once" },
+    );
+    yield ev("approval.resolved", { batchId, decisions });
+    const runs: Run[] = [];
+    for (const item of items) {
+      const call = { id: item.toolCallId, name: item.tool, arguments: item.args };
+      const entry = host.tools.get(item.tool);
+      const parsed = entry && parseInput(entry.manifest.inputSchema, item.args);
+      if (!item.decision) {
+        yield* skip(call, "The approval expired, so the call didn't run.", "denied");
+      } else if (item.decision.decision === "deny") {
+        yield* skip(call, "The user denied this call.", "denied");
+      } else if (!entry || !parsed) {
+        yield* skip(call, `There is no tool named "${item.tool}".`, "error");
+      } else if (!parsed.ok) {
+        yield* skip(call, parsed.error, "error");
+      } else {
+        runs.push({ call, tool: entry.tool, manifest: entry.manifest, input: parsed.input });
+      }
+    }
+    state.pending = null;
+    yield* execute(runs, true);
   }
 
   for (;;) {
@@ -343,11 +432,32 @@ export async function* runTurn(
       }
     }
     const asks = yield* execute(runs);
-    // Approvals are wired in M3-03b (3/3); until then a call that asks doesn't run.
-    for (const a of asks) {
-      yield* skip(a.call, "This call needs the user's approval, so it didn't run.", "denied");
-    }
     if (signal.aborted) return yield* cancelled();
+    if (asks.length > 0) {
+      // One batch for the step; each gated call gets a placeholder result while it waits.
+      const source = state.taint.sources[0];
+      const items = asks.map(({ call, tool, input, d }): PendingItem => {
+        const target = tool.target?.(input);
+        messages.push({ role: "tool", toolCallId: call.id, content: WAITING_FOR_APPROVAL });
+        return {
+          approvalId: `appr_${call.id}`,
+          toolCallId: call.id,
+          tool: call.name,
+          args: canonical(input),
+          ...(target === undefined ? {} : { target }),
+          risk: d.risk,
+          rule: d.rule,
+          ...(d.taint === "untrusted" && source ? { taint: source } : {}),
+          scopes: d.scopes,
+          expiresAt: host.now() + APPROVAL_TTL_MS,
+        };
+      });
+      const batchId = `batch_${host.newId()}`;
+      state.pending = { batchId, items };
+      const card = items.map(({ toolCallId: _, decision: __, ...item }) => item);
+      yield ev("approval.requested", { batchId, items: card });
+      return "awaiting_approval";
+    }
   }
 }
 
