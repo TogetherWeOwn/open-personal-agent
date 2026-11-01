@@ -24,5 +24,3 @@ export type HarnessEvent =
   | Envelope<"message.completed", { text: string }>
   | Envelope<"usage.updated", { usage: ModelUsage; providerId: string; model: string }>
   | Envelope<"status", { text: string }>;
-
-export type HarnessEventType = HarnessEvent["type"];

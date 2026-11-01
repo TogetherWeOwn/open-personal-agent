@@ -24,7 +24,7 @@ export const PUBLIC_ROUTES: ReadonlySet<string> = new Set([
 ]);
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-const IDLE_MS = 30 * 86_400_000;
+export const IDLE_MS = 30 * 86_400_000;
 /** `last_seen_at` is written at most this often, so reads don't each cost a D1 write. */
 const TOUCH_MS = 60 * 60_000;
 

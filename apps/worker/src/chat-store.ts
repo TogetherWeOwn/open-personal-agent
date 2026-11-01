@@ -2,7 +2,8 @@
 // Conversations, messages and the usage ledger in D1, the durable truth (ADR 0002). Every query
 // is filtered by the user the store was opened for, so one user can never read or write another's
 // rows, even with a guessed ID.
-import type { ModelMessage, ModelUsage } from "@opa/core";
+import type { ModelUsage } from "@opa/core";
+import { IDLE_MS } from "./session";
 
 /** Conversation IDs come from the client, so they are checked before they reach SQL. */
 export const isConversationId = (id: unknown): id is string =>
@@ -10,30 +11,23 @@ export const isConversationId = (id: unknown): id is string =>
 
 export type MessageStatus = "complete" | "streaming" | "interrupted" | "error";
 
-export interface StoredMessage {
-  id: string;
-  role: "user" | "assistant";
-  status: MessageStatus;
-  content: string;
-  createdAt: number;
+/** A running turn: also its eviction checkpoint, so it is plain JSON. */
+export interface TurnRecord {
+  conversationId: string;
+  turnId: string;
+  replyId: string;
+  providerId: string;
+  model: string;
+  reply: string;
+  usage: ModelUsage | null;
 }
 
 export function chatStore(db: D1Database, userId: string) {
   return {
-    listConversations: async () =>
-      (
-        await db
-          .prepare(
-            `SELECT id, title, updated_at AS updatedAt FROM conversations
-             WHERE user_id = ? AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 200`,
-          )
-          .bind(userId)
-          .all<{ id: string; title: string | null; updatedAt: number }>()
-      ).results,
-
     /** The conversation's messages oldest first, or `null` when it is missing or not the user's. */
-    async listMessages(conversationId: string): Promise<StoredMessage[] | null> {
-      const [owner, rows] = await db.batch<StoredMessage & { n?: number }>([
+    async listMessages(conversationId: string) {
+      type Row = { id: string; role: "user" | "assistant"; status: MessageStatus; content: string };
+      const [owner, rows] = await db.batch<Row & { createdAt: number; n?: number }>([
         db
           .prepare("SELECT count(*) AS n FROM conversations WHERE id = ? AND user_id = ?")
           .bind(conversationId, userId),
@@ -66,23 +60,8 @@ export function chatStore(db: D1Database, userId: string) {
       return owner === userId;
     },
 
-    /** The model context: every finished message, oldest first. */
-    async history(conversationId: string): Promise<ModelMessage[]> {
-      const { results } = await db
-        .prepare(
-          `SELECT role, content FROM messages WHERE user_id = ? AND conversation_id = ?
-           AND role IN ('user', 'assistant') AND content != '' ORDER BY seq`,
-        )
-        .bind(userId, conversationId)
-        .all<ModelMessage>();
-      return results;
-    },
-
     /** Appends a message after the conversation's last one and bumps `updated_at`. */
-    async append(
-      conversationId: string,
-      message: { id: string; role: "user" | "assistant"; status: MessageStatus; content: string },
-    ) {
+    async append(conversationId: string, id: string, role: "user" | "assistant", content = "") {
       await db.batch([
         db
           .prepare(
@@ -90,53 +69,59 @@ export function chatStore(db: D1Database, userId: string) {
              SELECT ?1, ?2, ?3, coalesce(max(seq), 0) + 1, ?4, ?5, ?6 FROM messages
              WHERE conversation_id = ?3`,
           )
-          .bind(message.id, userId, conversationId, message.role, message.status, message.content),
+          // A user message is complete when written; a reply streams until `settle`.
+          .bind(
+            id,
+            userId,
+            conversationId,
+            role,
+            role === "user" ? "complete" : "streaming",
+            content,
+          ),
         db
           .prepare("UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?")
           .bind(Date.now(), conversationId, userId),
       ]);
     },
 
-    finish: (messageId: string, status: MessageStatus, content: string) =>
-      db
-        .prepare("UPDATE messages SET status = ?, content = ? WHERE id = ? AND user_id = ?")
-        .bind(status, content, messageId, userId)
-        .run(),
-
-    /** Marks every reply still streaming as interrupted, after an eviction cut its turn short. */
-    interruptStreaming: () =>
-      db
+    /** Whether the session a socket was opened with is still live, as the session guard rules. */
+    sessionLive: async (sessionId: string) =>
+      (await db
         .prepare(
-          "UPDATE messages SET status = 'interrupted' WHERE user_id = ? AND status = 'streaming'",
+          `SELECT 1 AS ok FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+           AND expires_at > ?3 AND last_seen_at > ?3 - ?4`,
         )
-        .bind(userId)
-        .run(),
+        .bind(sessionId, userId, Date.now(), IDLE_MS)
+        .first("ok")) === 1,
 
-    /** One ledger row per model call (ADR 0006). Pricing joins in M2-21, so cost is 0. */
-    recordUsage: (row: {
-      conversationId: string;
-      messageId: string;
-      providerId: string;
-      model: string;
-      usage: ModelUsage | null;
-    }) =>
-      db
-        .prepare(
-          `INSERT INTO usage (id, user_id, conversation_id, message_id, provider_id, model,
-           input_tokens, output_tokens, cached_input_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          crypto.randomUUID(),
-          userId,
-          row.conversationId,
-          row.messageId,
-          row.providerId,
-          row.model,
-          row.usage?.inputTokens ?? 0,
-          row.usage?.outputTokens ?? 0,
-          row.usage?.cachedInputTokens ?? 0,
-        )
-        .run(),
+    /**
+     * Finishes a reply and writes the call's usage ledger row (ADR 0006) in one transaction.
+     * Pricing joins in M2-21, so cost is 0. The reply row may not exist yet after an early
+     * eviction, so the ledger row then has no message.
+     */
+    settle: (turn: TurnRecord, status: MessageStatus) =>
+      db.batch([
+        db
+          .prepare("UPDATE messages SET status = ?, content = ? WHERE id = ? AND user_id = ?")
+          .bind(status, turn.reply, turn.replyId, userId),
+        db
+          .prepare(
+            `INSERT INTO usage (id, user_id, conversation_id, message_id, provider_id, model,
+             input_tokens, output_tokens, cached_input_tokens)
+             VALUES (?, ?2, ?, (SELECT id FROM messages WHERE id = ? AND user_id = ?2), ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            userId,
+            turn.conversationId,
+            turn.replyId,
+            turn.providerId,
+            turn.model,
+            turn.usage?.inputTokens ?? 0,
+            turn.usage?.outputTokens ?? 0,
+            turn.usage?.cachedInputTokens ?? 0,
+          ),
+      ]),
   };
 }
 

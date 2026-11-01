@@ -4,7 +4,7 @@
 // and the SDK's `/agents/:class/:name` router is not mounted.
 import { getAgentByName } from "agents";
 import { Hono } from "hono";
-import { assistantName } from "./assistant";
+import { assistantName, SESSION_HEADER } from "./assistant";
 import { chatStore, isConversationId } from "./chat-store";
 import type { AppEnv } from "./env";
 
@@ -20,13 +20,9 @@ chatRoutes.get("/chat", async (c) => {
     return c.json({ error: "bad_origin" }, 403);
   }
   const assistant = await getAgentByName(c.env.ASSISTANT, assistantName(c.var.session.userId));
-  return assistant.fetch(c.req.raw);
-});
-
-chatRoutes.get("/conversations", async (c) => {
-  c.header("Cache-Control", "no-store");
-  const conversations = await chatStore(c.env.DB, c.var.session.userId).listConversations();
-  return c.json({ conversations });
+  const upgrade = new Request(c.req.raw);
+  upgrade.headers.set(SESSION_HEADER, c.var.session.id);
+  return assistant.fetch(upgrade);
 });
 
 chatRoutes.get("/conversations/:id/messages", async (c) => {

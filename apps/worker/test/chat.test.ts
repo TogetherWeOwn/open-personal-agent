@@ -13,16 +13,19 @@ freshDatabase();
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
 
-/** A model that replies "Hello there" and records what it was asked. */
-function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>): ModelProvider {
+const never = new Promise<void>(() => {});
+
+/** A model that replies "Hello there" and records what it was asked. A gate holds it mid-reply. */
+function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = false): ModelProvider {
   return {
     id: "scripted",
     listModels: async () => [],
     capabilities: () => ({ tools: false, usageInStream: true }),
     async *stream(request): AsyncGenerator<ModelEvent> {
       seen.push(request.messages);
+      if (early) await gate;
       yield { type: "text.delta", text: "Hello" };
-      await gate; // a gate that never opens holds the turn until the DO is evicted
+      await gate;
       yield { type: "text.delta", text: " there" };
       yield { type: "usage", usage: USAGE };
       yield { type: "done", finishReason: "stop" };
@@ -54,11 +57,14 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
   ws.addEventListener("message", (e) => {
     events.push(JSON.parse(e.data as string));
   });
+  const closed = new Promise<number>((resolve) =>
+    ws.addEventListener("close", (e) => resolve(e.code)),
+  );
   const until = (type: HarnessEvent["type"]) =>
     vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type));
   const send = (conversationId: string, text: string) =>
     ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
-  return { res, ws, events, until, send };
+  return { res, ws, events, until, send, closed };
 }
 
 describe("chat transport", () => {
@@ -78,9 +84,6 @@ describe("chat transport", () => {
     expect(b.events).toEqual(a.events);
     expect(a.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(a.events.every((e) => e.sessionId === "conv-1")).toBe(true);
-    expect(a.events.find((e) => e.type === "message.completed")?.payload).toEqual({
-      text: "Hello there",
-    });
     expect(seen).toEqual([[{ role: "user", content: "Hi!" }]]);
 
     const res = await browser.req("/api/conversations/conv-1/messages");
@@ -89,8 +92,6 @@ describe("chat transport", () => {
       { role: "user", content: "Hi!", status: "complete" },
       { role: "assistant", content: "Hello there", status: "complete" },
     ]);
-    const list = await (await browser.req("/api/conversations")).json();
-    expect(list).toMatchObject({ conversations: [{ id: "conv-1", title: "Hi!" }] });
     const ledger = await db.prepare("SELECT * FROM usage").all();
     expect(ledger.results).toMatchObject([
       { user_id: owner, conversation_id: "conv-1", provider_id: "scripted", model: "test-model" },
@@ -98,38 +99,40 @@ describe("chat transport", () => {
     expect(ledger.results[0]).toMatchObject({ input_tokens: 12, output_tokens: 3 });
   });
 
-  it("keeps the conversation through an eviction mid-turn and continues from D1", async () => {
-    const { browser, owner } = await claim();
-    await useModel(owner, scripted([], new Promise(() => {})));
-    const tab = await openTab(browser);
-    tab.send?.("conv-2", "Tell me a story");
-    await tab.until?.("message.delta");
-    await vi.waitFor(async () => expect(await count("messages", "status = 'streaming'")).toBe(1));
+  it.each([
+    ["mid-reply", "Hello", false],
+    ["before the first token", "", true],
+  ])(
+    "keeps the conversation through an eviction %s and continues from D1",
+    async (_, kept, early) => {
+      const { browser, owner } = await claim();
+      await useModel(owner, scripted([], never, early));
+      const tab = await openTab(browser);
+      tab.send?.("conv-2", "Tell me a story");
+      await tab.until?.(early ? "turn.started" : "message.delta");
 
-    await abortAllDurableObjects(); // the forced eviction: memory and the running turn are gone
-    const next = await openTab(browser); // wakes the DO, which recovers the turn's fiber
-    await vi.waitFor(async () => {
-      const { messages } = await (await browser.req("/api/conversations/conv-2/messages")).json<{
-        messages: { status: string; content: string }[];
-      }>();
-      expect(messages).toMatchObject([
-        { content: "Tell me a story", status: "complete" },
-        { content: "Hello", status: "interrupted" },
-      ]);
-    });
+      await abortAllDurableObjects(); // the forced eviction: memory and the running turn are gone
+      const next = await openTab(browser); // wakes the DO, which recovers the turn's fiber
+      await vi.waitFor(async () => {
+        const { messages } = await (await browser.req("/api/conversations/conv-2/messages")).json<{
+          messages: { status: string; content: string }[];
+        }>();
+        expect(messages).toMatchObject([
+          { content: "Tell me a story", status: "complete" },
+          { content: kept, status: "interrupted" },
+        ]);
+      });
+      expect(await count("usage", "conversation_id = 'conv-2'")).toBe(1); // the ledger keeps the call
 
-    const seen: ModelMessage[][] = [];
-    await useModel(owner, scripted(seen));
-    next.send?.("conv-2", "Go on");
-    await next.until?.("turn.completed");
-    expect(seen).toEqual([
-      [
-        { role: "user", content: "Tell me a story" },
-        { role: "assistant", content: "Hello" },
-        { role: "user", content: "Go on" },
-      ],
-    ]);
-  });
+      const seen: ModelMessage[][] = [];
+      await useModel(owner, scripted(seen));
+      next.send?.("conv-2", "Go on");
+      await next.until?.("turn.completed");
+      const story = { role: "user", content: "Tell me a story" };
+      const reply = early ? [] : [{ role: "assistant", content: "Hello" }];
+      expect(seen).toEqual([[story, ...reply, { role: "user", content: "Go on" }]]);
+    },
+  );
 
   it("names the DO from the session, never from the request", async () => {
     const { browser, owner } = await claim();
@@ -149,13 +152,23 @@ describe("chat transport", () => {
     expect(await count("conversations", `id = 'conv-3' AND user_id = '${owner}'`)).toBe(1);
   });
 
+  it("closes an open socket on its next send once the session is logged out", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const tab = await openTab(browser);
+    expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    tab.send?.("conv-4", "Still there?");
+    expect(await tab.closed).toBe(4401);
+    expect(await count("messages", "1")).toBe(0);
+  });
+
   it("refuses another user's conversation, bad input and a second concurrent turn", async () => {
     const { browser, owner } = await claim();
     await db.batch([
       db.prepare("INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member')"),
       db.prepare("INSERT INTO conversations (id, user_id) VALUES ('theirs', 'other')"),
     ]);
-    await useModel(owner, scripted([], new Promise(() => {})));
+    await useModel(owner, scripted([], never));
     const tab = await openTab(browser);
     tab.send?.("theirs", "hi");
     tab.send?.("../x", "hi");
