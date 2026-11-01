@@ -5,9 +5,12 @@
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
 import { Memory } from "./memory/Memory";
+import { Waiting } from "./memory/Waiting";
 import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
+import { TaskDetails } from "./tasks/TaskDetails";
+import { Tasks } from "./tasks/Tasks";
 import { EmptyState, Page } from "./ui";
 import { Usage } from "./usage/Usage";
 
@@ -55,9 +58,9 @@ export const SETTINGS: {
     body: "Your assistant works without one; it just can't browse like a person or run code.",
   },
   { id: "apps", label: "Apps & tools" },
-  { id: "memory", label: "Memory" },
+  { id: "memory", label: "Memory", shipped: true },
   { id: "spending", label: "Spending", shipped: true },
-  { id: "privacy", label: "Privacy & security" },
+  { id: "privacy", label: "Privacy & security", shipped: true },
   { id: "deployment", label: "Deployment" },
 ];
 
@@ -83,8 +86,9 @@ function SettingsList() {
 function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
-  // Models and Agent engine already shipped with real screens; the table serves them instead of
-  // their placeholders, so the rebase keeps what `main` already gives those addresses.
+  // Models, Agent engine, Spending and Privacy & security already shipped with real
+  // screens; the table serves them instead of their placeholders, so the rebase keeps what
+  // `main` already gives those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
   return (
     <Page title={page.label}>
@@ -103,10 +107,11 @@ export function NotFound() {
 }
 
 // m3-ux §1.2 names this screen "Waiting for you", so the two Memory addresses don't look alike.
-const waiting = placeholder(
-  "Waiting for you",
-  "I'll remember things you tell me, like your preferences and ongoing projects.",
-  "You can always see and change them here.",
+const waiting = () => (
+  <Page title="Waiting for you">
+    {go("/memory", "All of Memory")}
+    <Waiting heading={false} />
+  </Page>
 );
 
 export const routes: Route[] = [
@@ -124,25 +129,8 @@ export const routes: Route[] = [
   },
   { path: "/approvals/:approvalId", nav: "inbox", screen: () => <Redirect to="/inbox" /> },
   { path: "/activity", nav: "activity", screen: () => <Redirect to="/activity/tasks" /> },
-  {
-    path: "/activity/tasks",
-    nav: "activity",
-    screen: placeholder(
-      "Tasks",
-      "No tasks yet.",
-      "When I work on something for you, it shows up here.",
-    ),
-  },
-  {
-    path: "/activity/tasks/:taskId",
-    nav: "activity",
-    screen: placeholder(
-      "Task",
-      "This task doesn't exist or was deleted.",
-      undefined,
-      go("/activity/tasks", "See all tasks"),
-    ),
-  },
+  { path: "/activity/tasks", nav: "activity", screen: Tasks },
+  { path: "/activity/tasks/:taskId", nav: "activity", screen: TaskDetails },
   { path: "/activity/outputs", nav: "activity", screen: Outputs },
   { path: "/activity/outputs/:outputId", nav: "activity", screen: Output },
   {

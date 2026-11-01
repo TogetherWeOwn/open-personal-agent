@@ -34,6 +34,10 @@ export interface ModelPrice {
 /** A price this many days past its check is flagged on the Usage page. */
 export const STALE_AFTER_DAYS = 90;
 
+/** The Workers Paid plan every deployment runs on (PRD §15 category 1), billed by Cloudflare. */
+export const workersPaid: { usdPerMonth: number; verifiedAt: string; source: string } =
+  table.workersPaid;
+
 /** Cloudflare's free Workers AI allowance, shared by everything on the account. */
 export const workersAiAllowance: {
   neuronsPerDay: number;

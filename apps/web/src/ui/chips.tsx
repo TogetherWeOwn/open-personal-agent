@@ -3,6 +3,7 @@
 import {
   Check,
   CircleX,
+  Clock,
   Gauge,
   Globe,
   Hand,
@@ -16,8 +17,9 @@ import {
   Wallet,
 } from "lucide-react";
 
-/** The seven task statuses (M3-13 AC1). */
+/** The eight task statuses (M3-13 AC1). */
 export type Status =
+  | "queued"
   | "running"
   | "waiting_for_approval"
   | "budget_limited"
@@ -27,6 +29,7 @@ export type Status =
   | "interrupted";
 
 const statuses: Record<Status, [label: string, icon: LucideIcon, color: string]> = {
+  queued: ["Queued", Clock, "text-text-muted"],
   running: ["Working", Loader, "text-status-info"],
   waiting_for_approval: ["Needs your OK", Hand, "text-status-warning"],
   budget_limited: ["Paused: budget", Wallet, "text-status-warning"],

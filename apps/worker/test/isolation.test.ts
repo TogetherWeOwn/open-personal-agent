@@ -41,6 +41,7 @@ const CASES: Record<string, Case> = {
   "DELETE /api/artifacts/:id": { params: (v) => ({ id: v.artifact }), own: 204 },
   "GET /api/attachments/:id": { params: (v) => ({ id: v.attachment }), own: 200 },
   "DELETE /api/attachments/:id": { params: (v) => ({ id: v.attachment }), own: 204 },
+  "GET /api/exports/:id": { params: (v) => ({ id: v.export }), own: 200 },
   // The spare session: revoking the one the owner signs in with would 401 every later route.
   "DELETE /api/sessions/:id": { params: (v) => ({ id: v.spareSession }), own: 200 },
   "PUT /api/settings/providers/:id": {

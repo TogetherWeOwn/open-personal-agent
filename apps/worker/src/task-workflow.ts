@@ -242,7 +242,7 @@ async function driveLoop(
   /** The loop-yielded limit the run paused on, for the row's "Paused: limit" label (AC1). */
   limit?: { kind: TaskLimitKind; detail: string };
 }> {
-  const { taskId } = task;
+  const { taskId, conversationId } = task;
   const billingId = picked.billingId ?? picked.provider.id;
   let llmSeq = 0;
   let toolSeq = 0;
@@ -284,7 +284,7 @@ async function driveLoop(
             await ctx.budget.settle(key, billingId, req.model, usage).catch(() => {});
           }
           await user.usage
-            .record({ providerId: billingId, model: req.model, usage, taskId })
+            .record({ providerId: billingId, model: req.model, usage, conversationId, taskId })
             .catch(() => {});
           return { refused: null, events: events as unknown as JsonValue };
         });
@@ -302,6 +302,8 @@ async function driveLoop(
     registry.register({
       manifest: tool.manifest,
       ...(tool.target ? { target: tool.target } : {}),
+      // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
+      ...(tool.author ? { author: tool.author } : {}),
       execute: async (input, _signal, call) => {
         toolSeq += 1;
         const under = call?.approved && batch ? { batchId: batch, id: call.toolCallId } : null;

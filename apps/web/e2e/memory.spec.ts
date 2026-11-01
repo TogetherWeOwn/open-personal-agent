@@ -81,6 +81,9 @@ async function stubMemory(page: Page): Promise<Stub> {
   };
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings/memory", (route) =>
+    route.fulfill({ json: { learnFromChats: true } }),
+  );
   await page.route("/api/memory**", async (route) => {
     const url = new URL(route.request().url());
     const method = route.request().method();

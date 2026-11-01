@@ -225,6 +225,8 @@ describe("task rows", () => {
       conversationTitle: "Alice's",
     });
     expect(details?.costMicroUsd).toBe(report?.costMicroUsd);
+    // A task with no usage reads as zero calls and zero unpriced, like the list.
+    expect(await alice.tasks.details("t12")).toMatchObject({ calls: 0, unpricedCalls: 0 });
     expect(await alice.tasks.details("missing")).toBeUndefined();
     expect(await bob.tasks.details("t11")).toBeUndefined(); // someone else's run
 
@@ -239,5 +241,22 @@ describe("task rows", () => {
     expect(await alice.tasks.list({ limit: 1 })).toHaveLength(1);
     expect(await alice.tasks.list({ limit: 0 })).toHaveLength(1); // clamped to one
     expect((await alice.tasks.list({ limit: 500 })).length).toBeGreaterThan(1); // clamped to 200
+  });
+
+  it("files a queued row with no Workflow instance yet", async () => {
+    // What the `task` tool files: no instance until promotion creates it (M3-12b).
+    await alice.tasks.create({
+      id: "t20",
+      conversationId: "ca",
+      kind: "turn",
+      mode: "background",
+      title: "Later",
+    });
+    const row = await alice.tasks.get("t20");
+    expect(row?.status).toBe("queued");
+    expect(row?.workflowInstanceId).toBeNull();
+    await expect(
+      alice.tasks.create({ ...makeTask("t21", "ca"), workflowInstanceId: "x".repeat(129) }),
+    ).rejects.toThrow(/invalid instance id/);
   });
 });

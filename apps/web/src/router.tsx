@@ -10,7 +10,8 @@ const moved = (counts = true) => {
   if (counts) moves++;
   for (const listener of listeners) listener();
 };
-window.addEventListener("popstate", () => moved());
+// Guarded so the pure route helpers stay importable outside the browser (unit tests).
+if (typeof window !== "undefined") window.addEventListener("popstate", () => moved());
 
 /** `replace` swaps the current entry, for a route that only forwards; it isn't a move. */
 export function navigate(href: string, replace = false) {
@@ -57,6 +58,35 @@ export function match<R extends { path: string }>(routes: R[], path: string): Ma
     if (ok) return { route, params };
   }
   return null;
+}
+
+/** What a `/c/:conversationId` address means for the open chat, once resolved. */
+export type ChatAddressResolution =
+  /** Open the named chat: it has loaded and isn't open yet. */
+  | { action: "select"; id: string }
+  /** The loaded list has no such chat, so the address can't open anything: fall back. */
+  | { action: "redirect" }
+  /** The list hasn't loaded yet: the address may still name a real chat. */
+  | { action: "wait" }
+  /** Already open: nothing to do. */
+  | { action: "none" };
+
+/**
+ * Resolves a `/c/:conversationId` address against the loaded chats. The Tasks view links each
+ * run to its conversation this way (M3-13 AC2); without it the address changes while the open
+ * chat stays put. Each address is adopted once by the caller, so switching chats in place
+ * (which leaves the address behind) never yanks the open chat back.
+ */
+export function resolveChatAddress(
+  conversationId: string,
+  conversations: readonly { id: string }[],
+  activeId: string,
+  loaded: boolean,
+): ChatAddressResolution {
+  if (conversationId === activeId) return { action: "none" };
+  if (conversations.some((c) => c.id === conversationId))
+    return { action: "select", id: conversationId };
+  return loaded ? { action: "redirect" } : { action: "wait" };
 }
 
 /** Sends RAC `Link`s and `href` menu items through `navigate` instead of a page load. */

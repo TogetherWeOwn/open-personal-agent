@@ -215,6 +215,9 @@ importers:
       '@opa/db':
         specifier: workspace:*
         version: link:../db
+      '@opa/harness-builtin':
+        specifier: workspace:*
+        version: link:../harness-builtin
       '@opa/log':
         specifier: workspace:*
         version: link:../log

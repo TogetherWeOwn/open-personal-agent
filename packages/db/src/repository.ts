@@ -1608,6 +1608,52 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .groupBy(usage.providerId, usage.model, usage.costSource)
               .orderBy(usage.providerId, usage.model),
           /**
+           * The month's calls by conversation, by task and by day (M3-16 AC2). Titles come from
+           * this user's own rows only; a deleted conversation or task, or a call outside one,
+           * groups under a null ID. Days come as quarter-hour buckets (`bucket` × 15 min since
+           * the epoch), so the caller can place them on any time zone's calendar, DST included.
+           */
+          breakdowns: async (since: number) => {
+            const mine = and(eq(usage.userId, userId), gte(usage.createdAt, since));
+            const cost = {
+              calls: count(),
+              costMicroUsd: sql<number>`coalesce(sum(${usage.costMicroUsd}), 0)`.mapWith(Number),
+              unpricedCalls:
+                sql<number>`sum(case when ${usage.costSource} is null then 1 else 0 end)`.mapWith(
+                  Number,
+                ),
+            };
+            // Quarter hours fit every UTC offset, including the :30 and :45 ones. The time is cast
+            // first: the default `created_at` and a bound number can be REAL.
+            const bucket = sql<number>`cast(${usage.createdAt} as integer) / 900000`;
+            const [byConversation, byTask, byBucket] = await Promise.all([
+              db
+                .select({ id: conversations.id, title: conversations.title, ...cost })
+                .from(usage)
+                .leftJoin(
+                  conversations,
+                  and(eq(conversations.id, usage.conversationId), eq(conversations.userId, userId)),
+                )
+                .where(mine)
+                .groupBy(conversations.id)
+                .orderBy(desc(cost.costMicroUsd)),
+              db
+                .select({ id: tasks.id, title: tasks.title, ...cost })
+                .from(usage)
+                .leftJoin(tasks, and(eq(tasks.id, usage.taskId), eq(tasks.userId, userId)))
+                .where(mine)
+                .groupBy(tasks.id)
+                .orderBy(desc(cost.costMicroUsd)),
+              db
+                .select({ bucket: bucket.mapWith(Number), ...cost })
+                .from(usage)
+                .where(mine)
+                .groupBy(bucket)
+                .orderBy(bucket),
+            ]);
+            return { byConversation, byTask, byBucket };
+          },
+          /**
            * One model call's ledger row (one row per call, PRD §17), written when the call
            * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
            * such as the settings Test button, names neither. With `id`, writing the same call
@@ -2040,23 +2086,28 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
          * run's next write simply matches no row and reports `false`.
          */
         tasks: {
-          /** `false` when the conversation isn't the user's. The row starts `queued`. */
+          /**
+           * `false` when the conversation isn't the user's. The row starts `queued`. A row the
+           * `task` tool files has no Workflow instance yet (promotion creates it in M3-12b),
+           * so the instance id is optional and stays null until then.
+           */
           create: async (input: {
             id: string;
             conversationId: string;
-            workflowInstanceId: string;
+            workflowInstanceId?: string | null;
             kind: string;
             mode: TaskRow["mode"];
             title?: string | null;
             state?: string | null;
           }): Promise<boolean> => {
-            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
+            if (input.workflowInstanceId != null && !isInstanceId(input.workflowInstanceId))
+              throw new Error("invalid instance id");
             if (!(await getConversation(input.conversationId))) return false;
             await db.insert(tasks).values({
               id: checkId(input.id),
               userId,
               conversationId: input.conversationId,
-              workflowInstanceId: input.workflowInstanceId,
+              workflowInstanceId: input.workflowInstanceId ?? null,
               kind: input.kind,
               mode: input.mode,
               title: input.title ?? null,
@@ -2167,9 +2218,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 limitKind: tasks.limitKind,
                 error: tasks.error,
                 costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                // The left join's null usage row is not a call: without it a task with no
+                // usage would report one unpriced call alongside zero calls.
                 unpriced: sql<
                   number | null
-                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
+                >`sum(case when ${usage.id} is not null and ${usage.costMicroUsd} is null then 1 else 0 end)`.as(
+                  "unpriced",
+                ),
                 calls: count(usage.id).as("calls"),
                 createdAt: tasks.createdAt,
                 updatedAt: tasks.updatedAt,
