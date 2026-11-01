@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from "vitest";
-import { continueTurn, newTurn, TURN_LIMITS } from "../src/index";
-import { drain, history, host, ofType, scripted, tool, types } from "./helpers";
+import {
+  ApprovalError,
+  continueTurn,
+  newTurn,
+  resolveApprovals,
+  TURN_LIMITS,
+  WAITING_FOR_APPROVAL,
+} from "../src/index";
+import { drain, history, host, NOW, ofType, scripted, tool, types } from "./helpers";
 
 describe("tool input (M3-03 AC2)", () => {
   it("returns a bad input to the model as a tool error, before policy and without running it", async () => {
@@ -35,7 +42,7 @@ describe("tool input (M3-03 AC2)", () => {
 });
 
 describe("several calls in one step (M3-03 AC3)", () => {
-  it("runs ungated reads in parallel and doesn't run the calls that ask", async () => {
+  it("runs ungated reads in parallel and gates the rest as one batch", async () => {
     let running = 0;
     let peak = 0;
     const slow = async () => {
@@ -50,27 +57,167 @@ describe("several calls in one step (M3-03 AC3)", () => {
           ["read_a", { q: "1" }],
           ["read_b", { q: "2" }],
           ["send", { q: "3" }],
+          ["pay", { q: "4" }],
         ],
       },
     ]);
-    const send = tool("send", "consequential");
-    const tools = [tool("read_a", "read", slow), tool("read_b", "read", slow), send];
+    const tools = [
+      tool("read_a", "read", slow),
+      tool("read_b", "read", slow),
+      tool("send", "consequential"),
+      tool("pay", "irreversible"),
+    ];
     const state = newTurn();
     const { events, outcome } = await drain(host(provider, tools), state);
 
-    expect(outcome).toBe("completed");
+    expect(outcome).toBe("awaiting_approval");
     expect(peak).toBe(2);
-    expect(send.inputs).toEqual([]);
-    expect(ofType(events, "tool.called").map((e) => [e.payload.args, e.payload.risk])).toEqual([
-      ['{"q":"1"}', "read"],
-      ['{"q":"2"}', "read"],
-      ['{"q":"3"}', "consequential"],
+    const [batch, ...more] = ofType(events, "approval.requested");
+    expect(more).toEqual([]);
+    expect(batch?.payload.items.map((i) => [i.approvalId, i.tool, i.risk, i.scopes])).toEqual([
+      ["appr_call_3", "send", "consequential", ["once", "hour"]],
+      ["appr_call_4", "pay", "irreversible", ["once"]],
     ]);
+    expect(batch?.payload.items[0]).toMatchObject({
+      args: '{"q":"3"}',
+      rule: "default_consequential",
+    });
+    expect(batch?.payload.items[0]?.expiresAt).toBe(NOW + 24 * 3_600_000);
+    expect(state.pending?.batchId).toBe(batch?.payload.batchId);
     // Every call has a result, so the stored history stays valid for every provider.
     expect(state.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual([
-      "This call needs the user's approval, so it didn't run.",
       "page",
       "page",
+      WAITING_FOR_APPROVAL,
+      WAITING_FOR_APPROVAL,
+    ]);
+  });
+});
+
+describe("stop-and-resume approvals (M3-03 AC4)", () => {
+  async function stop() {
+    const send = tool("send", "consequential");
+    const { provider, requests } = scripted([
+      {
+        text: "Sending. ",
+        calls: [
+          ["send", { q: "a" }],
+          ["send", { q: "b" }],
+        ],
+      },
+      { text: "Sent." },
+    ]);
+    const h = host(provider, [send]);
+    const live = newTurn();
+    await drain(h, live);
+    return { send, h, requests, state: structuredClone(live) };
+  }
+  it("rejects an unknown, stale, duplicate or out-of-scope id before touching the state", async () => {
+    const { state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    const before = structuredClone(state);
+    const ok = { approvalId: "appr_call_1", decision: "approve", scope: "once" } as const;
+    const tries: [string, () => void][] = [
+      ["unknown", () => resolveApprovals(state, "batch_other", [ok], NOW)],
+      ["unknown", () => resolveApprovals(state, batchId, [{ ...ok, approvalId: "appr_x" }], NOW)],
+      // A known id after an unknown one: nothing is recorded.
+      [
+        "unknown",
+        () => resolveApprovals(state, batchId, [ok, { ...ok, approvalId: "call_2" }], NOW),
+      ],
+      ["duplicate", () => resolveApprovals(state, batchId, [ok, ok], NOW)],
+      ["stale", () => resolveApprovals(state, batchId, [ok], NOW + 24 * 3_600_000)],
+      ["scope", () => resolveApprovals(state, batchId, [{ ...ok, scope: "destination" }], NOW)],
+    ];
+    for (const [code, attempt] of tries) {
+      expect(attempt).toThrow(ApprovalError);
+      try {
+        attempt();
+      } catch (e) {
+        expect((e as ApprovalError).code).toBe(code);
+      }
+      expect(state).toEqual(before);
+    }
+    resolveApprovals(state, batchId, [ok], NOW);
+    expect(() => resolveApprovals(state, batchId, [ok], NOW)).toThrow("already decided");
+  });
+
+  it("waits for the whole batch, then runs the approved call and the model goes on", async () => {
+    const { send, h, requests, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    resolveApprovals(
+      state,
+      batchId,
+      [{ approvalId: "appr_call_1", decision: "approve", scope: "once" }],
+      NOW,
+    );
+    expect((await drain(h, state)).outcome).toBe("awaiting_approval");
+    expect(send.inputs).toEqual([]);
+
+    resolveApprovals(
+      state,
+      batchId,
+      [{ approvalId: "appr_call_2", decision: "deny", scope: "once" }],
+      NOW,
+    );
+    const { events, outcome } = await drain(h, state);
+    expect(outcome).toBe("completed");
+    expect(send.inputs).toEqual([{ q: "a" }]);
+    expect(
+      ofType(events, "approval.resolved")[0]?.payload.decisions.map((d) => d.decision),
+    ).toEqual(["approve", "deny"]);
+    expect(ofType(events, "step.completed").map((e) => e.payload.status)).toEqual([
+      "denied",
+      "ok",
+      "ok",
+    ]);
+    expect(state.pending).toBeNull();
+    // The placeholders were replaced in place; no call has two results.
+    expect(requests[1]?.messages.slice(1).map((m) => [m.role, m.content])).toEqual([
+      ["assistant", "Sending. "],
+      ["tool", "send ok"],
+      ["tool", "The user denied this call."],
+    ]);
+    expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "Sent." });
+  });
+
+  it("runs nothing it approved once the turn is cancelled", async () => {
+    const { send, h, state } = await stop();
+    const decisions = ["appr_call_1", "appr_call_2"].map((approvalId) => ({
+      approvalId,
+      decision: "approve" as const,
+      scope: "once" as const,
+    }));
+    resolveApprovals(state, state.pending?.batchId as string, decisions, NOW);
+    const ctl = new AbortController();
+    ctl.abort();
+    expect((await drain(h, state, ctl.signal)).outcome).toBe("cancelled");
+    expect(send.inputs).toEqual([]);
+    expect(state.pending).toBeNull();
+    expect(state.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual([
+      "Cancelled by the user.",
+      "Cancelled by the user.",
+    ]);
+  });
+
+  it("checks an approved call again against the current policy (M3-07 AC12)", async () => {
+    const { send, h, state } = await stop();
+    const batchId = state.pending?.batchId as string;
+    resolveApprovals(
+      state,
+      batchId,
+      ["appr_call_1", "appr_call_2"].map((approvalId) => ({
+        approvalId,
+        decision: "approve",
+        scope: "once",
+      })),
+      NOW,
+    );
+    const { events } = await drain({ ...h, policy: () => ({ override: "never" }) }, state);
+    expect(send.inputs).toEqual([]);
+    expect(ofType(events, "tool.result").map((e) => e.payload.error)).toEqual([
+      "Policy no longer allows this call.",
+      "Policy no longer allows this call.",
     ]);
   });
 });
@@ -180,6 +327,27 @@ describe("per-turn limits (M3-03 AC7)", () => {
       kind: "daily",
       detail: "daily cap",
     });
+  });
+});
+
+describe("taint", () => {
+  it("taints the context from a tool result and gates a later write with Just this once", async () => {
+    const fetch = tool("fetch", "read", () => ({ ok: true, content: "<page>" }), true);
+    const save = tool("save", "write_reversible");
+    const { provider } = scripted([
+      { calls: [["fetch", { q: "example.com" }]] },
+      { calls: [["save", { q: "x" }]] },
+    ]);
+    const state = newTurn();
+    const { events } = await drain(host(provider, [fetch, save]), state);
+    expect(ofType(events, "context.tainted").map((e) => e.payload.source)).toEqual([
+      { kind: "tool", label: "fetch" },
+    ]);
+    expect(save.inputs).toEqual([]);
+    const [item] = ofType(events, "approval.requested")[0]?.payload.items ?? [];
+    expect(item).toMatchObject({ tool: "save", rule: "default_tainted_write", scopes: ["once"] });
+    expect(item?.taint).toEqual({ kind: "tool", label: "fetch" });
+    expect(state.taint.taint).toBe("untrusted");
   });
 });
 
