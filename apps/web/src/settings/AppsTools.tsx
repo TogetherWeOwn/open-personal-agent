@@ -119,15 +119,9 @@ export function AppsTools() {
               {CHOICES.map(({ value, label }) => {
                 const locked = value === "auto" && tool.locked;
                 // An untouched tool behaves as its default: show it selected and say so.
-                // Clicking that preselected row fires no change event (it is already
-                // selected), so confirm it explicitly: the click saves the default as
-                // the override, keeping explicit `auto` one click away.
                 const isDefault = tool.override === null && value === tool.default;
                 return (
-                  <div
-                    key={value}
-                    onClick={isDefault && !locked ? () => void change(tool, value) : undefined}
-                  >
+                  <div key={value}>
                     <Radio
                       value={value}
                       isDisabled={locked || pending === tool.name}
@@ -147,13 +141,24 @@ export function AppsTools() {
                 );
               })}
             </RadioGroup>
-            {tool.override !== null && (
+            {tool.override !== null ? (
               <Button
                 onPress={() => change(tool, null)}
                 variant="secondary"
                 isDisabled={pending === tool.name}
               >
                 Use the default
+              </Button>
+            ) : (
+              // Clicking the already-selected default fires no change event, so an
+              // untouched tool offers this explicit action to save its default as the
+              // override — the same click for mouse and keyboard.
+              <Button
+                onPress={() => change(tool, tool.default)}
+                variant="secondary"
+                isDisabled={pending === tool.name}
+              >
+                Keep this default always
               </Button>
             )}
             <p className={hint}>Connectors and skills are coming later.</p>
