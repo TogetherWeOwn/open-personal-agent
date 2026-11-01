@@ -242,6 +242,9 @@ importers:
       '@opa/providers':
         specifier: workspace:*
         version: link:../providers
+      '@opa/tools-builtin':
+        specifier: workspace:*
+        version: link:../tools-builtin
       '@opa/vault':
         specifier: workspace:*
         version: link:../vault

@@ -81,36 +81,39 @@ const unexpected = (outcome: WriteOutcome): MemoryToolOutput =>
       : "I can't do that to a built-in memory.",
   );
 
+/** The `remember` manifest, exported so Settings can list the tool without its service. */
+export const REMEMBER_MANIFEST: ToolManifest = {
+  name: "remember",
+  description:
+    "Remember something about the user for later turns (a preference, a fact, an " +
+    "instruction). Use it when the user tells you something to keep. Content from a web " +
+    "page or file is only ever filed for the user's review, never remembered outright.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      text: {
+        type: "string",
+        minLength: 1,
+        maxLength: 2000,
+        description: "What to remember, in the user's own words where possible.",
+      },
+      kind: {
+        type: "string",
+        enum: ["fact", "instruction"],
+        description: "A fact (default) or an instruction the user gave.",
+      },
+    },
+    required: ["text"],
+    additionalProperties: false,
+  },
+  riskClass: "write_reversible",
+  destinations: STAY_HOME,
+  scopes: ["memory:write"],
+};
+
 function rememberTool(service: MemoryToolService, context: () => MemoryToolContext): MemoryTool {
   return {
-    manifest: {
-      name: "remember",
-      description:
-        "Remember something about the user for later turns (a preference, a fact, an " +
-        "instruction). Use it when the user tells you something to keep. Content from a web " +
-        "page or file is only ever filed for the user's review, never remembered outright.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          text: {
-            type: "string",
-            minLength: 1,
-            maxLength: 2000,
-            description: "What to remember, in the user's own words where possible.",
-          },
-          kind: {
-            type: "string",
-            enum: ["fact", "instruction"],
-            description: "A fact (default) or an instruction the user gave.",
-          },
-        },
-        required: ["text"],
-        additionalProperties: false,
-      },
-      riskClass: "write_reversible",
-      destinations: STAY_HOME,
-      scopes: ["memory:write"],
-    },
+    manifest: REMEMBER_MANIFEST,
     async execute(input) {
       const text = typeof input.text === "string" ? input.text.trim() : "";
       if (text === "") return failed("Tell me what to remember.");
@@ -129,37 +132,40 @@ function rememberTool(service: MemoryToolService, context: () => MemoryToolConte
   };
 }
 
+/** The `recall` manifest, exported so Settings can list the tool without its service. */
+export const RECALL_MANIFEST: ToolManifest = {
+  name: "recall",
+  description:
+    "Recall what is remembered about the user matching some text. Use it when an answer " +
+    "could depend on a preference, a fact or an instruction from an earlier turn. It " +
+    "searches only this user's own remembered rows.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        minLength: 1,
+        maxLength: 200,
+        description: "What to look for, e.g. a food, a place, a name.",
+      },
+      limit: {
+        type: "integer",
+        minimum: 1,
+        maximum: 25,
+        description: "How many rows to return (default 10).",
+      },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  },
+  riskClass: "read",
+  destinations: STAY_HOME,
+  scopes: ["memory:read"],
+};
+
 function recallTool(service: MemoryToolService, _context: () => MemoryToolContext): MemoryTool {
   return {
-    manifest: {
-      name: "recall",
-      description:
-        "Recall what is remembered about the user matching some text. Use it when an answer " +
-        "could depend on a preference, a fact or an instruction from an earlier turn. It " +
-        "searches only this user's own remembered rows.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            minLength: 1,
-            maxLength: 200,
-            description: "What to look for, e.g. a food, a place, a name.",
-          },
-          limit: {
-            type: "integer",
-            minimum: 1,
-            maximum: 25,
-            description: "How many rows to return (default 10).",
-          },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-      riskClass: "read",
-      destinations: STAY_HOME,
-      scopes: ["memory:read"],
-    },
+    manifest: RECALL_MANIFEST,
     async execute(input, signal) {
       const query = typeof input.query === "string" ? input.query.trim() : "";
       if (query === "") return failed("Tell me what to look for.");
@@ -193,33 +199,36 @@ function recallTool(service: MemoryToolService, _context: () => MemoryToolContex
   };
 }
 
+/** The `forget` manifest, exported so Settings can list the tool without its service. */
+export const FORGET_MANIFEST: ToolManifest = {
+  name: "forget",
+  description:
+    "Forget remembered rows by id (from recall), with their earlier versions. Use it when " +
+    "the user corrects you or asks to drop something. Forgetting is permanent; from " +
+    "anything but the user's own ask it only files a proposal for the inbox.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      ids: {
+        type: "array",
+        items: { type: "string", minLength: 1 },
+        minItems: 1,
+        maxItems: 25,
+        description: "The ids to forget, as recall returned them.",
+      },
+    },
+    required: ["ids"],
+    additionalProperties: false,
+  },
+  // A hard delete, so it asks; the gate still proposes from a tainted turn (A-Me2).
+  riskClass: "consequential",
+  destinations: STAY_HOME,
+  scopes: ["memory:write"],
+};
+
 function forgetTool(service: MemoryToolService, context: () => MemoryToolContext): MemoryTool {
   return {
-    manifest: {
-      name: "forget",
-      description:
-        "Forget remembered rows by id (from recall), with their earlier versions. Use it when " +
-        "the user corrects you or asks to drop something. Forgetting is permanent; from " +
-        "anything but the user's own ask it only files a proposal for the inbox.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          ids: {
-            type: "array",
-            items: { type: "string", minLength: 1 },
-            minItems: 1,
-            maxItems: 25,
-            description: "The ids to forget, as recall returned them.",
-          },
-        },
-        required: ["ids"],
-        additionalProperties: false,
-      },
-      // A hard delete, so it asks; the gate still proposes from a tainted turn (A-Me2).
-      riskClass: "consequential",
-      destinations: STAY_HOME,
-      scopes: ["memory:write"],
-    },
+    manifest: FORGET_MANIFEST,
     async execute(input) {
       const ids = [
         ...new Set(
