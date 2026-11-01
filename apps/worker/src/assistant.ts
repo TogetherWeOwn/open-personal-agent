@@ -111,6 +111,7 @@ export class Assistant extends Agent<Bindings> {
     if (!(await chat.open(conversationId, title))) {
       return reject(connection, conversationId, "That conversation doesn't exist.");
     }
+    await picked.used?.();
     const { provider, model } = picked;
     const turn: TurnRecord = {
       conversationId,
