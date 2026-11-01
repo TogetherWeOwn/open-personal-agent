@@ -466,12 +466,9 @@ describe("credentials and tasks (AC4)", () => {
         expect([id, action, res.status]).toEqual([id, action, 404]);
       }
     }
-    // B owns two tasks here: its own, and the approval fixture the helper seeds for it.
-    // Either way nothing of A's may leak in.
-    const listed = (await user.tasks.list()).map((t) => t.id);
-    expect(listed).toHaveLength(2);
-    expect(listed).toContain(b.task);
-    expect(listed).not.toContain(a.task);
+    expect((await user.tasks.list()).map((t) => t.id).sort()).toEqual(
+      [b.task, b.approvalTask].sort(),
+    );
     // No Workflow of A's was woken or created, and A's paused task is as it was.
     expect(leaked(a, JSON.stringify(touched.created))).toEqual([]);
     onlyOwn(touched, b);
