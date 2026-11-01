@@ -23,6 +23,15 @@ export const env: Env = {
   ASSETS: { fetch: async () => new Response("spa") } as unknown as Fetcher,
 };
 export const db = env.DB;
+
+/**
+ * For `vi.waitFor` on what a Durable Object sends back over a socket. The pool runs every DO event
+ * (each WebSocket message, `fetch`, alarm) through a wrapper that imports the Worker in the runner
+ * object, and Vite's module runner asks the main vitest process on every import, even a cached
+ * one. On a busy CI runner that process stalls for about a second, so one message can arrive
+ * later than `vi.waitFor`'s default 1 s timeout.
+ */
+export const SOCKET_WAIT = { timeout: 10_000 };
 export const TABLES =
   "setup_state used_setup_tokens sessions passkeys recovery_codes webauthn_challenges conversations audit_log users";
 
