@@ -153,7 +153,9 @@ settings.post("/model/test", async (c) => {
     // A lost master key makes saved keys unreadable; the user enters theirs again.
     apiKey = await decrypt(c.env.VAULT, vaultScope(c), ref).catch(() => null);
     if (apiKey === null) return fail(c, 409, "key_required");
-    provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey });
+    // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
+    const fetch = c.env.MODEL_FETCH ? { fetch: c.env.MODEL_FETCH } : {};
+    provider = createOpenAIChatProvider({ providerId, baseUrl, apiKey, ...fetch });
     await store.keyUsed(secretId);
   }
   const started = Date.now();

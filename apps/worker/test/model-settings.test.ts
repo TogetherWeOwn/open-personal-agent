@@ -109,6 +109,16 @@ describe("model settings", () => {
     expect(JSON.parse((await call("")).text).model.key.lastUsedAt).toBeTypeOf("number");
   });
 
+  it("sends Test through the runtime's model fetch when it sets one", async () => {
+    const global = vi.spyOn(globalThis, "fetch");
+    const MODEL_FETCH = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ error: { message: "refused" } }, { status: 403 }),
+    );
+    await call("/model/test", { method: "POST" }, { MODEL_FETCH });
+    expect(MODEL_FETCH.mock.calls[0]?.[0]).toBe("https://api.example.com/v1/chat/completions");
+    expect(global).not.toHaveBeenCalled();
+  });
+
   it("never returns a provider error that echoes part of the key", async () => {
     const echo = `Incorrect API key provided: ${CANARY.slice(0, 16)}****`;
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
