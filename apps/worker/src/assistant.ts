@@ -190,6 +190,18 @@ export class Assistant extends Agent<Bindings> {
   }
 
   /**
+   * Undoes a `setSpending` whose audit row couldn't be written: each field goes back to its
+   * `before` value only while it still holds this change's `after` value, so a later change
+   * that saved meanwhile is never overwritten.
+   */
+  revertSpending(before: SpendingSettings, after: SpendingSettings): void {
+    const now = this.limits.settings();
+    const keys = Object.keys(after) as (keyof SpendingSettings)[];
+    const undo = keys.filter((k) => before[k] !== after[k] && now[k] === after[k]);
+    if (undo.length) this.limits.setSettings(Object.fromEntries(undo.map((k) => [k, before[k]])));
+  }
+
+  /**
    * A Workflow task's progress, broadcast to the user's tabs in the v1 envelope. `seq` is the
    * driver's per-task counter; persisting these into the per-conversation event log is M3-03c's
    * (AC10), which will dedupe replays by it. Until then a Workflow replay can repeat a live
