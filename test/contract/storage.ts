@@ -687,6 +687,23 @@ export function memoryRecallContract(name: string, migrated: () => Promise<D1Dat
       expect(await memory.recall(" - ")).toEqual({ memories: [], tainted: false, tokens: 0 });
     });
 
+    it("skips an oversized top match and returns nothing for a zero limit", async () => {
+      const { memory } = await user();
+      // The newer huge row fuses first (recency wins its tie), but the budget fits only the
+      // smaller row, so packing skips the huge row instead of stopping.
+      saved(await memory.create(screen, "big small", "fact", said));
+      const huge = `big ${"z".repeat(500)}`;
+      saved(await memory.create(screen, huge, "fact", said));
+      const packed = await memory.recall("big", { budget: estimateTokens("big small") });
+      expect(packed.memories.map((m) => m.text)).toEqual(["big small"]);
+      expect(packed.tokens).toBeLessThanOrEqual(estimateTokens("big small"));
+      expect(await memory.recall("big", { limit: 0 })).toEqual({
+        memories: [],
+        tainted: false,
+        tokens: 0,
+      });
+    });
+
     it("taints only below user trust and misses another user's rows", async () => {
       const a = await user();
       const b = await user();

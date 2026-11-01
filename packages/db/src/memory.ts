@@ -380,9 +380,10 @@ export function memoryService(db: Db, userId: string) {
     },
     /**
      * Recall (M3-14 AC4): FTS5 matches re-ranked by recency and fused with RRF (k=60), packed to
-     * a token budget, newest first on ties. Read-only with no model call on the path: two indexed
-     * queries and one fetch by id. Only FTS matches can surface; recency never promotes a memory
-     * the query didn't match. `tainted` is set when any retrieved memory is below user trust.
+     * a token budget, newest first on ties. Read-only with no model call on the path: one FTS
+     * query and one fetch by id, with the recency order fused in memory. Only FTS matches can
+     * surface; recency never promotes a memory the query didn't match. `tainted` is set when any
+     * retrieved memory is below user trust.
      */
     recall: async (
       text: string,
@@ -393,7 +394,7 @@ export function memoryService(db: Db, userId: string) {
       if (!query) return empty;
       const budget = opts?.budget ?? DEFAULT_RECALL_BUDGET_TOKENS;
       const limit = Math.min(
-        Math.max(Math.trunc(opts?.limit ?? RECALL_MAX_MEMORIES) || 1, 1),
+        Math.max(Math.trunc(opts?.limit ?? RECALL_MAX_MEMORIES) || 0, 0),
         RECALL_MAX_MEMORIES,
       );
       const ids = await db.all<{ id: string }>(sql`
@@ -419,7 +420,8 @@ export function memoryService(db: Db, userId: string) {
       for (const m of fused) {
         if (memories.length >= limit) break;
         const cost = estimateTokens(m.text);
-        if (tokens + cost > budget) break;
+        // Skip a row that alone exceeds the remaining budget: smaller later matches still fit.
+        if (tokens + cost > budget) continue;
         memories.push(m);
         tokens += cost;
       }
