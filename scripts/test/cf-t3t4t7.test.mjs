@@ -295,15 +295,19 @@ describe("t4 reconnect bookkeeping", () => {
 });
 
 describe("t3 duplicate-ID verdict", () => {
-  const dup = (n) =>
+  const dup = (n, status = 500) =>
     [...Array(n)].map((_, i) =>
-      i === 0 ? { ok: true, id: "w1" } : { ok: false, error: `HTTP 409 duplicate ${i}` },
+      i === 0
+        ? { ok: true, id: "w1" }
+        : { ok: false, status, error: `HTTP ${status} duplicate ${i}` },
     );
   it("needs exactly one effective create with every rejection documented", () => {
     expect(summarizeDedupeAttempts(dup(4))).toEqual({
       okCreates: 1,
       failuresDocumented: true,
-      errors: ["HTTP 409 duplicate 1", "HTTP 409 duplicate 2", "HTTP 409 duplicate 3"],
+      uniformRejection: true,
+      errors: ["HTTP 500 duplicate 1", "HTTP 500 duplicate 2", "HTTP 500 duplicate 3"],
+      statuses: [500],
     });
   });
   it("fails silent duplicates, missing reasons and all-success", () => {
@@ -311,16 +315,54 @@ describe("t3 duplicate-ID verdict", () => {
     expect(summarizeDedupeAttempts(dup(4).map((a) => ({ ...a, ok: true }))).okCreates).toBe(4);
     // A rejection without a recorded reason is not documented semantics.
     expect(
-      summarizeDedupeAttempts([{ ok: true, id: "w1" }, { ok: false }]).failuresDocumented,
+      summarizeDedupeAttempts([
+        { ok: true, id: "w1" },
+        { ok: false, status: 500 },
+      ]).failuresDocumented,
     ).toBe(false);
     // Empty errors collapse: no rejection observed at all.
     expect(summarizeDedupeAttempts([{ ok: true, id: "w1" }]).failuresDocumented).toBe(false);
+  });
+  it("fails a stray failure hiding among duplicate-ID rejections", () => {
+    // Mixed rejection statuses: the verdict must not pass without observing
+    // duplicate-ID handling on every rejected attempt.
+    const mixed = [
+      { ok: true, id: "w1" },
+      { ok: false, status: 409, error: "HTTP 409 duplicate" },
+      { ok: false, status: 409, error: "HTTP 409 duplicate" },
+      { ok: false, status: 500, error: "HTTP 500 boom" },
+    ];
+    const summary = summarizeDedupeAttempts(mixed);
+    expect(summary.okCreates).toBe(1);
+    expect(summary.failuresDocumented).toBe(true);
+    expect(summary.uniformRejection).toBe(false);
+    expect(summary.statuses).toEqual([409, 500]);
   });
 });
 
 describe("t7 server-side budget", () => {
   it("caps past the corpus with headroom for retried turns", () => {
     expect(t7Budget()).toBe(BOUNDS.t7.turns + 50);
+  });
+  it("reserves atomically: one conditional write admits only below budget", async () => {
+    // Mirror of T7_RESERVE_SQL in cf-verify/t3t4t7/worker.ts, executed against real
+    // SQLite: the reservation and the budget check are one statement, so overlapping
+    // requests cannot both spend the last turn.
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(":memory:");
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS t7_turns (id INTEGER PRIMARY KEY CHECK (id = 1), used INTEGER NOT NULL DEFAULT 0)",
+    );
+    const reserve = db.prepare(
+      "INSERT INTO t7_turns (id, used) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET used = used + 1 WHERE used < ?",
+    );
+    const budget = 2;
+    expect(reserve.run(budget).changes).toBe(1);
+    expect(reserve.run(budget).changes).toBe(1);
+    expect(reserve.run(budget).changes).toBe(0);
+    expect(reserve.run(budget).changes).toBe(0);
+    expect(db.prepare("SELECT used FROM t7_turns WHERE id = 1").get()).toEqual({ used: 2 });
+    db.close();
   });
 });
 

@@ -226,16 +226,28 @@ export function scoreTurn(turn, emitted, executions = []) {
 }
 
 /**
- * T3 duplicate-ID verdict (TWO-687 finding 3): exactly one create may take effect, and every
- * rejection must carry a recorded reason. The summary lands in t3.jsonl so the report states
- * the response semantics, not just the committed-effect count.
+ * T3 duplicate-ID verdict (TWO-687 finding 3, PR #103 review): exactly one create may take
+ * effect, every rejection must carry a recorded reason, and all rejections must share one
+ * response semantic (same HTTP status) — a stray 500 among duplicate-ID rejections fails,
+ * since the verdict would otherwise pass without observing duplicate-ID handling. The
+ * summary lands in t3.jsonl so the report states the response semantics, not just the
+ * committed-effect count.
  */
 export function summarizeDedupeAttempts(attempts) {
   const okCreates = attempts.filter((a) => a.ok).length;
-  const errors = attempts.filter((a) => !a.ok).map((a) => a.error);
+  const rejected = attempts.filter((a) => !a.ok);
+  const errors = rejected.map((a) => a.error);
   const failuresDocumented =
-    errors.length > 0 && errors.every((e) => typeof e === "string" && e.length > 0);
-  return { okCreates, failuresDocumented, errors: [...new Set(errors)] };
+    rejected.length > 0 && rejected.every((a) => typeof a.error === "string" && a.error.length > 0);
+  const statuses = [...new Set(rejected.map((a) => a.status ?? null))];
+  const uniformRejection = rejected.length > 0 && statuses.length === 1;
+  return {
+    okCreates,
+    failuresDocumented,
+    uniformRejection,
+    errors: [...new Set(errors)],
+    statuses,
+  };
 }
 
 /** Per-tab seq coverage: duplicate delivery on replay is the bug T4 must catch. */
@@ -480,7 +492,9 @@ async function t3sync(prefix, deps) {
   const mk = () =>
     call(`${url}/t3/instance`, "POST", { id, kind: "briefing" }, auth).then(
       (r) => ({ ok: true, id: r.id }),
-      (e) => ({ ok: false, error: redact(e.message, secrets) }),
+      // The HTTP status is the duplicate-ID response semantic: the verdict requires every
+      // rejection to share it, so a stray failure cannot masquerade as duplicate handling.
+      (e) => ({ ok: false, status: e.status ?? null, error: redact(e.message, secrets) }),
     );
   const attempts = [await mk(), await mk(), ...(await Promise.all([mk(), mk()]))];
   note(prefix, "t3", { case: "dedupe", at: new Date().toISOString(), attempts });
@@ -520,10 +534,11 @@ async function t3sync(prefix, deps) {
     status.output?.ref?.endsWith("/large.bin") &&
     !steps.includes("cancel-step-2") &&
     dedupe.okCreates === 1 &&
-    dedupe.failuresDocumented;
+    dedupe.failuresDocumented &&
+    dedupe.uniformRejection;
   if (!ok)
     throw new Error(
-      `T3 sync: dedupe (1 ok in ${attempts.length}, rejected: ${dedupe.errors.join(" | ") || "none recorded"}), offload-ref or cancel assumption failed (see t3.jsonl)`,
+      `T3 sync: dedupe (1 ok in ${attempts.length}, statuses: ${dedupe.statuses.join(", ") || "none"}, rejected: ${dedupe.errors.join(" | ") || "none recorded"}), offload-ref or cancel assumption failed (see t3.jsonl)`,
     );
   return { attempts: attempts.length, effects: ledger.effects.length };
 }

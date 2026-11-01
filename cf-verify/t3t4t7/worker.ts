@@ -116,6 +116,9 @@ async function consumeTicket(
     string,
     number
   >;
+  // Object.hasOwn, not `in`: an inherited name such as "constructor" must never consult
+  // the prototype — only a minted own ticket authenticates.
+  if (!Object.hasOwn(tickets, ticket)) return false;
   const exp = tickets[ticket];
   if (typeof exp !== "number" || exp <= Date.now()) return false;
   delete tickets[ticket];
@@ -126,26 +129,23 @@ async function consumeTicket(
 const T7_USAGE_DDL =
   "CREATE TABLE IF NOT EXISTS t7_turns (id INTEGER PRIMARY KEY CHECK (id = 1), used INTEGER NOT NULL DEFAULT 0)";
 
-/** Campaign cap on executed turns (TWO-687 finding 2). Reads check, then the caller records. */
-async function t7Budget(env: FixtureEnv): Promise<{ used: number; budget: number }> {
-  const parsed = Number.parseInt(env.VERIFY_T7_BUDGET ?? "", 10);
-  const budget = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1050;
-  await env.DB.exec(T7_USAGE_DDL);
-  const row = await env.DB.prepare("SELECT used FROM t7_turns WHERE id = 1").first<{
-    used: number;
-  }>();
-  return { used: typeof row?.used === "number" ? row.used : 0, budget };
-}
+/**
+ * Atomic campaign reservation for /t7/turn (TWO-687 finding 2, PR #103 review): the
+ * conditional write admits a turn only while `used < budget`, so overlapping requests
+ * cannot both spend the last turn. `changes === 0` means the budget is exhausted.
+ */
+const T7_RESERVE_SQL =
+  "INSERT INTO t7_turns (id, used) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET used = used + 1 WHERE used < ?";
 
-async function recordT7Turn(db: D1Database): Promise<number> {
+async function reserveT7Turn(
+  db: D1Database,
+  budget: number,
+): Promise<{ admitted: boolean; used: number }> {
   await db.exec(T7_USAGE_DDL);
-  await db
-    .prepare(
-      "INSERT INTO t7_turns (id, used) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET used = used + 1",
-    )
-    .run();
+  const outcome = await db.prepare(T7_RESERVE_SQL).bind(budget).run();
   const row = await db.prepare("SELECT used FROM t7_turns WHERE id = 1").first<{ used: number }>();
-  return typeof row?.used === "number" ? row.used : 0;
+  const used = typeof row?.used === "number" ? row.used : 0;
+  return { admitted: outcome.meta.changes > 0, used };
 }
 
 /** Hibernating socket for T4: numbered broadcast log with replay from a sequence number. */
@@ -386,13 +386,15 @@ export default {
       // Server-side campaign cap (TWO-687 finding 2): the driver bounds its own turns, but
       // the fixture itself refuses past the budget so a stray or curious caller cannot spend
       // the owner's allowance. Past budget reads exactly like an AI cap: the driver stops
-      // inconclusive on `ai-capacity`, never failed. Attempts (not 400s) burn budget.
-      const quota = await t7Budget(env);
-      if (quota.used >= quota.budget) {
+      // inconclusive on `ai-capacity`, never failed. Attempts (not 400s) burn budget, and
+      // the reservation is one conditional write so overlapping requests cannot overspend.
+      const parsed = Number.parseInt(env.VERIFY_T7_BUDGET ?? "", 10);
+      const budget = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1050;
+      const reservation = await reserveT7Turn(env.DB, budget);
+      if (!reservation.admitted) {
         return Response.json({ error: "ai-capacity" }, { status: 429 });
       }
       const started = Date.now();
-      const used = await recordT7Turn(env.DB);
       let raw: Parameters<typeof normalizeToolCalls>[0];
       try {
         raw = (await env.AI.run(
@@ -427,7 +429,7 @@ export default {
         calls,
         executions,
         latencyMs: Date.now() - started,
-        quota: { used, budget: quota.budget },
+        quota: { used: reservation.used, budget },
       });
     }
     return new Response("not found", { status: 404 });
