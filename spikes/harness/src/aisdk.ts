@@ -152,7 +152,7 @@ export function createAISDKHarness(provider: SpikeProvider): SpikeHarness {
       } else if (part.type === "tool-result") {
         yield { type: "tool.result", toolCallId: part.toolCallId, output: String(part.output) };
       } else if (part.type === "abort") {
-        // `response` never settles with the partial step, so keep it ourselves (as builtin-loop does).
+        // `response` rejects on abort, dropping the partial step, so keep it ourselves (as builtin-loop does).
         if (partial) messages.push({ role: "assistant", content: partial });
         yield { type: "turn.end", reason: "cancelled" };
         return;
