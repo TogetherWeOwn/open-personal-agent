@@ -9,12 +9,18 @@ export interface OpenAIChatCompat {
   maxTokensField: "max_tokens" | "max_completion_tokens";
   /** The host accepts `tools` (reported through `capabilities`; tool calls arrive in M3). */
   supportsTools: boolean;
+  /** The host accepts `image_url` content parts (M3-10 AC2). Off until a host is known to. */
+  supportsImageInput: boolean;
+  /** The host accepts `file` content parts for PDFs (M3-10 AC2). Off until a host is known to. */
+  supportsPdfInput: boolean;
 }
 
 export const DEFAULT_OPENAI_CHAT_COMPAT: OpenAIChatCompat = {
   supportsUsageInStreaming: true,
   maxTokensField: "max_tokens",
   supportsTools: true,
+  supportsImageInput: false,
+  supportsPdfInput: false,
 };
 
 /**

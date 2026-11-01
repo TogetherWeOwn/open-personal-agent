@@ -24,6 +24,12 @@
       "origin": "https://openrouter.ai",
       "billedBy": "provider",
       "billingUrl": "https://openrouter.ai/activity"
+    },
+    "anthropic": {
+      "name": "Anthropic",
+      "origin": "https://api.anthropic.com",
+      "billedBy": "provider",
+      "billingUrl": "https://platform.claude.com/settings/billing"
     }
   },
   "models": [
@@ -67,6 +73,39 @@
       "outputUsdPerMTok": 0.6,
       "verifiedAt": "2026-11-01",
       "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+      "providerId": "anthropic",
+      "model": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "inputUsdPerMTok": 10,
+      "cachedInputUsdPerMTok": 0.25,
+      "cacheWriteUsdPerMTok": 12.5,
+      "outputUsdPerMTok": 50,
+      "verifiedAt": "2026-11-01",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "providerId": "anthropic",
+      "model": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "inputUsdPerMTok": 4,
+      "cachedInputUsdPerMTok": 0.2,
+      "cacheWriteUsdPerMTok": 5,
+      "outputUsdPerMTok": 20,
+      "verifiedAt": "2026-11-01",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "providerId": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "inputUsdPerMTok": 2,
+      "cachedInputUsdPerMTok": 0.1,
+      "cacheWriteUsdPerMTok": 2.5,
+      "outputUsdPerMTok": 10,
+      "verifiedAt": "2026-11-01",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
     }
   ]
 }

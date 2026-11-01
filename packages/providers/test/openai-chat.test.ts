@@ -77,7 +77,12 @@ describe("openai-chat requests", () => {
     const { p, body } = provider("http://localhost:11434/v1", sse(openaiText), overrides);
     await replay(p.stream({ ...hello, maxOutputTokens: 64 }));
     expect(body()).toEqual({ ...hello, stream: true, max_tokens: 64 });
-    expect(p.capabilities("m")).toEqual({ tools: true, usageInStream: false });
+    expect(p.capabilities("m")).toEqual({
+      tools: true,
+      usageInStream: false,
+      imageInput: false,
+      pdfInput: false,
+    });
   });
 
   it.each([
