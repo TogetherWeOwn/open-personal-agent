@@ -21,13 +21,19 @@ function webHost(ref: string | null) {
 }
 
 /** Where it came from and when, as one muted line. */
-export function NoteMeta({ note, learned = false }: { note: Note; learned?: boolean }) {
+export function NoteMeta({
+  note,
+  verb = "Added",
+}: {
+  note: Note;
+  verb?: "Added" | "Learned" | "Suggested";
+}) {
   const href = note.conversation ? `/c/${note.conversation.id}` : null;
   const from = sourceLabel(note);
   const host = webHost(note.sourceRef);
   return (
     <p className="text-sm text-text-muted">
-      {learned ? `Learned ${ago(note.createdAt)}` : `Added ${ago(note.createdAt)}`}
+      {verb} {ago(note.createdAt)}
       {" · "}
       {href ? (
         <Link href={href} className={link}>
