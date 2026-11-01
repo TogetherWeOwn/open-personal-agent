@@ -34,6 +34,10 @@ It listens on `127.0.0.1:8787` (`OPA_HOST`, `PORT`); put a TLS-terminating proxy
 expose it. Workers AI and background tasks are Cloudflare-only for now, so `/api/health` reports
 `degraded` on Node.
 
+On Node, model providers can't reach private, loopback, link-local or cloud-metadata addresses, so
+a base URL can't be used to read your network. To use a model server on the same machine or LAN
+(Ollama, the mock server), set `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`.
+
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
 | `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
