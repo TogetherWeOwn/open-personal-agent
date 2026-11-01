@@ -15,10 +15,10 @@ export const usageRoutes = new Hono<AppEnv>();
 
 const DAY = 86_400_000;
 
-/** The client's local midnight, so "today" is the user's day; UTC when missing or implausible. */
-function since(value: string | undefined, fallback: number, now: number, maxAge: number) {
+/** The client's local midnight, so "today" is the user's day; null when missing or implausible. */
+function since(value: string | undefined, now: number, maxAge: number) {
   const n = Number(value);
-  return Number.isSafeInteger(n) && n <= now && now - n <= maxAge ? n : fallback;
+  return Number.isSafeInteger(n) && n <= now && now - n <= maxAge ? n : null;
 }
 
 /** A period's lines grouped by who bills them. A null cost means no price on file. */
@@ -95,6 +95,16 @@ export function calendar(timeZone: string | undefined, today: number): DateOf {
 const utcOf = (date: string) => Date.parse(`${date}T00:00:00Z`);
 
 /**
+ * The instant a calendar date begins: the first quarter hour that falls on it. Every UTC offset
+ * is whole quarter hours and within ±14 h, so this is exact for any zone, DST included.
+ */
+function startOf(date: string, dateOf: DateOf) {
+  let t = utcOf(date) - 14 * 3_600_000;
+  while (dateOf(t) < date) t += 900_000;
+  return t;
+}
+
+/**
  * Month-end at the month's pace so far. Under a day in, it counts a whole day, so the first
  * message of the month doesn't project to a month of them.
  */
@@ -154,10 +164,15 @@ function categories(ai: { today: number; month: number; projected: number }, now
 usageRoutes.get("/", async (c) => {
   const now = Date.now();
   const utcDay = now - (now % DAY);
-  const d = new Date(now);
-  const utcMonth = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-  const today = since(c.req.query("today"), utcDay, now, DAY + 2 * 3_600_000);
-  const month = since(c.req.query("month"), utcMonth, now, 32 * DAY);
+  const sentToday = since(c.req.query("today"), now, DAY + 2 * 3_600_000);
+  const sentMonth = since(c.req.query("month"), now, 32 * DAY);
+  // The client's calendar. Today is the date of now on it; a midnight the client didn't send is
+  // taken from it too, so the queries, the day list and the projection all use the same days.
+  const dateOf = calendar(c.req.query("tz"), sentToday ?? utcDay);
+  const last = dateOf(now);
+  const today = sentToday ?? startOf(last, dateOf);
+  const month = sentMonth ?? startOf(`${last.slice(0, 7)}-01`, dateOf);
+  const first = dateOf(month);
   const repo = createRepository(c.env);
   const user = repo.forUser(c.var.session.scope);
   const [todayRows, monthRows, breakdownRows, profile] = await Promise.all([
@@ -168,11 +183,6 @@ usageRoutes.get("/", async (c) => {
   ]);
   const todayPeriod = period(todayRows, now);
   const monthPeriod = period(monthRows, now);
-  const dateOf = calendar(c.req.query("tz"), today);
-  // The client's today is the calendar date of now. A `month` that fell back to the UTC month
-  // can, in a western zone, still be last month, so then the 1st comes from that date.
-  const last = dateOf(now);
-  const first = month === utcMonth ? `${last.slice(0, 7)}-01` : dateOf(month);
   const projected = projectMonth(monthPeriod.costMicroUsd, month, first, now);
   // The allowance is the Cloudflare account's, so its total includes everyone's calls; only the
   // owner, who runs the account, sees it. A member's view would reveal others' activity. The

@@ -258,14 +258,35 @@ describe("usage ledger", () => {
       ["2026-11-01", 2],
       ["2026-11-02", 1],
     ]);
-    // A request without its month falls back to the UTC month, which is still 31 October in New
-    // York: the days start on the client's own 1st all the same.
-    const { browser } = await claim();
+    // A request with only its zone: the month's query, its day list and its total agree, east or
+    // west of UTC, whatever the date the test runs on.
+    const { browser, owner } = await claim();
     const now = Date.now();
-    const local = calendar("America/New_York", now)(now);
-    const res = await browser.req(`/api/usage?tz=America%2FNew_York`);
-    const { day } = (await res.json<UsageBody>()).breakdowns;
-    expect([day[0]?.date, day.at(-1)?.date]).toEqual([`${local.slice(0, 7)}-01`, local]);
+    const row = db.prepare(
+      "INSERT INTO usage (id, user_id, provider_id, model, cost_micro_usd, cost_source, created_at) VALUES (?, ?, 'openai', 'gpt-4.1', 10, 'estimated', ?)",
+    );
+    // A call every 7 hours over the last 40 days crosses every local midnight and month start.
+    await db.batch(
+      Array.from({ length: 138 }, (_, i) => row.bind(`z${i}`, owner, now - i * 7 * 3_600_000)),
+    );
+    for (const tz of ["America/New_York", "Pacific/Auckland", "Pacific/Kiritimati"]) {
+      const local = calendar(tz, now)(now);
+      const body = await (
+        await browser.req(`/api/usage?tz=${encodeURIComponent(tz)}`)
+      ).json<UsageBody>();
+      const { day } = body.breakdowns;
+      expect([tz, day[0]?.date, day.at(-1)?.date]).toEqual([tz, `${local.slice(0, 7)}-01`, local]);
+      const monthCalls = body.month.groups
+        .flatMap((g) => g.lines)
+        .reduce((n: number, l) => n + (l as { calls: number }).calls, 0);
+      expect([tz, day.reduce((n, d) => n + d.calls, 0)]).toEqual([tz, monthCalls]);
+      // Every call on or after the client's 1st, and none before.
+      const dateOf = calendar(tz, now);
+      const since1st = Array.from({ length: 138 }, (_, i) => now - i * 7 * 3_600_000).filter(
+        (t) => dateOf(t) >= `${local.slice(0, 7)}-01`,
+      ).length;
+      expect([tz, monthCalls]).toEqual([tz, since1st]);
+    }
     // An old client sends no zone: its midnight's offset stands in, and +12 h is a day ahead.
     const auckland = Date.UTC(2026, 10, 1, 12); // midnight on 2 November at UTC+12
     const plus12 = calendar(undefined, auckland);
