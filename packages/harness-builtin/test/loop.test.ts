@@ -648,3 +648,42 @@ describe("failures", () => {
     expect(history).toHaveLength(1);
   });
 });
+
+describe("steer (M3-09 AC4)", () => {
+  it("drains steers at the next step boundary without restarting the turn", async () => {
+    const { provider, requests } = scripted([
+      { calls: [["lookup", { q: "x" }]] },
+      { text: "Second." },
+    ]);
+    // The steers arrive mid-run: only once the tool has executed does the host have any.
+    let midRun = false;
+    const lookup = tool("lookup", "read", () => {
+      midRun = true;
+      return { ok: true, content: "page", context: { kind: "system" } };
+    });
+    const steers = [
+      { messageId: "m-steer-1", text: "actually, shorter" },
+      { messageId: "m-steer-2", text: "and friendlier" },
+    ];
+    const h = host(provider, [lookup], {
+      takeSteer: () => (midRun ? (steers.shift() ?? null) : null),
+    });
+    const { events, outcome } = await drain(h, newTurn());
+
+    expect(outcome).toBe("completed");
+    const steered = ofType(events, "turn.steered");
+    expect(steered.map((e) => e.payload)).toEqual([
+      { messageId: "m-steer-1", text: "actually, shorter" },
+      { messageId: "m-steer-2", text: "and friendlier" },
+    ]);
+    // Both steers land before the second model call, as user messages the turn never restarts for.
+    const order = types(events);
+    expect(order.indexOf("turn.steered")).toBeLessThan(order.lastIndexOf("usage.updated"));
+    const secondCall = requests[1]?.messages ?? [];
+    expect(secondCall.filter((m) => m.role === "user").map((m) => m.content)).toEqual([
+      "hello",
+      "actually, shorter",
+      "and friendlier",
+    ]);
+  });
+});

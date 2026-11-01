@@ -60,6 +60,20 @@ export type HarnessEvent =
   | Envelope<"turn.cancelled", Record<string, never>>
   | Envelope<"turn.interrupted", { message: string }>
   | Envelope<"turn.failed", { message: string; reason?: TurnLimit; code?: TurnFailure }>
+  /**
+   * A send that arrived mid-run and waits in the conversation's FIFO (M3-09 AC4): the sending
+   * tab's message row is already in D1, and `position` is its place in the queue (1-based).
+   * Logged under the running turn, so it trims with it and replays to a reconnected tab.
+   */
+  | Envelope<"turn.queued", { messageId: string; text: string; position: number }>
+  /**
+   * A steer that joined the running turn (M3-09 AC4): the text is a user message in D1 and in
+   * the turn's next step. Yielded by the loop when the text enters the turn, so the timeline
+   * shows it exactly where the model reads it.
+   */
+  | Envelope<"turn.steered", { messageId: string; text: string }>
+  /** A queued send the user cancelled before it started (M3-09 AC4); its D1 row is gone. */
+  | Envelope<"turn.dequeued", { messageId: string }>
   | Envelope<"message.delta", { text: string }>
   | Envelope<"message.completed", { text: string }>
   | Envelope<"usage.updated", { usage: ModelUsage; providerId: string; model: string }>
