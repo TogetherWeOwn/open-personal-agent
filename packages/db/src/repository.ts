@@ -2014,6 +2014,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         audit: {
           list: () =>
             db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
+          /** One row of the user's own trail; `detail` is a fact, never a secret or content. */
+          add: async (row: {
+            action: string;
+            module: string;
+            targetId?: string | null;
+            result?: "ok" | "denied" | "error";
+            detail?: Record<string, unknown> | null;
+          }) => {
+            await db.insert(auditLog).values({
+              userId,
+              action: row.action,
+              module: row.module,
+              targetId: row.targetId ?? null,
+              result: row.result ?? "ok",
+              detail: row.detail ? JSON.stringify(row.detail) : null,
+            });
+          },
         },
         /**
          * Saved model providers (M3-06). A foreign key proves only that a row exists, so every

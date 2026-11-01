@@ -72,6 +72,14 @@ describe("model settings", () => {
       model: null,
     });
     expect((await call("/onboarded", { method: "POST" })).status).toBe(409);
+    // The change is in the Activity log: the old and new name, but never the "about" text.
+    const audit = await env.DB.prepare(
+      "SELECT detail FROM audit_log WHERE user_id = 'u1' AND action = 'settings.profile'",
+    ).first<{ detail: string }>();
+    expect(JSON.parse(audit?.detail ?? "null")).toEqual({
+      displayName: { from: "Owner", to: "Sam" },
+      about: "changed",
+    });
   });
 
   it("refuses a key while the vault is down, and stores nothing", async () => {

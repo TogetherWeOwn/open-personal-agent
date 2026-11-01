@@ -7,11 +7,16 @@
 import type { Memory, WriteOutcome } from "@opa/db/memory";
 import { createRepository, isId } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
+import { changes } from "./audit";
 import type { AppEnv } from "./env";
 import { hasAccountStepUp } from "./session";
 
 type Ctx = Context<AppEnv>;
 const userOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope);
+
+/** A deletion in the Activity log (M3-19 AC3): how many notes, never their text. */
+const forgotten = (user: ReturnType<typeof userOf>, notes: number) =>
+  user.audit.add({ action: "memory.forget", module: "memory", detail: { notes } });
 const screen = { via: "user" } as const;
 const typed = { source: "memory_screen" } as const;
 
@@ -137,7 +142,13 @@ memoryRoutes.post("/proposals/:id/:decision", async (c) => {
  */
 memoryRoutes.get("/export", async (c) => {
   if (!hasAccountStepUp(c.var.session)) return c.json({ error: "step_up_required" }, 403);
-  const { rows, links } = await userOf(c).memory.dump();
+  const user = userOf(c);
+  const { rows, links } = await user.memory.dump();
+  await user.audit.add({
+    action: "export.memory",
+    module: "memory",
+    detail: { notes: rows.length },
+  });
   const exportedAt = new Date().toISOString();
   c.header(
     "Content-Disposition",
@@ -176,15 +187,18 @@ memoryRoutes.post("/delete", async (c) => {
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_BULK || !ids.every(isId)) {
     return c.json({ error: "invalid_ids" }, 400);
   }
-  const memory = userOf(c).memory;
+  const user = userOf(c);
+  const memory = user.memory;
   const unique = [...new Set<string>(ids)];
   if ((await memory.forget(screen, unique, typed)).status === "deleted") {
+    await forgotten(user, unique.length);
     return c.json({ deleted: unique, failed: [] });
   }
   const current = new Set((await memory.list()).map((m) => m.id));
   const live = unique.filter((id) => current.has(id));
   // A note that changed between the two reads fails the whole second statement; the user retries.
   const ok = live.length > 0 && (await memory.forget(screen, live, typed)).status === "deleted";
+  if (ok) await forgotten(user, live.length);
   return c.json({
     deleted: ok ? live : [],
     failed: ok ? unique.filter((id) => !current.has(id)) : unique,
@@ -215,7 +229,10 @@ memoryRoutes.put("/:id", async (c) => {
 memoryRoutes.delete("/:id", async (c) => {
   const id = c.req.param("id");
   if (!isId(id)) return c.json({ error: "not_found" }, 404);
-  return reply(c, await userOf(c).memory.forget(screen, [id], typed), new Map());
+  const user = userOf(c);
+  const outcome = await user.memory.forget(screen, [id], typed);
+  if (outcome.status === "deleted") await forgotten(user, 1);
+  return reply(c, outcome, new Map());
 });
 
 /** Settings › Memory (M3-15 AC5). Mounted at `/api/settings/memory`. */
@@ -236,6 +253,10 @@ memorySettings.get("/", async (c) => {
 memorySettings.put("/", async (c) => {
   const value = (await c.req.json().catch(() => null))?.learnFromChats;
   if (typeof value !== "boolean") return c.json({ error: "invalid_setting" }, 400);
-  await userOf(c).settings.save({ learnFromChats: value });
+  const user = userOf(c);
+  const from = (await user.settings.get())?.learnFromChats ?? true;
+  await user.settings.save({ learnFromChats: value });
+  const detail = changes({ learnFromChats: from }, { learnFromChats: value });
+  if (detail) await user.audit.add({ action: "settings.memory", module: "settings", detail });
   return c.json({ learnFromChats: value });
 });

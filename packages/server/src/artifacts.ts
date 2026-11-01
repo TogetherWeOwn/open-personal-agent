@@ -59,6 +59,14 @@ artifactRoutes.get("/:id/content", async (c) => {
 
 artifactRoutes.delete("/:id", async (c) => {
   const user = createRepository(c.env).forUser(c.var.session.scope);
-  if (!(await user.artifacts.remove(c.req.param("id")))) return c.json({ error: "not_found" }, 404);
+  const row = await user.artifacts.get(c.req.param("id"));
+  if (!row || !(await user.artifacts.remove(row.id))) return c.json({ error: "not_found" }, 404);
+  // A deletion in the Activity log (M3-19 AC3): the file's name, never its content.
+  await user.audit.add({
+    action: "artifact.delete",
+    module: "artifacts",
+    targetId: row.id,
+    detail: { name: row.name },
+  });
   return c.body(null, 204);
 });

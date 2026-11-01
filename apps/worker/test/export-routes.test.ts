@@ -191,6 +191,14 @@ describe("GET /api/exports/:id", () => {
     const view = new DataView(bytes.buffer);
     expect(view.getUint32(bytes.length - 22, true)).toBe(0x06054b50);
     expect(new TextDecoder().decode(bytes)).toContain("conversations.json");
+    // The start and the download are both in the Activity log (M3-19 AC3).
+    const audit = await db
+      .prepare("SELECT action, target_id FROM audit_log WHERE module = 'exports' ORDER BY id")
+      .all();
+    expect(audit.results).toEqual([
+      { action: "export.start", target_id: created.id },
+      { action: "export.download", target_id: created.id },
+    ]);
   });
 
   it("refuses what is not a downloadable row", async () => {

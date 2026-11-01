@@ -63,6 +63,7 @@ exportRoutes.post("/", async (c) => {
     return c.json({ error: "conflict" }, 409);
   }
   if (!claimed) return c.json({ error: "conflict" }, 409);
+  await user.audit.add({ action: "export.start", module: "exports", targetId: id });
   try {
     // Called on the binding: its methods reject a detached call.
     await workflows.create({ id: instanceId, params: {} });
@@ -95,5 +96,6 @@ exportRoutes.get("/:id", async (c) => {
     return c.json({ error: "expired" }, 410);
   const object = await user.exports.getObject(user.exports.key(row.id));
   if (!object?.body) return c.json({ error: "not_found" }, 404);
+  await user.audit.add({ action: "export.download", module: "exports", targetId: row.id });
   return userContent(object.body, "application/zip", `export-${row.id}.zip`);
 });
