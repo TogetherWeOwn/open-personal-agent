@@ -77,6 +77,15 @@ jobs:
       - uses: ./.github/actions/setup
       - run: pnpm test:worker --coverage
 
+  selfhost-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - *checkout
+      - uses: ./.github/actions/setup
+      - run: pnpm build # the web app apps/node serves
+      - run: pnpm test:node # storage contract on the Node adapters; boot, migrations, health
+      - run: pnpm vitest run --project worker apps/worker/test/parity.test.ts # same contract on D1/R2
+
   build-and-harness:
     runs-on: ubuntu-latest
     steps:

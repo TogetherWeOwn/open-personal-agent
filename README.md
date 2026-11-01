@@ -18,6 +18,16 @@ pnpm dev                         # http://localhost:8787
 and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
 reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
 
+### Run on Node (self-host)
+
+`apps/node` runs the same app on Node.js 22.16 or newer without Cloudflare: `@hono/node-server`,
+SQLite (`node:sqlite`) for the database, a local directory for files, and the same `migrations/`,
+applied on start. Run `pnpm build`, then `pnpm start:node` with the three secrets from
+`.dev.vars.example` in the environment. Data goes to `.opa-data/` (set `OPA_DATA_DIR` to move it).
+It listens on `127.0.0.1:8787` (`OPA_HOST`, `PORT`); put a TLS-terminating proxy in front to
+expose it. Workers AI and background tasks are Cloudflare-only
+for now, so `/api/health` reports `degraded` on Node.
+
 | Command                           | What it does                                                              |
 | --------------------------------- | ------------------------------------------------------------------------- |
 | `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
@@ -25,6 +35,7 @@ reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxyi
 | `pnpm typecheck`                  | `tsc --noEmit` in every package                                           |
 | `pnpm deploy:dry-run`             | Builds and bundles the Worker without deploying it                        |
 | `pnpm test:harness`               | Boots the dry-run bundle with `createTestHarness` (run it after)          |
+| `pnpm test:node`                  | Node adapters' storage contract, then boots `apps/node` (after `build`)   |
 | `pnpm check`                      | Ports rule, dependency guard, builder independence, supply chain          |
 | `pnpm notices`                    | Writes `dist/THIRD_PARTY_NOTICES.md` for production dependencies          |
 | `pnpm --filter @opa/web test:e2e` | Playwright: axe, keyboard send and screenshot baselines (`visual` CI job) |
