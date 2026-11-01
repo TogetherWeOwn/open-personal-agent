@@ -3,7 +3,8 @@
 // deleted key leaves the listing — so account deletion can prove the prefix empty. A cursor
 // whose object vanishes concurrently still resumes at what follows it, and an unreadable
 // directory throws instead of passing an empty page off as proven-empty.
-import { mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +62,28 @@ describe("localBlobStore list", () => {
     await files.put("u/a/attachments/1", "one");
     await rm(dir, { recursive: true, force: true });
     await expect(files.list({ prefix: "u/a/" })).rejects.toThrow();
+  });
+
+  it("a failed overwrite keeps the old body", async () => {
+    const dir = freshDir();
+    const files = localBlobStore(dir);
+    await files.put("u/a/attachments/1", "old");
+    // Block the sidecar write with a directory where the `.key` file goes: the sidecar
+    // lands before the rename, so its failure must leave the old object in place.
+    const sidecar = `${createHash("sha256").update("u/a/attachments/1").digest("hex")}.key`;
+    rmSync(join(dir, sidecar));
+    mkdirSync(join(dir, sidecar));
+    await expect(files.put("u/a/attachments/1", "new")).rejects.toThrow();
+    // The old body survives, and the failed write left no temp file behind. (The listing
+    // cannot read the sidecar through the blocking directory; it recovers below.)
+    expect(await (await files.get("u/a/attachments/1"))?.text()).toBe("old");
+    expect((await readdir(dir)).filter((n) => n.startsWith(".tmp-"))).toEqual([]);
+    // Unblocked, the overwrite lands as usual and the key lists again.
+    await rm(join(dir, sidecar), { recursive: true, force: true });
+    await files.put("u/a/attachments/1", "new");
+    expect(await (await files.get("u/a/attachments/1"))?.text()).toBe("new");
+    const page = await files.list({ prefix: "u/a/" });
+    expect(page.objects.map((o) => o.key)).toEqual(["u/a/attachments/1"]);
   });
 
   it("forgets a deleted key", async () => {

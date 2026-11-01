@@ -3,7 +3,7 @@
 // no row with the `user_id` (including `approvals`), nothing under `u/{userId}/` in R2 and
 // no DEK — while the audit trail survives with a null user. Deleting the only owner returns
 // the deployment to the unclaimed state; deleting one of two users leaves setup claimed.
-import { deleteUserData } from "@opa/db/deletion";
+import { deleteUserData, purgeDeletedUserFiles } from "@opa/db/deletion";
 import { describe, expect, it } from "vitest";
 import {
   Browser,
@@ -207,7 +207,7 @@ describe("DELETE /api/account", () => {
   it("a write racing the purge still leaves no objects behind", async () => {
     const { owner } = await claim();
     await seedUser(owner);
-    // A step already past its row re-read writes once, mid-purge: the final pass removes it.
+    // A step already past its row re-read writes once, mid-purge: the second pass removes it.
     let planted = false;
     const racing = new Proxy(env.FILES, {
       get(target, prop, receiver) {
@@ -233,7 +233,109 @@ describe("DELETE /api/account", () => {
     expect(result?.taskInstances).toEqual([`${owner}-inst-active`]);
     expect(result?.exportInstances).toEqual([`${owner}-inst-e-run`]);
     expect(planted).toBe(true);
+    // The route terminates the named runs, then finishes with the final purge.
+    await purgeDeletedUserFiles({ FILES: racing }, owner);
     expect(await userR2Keys(owner)).toEqual([]);
+  });
+
+  it("termination runs before the final purge: a write landing at terminate time is removed", async () => {
+    const { browser, key, owner } = await claim();
+    await seedUser(owner);
+    // A step still running at termination writes under the prefix; the final purge, which
+    // the route runs after termination, must remove it.
+    const workflows = {
+      get: async () => ({
+        terminate: async () => {
+          await env.FILES.put(`u/${owner}/task-outputs/late`, "{}", {
+            httpMetadata: { contentType: "application/json" },
+          });
+        },
+      }),
+    };
+    const bound = new Browser({
+      ...env,
+      TASK_WORKFLOW: workflows as unknown as Workflow,
+      EXPORT_WORKFLOW: workflows as unknown as Workflow,
+    });
+    bound.cookies = new Map(browser.cookies);
+    expect((await stepUp(bound, key)).status).toBe(200);
+    const res = await bound.req("/api/account", { method: "DELETE", body: {} });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ deleted: true, unclaimed: true });
+    expect(await userR2Keys(owner)).toEqual([]);
+  });
+
+  it("a final purge that keeps failing after the batch answers delete_failed", async () => {
+    const { browser, key, owner } = await claim();
+    await seedUser(owner);
+    // The store works until the batch commits, then stays down: only the final purge sees
+    // the failure. Termination runs between the two, so it flips the flag.
+    let postBatch = false;
+    const files = new Proxy(env.FILES, {
+      get(target, prop, receiver) {
+        if (prop === "list")
+          return async (opts: unknown) => {
+            if (postBatch) throw new Error("store down after batch");
+            return (target.list as (o: unknown) => Promise<unknown>).call(target, opts);
+          };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const workflows = {
+      get: async () => ({
+        terminate: async () => {
+          postBatch = true;
+        },
+      }),
+    };
+    const bound = new Browser({
+      ...env,
+      FILES: files,
+      TASK_WORKFLOW: workflows as unknown as Workflow,
+      EXPORT_WORKFLOW: workflows as unknown as Workflow,
+    });
+    bound.cookies = new Map(browser.cookies);
+    expect((await stepUp(bound, key)).status).toBe(200);
+    const res = await bound.req("/api/account", { method: "DELETE", body: {} });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "delete_failed" });
+  });
+
+  it("the final purge rides out transient store failures in place", async () => {
+    const { owner } = await claim();
+    await seedUser(owner);
+    let lists = 0;
+    const flaky = new Proxy(env.FILES, {
+      get(target, prop, receiver) {
+        if (prop === "list")
+          return async (opts: unknown) => {
+            lists += 1;
+            if (lists < 3) throw new Error("transient blip");
+            return (target.list as (o: unknown) => Promise<unknown>).call(target, opts);
+          };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await purgeDeletedUserFiles({ FILES: flaky }, owner);
+    expect(lists).toBe(3);
+    expect(await userR2Keys(owner)).toEqual([]);
+  });
+
+  it("the final purge throws after its attempts, so the route can answer delete_failed", async () => {
+    const { owner } = await claim();
+    const dead = new Proxy(env.FILES, {
+      get(target, prop, receiver) {
+        if (prop === "list")
+          return async () => {
+            throw new Error("store down");
+          };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await expect(purgeDeletedUserFiles({ FILES: dead }, owner, 2)).rejects.toThrow("store down");
   });
 
   it("deletes the only owner: no rows, no R2, no DEK, deployment unclaimed", async () => {

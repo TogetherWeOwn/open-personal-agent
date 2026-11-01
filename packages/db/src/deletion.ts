@@ -13,17 +13,22 @@
 // nobody remains, and handed to a survivor when somebody does. `used_setup_tokens` stays: a
 // spent token must never reopen `/setup` again.
 //
-// Ordering: purge R2 first, stop the work, purge again, then one D1 batch, then a final
-// purge. The first purge throws before any row moves, so a store without a listing (or an
-// unreadable one) refuses the delete with the account and its work intact; active tasks go
-// cancelled and running exports fail before the second purge, so a run the best-effort
-// termination misses still finds a terminal row at its next step and stops without writing
-// (tasks M3-12 AC3, exports M3-20 AC1). The final pass catches what a step already past its
-// re-read wrote between the second purge and the batch — object deletes are idempotent, so
-// a D1 failure between the purges still retries clean. R2 has no transactions, so the final
-// pass failing after the batch surfaces `delete_failed` instead of claiming success with
-// objects possibly left behind; without a listing the purge cannot prove the prefix empty,
-// so the delete refuses rather than strand objects.
+// Ordering: purge R2 first, stop the work, purge again, then one D1 batch. The first
+// purge throws before any row moves, so a store without a listing (or an unreadable one)
+// refuses the delete with the account and its work intact; active tasks go cancelled and
+// running exports fail before the second purge, so a run the best-effort termination
+// misses still finds a terminal row at its next step and stops without writing
+// (tasks M3-12 AC3, exports M3-20 AC1). The second pass catches what a step already past
+// its re-read wrote between the first purge and the stop. What this function must not do
+// is the last purge itself: the route terminates the stopped runs' Workflow instances
+// first (a step still running can otherwise write under the prefix afterwards), and only
+// then calls `purgeDeletedUserFiles`, which retries the pass in place — a transient store
+// failure between the batch and the last pass must not strand objects with no user row
+// left to retry through. Object deletes are idempotent, so a D1 failure between the
+// purges still retries clean. R2 has no transactions, so a final pass that keeps failing
+// after its retries surfaces `delete_failed` instead of claiming success with objects
+// possibly left behind; without a listing the purge cannot prove the prefix empty, so
+// the delete refuses rather than strand objects.
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { openD1 } from "./index";
 import { type DataBindings, isId } from "./repository";
@@ -95,8 +100,37 @@ async function purgeUserPrefix(
 }
 
 /**
+ * The last pass over the user's prefix, after the route has terminated the stopped runs'
+ * Workflow instances. Retries in place: the user row is already gone by the time this runs,
+ * so a transient store failure must be ridden out here — no later request can retry through
+ * a user that no longer exists. Throws the last error when every attempt fails, so the
+ * route answers `delete_failed` instead of claiming success with objects possibly left.
+ */
+export async function purgeDeletedUserFiles(
+  bindings: Pick<DataBindings<unknown, unknown>, "FILES">,
+  userId: string,
+  attempts = 3,
+): Promise<void> {
+  if (!isId(userId)) throw new Error("invalid user id");
+  let last: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await purgeUserPrefix(bindings.FILES, userId);
+      return;
+    } catch (error) {
+      last = error;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    }
+  }
+  throw last;
+}
+
+/**
  * Deletes the user's account and everything it owns. Returns `null` when the user does not
  * exist, so the route answers 404. Throws when the R2 purge cannot run, before any row moves.
+ * Stops short of the final purge: the caller terminates `taskInstances`/`exportInstances`
+ * first, then finishes with `purgeDeletedUserFiles`, so nothing still running can write
+ * under the prefix after the last pass.
  */
 export async function deleteUserData(
   bindings: Pick<DataBindings<unknown, unknown>, "DB" | "FILES">,
@@ -210,10 +244,6 @@ export async function deleteUserData(
       detail: JSON.stringify({ unclaimed }),
     }),
   ]);
-
-  // The final pass: a step already past its row re-read may have written after the first
-  // purge, and an export Workflow is never terminated before here. Deletes are idempotent.
-  await purgeUserPrefix(bindings.FILES, userId);
 
   return { unclaimed, taskInstances, exportInstances };
 }

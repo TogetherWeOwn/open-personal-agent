@@ -6,7 +6,12 @@
 // unclaimed first-run screen (and the setup-token rotation notice) instead of the login page.
 // The preview needs no step-up: the deletion screen reads it before the passkey ceremony, to
 // show the only-owner warning up front.
-import { type DeletionResult, deleteUserData, deletionPreview } from "@opa/db/deletion";
+import {
+  type DeletionResult,
+  deleteUserData,
+  deletionPreview,
+  purgeDeletedUserFiles,
+} from "@opa/db/deletion";
 import { Hono } from "hono";
 import { deleteCookie } from "hono/cookie";
 import * as auth from "./auth";
@@ -35,10 +40,13 @@ accountRoutes.delete("/", async (c) => {
     return c.json({ error: "delete_failed" }, 503);
   }
   if (!result) return c.json({ error: "not_found" }, 404);
-  // Row first, terminate best-effort, as the task cancel route. A run the terminate misses
-  // still finds its task row cancelled or its export row failed — or no row at all — and
-  // stops without writing (tasks M3-12 AC3, exports M3-20 AC1); the final purge in
-  // `deleteUserData` removes what a step past its re-read wrote anyway.
+  // Terminate before the last purge, not after: a step still running when the batch commits
+  // can otherwise write under the prefix after the final pass. Row first, terminate
+  // best-effort, as the task cancel route. A run the terminate misses still finds its task
+  // row cancelled or its export row failed — or no row at all — and stops without writing
+  // (tasks M3-12 AC3, exports M3-20 AC1); the final purge below removes what a step past
+  // its re-read wrote anyway. It retries in place: the user row is gone, so no later
+  // request could finish a stranded prefix.
   const tasks = c.env.TASK_WORKFLOW;
   if (typeof tasks?.get === "function") {
     await Promise.all(
@@ -61,6 +69,12 @@ accountRoutes.delete("/", async (c) => {
           .catch(() => {}),
       ),
     );
+  }
+  try {
+    // The whole env, as above: only @opa/db touches the raw FILES binding (ADR 0010 D3).
+    await purgeDeletedUserFiles(c.env, userId);
+  } catch {
+    return c.json({ error: "delete_failed" }, 503);
   }
   deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   c.header("Cache-Control", "no-store");
