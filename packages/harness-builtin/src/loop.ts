@@ -49,7 +49,13 @@ export type ToolOutput = {
   // The host refused to run the tool: the user made 60 tool calls in the last minute (COST-2).
   // The loop stops with `limit.reached{tool_rate}` once the calls started with it have finished.
   slowDown?: true;
+  // The rest of the turn should run as a task (the `task` tool, background work): the host
+  // promotes it at the next step boundary, if it can (M3-12 AC2).
+  promote?: Promotion;
 };
+
+/** Why a turn moves to a Workflow, and which task duration limit then applies (M3-12 AC6). */
+export type Promotion = { mode: "interactive" | "background"; title?: string };
 
 export interface LoopTool extends RegisteredTool {
   /** What the call reaches, e.g. a URL's host: shown on the card and matched by grants. */
@@ -84,6 +90,7 @@ export type TurnState = {
   counts: { calls: number; tools: number }; // persist with the turn, so a resume doesn't reset them
   usage: ModelUsage; // summed over the turn's calls, for the ledger
   pending: { batchId: string; items: PendingItem[] } | null;
+  promotion?: Promotion; // a tool asked for the rest of the turn to run as a task
 };
 
 export type Budget = {
@@ -105,6 +112,13 @@ export type LoopHost = {
   taskId?: string;
   now(): number;
   newId(): string; // step and batch ids
+  /**
+   * Asked at every step boundary, once a step's calls have all finished and before the next model
+   * call: `true` ends this run as `promoted`, its state complete, for a Workflow to run on (M3-12
+   * AC2). A host that is already a Workflow has none. An approval never gets here: it stops the
+   * turn instead (§8 decision 9).
+   */
+  promote?(state: TurnState): boolean;
   /**
    * The approval rows behind a resumed batch (M3-07 AC12). `claim` runs just before an approved
    * call would start, after the policy re-check allowed it: `null` lets it run, a reason stops
@@ -341,6 +355,10 @@ export async function* runTurn(
         const o = await out;
         if (approved) finish(run.call.id, { status: o.ok ? "executed" : "failed" });
         if (o.slowDown) slowed = true;
+        // Background work outranks a plain request: it sets the longer duration limit.
+        if (o.ok && o.promote && state.promotion?.mode !== "background") {
+          state.promotion = o.promote;
+        }
         stepId = id;
         yield* result(run.call, o.ok, o.content);
         if (o.ok && o.artifact) yield ev("artifact.created", o.artifact);
@@ -421,6 +439,7 @@ export async function* runTurn(
 
   for (;;) {
     if (signal.aborted) return yield* cancelled();
+    if (host.promote?.(state)) return "promoted";
     if (state.counts.calls >= TURN_LIMITS.calls) {
       return yield* limit("calls", `${TURN_LIMITS.calls} model calls`);
     }

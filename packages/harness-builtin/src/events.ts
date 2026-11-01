@@ -29,10 +29,14 @@ export type LoopEvent =
   // The loop's failure carries no limit reason: a refused send never starts a turn.
   | { type: "turn.failed"; payload: { message: string } };
 
-/** How a run of the loop ended. Only `awaiting_approval` and `limit_reached` can be resumed. */
+/**
+ * How a run of the loop ended. Only `awaiting_approval` and `limit_reached` can be resumed;
+ * `promoted` hands the rest of the turn to a Workflow, which runs the same state on (M3-12 AC2).
+ */
 export type TurnOutcome =
   | "completed"
   | "awaiting_approval"
   | "limit_reached"
+  | "promoted"
   | "cancelled"
   | "failed";
