@@ -79,7 +79,19 @@ export function Onboarding() {
   const [test, setTest] = useState<TestResult | null>(null);
 
   useEffect(() => {
-    api<Settings>("").then(setSettings, () => setError("Sign in to continue setting up."));
+    api<Settings>("").then(
+      (loaded) => {
+        setSettings(loaded);
+        // Resume where the user left off, so an unchanged Save keeps the saved key.
+        const m = loaded.model;
+        if (m?.kind === "workers-ai") setChoice("starter");
+        if (m?.kind !== "openai-chat") return;
+        const id = m.providerId && m.providerId in PRESETS ? (m.providerId as Preset) : "custom";
+        setPreset(id);
+        setForm({ baseUrl: id === "custom" ? (m.baseUrl ?? "") : "", model: m.model, apiKey: "" });
+      },
+      () => setError("Sign in to continue setting up."),
+    );
   }, []);
 
   const run = (fn: () => Promise<void>) => async () => {
@@ -164,7 +176,8 @@ export function Onboarding() {
           <span className="font-semibold">Try without a key</span>
           <span className="text-sm text-text-muted">
             Starter model on Cloudflare Workers AI. It is metered: your Cloudflare account has a
-            free daily allowance, and the Usage page tracks it.
+            free daily allowance. The Cloudflare dashboard shows what you've used; a Usage page here
+            comes in a later release.
           </span>
         </Radio>
         <Radio value="subscription" className={card}>
@@ -179,7 +192,11 @@ export function Onboarding() {
         <div className="flex flex-col gap-4">
           <RadioGroup
             value={preset}
-            onChange={(v) => setPreset(v as Preset)}
+            onChange={(v) => {
+              // A model or base URL typed for one provider never carries over to another.
+              setPreset(v as Preset);
+              setForm((f) => ({ ...f, baseUrl: "", model: "" }));
+            }}
             orientation="horizontal"
             className="flex flex-wrap gap-2"
           >

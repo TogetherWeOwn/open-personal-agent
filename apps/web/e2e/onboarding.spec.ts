@@ -33,11 +33,12 @@ test("onboarding saves a key, shows only its last 4, tests it and opens the chat
   const cards = page.getByRole("radiogroup", { name: "How your assistant reaches a model" });
   await expect(cards.getByRole("radio")).toHaveCount(3);
   await expect(cards).toContainText("metered");
-  await expect(cards).toContainText("the Usage page tracks it");
+  await expect(cards).toContainText("free daily allowance");
   expect(await new AxeBuilder({ page }).analyze()).toHaveProperty("violations", []);
-  // A base URL typed under "Other" stays behind when the user switches back to OpenAI.
+  // A base URL and model typed under "Other" stay behind when the user switches to OpenAI.
   await page.getByText("Other OpenAI-compatible", { exact: true }).click();
   await page.getByLabel("Base URL").fill("https://other.test/v1");
+  await page.getByLabel("Model", { exact: true }).fill("other/model");
   await page.getByText("OpenAI", { exact: true }).click();
   await expect(page.getByLabel("API key", { exact: true })).toHaveAttribute("type", "password");
   await page.getByLabel("API key", { exact: true }).fill(KEY);
@@ -65,5 +66,31 @@ test("onboarding saves a key, shows only its last 4, tests it and opens the chat
     apiKey: KEY,
   });
   expect(bodies).toContainEqual({ ...model, model: "gpt-4.1-mini" });
-  expect(JSON.stringify(bodies)).not.toContain("other.test");
+  expect(JSON.stringify(bodies)).not.toContain("other");
+});
+
+test("a resumed setup keeps the saved provider, so Save reuses the saved key", async ({ page }) => {
+  const saved = {
+    kind: "openai-chat",
+    providerId: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "router/model",
+  };
+  const bodies: unknown[] = [];
+  await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("/api/settings**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== "GET") bodies.push(route.request().postDataJSON());
+    const settings = { displayName: "Sam", about: "", onboarded: false };
+    const model = { ...saved, key: { last4: "WXYZ" } };
+    if (path.endsWith("/profile")) return route.fulfill({ status: 204 });
+    return route.fulfill({ json: { ...settings, model } });
+  });
+
+  await page.goto("/onboarding");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("router/model");
+  await page.getByRole("button", { name: "Save and continue" }).click();
+  await expect(page.getByRole("button", { name: "Test" })).toBeVisible();
+  expect(bodies).toContainEqual(saved);
 });
