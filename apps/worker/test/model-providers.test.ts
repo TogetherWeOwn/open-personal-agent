@@ -289,6 +289,68 @@ describe("several providers", () => {
     expect(await keys.first("n")).toBe(Number(before) - 1);
     expect((await call("u1", "DELETE", `/settings/providers/${first}`)).status).toBe(404);
   });
+
+  it("audits each key added or removed by last 4, and each role change with both values", async () => {
+    const { results } = await env.DB.prepare(
+      "SELECT action, target_id, detail FROM audit_log WHERE user_id = 'u1' AND module = 'settings' ORDER BY id",
+    ).all<{ action: string; target_id: string | null; detail: string }>();
+    const rows = results.map((r) => ({ ...r, detail: JSON.parse(r.detail) }));
+    const keyed = (id: string) =>
+      rows.filter((r) => r.action.startsWith("settings.key_") && r.target_id === id);
+    expect([...keyed(first), ...keyed(second)]).toEqual([
+      {
+        action: "settings.key_add",
+        target_id: first,
+        detail: { provider: "OpenAI", last4: "WXYZ" },
+      },
+      {
+        action: "settings.key_remove",
+        target_id: first,
+        detail: { provider: "OpenAI", last4: "WXYZ" },
+      },
+      {
+        action: "settings.key_add",
+        target_id: second,
+        detail: { provider: "OpenRouter", last4: "QRST" },
+      },
+    ]);
+    // A model edit without a new key is a settings change of its own; onboarding's is the Chat
+    // model's, which `settings.model` records.
+    expect(rows.filter((r) => r.action === "settings.provider")).toEqual([
+      {
+        action: "settings.provider",
+        target_id: first,
+        detail: { model: { from: "gpt-4o-mini", to: "gpt-4.1-mini" } },
+      },
+      {
+        action: "settings.provider",
+        target_id: first,
+        detail: { model: { from: "gpt-4.1-mini", to: "gpt-4o-mini" } },
+      },
+    ]);
+    expect(rows.find((r) => r.action === "settings.roles")?.detail).toEqual({
+      chatProvider: { from: null, to: second },
+      chatModel: { from: null, to: "other/model" },
+      backgroundProvider: { from: null, to: first },
+      backgroundModel: { from: null, to: "gpt-4.1-mini" },
+    });
+    // No row carries any part of a key beyond its last 4.
+    for (const r of results)
+      for (const key of KEYS) expect(r.detail).not.toContain(key.slice(0, 8));
+  });
+
+  it("logs a keyless provider's removal as that, never as a key removed", async () => {
+    const starter = (await call("u1", "POST", "/settings/providers", { kind: "workers-ai" })).body;
+    expect((await call("u1", "DELETE", `/settings/providers/${starter.id}`)).status).toBe(204);
+    const { results } = await env.DB.prepare(
+      "SELECT action, detail FROM audit_log WHERE target_id = ? ORDER BY id",
+    )
+      .bind(starter.id)
+      .all<{ action: string; detail: string }>();
+    expect(results.map((r) => ({ ...r, detail: JSON.parse(r.detail) }))).toEqual([
+      { action: "settings.provider_remove", detail: { provider: starter.providerName } },
+    ]);
+  });
 });
 
 describe("isolation", () => {

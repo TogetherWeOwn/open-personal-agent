@@ -2,7 +2,7 @@
 // Onboarding answers and model settings (M2-15, M3-06). Keys arrive in a request body, go straight
 // into the vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
 import type { ModelProvider, ModelUsage } from "@opa/core";
-import { createRepository, type ProviderValues } from "@opa/db/repository";
+import { type AuditRow, createRepository, type ProviderValues } from "@opa/db/repository";
 import { findPrice, isStale, providerInfo } from "@opa/pricing";
 import {
   credentialBinding,
@@ -13,6 +13,7 @@ import {
 } from "@opa/providers";
 import { decrypt, encrypt, userState, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
+import { changes } from "./audit";
 import {
   billerOf,
   type ModelPick,
@@ -47,6 +48,63 @@ const userOf = (c: Ctx) => createRepository(c.env).forUser(c.var.session.scope);
 // The vault takes the session's scope too; its own brand keeps it from importing `@opa/db`.
 const vaultScope = (c: Ctx) => c.var.session.scope as unknown as VaultScope;
 
+/**
+ * A settings change's row for the Activity log (M3-19 AC3), with the old and new values, saved in
+ * the same batch as the change; none when nothing changed.
+ */
+function audit(
+  action: string,
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown>,
+  private_: string[] = [],
+): AuditRow | undefined {
+  const detail = changes(before ?? {}, after, private_);
+  return detail ? { action, module: "settings", detail } : undefined;
+}
+
+/** A key's last 4 as the vault keeps them: none for a short key (crypto review L-1). */
+const last4 = (key: string) => (key.length >= 20 ? key.slice(-4) : null);
+
+/**
+ * A provider's row, saved in its batch: a new key names the provider and its last 4, never the
+ * key (SEC-7), with any other field that changed; an edit without one, what changed.
+ */
+function providerAudit(
+  body: Record<string, unknown>,
+  values: ProviderValues & { model: string },
+  before?: Provider,
+): AuditRow | undefined {
+  const fields = { providerId: values.providerId ?? null, baseUrl: values.baseUrl ?? null };
+  const edits = before ? changes(before, { ...fields, model: values.model }) : null;
+  const targetId = before?.id ?? null;
+  if (typeof body.apiKey !== "string") {
+    return edits
+      ? { action: "settings.provider", module: "settings", targetId, detail: edits }
+      : undefined;
+  }
+  return {
+    action: before ? "settings.key_replace" : "settings.key_add",
+    module: "settings",
+    targetId,
+    detail: {
+      provider: namesOf({ kind: values.kind, baseUrl: fields.baseUrl }, null).providerName,
+      last4: last4(body.apiKey.trim()),
+      ...edits,
+    },
+  };
+}
+
+/** A provider removed: with its key, if it had one, by provider and last 4. */
+const removedAudit = (row: Provider): AuditRow => ({
+  action: row.keySecretId ? "settings.key_remove" : "settings.provider_remove",
+  module: "settings",
+  targetId: row.id,
+  detail: {
+    provider: namesOf(row, null).providerName,
+    ...(row.keySecretId ? { last4: row.keyLast4 } : {}),
+  },
+});
+
 const text = (value: unknown, max: number): string | null =>
   typeof value === "string" && value.trim() !== "" && value.length <= max ? value.trim() : null;
 
@@ -72,7 +130,7 @@ const apiOf = (row: Provider) =>
  * Names a person reads ("GPT-4.1 mini · OpenAI"), from the price table where it has them; a
  * provider it doesn't know is named by its billing host, as on the Usage page.
  */
-export function namesOf(row: Provider, model: string | null) {
+export function namesOf(row: Pick<Provider, "kind" | "baseUrl">, model: string | null) {
   const billingId = billerOf(row);
   const modelName = (model && findPrice(billingId, model)?.name) || model;
   return { providerName: providerInfo(billingId).name, modelName };
@@ -288,9 +346,16 @@ settings.put("/profile", async (c) => {
   const displayName = text(body?.displayName, 80);
   const about = typeof body?.about === "string" && body.about.length <= 2000 ? body.about : null;
   if (!displayName || about === null) return fail(c, 400, "invalid_profile");
-  const { settings: store } = userOf(c);
-  await store.rename(displayName);
-  await store.save({ about: about.trim() });
+  const user = userOf(c);
+  const before = await user.settings.get();
+  const was = before && { ...before, about: before.about ?? "" };
+  await user.settings.save(
+    { about: about.trim() },
+    {
+      displayName,
+      audit: audit("settings.profile", was, { displayName, about: about.trim() }, ["about"]),
+    },
+  );
   return c.body(null, 204);
 });
 
@@ -300,7 +365,9 @@ settings.put("/model", async (c) => {
   const user = userOf(c);
   if (body?.kind === "workers-ai") {
     // Any saved key stays in its own row, for switching back.
-    await user.settings.save({ chatProvider: await starterRow(user), chatModel: STARTER_MODEL });
+    const before = await user.settings.get();
+    const starter = { chatProvider: await starterRow(user), chatModel: STARTER_MODEL };
+    await user.settings.save(starter, { audit: audit("settings.model", before, starter) });
     return c.json(await view(c));
   }
   if (body?.kind !== "openai-chat") return fail(c, 400, "invalid_model");
@@ -312,10 +379,13 @@ settings.put("/model", async (c) => {
   const current = keyed.find((p) => p.id === settings.chatProvider) ?? keyed.at(-1);
   const values = await keyedValues(c, body, current);
   if ("error" in values) return fail(c, values.status, values.error);
+  // A model edit without a key is the Chat model's change, which `settings.model` records.
+  const keyAudit = body.apiKey === undefined ? undefined : providerAudit(body, values, current);
   let id = current?.id;
-  if (id) await user.providers.update(id, values);
-  else id = await user.providers.add(values);
-  await user.settings.save({ chatProvider: id, chatModel: values.model });
+  if (id) await user.providers.update(id, values, keyAudit);
+  else id = await user.providers.add(values, keyAudit);
+  const chat = { chatProvider: id, chatModel: values.model };
+  await user.settings.save(chat, { audit: audit("settings.model", settings, chat) });
   return c.json(await view(c));
 });
 
@@ -330,7 +400,9 @@ settings.post("/providers", async (c) => {
   if (body.apiKey === undefined) return fail(c, 400, "key_required");
   const values = await keyedValues(c, body);
   if ("error" in values) return fail(c, values.status, values.error);
-  const row = await user.providers.get(await user.providers.add(values));
+  const row = await user.providers.get(
+    await user.providers.add(values, providerAudit(body, values)),
+  );
   return c.json(providerView(row as Provider), 201);
 });
 
@@ -345,7 +417,7 @@ settings.put("/providers/:id", async (c) => {
   }
   const values = await keyedValues(c, body, current);
   if ("error" in values) return fail(c, values.status, values.error);
-  await user.providers.update(current.id, values);
+  await user.providers.update(current.id, values, providerAudit(body, values, current));
   return c.json(providerView((await user.providers.get(current.id)) as Provider));
 });
 
@@ -354,7 +426,10 @@ settings.delete("/providers/:id", async (c) => {
   const id = c.req.param("id");
   // Chat always has a model: the user picks another for it first.
   if ((await user.settings.get())?.chatProvider === id) return fail(c, 409, "chat_role");
-  return (await user.providers.remove(id)) ? c.body(null, 204) : fail(c, 404, "not_found");
+  const row = await user.providers.get(id);
+  if (!row || !(await user.providers.remove(id, removedAudit(row))))
+    return fail(c, 404, "not_found");
+  return c.body(null, 204);
 });
 
 /** Sets the Chat and Background roles; a null Background goes back to the cheapest. */
@@ -362,7 +437,8 @@ settings.put("/roles", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body !== "object") return fail(c, 400, "invalid_role");
   const user = userOf(c);
-  if (!(await user.settings.get())) return fail(c, 404, "not_found");
+  const before = await user.settings.get();
+  if (!before) return fail(c, 404, "not_found");
   const update: Parameters<User["settings"]["save"]>[0] = {};
   if ("chat" in body) {
     const chat = await choice(user, body.chat);
@@ -375,7 +451,7 @@ settings.put("/roles", async (c) => {
     update.backgroundProvider = background?.provider ?? null;
     update.backgroundModel = background?.model ?? null;
   }
-  await user.settings.save(update);
+  await user.settings.save(update, { audit: audit("settings.roles", before, update) });
   return c.json(await view(c));
 });
 

@@ -259,19 +259,24 @@ export function memoryService(db: Db, userId: string) {
    * Hard-deletes current memories with their earlier versions and pending proposals about them,
    * in one statement: nothing if any of `ids` stopped being current meanwhile, or if `proposalId`
    * (an accepted delete proposal) is no longer pending. Returns the deleted IDs, or `null`.
+   * A user's own forget writes its `memory.forget` row for the Activity log (M3-19 AC3) in the
+   * same batch, under the same condition: how many notes, never their text.
    */
-  const forget = async (ids: string[], proposalId?: string): Promise<string[] | null> => {
+  const forget = async (
+    ids: string[],
+    proposalId?: string,
+    logged = false,
+  ): Promise<string[] | null> => {
     const pending =
       proposalId === undefined
         ? sql`1`
         : sql`EXISTS (SELECT 1 FROM memories p WHERE p.id = ${proposalId} AND p.user_id = ${userId}
             AND p.status = 'proposed' AND p.expires_at > ${Date.now()})`;
-    const deleted = await db.all<{ id: string }>(sql`
+    const anchor = sql`SELECT id FROM memories
+      WHERE user_id = ${userId} AND status = 'active' AND ${inIds(memories.id, ids)}`;
+    const remove = sql`
       WITH RECURSIVE
-        anchor(id) AS (
-          SELECT id FROM memories
-            WHERE user_id = ${userId} AND status = 'active' AND ${inIds(memories.id, ids)}
-        ),
+        anchor(id) AS (${anchor}),
         chain(id) AS (
           SELECT id FROM anchor WHERE (SELECT count(*) FROM anchor) = ${ids.length} AND ${pending}
           UNION
@@ -281,8 +286,20 @@ export function memoryService(db: Db, userId: string) {
       DELETE FROM memories
         WHERE user_id = ${userId} AND (id IN chain OR (status = 'proposed' AND id IN (
           SELECT memory_id FROM memory_links WHERE user_id = ${userId} AND target_id IN chain)))
-      RETURNING id`);
-    return deleted.length > 0 ? deleted.map((r) => r.id) : null;
+      RETURNING id`;
+    const idsOf = (rows: { id: string }[]) => (rows.length > 0 ? rows.map((r) => r.id) : null);
+    if (!logged) return idsOf(await db.all<{ id: string }>(remove));
+    // The log row goes first: once the delete has run, its condition no longer holds. Drizzle's
+    // D1 batch can't bind a raw statement, so the pair goes to D1 itself.
+    const log = sql`INSERT INTO audit_log (user_id, action, module, result, detail)
+      SELECT ${userId}, 'memory.forget', 'memory', 'ok', ${JSON.stringify({ notes: ids.length })}
+      WHERE (SELECT count(*) FROM (${anchor})) = ${ids.length} AND ${pending}`;
+    const statement = (query: SQL) => {
+      const built = db.all(query).getQuery();
+      return db.$client.prepare(built.sql).bind(...built.params);
+    };
+    const [, removed] = await db.$client.batch<{ id: string }>([statement(log), statement(remove)]);
+    return idsOf(removed?.results ?? []);
   };
 
   const deleted = (ids: string[] | null): WriteOutcome =>
@@ -316,7 +333,8 @@ export function memoryService(db: Db, userId: string) {
       (actor.tainted ||
         downward ||
         (op !== "delete" && resultKind === "instruction" && RANK[trust] < RANK.user));
-    if (!propose && op === "delete") return deleted(await forget(targetIds));
+    if (!propose && op === "delete")
+      return deleted(await forget(targetIds, undefined, actor.via === "user"));
     const status = propose ? "proposed" : "active";
     const values = row({ kind: resultKind, text, trust, status, op }, from);
     const saved = await write(values, targetIds);
@@ -506,7 +524,7 @@ export function memoryService(db: Db, userId: string) {
       if (builtIn(proposal.op, targets)) return { status: "forbidden" };
       if (proposal.op === "delete") {
         return targetIds.length > 0
-          ? deleted(await forget(targetIds, id))
+          ? deleted(await forget(targetIds, id, true))
           : { status: "not_found" };
       }
       const trust = proposal.kind === "instruction" ? "user" : proposal.trust;
