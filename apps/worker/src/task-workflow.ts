@@ -304,7 +304,10 @@ async function driveLoop(
         const { unknownOutcome, ...out } = (await ctx.step(
           `tool:${toolSeq}`,
           async (key): Promise<ToolOutput & { unknownOutcome?: true }> => {
-            if (!(await ctx.budget.allowToolCall(key))) {
+            // An approved call counts towards the minute but isn't refused by it: the user's
+            // approval already gates it, and its row is claimed by now, so a refusal here would
+            // end the approved call without running it.
+            if (!(await ctx.budget.allowToolCall(key)) && !under) {
               return { ok: false, content: SLOW_DOWN, slowDown: true };
             }
             if (

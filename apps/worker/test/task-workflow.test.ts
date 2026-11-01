@@ -617,6 +617,32 @@ describe("task limits (M3-17)", () => {
     expect((await fred.tasks.get(taskId))?.status).toBe("succeeded");
   });
 
+  it("runs an approved call even past the minute's tool limit", async () => {
+    const { taskId, instanceId } = await makeTask(carol, "cc");
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    let batchId = "";
+    const approve = async () => {
+      const state = JSON.parse((await carol.tasks.get(taskId))?.state ?? "{}");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await carol.approvals.decide(batchId, [decision], Date.now());
+      // The minute fills up while the task waits for the decision.
+      for (let i = 0; i < 60; i++) await rpc(carol).allowToolCall();
+      return null;
+    };
+    const { promise } = await run(
+      [{ calls: [["send", { q: "x" }]] }, { text: "done" }],
+      instanceId,
+      new FakeStepper([approve]),
+      [send],
+    );
+    await promise;
+    expect(send.calls).toBe(1);
+    expect((await carol.approvals.batch(batchId))[0]?.status).toBe("executed");
+    expect((await carol.tasks.get(taskId))?.status).toBe("succeeded");
+  });
+
   it("refuses the 61st tool call in a minute without running it, as slow-down (COST-2)", async () => {
     for (let i = 0; i < 60; i++) await rpc(carol).allowToolCall();
     const fetch = fetchTool();
