@@ -122,6 +122,81 @@ test("shows the empty state when nothing has been made yet", async ({ page }) =>
   ).toBeVisible();
 });
 
+test("previews Markdown with Download and a link to its source chat", async ({ page }) => {
+  await serve(page);
+  await page.goto("/activity/outputs");
+  await page.getByRole("link", { name: /trip-plan\.md/ }).click();
+  await expect(page).toHaveURL(/\/activity\/outputs\/plan$/);
+  await expect(h1(page)).toHaveText("trip-plan.md");
+  await expect(page.getByRole("heading", { name: "Kirkwall" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download" })).toHaveAttribute(
+    "href",
+    "/api/artifacts/plan/content?download=1",
+  );
+  await expect(page.getByRole("link", { name: "Open source chat" })).toHaveAttribute(
+    "href",
+    "/c/trip",
+  );
+  await axe(page, 1280);
+});
+
+test("links a task's file to its task", async ({ page }) => {
+  await serve(page);
+  await page.goto("/activity/outputs/totals");
+  await expect(page.getByRole("link", { name: "Open source task" })).toHaveAttribute(
+    "href",
+    "/activity/tasks/t1",
+  );
+});
+
+test("previews HTML in a frame with an empty sandbox, so its script never runs", async ({
+  page,
+}) => {
+  await serve(page);
+  await page.goto("/activity/outputs/page");
+  await expect(
+    page.getByText(
+      "Shown in a locked-down frame. Links and scripts in it can't reach your account.",
+    ),
+  ).toBeVisible();
+  const frame = page.locator("iframe");
+  await expect(frame).toHaveAttribute("sandbox", "");
+  await expect(frame).toHaveAttribute("title", "Preview of ferries.html");
+  await expect(page.frameLocator("iframe").getByText("Ferry times")).toBeVisible();
+  await expect(page).toHaveTitle("ferries.html · Open Personal Agent");
+});
+
+test("deletes after the Undo window, and Undo keeps the file", async ({ page }) => {
+  await page.clock.install();
+  const seen = await serve(page);
+  await page.goto("/activity/outputs/plan");
+  await page.getByRole("button", { name: "Delete" }).click();
+  await expect(page).toHaveURL(/\/activity\/outputs\?conversation=trip$/);
+  await expect(page.getByRole("status").filter({ hasText: "Deleted trip-plan.md." })).toBeVisible();
+  await expect(page.getByRole("link", { name: /trip-plan\.md/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByRole("link", { name: /trip-plan\.md/ })).toBeVisible();
+  await page.clock.runFor(11_000);
+  expect(seen.filter((r) => r.startsWith("DELETE"))).toEqual([]);
+
+  await page.getByRole("link", { name: /trip-plan\.md/ }).click();
+  await page.getByRole("button", { name: "Delete" }).click();
+  await page.clock.runFor(11_000);
+  await expect
+    .poll(() => seen.filter((r) => r.startsWith("DELETE")))
+    .toEqual(["DELETE /api/artifacts/plan"]);
+});
+
+test("says so when the file doesn't exist", async ({ page }) => {
+  await serve(page);
+  await page.goto("/activity/outputs/nope");
+  await expect(
+    page.getByRole("heading", { name: "This file doesn't exist or was deleted." }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "All files" })).toBeVisible();
+});
+
 test("the chat's menu opens its files", async ({ page }) => {
   await serve(page);
   await page.goto("/");
