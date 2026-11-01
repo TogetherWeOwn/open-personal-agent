@@ -31,6 +31,12 @@ export interface SpendingSettings {
   hardCapMicroUsd: number | null;
 }
 
+/** The last settings write's number, and the write that last changed each field. */
+interface SettingsWrites {
+  last: number;
+  fields: Partial<Record<keyof SpendingSettings, number>>;
+}
+
 export const SPENDING_DEFAULTS: SpendingSettings = {
   taskBudgetMicroUsd: 500_000,
   dailyCapMicroUsd: DAILY_SPEND_CAP_MICRO_USD,
@@ -125,9 +131,37 @@ export class Limits {
 
   /** Saves the settings given; the caller has checked them with `checkSpending`. */
   setSettings(changes: Partial<SpendingSettings>): SpendingSettings {
-    const next = { ...this.settings(), ...changes };
+    return this.saveSettings(changes).settings;
+  }
+
+  /**
+   * Saves the settings given and numbers the write. Each field it changes records that number,
+   * so `revertSettings` can tell whether a later write has changed the field since, even back
+   * to the same value.
+   */
+  saveSettings(changes: Partial<SpendingSettings>): { settings: SpendingSettings; write: number } {
+    const before = this.settings();
+    const next = { ...before, ...changes };
+    const writes = this.kv.get<SettingsWrites>("settingsWrites") ?? { last: 0, fields: {} };
+    const write = writes.last + 1;
+    const fields = { ...writes.fields };
+    for (const k of Object.keys(next) as (keyof SpendingSettings)[])
+      if (next[k] !== before[k]) fields[k] = write;
     this.kv.put("settings", next);
-    return next;
+    this.kv.put("settingsWrites", { last: write, fields });
+    return { settings: next, write };
+  }
+
+  /**
+   * Undoes write `write` (from `saveSettings`): each field it changed goes back to its `before`
+   * value, unless a later write has changed that field since.
+   */
+  revertSettings(write: number, before: SpendingSettings): void {
+    const fields = this.kv.get<SettingsWrites>("settingsWrites")?.fields ?? {};
+    const undo = (Object.keys(fields) as (keyof SpendingSettings)[]).filter(
+      (k) => fields[k] === write,
+    );
+    if (undo.length) this.saveSettings(Object.fromEntries(undo.map((k) => [k, before[k]])));
   }
 
   /** Counts a turn, or returns `false` if the user has started too many in the last minute. */
