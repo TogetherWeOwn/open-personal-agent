@@ -59,21 +59,54 @@ describe("the cost label", () => {
     expect(money(0)).toBe("$0.00");
     expect(money(1)).toContain("<");
     expect(money(123_400)).toBe("$0.12");
-    expect(costLabel({ calls: 1, costMicroUsd: null })).toBe("1 call · cost unknown");
-    expect(costLabel({ calls: 3, costMicroUsd: 123_400 })).toBe("3 calls · $0.12");
+    expect(costLabel({ calls: 1, costMicroUsd: null, unpricedCalls: 0 })).toBe(
+      "1 call · cost unknown",
+    );
+    expect(costLabel({ calls: 3, costMicroUsd: 123_400, unpricedCalls: 0 })).toBe(
+      "3 calls · $0.12",
+    );
+  });
+
+  it("names the unpriced calls the subtotal is missing", () => {
+    expect(costLabel({ calls: 3, costMicroUsd: 123_400, unpricedCalls: 2 })).toBe(
+      "3 calls · $0.12 · 2 unpriced",
+    );
+    expect(costLabel({ calls: 1, costMicroUsd: null, unpricedCalls: 1 })).toBe(
+      "1 call · cost unknown · 1 unpriced",
+    );
   });
 });
 
 describe("the elapsed label", () => {
   it("stays quiet before the start, then counts in s, m and h", () => {
-    expect(elapsed({ startedAt: null, finishedAt: null })).toBeNull();
-    expect(elapsed({ startedAt: 1_000, finishedAt: 46_000 })).toBe("45s");
-    expect(elapsed({ startedAt: 1_000, finishedAt: 193_000 })).toBe("3m 12s");
-    expect(elapsed({ startedAt: 0, finishedAt: 7_500_000 })).toBe("2h 5m");
+    expect(
+      elapsed({ startedAt: null, finishedAt: null, status: "queued", updatedAt: 0 }),
+    ).toBeNull();
+    expect(
+      elapsed({ startedAt: 1_000, finishedAt: 46_000, status: "succeeded", updatedAt: 46_000 }),
+    ).toBe("45s");
+    expect(
+      elapsed({ startedAt: 1_000, finishedAt: 193_000, status: "failed", updatedAt: 193_000 }),
+    ).toBe("3m 12s");
+    expect(
+      elapsed({ startedAt: 0, finishedAt: 7_500_000, status: "cancelled", updatedAt: 7_500_000 }),
+    ).toBe("2h 5m");
   });
 
   it("counts a running task to now", () => {
-    expect(elapsed({ startedAt: 1_000, finishedAt: null }, 61_000)).toBe("1m 0s");
+    expect(
+      elapsed({ startedAt: 1_000, finishedAt: null, status: "running", updatedAt: 2_000 }, 61_000),
+    ).toBe("1m 0s");
+  });
+
+  it("freezes a paused task at its last write instead of counting idle time", () => {
+    // Paused at 301s; an hour later the clock still reads the five run minutes.
+    expect(
+      elapsed(
+        { startedAt: 1_000, finishedAt: null, status: "budget_limited", updatedAt: 301_000 },
+        3_901_000,
+      ),
+    ).toBe("5m 0s");
   });
 });
 

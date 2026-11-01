@@ -20,8 +20,12 @@ export interface TaskItem {
   limitKind: string | null;
   error: string | null;
   costMicroUsd: number | null;
+  /** Calls with no price on file; their cost is missing from `costMicroUsd`. */
+  unpricedCalls: number;
   calls: number;
   createdAt: number;
+  /** A paused task's last write is its pause (see `elapsed`). */
+  updatedAt: number;
   startedAt: number | null;
   finishedAt: number | null;
 }
@@ -60,7 +64,10 @@ export function isExecutionLimitKind(kind: string | null): boolean {
   );
 }
 
-/** The query string for a `GET /api/tasks` fetch over these statuses. */
+/**
+ * The query string for a `GET /api/tasks` fetch over these statuses. One capped fetch for
+ * now; paging History past 100 is TWO-713.
+ */
 export function listQuery(statuses: readonly TaskStatus[], limit = 100): string {
   const params = new URLSearchParams();
   for (const status of statuses) params.append("status", status);
@@ -74,20 +81,27 @@ export function money(micro: number): string {
   return micro > 0 && micro < 10_000 ? `< ${fmt.format(0.01)}` : fmt.format(micro / 1e6);
 }
 
-export function costLabel(task: Pick<TaskItem, "costMicroUsd" | "calls">): string {
+export function costLabel(
+  task: Pick<TaskItem, "costMicroUsd" | "calls" | "unpricedCalls">,
+): string {
   const calls = `${task.calls} ${task.calls === 1 ? "call" : "calls"}`;
-  return task.costMicroUsd === null
-    ? `${calls} · cost unknown`
-    : `${calls} · ${money(task.costMicroUsd)}`;
+  const known = task.costMicroUsd === null ? "cost unknown" : money(task.costMicroUsd);
+  const unpriced = task.unpricedCalls > 0 ? ` · ${task.unpricedCalls} unpriced` : "";
+  return `${calls} · ${known}${unpriced}`;
 }
 
-/** "3m 12s" between start and finish (or now, while running); null before it starts. */
+/**
+ * "3m 12s" between start and finish (or now, while running); null before it starts. A paused
+ * task keeps no `finishedAt` (it may continue), but its last write is the pause itself, so the
+ * clock freezes there instead of counting idle time as run time.
+ */
 export function elapsed(
-  task: Pick<TaskItem, "startedAt" | "finishedAt">,
+  task: Pick<TaskItem, "startedAt" | "finishedAt" | "status" | "updatedAt">,
   now: number = Date.now(),
 ): string | null {
   if (task.startedAt === null) return null;
-  const seconds = Math.max(0, Math.floor(((task.finishedAt ?? now) - task.startedAt) / 1000));
+  const end = task.finishedAt ?? (task.status === "budget_limited" ? task.updatedAt : null) ?? now;
+  const seconds = Math.max(0, Math.floor((end - task.startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;

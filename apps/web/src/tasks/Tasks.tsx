@@ -57,44 +57,44 @@ export function Tasks() {
 
   return (
     <Page title="Tasks">
+      {/* The toggle stays mounted while a tab loads or fails, so the other tab is one press
+        away and focus survives the switch. */}
+      <ToggleButtonGroup
+        aria-label="Which tasks"
+        selectionMode="single"
+        disallowEmptySelection
+        selectedKeys={[tab]}
+        onSelectionChange={(keys) => setTab([...keys][0] === "history" ? "history" : "now")}
+        className="flex self-start rounded-lg border border-border-strong"
+      >
+        {(["now", "history"] as const).map((id) => (
+          <ToggleButton
+            key={id}
+            id={id}
+            className="min-h-11 rounded-lg px-4 font-medium data-selected:bg-accent data-selected:text-accent-contrast"
+          >
+            {id === "now" ? "Now" : "History"}
+          </ToggleButton>
+        ))}
+      </ToggleButtonGroup>
       {failed && <p role="alert">Tasks couldn&apos;t be loaded. Try again in a moment.</p>}
       {!failed && tasks === null && <Skeleton label="Loading tasks" />}
-      {!failed && tasks !== null && (
-        <>
-          <ToggleButtonGroup
-            aria-label="Which tasks"
-            selectionMode="single"
-            disallowEmptySelection
-            selectedKeys={[tab]}
-            onSelectionChange={(keys) => setTab([...keys][0] === "history" ? "history" : "now")}
-            className="flex self-start rounded-lg border border-border-strong"
+      {!failed &&
+        tasks !== null &&
+        (tasks.length === 0 ? (
+          <EmptyState title={tab === "now" ? "No tasks running." : "No finished tasks yet."}>
+            When I work on something for you, it shows up here.
+          </EmptyState>
+        ) : (
+          <ul
+            aria-label={tab === "now" ? "Tasks now" : "Task history"}
+            className="flex flex-col gap-2"
           >
-            {(["now", "history"] as const).map((id) => (
-              <ToggleButton
-                key={id}
-                id={id}
-                className="min-h-11 rounded-lg px-4 font-medium data-selected:bg-accent data-selected:text-accent-contrast"
-              >
-                {id === "now" ? "Now" : "History"}
-              </ToggleButton>
+            {tasks.map((task) => (
+              <TaskRow key={task.id} task={task} />
             ))}
-          </ToggleButtonGroup>
-          {tasks.length === 0 ? (
-            <EmptyState title={tab === "now" ? "No tasks running." : "No finished tasks yet."}>
-              When I work on something for you, it shows up here.
-            </EmptyState>
-          ) : (
-            <ul
-              aria-label={tab === "now" ? "Tasks now" : "Task history"}
-              className="flex flex-col gap-2"
-            >
-              {tasks.map((task) => (
-                <TaskRow key={task.id} task={task} />
-              ))}
-            </ul>
-          )}
-        </>
-      )}
+          </ul>
+        ))}
     </Page>
   );
 }
