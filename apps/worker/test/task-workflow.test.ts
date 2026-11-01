@@ -344,6 +344,46 @@ describe("task workflow", () => {
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
+  it("cancels the task when its approval expires undecided, with no further model call", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    let batchId = "";
+    const stepper = new FakeStepper([
+      // The wait times out past the approval's expiry with the row still pending. Past expiry
+      // is a row write, not a clock jump, so the task's own duration limit doesn't trip.
+      async () => {
+        const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+        batchId = state.turn.pending.batchId as string;
+        await env.DB.prepare("UPDATE approvals SET expires_at = ? WHERE batch_id = ?")
+          .bind(Date.now() - 1, batchId)
+          .run();
+        return null;
+      },
+    ]);
+    const { promise, streams } = await run(
+      [{ calls: [["send", { q: "x" }]] }, { text: "done" }],
+      instanceId,
+      stepper,
+      [send],
+    );
+    await promise;
+    expect(stepper.waits).toBe(1);
+    expect(send.calls).toBe(0);
+    expect(streams()).toBe(1); // the expiry ends the run before the next model call
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    // The undecided row expired with its audit row, as the reconciler's sweep writes them.
+    expect((await alice.approvals.batch(batchId))[0]).toMatchObject({
+      status: "expired",
+      reason: "expired",
+    });
+    const audit = await env.DB.prepare(
+      "SELECT result, detail FROM audit_log WHERE action = 'approval.expire' AND target_id = ?",
+    )
+      .bind(`${batchId}/appr_call_1`)
+      .first<{ result: string; detail: string }>();
+    expect(audit).toMatchObject({ result: "denied", detail: '{"reason":"expired"}' });
+  });
+
   it("never runs an approved call twice when a crash reruns its step (crypto review W3)", async () => {
     const { taskId, instanceId } = await makeTask();
     const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
