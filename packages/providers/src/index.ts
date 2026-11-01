@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 export {
+  type AnthropicMessagesOptions,
+  createAnthropicMessagesProvider,
+} from "./anthropic-messages";
+export { ANTHROPIC_MESSAGES_API } from "./anthropic-request";
+export {
   DEFAULT_OPENAI_CHAT_COMPAT,
   OPENAI_CHAT_HOST_PRESETS,
   type OpenAIChatCompat,
