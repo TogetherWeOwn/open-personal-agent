@@ -107,6 +107,22 @@ describe("export rows", () => {
     expect(() => alice.exports.key("../bob/exports/e1")).toThrow(/invalid id/);
   });
 
+  it("expires a running export and deletes its ZIP, never touching a finished row", async () => {
+    // One export runs at a time: whatever an earlier test left running finishes first.
+    const inFlight = await alice.exports.running();
+    if (inFlight) await alice.exports.finishFailed(inFlight.id, "done");
+    await alice.exports.create({ id: "e8", workflowInstanceId: "exp-e8", expiresAt: 3600000 });
+    await env.FILES.put("u/alice/exports/e8.zip", "zip");
+    expect(await alice.exports.finishExpired("e8")).toBe(true);
+    expect((await alice.exports.get("e8"))?.status).toBe("expired");
+    await alice.exports.removeZip("e8");
+    expect(await env.FILES.get("u/alice/exports/e8.zip")).toBeNull();
+    // A finished row never moves again, and another user's row is invisible.
+    expect(await alice.exports.finishExpired("e8")).toBe(false);
+    expect(await bob.exports.finishExpired("e8")).toBe(false);
+    expect((await alice.exports.get("e8"))?.status).toBe("expired");
+  });
+
   it("listPrefix enumerates staged keys in order, and nothing without a listing", async () => {
     const prefix = alice.exports.stagedPrefix("e7");
     await env.FILES.put(`${prefix}b.json`, "b");
@@ -173,6 +189,39 @@ describe("export item listings", () => {
     expect(rows.length).toBe(1);
     expect(rows[0]).toMatchObject({ providerId: "p", model: "m" });
     expect(await bob.usage.list()).toEqual([]);
+  });
+
+  it("lists every memory row and proposal for the export, whatever the status", async () => {
+    await env.DB.batch([
+      // An active memory with its superseded predecessor, a pending proposal and an
+      // expired one: the live listings show only the active row and the pending proposal.
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, created_at) VALUES ('mm-old', 'alice', 'fact', 'old', 'user', 'superseded', 'create', 'chat', 1000)",
+      ),
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, created_at) VALUES ('mm-new', 'alice', 'fact', 'new', 'user', 'active', 'update', 'chat', 4000)",
+      ),
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, created_at, expires_at) VALUES ('mm-prop', 'alice', 'fact', 'maybe', 'user', 'proposed', 'create', 'chat', 3000, 9999999999999)",
+      ),
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, created_at, expires_at) VALUES ('mm-stale', 'alice', 'fact', 'stale', 'user', 'proposed', 'create', 'chat', 2000, 1)",
+      ),
+      env.DB.prepare(
+        "INSERT INTO memories (id, user_id, kind, text, trust, status, op, source) VALUES ('mm-bob', 'bob', 'fact', 'his', 'user', 'active', 'create', 'chat')",
+      ),
+    ]);
+    expect((await alice.memory.list()).map((r) => r.id)).toEqual(["mm-new"]);
+    expect((await alice.memory.proposals()).map((r) => r.id)).toEqual(["mm-prop"]);
+    // The export's listings carry every row with its status, and every proposal.
+    expect((await alice.memory.all()).map((r) => `${r.id}:${r.status}`)).toEqual([
+      "mm-new:active",
+      "mm-prop:proposed",
+      "mm-stale:proposed",
+      "mm-old:superseded",
+    ]);
+    expect((await alice.memory.allProposals()).map((r) => r.id)).toEqual(["mm-prop", "mm-stale"]);
+    expect((await bob.memory.all()).map((r) => r.id)).toEqual(["mm-bob"]);
   });
 
   it("lists the user's own audit trail, oldest first; deployment rows belong to nobody", async () => {

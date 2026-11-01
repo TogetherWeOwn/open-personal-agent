@@ -1227,6 +1227,27 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 )
                 .returning({ id: dataExports.id })
             ).length > 0,
+          /**
+           * Moves a running export to expired, for a finish that finds its row past expiry: a
+           * past-expiry row must never turn ready. `false` when it had already ended. (The
+           * sweep moves rows of any status with its own update; this is the running-only guard.)
+           */
+          finishExpired: async (id: string) =>
+            (
+              await db
+                .update(dataExports)
+                .set({ status: "expired" })
+                .where(
+                  and(
+                    eq(dataExports.id, id),
+                    eq(dataExports.userId, userId),
+                    eq(dataExports.status, "running"),
+                  ),
+                )
+                .returning({ id: dataExports.id })
+            ).length > 0,
+          /** Deletes the final ZIP, for a finish that expired before it could turn ready. */
+          removeZip: (id: string) => FILES.delete(`u/${userId}/exports/${checkId(id)}.zip`),
         },
         /**
          * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they

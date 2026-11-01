@@ -318,6 +318,37 @@ export function memoryService(db: Db, userId: string) {
         targetIds: links.filter((l) => l.memoryId === r.id).map((l) => l.targetId),
       }));
     },
+    /**
+     * Every memory row — active, proposed and superseded — newest first, for the data export
+     * (M3-20 AC1): superseded versions are still the user's retained data, so the export
+     * carries them with their status rather than only the live ones.
+     */
+    all: () =>
+      db
+        .select()
+        .from(memories)
+        .where(eq(memories.userId, userId))
+        .orderBy(desc(memories.createdAt), desc(memories.n)),
+    /**
+     * Every proposal — pending and expired — newest first with the IDs it would replace, for
+     * the data export: an expired proposal is still a record of what was suggested.
+     */
+    allProposals: async () => {
+      const rows = await db
+        .select()
+        .from(memories)
+        .where(and(eq(memories.userId, userId), eq(memories.status, "proposed")))
+        .orderBy(desc(memories.createdAt), desc(memories.n));
+      const links = await db
+        .select({ memoryId: memoryLinks.memoryId, targetId: memoryLinks.targetId })
+        .from(memoryLinks)
+        .innerJoin(memories, eq(memories.id, memoryLinks.memoryId))
+        .where(and(eq(memoryLinks.userId, userId), eq(memories.status, "proposed")));
+      return rows.map((r) => ({
+        ...r,
+        targetIds: links.filter((l) => l.memoryId === r.id).map((l) => l.targetId),
+      }));
+    },
     /** The user's current memory, or `undefined` when it is missing or someone else's. */
     get: async (id: string) =>
       (
