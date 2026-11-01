@@ -227,6 +227,18 @@ importers:
         specifier: 4.13.14
         version: 4.13.14
 
+  packages/tools-builtin:
+    dependencies:
+      '@opa/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opa/harness-builtin':
+        specifier: workspace:*
+        version: link:../harness-builtin
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../policy
+
   packages/vault: {}
 
 packages:
@@ -2165,6 +2177,7 @@ packages:
 
   longest-streak@3.1.0:
     resolution: {integrity: sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==}
+
   lucide-react@1.63.0:
     resolution: {integrity: sha512-GkBfQG+FUJ41x6y3/lNXiOziVU0Rcqqq0TCzhHS8avsFXHZmOdmfBqsVTvHSaVmbI+wbdGkxHRmhYWhD3N4/yA==}
     peerDependencies:
@@ -4221,6 +4234,7 @@ snapshots:
       lightningcss-win32-x64-msvc: 1.33.0
 
   longest-streak@3.1.0: {}
+
   lucide-react@1.63.0(@types/react@19.3.0)(react@19.3.1):
     dependencies:
       react: 19.3.1

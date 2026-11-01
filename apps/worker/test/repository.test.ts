@@ -37,6 +37,38 @@ describe("scoped repository", () => {
     expect(scopeForAssistant("u:alice").userId).toBe("alice");
   });
 
+  it("searches only the caller's history, with the query matched literally (M3-08 AC2)", async () => {
+    await alice?.createConversation("cs", "Trips");
+    await bob?.createConversation("cs2", "Bob's trips");
+    const insert = (id: string, userId: string, conversationId: string, content: string) =>
+      env.DB.prepare(
+        "INSERT INTO messages (id, user_id, conversation_id, seq, role, status, content) VALUES (?, ?, ?, 1, 'user', 'complete', ?)",
+      )
+        .bind(id, userId, conversationId, content)
+        .run();
+    await insert("m1", "alice", "cs", "Book the ferry to Kirkwall, 100% sure this time");
+    await insert("m2", "bob", "cs2", "Book the ferry to Kirkwall too");
+
+    const aliceHits = (await alice?.chat.searchHistory("kirkwall", 10)) ?? [];
+    expect(aliceHits.map((h) => h.messageId)).toEqual(["m1"]);
+    expect(aliceHits[0]).toMatchObject({ conversationId: "cs", conversationTitle: "Trips" });
+    expect(aliceHits[0]?.snippet).toContain("Kirkwall");
+    // Bob finds his own message and never Alice's, even asking for her exact words.
+    expect((await bob?.chat.searchHistory("Kirkwall", 10))?.map((h) => h.messageId)).toEqual([
+      "m2",
+    ]);
+    expect(await bob?.chat.searchHistory("100% sure", 10)).toEqual([]);
+    // LIKE wildcards in the query are literal text, not a match-everything pattern.
+    expect(await bob?.chat.searchHistory("%", 10)).toEqual([]);
+    expect((await alice?.chat.searchHistory("100% sure", 10))?.map((h) => h.messageId)).toEqual([
+      "m1",
+    ]);
+    // SQLite LIKE folds A–Z only: other scripts match exactly as typed (documented contract).
+    await insert("m3", "alice", "cs", "CAFÉ on the corner");
+    expect((await alice?.chat.searchHistory("CAFÉ", 10))?.map((h) => h.messageId)).toEqual(["m3"]);
+    expect(await alice?.chat.searchHistory("café", 10)).toEqual([]);
+  });
+
   it("keeps files under the user's prefix and names the assistant from the scope", async () => {
     await alice?.putFile("f1", "hello", "text/plain");
     expect(await env.FILES.head("u/alice/files/f1")).not.toBeNull();
