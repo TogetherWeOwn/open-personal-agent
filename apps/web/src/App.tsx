@@ -21,7 +21,7 @@ import {
   settingsApi,
 } from "./models/settings-api";
 import { ThemeToggle } from "./ThemeToggle";
-import { Button, buttonClass } from "./ui";
+import { Banner, Button, buttonClass } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -259,9 +259,9 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
           </Heading>
         </header>
         {!healthy && (
-          <p role="alert" className="border-b border-border bg-surface-sunken px-4 py-2 text-sm">
+          <Banner tone="danger" alert>
             Your assistant's server isn't responding properly, so replies may fail.
-          </p>
+          </Banner>
         )}
         <Thread key={active.id} conversation={active} />
         {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
