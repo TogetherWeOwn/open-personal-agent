@@ -8,7 +8,8 @@ export * from "./schema";
 /** The schema version this build expects: the version the newest migration records. */
 export const SCHEMA_VERSION = 21;
 
-export type Db = DrizzleD1Database<typeof schema>;
+/** With D1 itself as `drizzle()` returns it, for a batch drizzle can't build (raw statements). */
+export type Db = DrizzleD1Database<typeof schema> & { $client: AnyD1Database };
 
 export function openD1(d1: AnyD1Database): Db {
   return drizzle(d1, { schema });

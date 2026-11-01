@@ -63,7 +63,6 @@ exportRoutes.post("/", async (c) => {
     return c.json({ error: "conflict" }, 409);
   }
   if (!claimed) return c.json({ error: "conflict" }, 409);
-  await user.audit.add({ action: "export.start", module: "exports", targetId: id });
   try {
     // Called on the binding: its methods reject a detached call.
     await workflows.create({ id: instanceId, params: {} });
@@ -72,6 +71,8 @@ exportRoutes.post("/", async (c) => {
     await user.exports.finishFailed(id, "the export could not start").catch(() => {});
     return c.json({ error: "start_failed" }, 503);
   }
+  // Logged once the run has started (M3-19 AC3): a start that failed was no export.
+  await user.audit.add({ action: "export.start", module: "exports", targetId: id });
   const row = await user.exports.get(id);
   c.header("Cache-Control", "no-store");
   return c.json(row ? present(row) : { id }, 201);

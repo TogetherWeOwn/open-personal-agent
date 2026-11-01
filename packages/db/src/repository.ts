@@ -2060,16 +2060,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /** `undefined` when the row is missing or someone else's. */
           get: async (id: string) =>
             isId(id) ? (await providerRows(eq(modelProviders.id, id)).limit(1))[0] : undefined,
-          add: async (values: ProviderValues) => {
+          /** Adds a provider, with `audit` in the same batch when given. */
+          add: async (values: ProviderValues, audit?: AuditRow) => {
             const id = crypto.randomUUID();
-            await db.insert(modelProviders).values({ ...values, id, userId });
+            await db.batch([
+              db.insert(modelProviders).values({ ...values, id, userId }),
+              ...(audit
+                ? [db.insert(auditLog).values(auditValues(userId, { ...audit, targetId: id }))]
+                : []),
+            ]);
             return id;
           },
           /**
            * A new model also moves the roles and conversations that were on the old one, so a
-           * listing never shows one model while calls go to another. Other picks stay.
+           * listing never shows one model while calls go to another. Other picks stay. `audit`
+           * goes in the same batch when given.
            */
-          update: async (id: string, values: Partial<ProviderValues>) => {
+          update: async (id: string, values: Partial<ProviderValues>, audit?: AuditRow) => {
             const old = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
             if (!old) return;
             const { model } = values;
@@ -2100,10 +2107,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                       ),
                   ]
                 : []),
+              ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
             ]);
           },
-          /** Removes the row and its key; roles and conversations naming it fall back. */
-          /** Deletes the provider and its key, with `audit` in the same batch when given. */
+          /**
+           * Removes the row and its key, with `audit` in the same batch when given; roles and
+           * conversations naming it fall back.
+           */
           remove: async (id: string, audit?: AuditRow) => {
             const row = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
             if (!row) return false;
@@ -2792,9 +2802,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           getObject: (id: string) => FILES.get(fileKey(id)),
           /**
            * Deletes the object, then the row; `false` when it isn't the user's. The row goes last
-           * so a failed object delete leaves the file listed, and the delete can be retried.
+           * so a failed object delete leaves the file listed, and the delete can be retried. The
+           * row and `audit` go in one batch, so a retry also writes a log row that failed.
            */
-          remove: async (id: string) => {
+          remove: async (id: string, audit?: AuditRow) => {
             if (!isId(id)) return false;
             const own = await db
               .select({ id: artifacts.id })
@@ -2803,9 +2814,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .limit(1);
             if (!own.length) return false;
             await FILES.delete(fileKey(id));
-            await db
-              .delete(artifacts)
-              .where(and(eq(artifacts.id, id), eq(artifacts.userId, userId)));
+            await db.batch([
+              db.delete(artifacts).where(and(eq(artifacts.id, id), eq(artifacts.userId, userId))),
+              ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
+            ]);
             return true;
           },
         },

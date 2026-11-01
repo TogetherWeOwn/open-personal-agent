@@ -62,21 +62,48 @@ function audit(
   return detail ? { action, module: "settings", detail } : undefined;
 }
 
-/** A saved key added, replaced or removed: its provider and last 4, never the key (SEC-7). */
-const keyAudit = (action: string, row: Provider): AuditRow => ({
-  action,
-  module: "settings",
-  targetId: row.id,
-  detail: { provider: namesOf(row, row.model).providerName, last4: row.keyLast4 },
-});
+/** A key's last 4 as the vault keeps them: none for a short key (crypto review L-1). */
+const last4 = (key: string) => (key.length >= 20 ? key.slice(-4) : null);
 
 /**
- * A key just added or replaced. The vault has already written its own `vault.encrypt` row in
- * the key's batch, so this one only names the provider, and it follows the save.
+ * A provider's row, saved in its batch: a new key names the provider and its last 4, never the
+ * key (SEC-7), with any other field that changed; an edit without one, what changed.
  */
-const keySaved = async (c: Ctx, action: string, row: Provider | undefined) => {
-  if (row) await userOf(c).audit.add(keyAudit(action, row));
-};
+function providerAudit(
+  body: Record<string, unknown>,
+  values: ProviderValues & { model: string },
+  before?: Provider,
+): AuditRow | undefined {
+  const fields = { providerId: values.providerId ?? null, baseUrl: values.baseUrl ?? null };
+  const edits = before ? changes(before, { ...fields, model: values.model }) : null;
+  const targetId = before?.id ?? null;
+  if (typeof body.apiKey !== "string") {
+    return edits
+      ? { action: "settings.provider", module: "settings", targetId, detail: edits }
+      : undefined;
+  }
+  return {
+    action: before ? "settings.key_replace" : "settings.key_add",
+    module: "settings",
+    targetId,
+    detail: {
+      provider: namesOf({ kind: values.kind, baseUrl: fields.baseUrl }, null).providerName,
+      last4: last4(body.apiKey.trim()),
+      ...edits,
+    },
+  };
+}
+
+/** A provider removed: with its key, if it had one, by provider and last 4. */
+const removedAudit = (row: Provider): AuditRow => ({
+  action: row.keySecretId ? "settings.key_remove" : "settings.provider_remove",
+  module: "settings",
+  targetId: row.id,
+  detail: {
+    provider: namesOf(row, null).providerName,
+    ...(row.keySecretId ? { last4: row.keyLast4 } : {}),
+  },
+});
 
 const text = (value: unknown, max: number): string | null =>
   typeof value === "string" && value.trim() !== "" && value.length <= max ? value.trim() : null;
@@ -103,7 +130,7 @@ const apiOf = (row: Provider) =>
  * Names a person reads ("GPT-4.1 mini · OpenAI"), from the price table where it has them; a
  * provider it doesn't know is named by its billing host, as on the Usage page.
  */
-export function namesOf(row: Provider, model: string | null) {
+export function namesOf(row: Pick<Provider, "kind" | "baseUrl">, model: string | null) {
   const billingId = billerOf(row);
   const modelName = (model && findPrice(billingId, model)?.name) || model;
   return { providerName: providerInfo(billingId).name, modelName };
@@ -352,16 +379,11 @@ settings.put("/model", async (c) => {
   const current = keyed.find((p) => p.id === settings.chatProvider) ?? keyed.at(-1);
   const values = await keyedValues(c, body, current);
   if ("error" in values) return fail(c, values.status, values.error);
+  // A model edit without a key is the Chat model's change, which `settings.model` records.
+  const keyAudit = body.apiKey === undefined ? undefined : providerAudit(body, values, current);
   let id = current?.id;
-  if (id) await user.providers.update(id, values);
-  else id = await user.providers.add(values);
-  if (!current || body.apiKey !== undefined) {
-    await keySaved(
-      c,
-      current ? "settings.key_replace" : "settings.key_add",
-      await user.providers.get(id),
-    );
-  }
+  if (id) await user.providers.update(id, values, keyAudit);
+  else id = await user.providers.add(values, keyAudit);
   const chat = { chatProvider: id, chatModel: values.model };
   await user.settings.save(chat, { audit: audit("settings.model", settings, chat) });
   return c.json(await view(c));
@@ -378,8 +400,9 @@ settings.post("/providers", async (c) => {
   if (body.apiKey === undefined) return fail(c, 400, "key_required");
   const values = await keyedValues(c, body);
   if ("error" in values) return fail(c, values.status, values.error);
-  const row = await user.providers.get(await user.providers.add(values));
-  await keySaved(c, "settings.key_add", row);
+  const row = await user.providers.get(
+    await user.providers.add(values, providerAudit(body, values)),
+  );
   return c.json(providerView(row as Provider), 201);
 });
 
@@ -394,10 +417,8 @@ settings.put("/providers/:id", async (c) => {
   }
   const values = await keyedValues(c, body, current);
   if ("error" in values) return fail(c, values.status, values.error);
-  await user.providers.update(current.id, values);
-  const row = await user.providers.get(current.id);
-  if (body?.apiKey !== undefined) await keySaved(c, "settings.key_replace", row);
-  return c.json(providerView(row as Provider));
+  await user.providers.update(current.id, values, providerAudit(body, values, current));
+  return c.json(providerView((await user.providers.get(current.id)) as Provider));
 });
 
 settings.delete("/providers/:id", async (c) => {
@@ -406,7 +427,7 @@ settings.delete("/providers/:id", async (c) => {
   // Chat always has a model: the user picks another for it first.
   if ((await user.settings.get())?.chatProvider === id) return fail(c, 409, "chat_role");
   const row = await user.providers.get(id);
-  if (!row || !(await user.providers.remove(id, keyAudit("settings.key_remove", row))))
+  if (!row || !(await user.providers.remove(id, removedAudit(row))))
     return fail(c, 404, "not_found");
   return c.body(null, 204);
 });

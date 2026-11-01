@@ -60,13 +60,15 @@ artifactRoutes.get("/:id/content", async (c) => {
 artifactRoutes.delete("/:id", async (c) => {
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const row = await user.artifacts.get(c.req.param("id"));
-  if (!row || !(await user.artifacts.remove(row.id))) return c.json({ error: "not_found" }, 404);
-  // A deletion in the Activity log (M3-19 AC3): the file's name, never its content.
-  await user.audit.add({
+  if (!row) return c.json({ error: "not_found" }, 404);
+  // A deletion in the Activity log (M3-19 AC3), in the row's batch: the file's name, never its
+  // content.
+  const audit = {
     action: "artifact.delete",
     module: "artifacts",
     targetId: row.id,
     detail: { name: row.name },
-  });
+  };
+  if (!(await user.artifacts.remove(row.id, audit))) return c.json({ error: "not_found" }, 404);
   return c.body(null, 204);
 });

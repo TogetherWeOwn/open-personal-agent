@@ -164,6 +164,30 @@ describe("memory proposals", () => {
       "Sam lives in Oslo",
       "Sam lives in Paris",
     ]);
+
+    // An accepted delete proposal is a deletion in the Activity log too (M3-19 AC3).
+    const oslo = (await list(browser)).find((m) => m.text === "Sam lives in Oslo")?.id ?? "";
+    const forget = await memory.forget(tainted, [oslo], web);
+    const forgetId = forget.status === "proposed" ? forget.proposal.memoryId : "";
+    expect(
+      (await browser.req(`/api/memory/proposals/${forgetId}/accept`, { body: {} })).status,
+    ).toBe(204);
+    expect((await list(browser)).map((m) => m.text)).toEqual(["Sam lives in Paris"]);
+    expect(await audited(owner, "memory.forget")).toEqual([{ notes: 1 }]);
+  });
+
+  it("deletes nothing when its audit row can't be written", async () => {
+    const { browser, owner } = await claim();
+    const note = await add(browser, "Likes tea");
+    await db.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const res = await browser.req(`/api/memory/${note.id}`, { method: "DELETE" });
+      expect(res.status).toBe(500);
+    } finally {
+      await db.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect((await list(browser)).map((m) => m.id)).toEqual([note.id]);
+    expect(await audited(owner, "memory.forget")).toEqual([]);
   });
 });
 

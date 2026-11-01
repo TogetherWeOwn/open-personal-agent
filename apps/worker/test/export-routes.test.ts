@@ -144,6 +144,21 @@ describe("POST /api/exports", () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "workflow_unavailable" });
   });
+
+  it("logs no start for a run that never started, and leaves no export blocking the next", async () => {
+    const { browser, key } = await claim();
+    expect((await stepUp(browser, key)).status).toBe(200);
+    const failing = {
+      create: async () => {
+        throw new Error("no capacity");
+      },
+    };
+    const broken = new Browser({ ...env, EXPORT_WORKFLOW: failing as never });
+    broken.cookies.set(SESSION_COOKIE, browser.cookies.get(SESSION_COOKIE) as string);
+    expect((await postExport(broken)).status).toBe(503);
+    expect(await count("audit_log", "action = 'export.start'")).toBe(0);
+    expect((await postExport(browser)).status).toBe(201);
+  });
 });
 
 describe("GET /api/exports", () => {
