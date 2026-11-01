@@ -6,7 +6,7 @@ export default defineConfig({
   testDir: "e2e",
   snapshotPathTemplate: "{testDir}/__screenshots__/{arg}{ext}",
   workers: 1,
-  forbidOnly: !!process.env.CI,
+  forbidOnly: true,
   use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:4173" },
   expect: { toHaveScreenshot: { animations: "disabled", maxDiffPixelRatio: 0.01 } },
   webServer: {
