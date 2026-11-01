@@ -10,9 +10,6 @@ import type { AppEnv } from "./env";
 export const chatRoutes = new Hono<AppEnv>();
 
 chatRoutes.get("/chat", async (c) => {
-  if (c.req.header("Upgrade")?.toLowerCase() !== "websocket") {
-    return c.json({ error: "upgrade_required" }, 426);
-  }
   // A WebSocket upgrade is a GET and skips CORS, so a cross-site page could open one with the
   // user's cookie. The session guard checks Origin on writes only, so check it here.
   if (c.req.header("Origin") !== new URL(c.req.url).origin) {

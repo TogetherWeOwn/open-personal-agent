@@ -130,12 +130,21 @@ describe("chat transport", () => {
     },
   );
 
+  it("settles a turn evicted before its first write: no messages, no ledger row", async () => {
+    const { owner } = await claim();
+    const turn = { conversationId: "c5", turnId: "t", replyId: "r", providerId: "p", model: "m" };
+    const ctx = { name: "chat-turn", snapshot: { ...turn, reply: "", usage: null, called: false } };
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered(ctx as never),
+    );
+    expect([await count("messages", "1"), await count("usage", "1")]).toEqual([0, 0]);
+  });
+
   it("names the DO from the session, never from the request", async () => {
     const { browser, owner } = await claim();
     expect((await openTab(new Browser())).res.status).toBe(401);
     expect((await openTab(browser, "/api/chat", "https://evil.test")).res.status).toBe(403);
     expect((await openTab(browser, "/agents/assistant/u:someone-else")).res.status).toBe(404);
-    expect((await browser.req("/api/chat")).status).toBe(426);
 
     // Query strings and SDK name headers are ignored: the socket lands on the owner's DO.
     await useModel(owner, scripted());

@@ -26,11 +26,6 @@ const MAX_TEXT = 32_000;
 /** How often a streaming reply is checkpointed, so an eviction keeps most of it. */
 const STASH_MS = 1_000;
 
-/** What a tab may send. Anything else is ignored. */
-type ClientMessage =
-  | { type: "chat.send"; conversationId: string; text: string }
-  | { type: "turn.cancel" };
-
 type Emit = <T extends HarnessEvent["type"]>(
   type: T,
   payload: Extract<HarnessEvent, { type: T }>["payload"],
@@ -75,7 +70,9 @@ export class Assistant extends Agent<Bindings> {
 
   override onMessage(connection: Connection, message: WSMessage): void {
     const msg = parse(message);
-    if (msg?.type === "turn.cancel") void this.#cancel(connection);
+    // A tab whose session is still live may stop the running turn.
+    if (msg?.type === "turn.cancel")
+      void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
     if (msg?.type !== "chat.send") return;
     const text = msg.text.trim();
     if (this.#running) {
@@ -169,11 +166,6 @@ export class Assistant extends Agent<Bindings> {
     }
   }
 
-  /** Stops the running turn, for a tab whose session is still live. */
-  async #cancel(connection: Connection) {
-    if (await this.#sessionLive(connection)) this.#running?.abort();
-  }
-
   /** A socket outlives logout and revocation, so each action rechecks the session it opened with. */
   async #sessionLive(connection: Connection): Promise<boolean> {
     const { sessionId } = (connection.state ?? {}) as { sessionId?: string | null };
@@ -202,13 +194,15 @@ export class Assistant extends Agent<Bindings> {
   }
 }
 
-function parse(message: WSMessage): ClientMessage | null {
+/** What a tab may send: `chat.send` or `turn.cancel`. Anything else is ignored. */
+function parse(message: WSMessage) {
   if (typeof message !== "string") return null;
   try {
     const msg = JSON.parse(message) as Partial<Record<string, unknown>>;
-    if (msg.type === "turn.cancel") return { type: "turn.cancel" };
+    if (msg.type === "turn.cancel") return { type: "turn.cancel" } as const;
+    const conversationId = String(msg.conversationId);
     if (msg.type === "chat.send" && typeof msg.text === "string") {
-      return { type: "chat.send", conversationId: String(msg.conversationId), text: msg.text };
+      return { type: "chat.send", conversationId, text: msg.text } as const;
     }
   } catch {}
   return null;
