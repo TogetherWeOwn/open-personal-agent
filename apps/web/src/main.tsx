@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import "./styles.css";
-import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
+import { lazy, StrictMode, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { Setup } from "./auth/Setup";
 import { SignIn } from "./auth/SignIn";
 import { createMockTransport } from "./chat/mock-transport";
 import { createSocketTransport } from "./chat/socket-transport";
+import { Offline } from "./Offline";
 import { Onboarding } from "./onboarding/Onboarding";
+import { startPwa } from "./pwa";
 import { Router } from "./router";
 
 const root = document.getElementById("root");
@@ -34,18 +36,22 @@ function fragmentToken(hash: string): string {
 const transport =
   import.meta.env.VITE_MOCK_CHAT === "1" ? createMockTransport() : createSocketTransport();
 
-type View = "setup" | "sign-in" | "onboarding" | "app";
+type View = "setup" | "sign-in" | "onboarding" | "app" | "offline";
+
+startPwa();
 
 /** Who is asking decides the screen. Anything but a signed-in user is kept from the chat. */
 async function route(): Promise<View | null> {
   const me = await fetch("/api/me").catch(() => null);
-  const body = (await me?.json().catch(() => null)) as { error?: string } | null;
-  if (me?.status === 403 && body?.error === "not_claimed") {
+  // No answer at all, not a refusal: the installed app opened with no network.
+  if (!me) return "offline";
+  const body = (await me.json().catch(() => null)) as { error?: string } | null;
+  if (me.status === 403 && body?.error === "not_claimed") {
     // A real navigation, so the server shows its own page if the deployment isn't ready yet.
     window.location.replace("/setup");
     return null;
   }
-  if (!me?.ok) return "sign-in";
+  if (!me.ok) return "sign-in";
   if (window.location.pathname === "/onboarding") return "onboarding";
   const settings = await fetch("/api/settings").catch(() => null);
   const { onboarded } = ((await settings?.json().catch(() => null)) ?? {}) as {
@@ -70,9 +76,29 @@ function Root() {
   useEffect(() => {
     if (!view) route().then(setView);
   }, [view]);
+  // The offline screen's retry: re-route in place and only leave it once the server answers,
+  // so the screen doesn't flash blank between attempts. One attempt at a time, however many
+  // of the screen's triggers (timer, `online`, focus) fire together.
+  const retrying = useRef(false);
+  const retry = useCallback(async () => {
+    if (retrying.current) return;
+    retrying.current = true;
+    try {
+      const next = await route().catch(() => "offline" as View);
+      if (next && next !== "offline") setView(next);
+    } finally {
+      retrying.current = false;
+    }
+  }, []);
   if (view === "setup") return <Setup initialToken={setupToken} />;
   if (view === "sign-in") return <SignIn />;
   if (view === "onboarding") return <Onboarding />;
+  if (view === "offline")
+    return (
+      <Router>
+        <Offline onRetry={retry} />
+      </Router>
+    );
   if (view === "app")
     return (
       <Router>

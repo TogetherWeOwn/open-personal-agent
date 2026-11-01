@@ -14,6 +14,7 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import { Link } from "react-aria-components";
 import { post } from "./auth/ui";
+import { useInstall, useUpdateReady } from "./pwa";
 import type { Destination } from "./routes";
 import { isDark, setDark } from "./theme";
 import { Banner, Button, Menu, MenuItem } from "./ui";
@@ -33,6 +34,7 @@ const DESTINATIONS: [Destination, string, string, LucideIcon][] = [
  */
 function AccountItems({ onSignOutError }: { onSignOutError: () => void }) {
   const dark = isDark();
+  const install = useInstall();
   const signOut = () =>
     post("/api/auth/logout").then(
       () => window.location.assign("/"),
@@ -49,6 +51,7 @@ function AccountItems({ onSignOutError }: { onSignOutError: () => void }) {
       <MenuItem onAction={() => setDark(!dark)}>
         {dark ? "Switch to light theme" : "Switch to dark theme"}
       </MenuItem>
+      {install && <MenuItem onAction={install}>Install as an app</MenuItem>}
       <MenuItem onAction={signOut}>Sign out</MenuItem>
     </>
   );
@@ -106,6 +109,7 @@ export function NavShell({
 }) {
   const here = (d: Destination) => (d === current ? "page" : false);
   const [signOutFailed, setSignOutFailed] = useState(false);
+  const updateReady = useUpdateReady();
   const account = <AccountItems onSignOutError={() => setSignOutFailed(true)} />;
   return (
     <div className={`${fit ? "h-dvh" : "min-h-dvh"} flex flex-col sm:flex-row`}>
@@ -149,6 +153,15 @@ export function NavShell({
             again.{" "}
             <Button variant="quiet" onPress={() => setSignOutFailed(false)}>
               Dismiss
+            </Button>
+          </Banner>
+        )}
+        {updateReady && (
+          // Only ever on request, so a draft or an edit in progress is never lost.
+          <Banner>
+            A new version is ready.{" "}
+            <Button variant="quiet" onPress={() => window.location.reload()}>
+              Reload
             </Button>
           </Banner>
         )}
