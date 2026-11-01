@@ -123,8 +123,13 @@ included amounts. The ones you are most likely to meet are:
 
 The app's **Usage** page shows today's and this month's model calls, with an estimate from published
 prices for each and, for the owner, the Workers AI free allowance used today. Your providers' bills
-and the Cloudflare dashboard under **Billing** are the final word. Budgets and spending warnings are
-planned but not in this release.
+and the Cloudflare dashboard under **Billing** are the final word.
+
+Each user can start up to 30 chat turns a minute and spend up to $5 a day (UTC) at published
+prices. Every model call reserves its worst case before it starts, so replies running at once can't
+pass the limit. Models without a price on file are not counted; the Usage page lists their calls
+as unpriced. A priced call whose provider reports no token counts uses up its whole reservation,
+though Usage lists it as unpriced. Changing the limit in Settings and spending warnings are planned, not in this release.
 
 What each binding in `wrangler.jsonc` uses (CI checks that every binding has a row here):
 

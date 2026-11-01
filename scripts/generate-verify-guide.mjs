@@ -40,8 +40,10 @@ ${leaveOut.join("\n")}
 
 ## 2. Run the verification
 
-Under a throwaway prefix \`${prefix}\` it deploys, re-runs (must be up to date), upgrades with a
-dummy migration, checks health, tears everything down and writes a report.
+Under a throwaway prefix \`${prefix}\` it deploys, claims the deployment in a browser with a
+virtual passkey, onboards with the starter model on Workers AI and waits for a first answer
+(within the free daily allowance), re-runs (must be up to date), upgrades with a dummy migration,
+checks health, tears everything down and writes a report.
 
 - **GitHub:** put the token and the account ID in the \`cf-verify\` environment as
   \`CLOUDFLARE_API_TOKEN\` and \`CLOUDFLARE_ACCOUNT_ID\`, run **deploy-verify** on \`main\` and

@@ -28,7 +28,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: Verify (deploy, re-run, upgrade, health, teardown)
+      - name: Install Chromium for the first run in the browser
+        if: env.TEARDOWN_PREFIX == ''
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify (deploy, first run, re-run, upgrade, health, teardown)
         if: env.TEARDOWN_PREFIX == ''
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
