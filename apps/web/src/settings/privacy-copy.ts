@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Settings › Privacy & security copy (M3-19 AC2, m3-ux §3.9): the rows the page shows and the
-// compromise confirmations. Every confirmation for a compromise signal — removing a passkey,
-// signing out everywhere — says that anything waiting on approval expires with it (M3-07
-// AC13). Kept apart from the page so the copy stays importable (and testable) without the
-// DOM. (The Approvals section's grant copy follows on top.)
+// Settings › Privacy & security copy (M3-19 AC2, m3-ux §3.9): the rows the page shows, a grant
+// scope in plain words, and the compromise confirmations. Every confirmation for a
+// compromise signal — removing a passkey, signing out everywhere — says that anything waiting
+// on approval expires with it (M3-07 AC13). Kept apart from the page so the copy stays
+// importable (and testable) without the DOM.
 
 export interface PasskeyRow {
   id: string;
@@ -18,6 +18,28 @@ export interface SessionRow {
   lastSeenAt: number;
   expiresAt: number;
   current: boolean;
+}
+
+export type GrantScope = "task" | "hour" | "destination";
+
+export interface GrantRow {
+  id: string;
+  tool: string;
+  scope: GrantScope;
+  destination?: string | null;
+  createdAt: number;
+}
+
+/** A standing grant's scope in plain words (m3-ux §3.9). */
+export function grantScopeLabel(grant: GrantRow): string {
+  switch (grant.scope) {
+    case "task":
+      return "This task only";
+    case "hour":
+      return "For an hour";
+    case "destination":
+      return grant.destination ? `Always for ${grant.destination}` : "Always for one place";
+  }
 }
 
 /**
