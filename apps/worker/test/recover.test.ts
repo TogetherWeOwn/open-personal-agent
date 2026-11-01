@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Redeeming a recovery code (M2-10b): single use, no oracle, rate limit, no lockout, audit.
+
+import { ADDRESS_LIMIT } from "@opa/server/recover";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
-import { ADDRESS_LIMIT } from "../src/recover";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();
 
 type Options = { options: { challenge: string } };
-type Recovered = { codesLeft: number | null; passkeys: { current: boolean }[] | null };
+type Recovered = { recoveryCodes: string[] };
 
 /** Runs both steps with `code` and a new passkey; `second` is the code step 2 sends. */
 async function recover(br: Browser, code: unknown, second: unknown = code) {
@@ -38,51 +39,28 @@ describe("before the claim", () => {
 });
 
 describe("a recovery code", () => {
-  it("signs in with a new passkey once, ends every session and keeps the old passkeys", async () => {
+  it("signs in with a new passkey once and replaces every other credential", async () => {
     const { key, browser: old, codes } = await claim();
     const br = new Browser();
     const res = await recover(br, codes[0]);
     expect([res.status, res.headers.get("Cache-Control")]).toEqual([200, "no-store"]);
-    const body = await res.json<Recovered>();
-    expect([body.codesLeft, body.passkeys?.map((p) => p.current)]).toEqual([9, [false, true]]);
+    const { recoveryCodes } = await res.json<Recovered>();
+    expect(recoveryCodes).toHaveLength(10);
+    expect(recoveryCodes.filter((c) => codes.includes(c))).toEqual([]);
     expect((await br.req("/api/me")).status).toBe(200);
     expect((await old.req("/api/me")).status).toBe(401);
-    expect(await count("passkeys")).toBe(2);
-    expect(await count("recovery_codes", "used_at IS NOT NULL")).toBe(1);
-    // The old passkey still signs in: the owner removes it if they don't recognise it.
-    expect((await new Browser().login(key)).status).toBe(200);
+    // Whoever else held a passkey or a code from the old set is out with this redemption.
+    expect(await count("passkeys")).toBe(1);
+    expect((await new Browser().login(key)).status).not.toBe(200);
+    expect(await count("recovery_codes", "used_at IS NULL")).toBe(10);
+    expect((await recover(new Browser(), codes[1])).status).toBe(403);
     // One for each step; the matched attempts don't count as denied.
-    expect([await audits("allowed"), await audits("denied")]).toEqual([2, 0]);
+    expect([await audits("allowed"), await audits("denied")]).toEqual([2, 1]);
     expect(await audits("redeemed")).toBe(1);
 
     expect((await recover(new Browser(), codes[0])).status).toBe(403);
-    expect(await count("passkeys")).toBe(2);
-  });
-
-  it("still signs in if the count and the list can't be read after the code is spent", async () => {
-    const { codes } = await claim();
-    // `spent` turns true once the batch that burns the code has committed.
-    let burning = false;
-    let spent = false;
-    const down = { bind: () => down, all: () => Promise.reject(new Error("D1 down")) };
-    const reads = /^SELECT [\s\S]* FROM (passkeys WHERE user_id|recovery_codes r)/;
-    const DB = {
-      prepare: (q: string) => {
-        if (q.startsWith("UPDATE recovery_codes SET used_at")) burning = true;
-        return spent && reads.test(q) ? down : db.prepare(q);
-      },
-      batch: async (st: D1PreparedStatement[]) => {
-        const out = await db.batch(st);
-        spent ||= burning;
-        return out;
-      },
-    } as unknown as D1Database;
-    const br = new Browser({ ...env, DB });
-    const res = await recover(br, codes[0]);
-    expect([res.status, await res.json()]).toEqual([200, { codesLeft: null, passkeys: null }]);
-    const after = new Browser();
-    after.cookies = br.cookies;
-    expect((await after.req("/api/me")).status).toBe(200);
+    expect((await recover(new Browser(), recoveryCodes[0])).status).toBe(200);
+    expect(await count("passkeys")).toBe(1);
   });
 
   it("ignores case, spaces and dashes", async () => {
@@ -120,7 +98,28 @@ describe("a recovery code", () => {
       ),
     );
     expect(results.map((r) => r.status).sort()).toEqual([200, 403]);
-    expect(await count("passkeys")).toBe(2);
+    expect(await count("passkeys")).toBe(1);
+    expect(await count("sessions", "revoked_at IS NULL")).toBe(1);
+  });
+
+  it("wins once when two browsers race with two different codes", async () => {
+    const { codes } = await claim();
+    const browsers = [new Browser(), new Browser()];
+    const opts = await Promise.all(
+      browsers.map(async (br, i) => {
+        const res = await br.req("/api/auth/recover/options", { body: { code: codes[i] } });
+        return (await res.json<Options>()).options;
+      }),
+    );
+    const credentials = await Promise.all(opts.map((o) => passkey().create(o)));
+    const results = await Promise.all(
+      browsers.map((br, i) =>
+        br.req("/api/auth/recover", { body: { code: codes[i], credential: credentials[i] } }),
+      ),
+    );
+    expect(results.map((r) => r.status).sort()).toEqual([200, 403]);
+    expect(await count("passkeys")).toBe(1);
+    expect(await count("recovery_codes", "used_at IS NULL")).toBe(10);
     expect(await count("sessions", "revoked_at IS NULL")).toBe(1);
   });
 
@@ -158,9 +157,11 @@ describe("the rate limits", () => {
     expect([res.status, await res.json()]).toEqual([429, { error: "rate_limited" }]);
     expect(await audits("limited")).toBe(1);
     // Another address isn't affected, and the window passes.
-    expect((await recover(new Browser(env, "192.0.2.2"), codes[1])).status).toBe(200);
+    const res2 = await recover(new Browser(env, "192.0.2.2"), codes[1]);
+    expect(res2.status).toBe(200);
+    const { recoveryCodes } = await res2.json<Recovered>();
     await db.prepare("UPDATE audit_log SET created_at = created_at - 16 * 60000").run();
-    expect((await recover(new Browser(env, "192.0.2.1"), codes[0])).status).toBe(200);
+    expect((await recover(new Browser(env, "192.0.2.1"), recoveryCodes[0])).status).toBe(200);
   });
 
   it("hold under parallel requests from one address", async () => {

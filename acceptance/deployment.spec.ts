@@ -7,7 +7,10 @@ import { expect, test } from "@playwright/test";
 test("health reports a migrated database", async ({ request }) => {
   const res = await request.get("/api/health");
   expect(res.headers()["content-type"]).toContain("application/json");
-  expect(await res.json()).toMatchObject({
+  const body = await res.json();
+  // After the claim, a caller without a session gets only the status (M2-22).
+  if (Object.keys(body).length === 1) return expect(body).toEqual({ status: "ok" });
+  expect(body).toMatchObject({
     schema: { current: true },
     checks: { database: true, durableObject: true },
   });

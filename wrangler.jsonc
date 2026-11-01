@@ -35,6 +35,11 @@
     "Assistant": { "type": "durable-object", "storage": "sqlite" },
     "TaskWorkflow": { "type": "workflow", "name": "opa-task-workflow" }
   },
+  // Per client address on /api/health, /setup* and the login and recovery-code steps (rate-limit.ts).
+  // The namespace is per account: another Worker using 1001 would share the counters.
+  "ratelimits": [
+    { "name": "PUBLIC_LIMIT", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
   "triggers": { "crons": ["*/10 * * * *"] },
   // Invocation logs record each request's URL and are off (ADR 0010 D11). The app's own
   // allowlist logger (packages/log) writes the request log instead.

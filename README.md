@@ -123,8 +123,14 @@ included amounts. The ones you are most likely to meet are:
 
 The app's **Usage** page shows today's and this month's model calls, with an estimate from published
 prices for each and, for the owner, the Workers AI free allowance used today. Your providers' bills
-and the Cloudflare dashboard under **Billing** are the final word. Budgets and spending warnings are
-planned but not in this release.
+and the Cloudflare dashboard under **Billing** are the final word.
+
+Each user can start up to 30 chat turns a minute and spend up to $5 a day (UTC) at published
+prices. Every model call reserves its worst case before it starts, with the input estimated from
+the message length, so replies running at once can pass the limit only by what that estimate
+missed. Models without a price on file are not counted; the Usage page lists their calls
+as unpriced. A priced call whose provider reports no token counts uses up its whole reservation,
+though Usage lists it as unpriced. Changing the limit in Settings and spending warnings are planned, not in this release.
 
 What each binding in `wrangler.jsonc` uses (CI checks that every binding has a row here):
 
@@ -137,6 +143,7 @@ What each binding in `wrangler.jsonc` uses (CI checks that every binding has a r
 | `AI`            | Workers AI              | 10,000 neurons a day                          | $0.011 per 1,000 neurons                          |
 | `ASSISTANT`     | Durable Objects         | 1M requests, 400,000 GB-s, 5 GB SQLite stored | $0.15/M requests, $12.50/M GB-s, $0.20/GB-month   |
 | `TASK_WORKFLOW` | Workflows               | 500,000 steps, 1 GB-month stored              | $0.80 per 100,000 steps, $0.20/GB-month           |
+| `PUBLIC_LIMIT`  | Workers rate limiting   | No separate price published (2026-11-01)      | Each check runs inside its Worker request         |
 | `triggers`      | Cron Triggers           | Included                                      | Each run counts as a Worker request and its CPU   |
 
 Prices are Cloudflare's and your providers', and they can change. Check

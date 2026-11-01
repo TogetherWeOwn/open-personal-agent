@@ -4,21 +4,21 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { STARTER_MODEL } from "@opa/providers";
+import { resolveChatModel } from "@opa/server/chat-model";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
-import { resolveChatModel } from "../src/chat-model";
 import { compose, type WorkerEnv } from "../src/compose";
+import { DAILY_SPEND_CAP_MICRO_USD, TURNS_PER_MINUTE } from "../src/limits";
 import { workerApp } from "../src/worker-app";
-import { Browser, claim, count, db, env, freshDatabase, ORIGIN } from "./helpers/app";
+import { Browser, claim, count, db, env, freshDatabase, ORIGIN, SOCKET_WAIT } from "./helpers/app";
 
 freshDatabase();
 afterEach(() => vi.restoreAllMocks());
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
 const never = new Promise<void>(() => {});
-/** `vi.waitFor` gives up after 1 s; a turn's D1 round trips take longer on a loaded CI runner. */
-const WAIT = { timeout: 10_000 };
 
 /** A model that replies "Hello there" and records what it was asked. A gate holds it mid-reply. */
 function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = false): ModelProvider {
@@ -55,8 +55,8 @@ async function useSavedModel(userId: string, AI: Ai) {
   const raw = { ...workerEnv, OPA_MASTER_KEY: btoa("k".repeat(32)) } as unknown as WorkerEnv;
   const { VAULT } = await compose(raw);
   await runInDurableObject(assistantOf(userId), (instance: Assistant) => {
-    instance.resolveModel = (doEnv, scope, caller) =>
-      resolveChatModel({ ...doEnv, VAULT, AI }, scope, caller);
+    instance.resolveModel = (doEnv, scope, caller, pick) =>
+      resolveChatModel({ ...doEnv, VAULT, AI }, scope, caller, pick);
   });
   return { ...env, VAULT };
 }
@@ -82,7 +82,7 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
     ws.addEventListener("close", (e) => resolve(e.code)),
   );
   const until = (type: HarnessEvent["type"]) =>
-    vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type), WAIT);
+    vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type), SOCKET_WAIT);
   const send = (conversationId: string, text: string) =>
     ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
   return { res, ws, events, until, send, closed };
@@ -173,6 +173,25 @@ describe("chat transport", () => {
       { provider_id: "api.example.com", model: "gpt-x" },
       { provider_id: "workers-ai", model: STARTER_MODEL },
     ]);
+
+    // A conversation's own model overrides the Chat role, and the model gets the whole history
+    // from the other model's turns (M3-06 AC3).
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    const keyedRow = (await user.providers.list()).find((p) => p.kind === "openai-chat");
+    await user.chat.setModel("conv-6", { provider: String(keyedRow?.id), model: "gpt-y" });
+    tab.events.length = 0;
+    tab.send?.("conv-6", "Back to you");
+    await tab.until?.("turn.completed");
+    expect(AI.run).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetch.mock.calls[1]?.[1]?.body as string);
+    expect(body.model).toBe("gpt-y");
+    expect(body.messages.map((m: { content: string }) => m.content)).toEqual([
+      "Who are you?",
+      "From gpt-x",
+      "And now?",
+      "From the starter",
+      "Back to you",
+    ]);
   });
 
   it.each([
@@ -198,7 +217,7 @@ describe("chat transport", () => {
           { content: "Tell me a story", status: "complete" },
           { content: kept, status: "interrupted" },
         ]);
-      }, WAIT);
+      }, SOCKET_WAIT);
       expect(await count("usage", "conversation_id = 'conv-2'")).toBe(1); // the ledger keeps the call
 
       const seen: ModelMessage[][] = [];
@@ -215,10 +234,19 @@ describe("chat transport", () => {
     const { owner } = await claim();
     const turn = { conversationId: "c5", turnId: "t", replyId: "r", providerId: "p", model: "m" };
     const ctx = { name: "chat-turn", snapshot: { ...turn, reply: "", usage: null, called: false } };
-    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
-      i.onFiberRecovered(ctx as never),
-    );
+    const day = Date.now() - (Date.now() % 86_400_000);
+    const spend = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
+      state.storage.kv.put("spend", {
+        day,
+        spentMicroUsd: 0,
+        held: { t: { microUsd: 500, at: Date.now() } },
+      });
+      await i.onFiberRecovered(ctx as never);
+      return state.storage.kv.get("spend");
+    });
     expect([await count("messages", "1"), await count("usage", "1")]).toEqual([0, 0]);
+    // It never called the model, so its reservation is released without a charge.
+    expect(spend).toEqual({ day, spentMicroUsd: 0, held: {} });
   });
 
   it("names the DO from the session, never from the request", async () => {
@@ -242,13 +270,25 @@ describe("chat transport", () => {
     await useModel(owner, scripted([], never));
     const [stale, live] = [await openTab(browser), await openTab(other)];
     expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    stale.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    expect(await stale.closed).toBe(4401);
     live.send?.("conv-4", "Still there?");
     await live.until?.("message.delta");
-    stale.ws?.send(JSON.stringify({ type: "turn.cancel" })); // can't stop the live tab's turn
-    expect(await stale.closed).toBe(4401);
-    expect(live.events.map((e) => e.type)).not.toContain("turn.interrupted");
     live.ws?.send(JSON.stringify({ type: "turn.cancel" }));
     await live.until?.("turn.interrupted");
+  });
+
+  it("sends a turn to no tab whose session has ended", async () => {
+    const { browser, owner, key } = await claim();
+    const other = new Browser();
+    expect((await other.login(key)).status).toBe(200);
+    await useModel(owner, scripted());
+    const [stale, live] = [await openTab(browser), await openTab(other)];
+    expect((await browser.req("/api/auth/logout", { body: {} })).status).toBe(200);
+    live.send?.("conv-5", "Only for live tabs");
+    await live.until?.("turn.completed");
+    expect(await stale.closed).toBe(4401);
+    expect(stale.events).toEqual([]);
   });
 
   it("refuses another user's conversation, bad input and a second concurrent turn", async () => {
@@ -260,26 +300,100 @@ describe("chat transport", () => {
     tab.send?.("mine", "first");
     const failed = (message: string) => ({ type: "turn.failed", seq: 0, payload: { message } });
     const noModel = failed("Pick a model in Settings first.");
-    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]), WAIT);
+    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel]), SOCKET_WAIT);
     expect(await count("conversations", "id = 'mine'")).toBe(0);
     await useModel(owner, scripted([], never));
-    tab.send?.("theirs", "hi");
+    // A bad message is refused before any turn starts. Sent after "theirs", it could arrive while
+    // that turn still runs and be refused as busy instead.
     tab.send?.("../x", "hi");
-    const gone = failed("That conversation doesn't exist.");
+    tab.send?.("theirs", "hi");
     const bad = failed("That message can't be sent.");
-    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, gone, bad]), WAIT);
+    const gone = failed("That conversation doesn't exist.");
+    await vi.waitFor(() => expect(tab.events).toMatchObject([noModel, bad, gone]), SOCKET_WAIT);
     expect(await count("messages", "conversation_id = 'theirs'")).toBe(0);
     expect((await browser.req("/api/conversations/theirs/messages")).status).toBe(404);
     tab.send?.("mine", "first");
     await tab.until?.("message.delta");
     tab.send?.("mine", "second");
     const busy = { message: "Another reply is still being written." };
-    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }), WAIT);
+    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }), SOCKET_WAIT);
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
     // The list holds the user's own conversations only.
     const list = await (await browser.req("/api/conversations")).json<{ conversations: unknown }>();
     expect(list.conversations).toEqual([
       { id: "mine", title: "first", updatedAt: expect.any(Number) },
     ]);
+  });
+});
+
+describe("turn and spend limits (M2-22)", () => {
+  /** gpt-4.1 at $2 in and $8 out per million tokens, recording each request's `max_tokens`. */
+  function priced(userId: string, maxTokens: (number | undefined)[]) {
+    const provider = { ...scripted(), id: "openai" };
+    const stream = provider.stream;
+    provider.stream = (request) => {
+      maxTokens.push(request.maxOutputTokens);
+      return stream(request);
+    };
+    return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
+      instance.resolveModel = async () => ({ provider, model: "gpt-4.1", apiKey: null });
+    });
+  }
+  /** The DO's storage is usable only inside it. */
+  const storage = <T>(userId: string, fn: (kv: SyncKvStorage) => T) =>
+    runInDurableObject(assistantOf(userId), (_: Assistant, state) => fn(state.storage.kv));
+  const spendLeft = async (userId: string, left: number) => {
+    const now = Date.now();
+    const day = now - (now % 86_400_000);
+    const spend = { day, spentMicroUsd: DAILY_SPEND_CAP_MICRO_USD - left, held: {} };
+    await storage(userId, (kv) => kv.put("spend", spend));
+  };
+
+  it("asks to slow down past 30 turns a minute, without calling the model", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    await useModel(owner, scripted(seen));
+    await storage(owner, (kv) => kv.put("turns", Array(TURNS_PER_MINUTE).fill(Date.now())));
+    const tab = await openTab(browser);
+    tab.send?.("conv-1", "Hi!");
+    await tab.until?.("turn.failed");
+    expect(tab.events).toMatchObject([
+      { seq: 0, type: "turn.failed", payload: { reason: "slow_down" } },
+    ]);
+    expect(seen).toEqual([]);
+    expect(await count("messages")).toBe(0);
+  });
+
+  it("refuses a turn the day's budget can't cover, leaving no trace", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    await spendLeft(owner, 100);
+    const tab = await openTab(browser);
+    tab.send?.("conv-1", "Hi!");
+    await tab.until?.("turn.failed");
+    expect(tab.events).toMatchObject([
+      { seq: 0, type: "turn.failed", payload: { reason: "limit_reached" } },
+    ]);
+    expect(maxTokens).toEqual([]);
+    expect(await count("messages")).toBe(0);
+    expect(await count("conversations")).toBe(0);
+  });
+
+  it("caps max_tokens from the budget left and charges the call's cost", async () => {
+    const { browser, owner } = await claim();
+    const maxTokens: (number | undefined)[] = [];
+    await priced(owner, maxTokens);
+    // "Hi!" counts as 2 input tokens (4 micro-USD), leaving room for 1,000 output tokens.
+    await spendLeft(owner, 4 + 1000 * 8);
+    const tab = await openTab(browser);
+    tab.send?.("conv-1", "Hi!");
+    await tab.until?.("turn.completed");
+    expect(maxTokens).toEqual([1000]);
+    // USAGE: 12 input tokens at 2 and 3 output tokens at 8.
+    expect(await storage(owner, (kv) => kv.get("spend"))).toMatchObject({
+      spentMicroUsd: DAILY_SPEND_CAP_MICRO_USD - (4 + 1000 * 8) + 12 * 2 + 3 * 8,
+      held: {},
+    });
   });
 });

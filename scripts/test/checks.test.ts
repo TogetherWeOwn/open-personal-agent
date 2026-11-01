@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { findDependencyViolations, findPortViolations } from "../check-boundaries.mjs";
+import {
+  findAppImports,
+  findDependencyViolations,
+  findPortViolations,
+} from "../check-boundaries.mjs";
 import { findViolations } from "../check-builder-independence.mjs";
 import { checkBudget, findLeakedNames, serverOnlyNames } from "../check-bundles.mjs";
 import { bindingNames, checkDocsCost } from "../check-docs-cost.mjs";
@@ -52,26 +56,39 @@ describe("boundaries", () => {
     expect(ports("packages/db/src/a.ts", 'import { z } from "zod";')).toBe(0);
   });
 
-  it("applies to the Worker modules @opa/worker exports to apps/node", () => {
-    const worker = (app: string) => [
-      { path: "apps/worker/package.json", text: '{ "exports": { "./app": "./src/app.ts" } }' },
-      { path: "apps/worker/src/app.ts", text: app },
-      {
-        path: "apps/worker/src/chat/index.tsx",
-        text: 'import { DurableObject } from "cloudflare:workers";',
-      },
-      { path: "apps/worker/src/index.ts", text: 'import { env } from "cloudflare:workers";' },
+  it("covers the shared HTTP app in packages/server, types included", () => {
+    expect(ports("packages/server/src/app.ts", 'import { env } from "cloudflare:workers";')).toBe(
+      1,
+    );
+    expect(ports("packages/server/src/env.ts", 'import type { Agent } from "agents";')).toBe(1);
+  });
+
+  it("rejects one app importing or depending on another", () => {
+    const pkg = (name: string, deps = {}) => JSON.stringify({ name, dependencies: deps });
+    const apps = (path: string, text: string) => [
+      { path: "apps/worker/package.json", text: pkg("@opa/worker") },
+      { path: "apps/web/package.json", text: pkg("@opa/web") },
+      { path, text },
     ];
-    expect(findPortViolations(worker('import { chat } from "./chat";'))).toEqual([
-      'apps/worker/src/chat/index.tsx:1: imports "cloudflare:workers" (ports rule, ADR 0011 #4)',
+    const appImports = (path: string, text: string) => findAppImports(apps(path, text));
+    expect(appImports("apps/node/src/a.ts", 'import { app } from "@opa/worker/app";')).toEqual([
+      'apps/node/src/a.ts:1: "@opa/worker/app" is apps/worker; share it from packages/*',
     ]);
-    expect(findPortViolations(worker('import type { Chat } from "./chat";'))).toEqual([]);
-    // Types from a runtime module are erased too; a runtime import after them keeps its line.
-    const typed =
-      'import type {\n  DurableObjectState,\n} from "cloudflare:workers";\nimport "node:fs";';
-    expect(findPortViolations(worker(typed))).toEqual([
-      'apps/worker/src/app.ts:4: imports "node:fs" (ports rule, ADR 0011 #4)',
+    expect(
+      appImports("apps/node/src/a.ts", 'import type { Env } from "@opa/worker";'),
+    ).toHaveLength(1);
+    expect(appImports("apps/node/test/a.test.ts", 'import "../../worker/test/x";')).toHaveLength(1);
+    expect(appImports("apps/node/package.json", pkg("@opa/node", { "@opa/worker": "*" }))).toEqual([
+      'apps/node/package.json: "@opa/worker" is apps/worker; share it from packages/*',
     ]);
+    // An app's own modules, shared packages and file text read with `?raw` are fine.
+    expect(appImports("apps/worker/src/a.ts", 'import "./b";\nimport "@opa/worker/c";')).toEqual(
+      [],
+    );
+    expect(appImports("apps/node/src/a.ts", 'import { app } from "@opa/server/app";')).toEqual([]);
+    expect(
+      appImports("apps/worker/test/a.ts", 'import h from "../../web/public/_headers?raw";'),
+    ).toEqual([]);
   });
 
   it("rejects tooling in dependencies but allows it in devDependencies", () => {
@@ -91,7 +108,19 @@ describe("supply chain", () => {
     const lax = yaml.replace("esbuild", "esbuild\n  - sharp").replace("1440", "60");
     expect(checkPnpmPolicy(lax.replace("strictDepBuilds: true", ""))).toHaveLength(3);
     expect(checkRenovatePolicy('{"minimumReleaseAge":"3 days"}')).toEqual([]);
+    expect(checkRenovatePolicy('{"minimumReleaseAge":"24 hours"}')).toEqual([]);
     expect(checkRenovatePolicy("{}")).toHaveLength(1);
+    // Too short, unreadable, only on some packages, or lowered by a rule.
+    for (const age of ['"1 minute"', '"12 hours"', '"soon"', "3"]) {
+      expect(checkRenovatePolicy(`{"minimumReleaseAge":${age}}`)).toHaveLength(1);
+    }
+    const narrow = { packageRules: [{ matchPackageNames: ["x"], minimumReleaseAge: "3 days" }] };
+    expect(checkRenovatePolicy(JSON.stringify(narrow))).toHaveLength(1);
+    const lowered = {
+      minimumReleaseAge: "3 days",
+      packageRules: [{ minimumReleaseAge: "1 hour" }],
+    };
+    expect(checkRenovatePolicy(JSON.stringify(lowered))).toHaveLength(1);
   });
 
   it("requires SHA pins, read-only permissions and no privileged PR trigger", () => {
@@ -122,6 +151,37 @@ describe("supply chain", () => {
     expect(
       checkWorkflow("ci.yml", `on: [push, ${trigger}]\npermissions:\n  contents: read\n`),
     ).toEqual(["ci.yml: uses pull_request_target"]);
+    // Triggers that run with the base repository's secrets on events outsiders can cause.
+    for (const t of [
+      "workflow_run",
+      "issue_comment",
+      "pull_request_review",
+      join("pull_request_review", "_comment"),
+    ]) {
+      const text = `on:\n  ${t}:\n    types: [created]\npermissions:\n  contents: read\n`;
+      expect(checkWorkflow("ci.yml", text)).toEqual([`ci.yml: uses ${t}`]);
+    }
+  });
+
+  it("requires container and service images pinned by digest", () => {
+    const digest = `@sha256:${"a".repeat(64)}`;
+    const wf = (job: string) => `on: push\npermissions:\n  contents: read\njobs:\n  a:\n${job}`;
+    const pinned = wf(
+      `    container:\n      image: mcr.microsoft.com/playwright${digest}\n` +
+        `    services:\n      db:\n        image: postgres${digest}\n`,
+    );
+    expect(checkWorkflow("ci.yml", pinned)).toEqual([]);
+    expect(checkWorkflow("ci.yml", wf("    container: node:22\n"))).toEqual([
+      'ci.yml: jobs.a.container uses "node:22", which is not pinned to a sha256 digest',
+    ]);
+    const service = wf("    services:\n      db:\n        image: postgres:17\n");
+    expect(checkWorkflow("ci.yml", service)).toEqual([
+      'ci.yml: jobs.a.services.db uses "postgres:17", which is not pinned to a sha256 digest',
+    ]);
+    const expr = wf(`    container: \${{ matrix.image }}${digest}\n`);
+    expect(checkWorkflow("ci.yml", expr)).toEqual([
+      `ci.yml: jobs.a.container uses "\${{ matrix.image }}${digest}", which is not pinned to a sha256 digest`,
+    ]);
   });
 
   it("lists the packages in the Worker bundle and flags unreviewed ones", () => {
@@ -192,7 +252,16 @@ describe("docs-cost-lint", () => {
     const docs = repo();
     expect(checkDocsCost(docs)).toEqual([]);
     expect(bindingNames(docs.config)).toEqual(
-      ["AI", "ASSETS", "ASSISTANT", "DB", "FILES", "TASK_WORKFLOW", "triggers"].sort(),
+      [
+        "AI",
+        "ASSETS",
+        "ASSISTANT",
+        "DB",
+        "FILES",
+        "PUBLIC_LIMIT",
+        "TASK_WORKFLOW",
+        "triggers",
+      ].sort(),
     );
   });
 

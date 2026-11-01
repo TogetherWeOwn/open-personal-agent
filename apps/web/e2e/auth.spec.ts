@@ -228,7 +228,7 @@ test("Sign in with your passkey signs in and opens the app", async ({ page }) =>
   await expect(page.getByRole("heading", { name: "Set up your assistant" })).toBeVisible();
 });
 
-test("Lost your passkey? A recovery code creates a new one and lists the others", async ({
+test("Lost your passkey? A recovery code replaces the passkeys and shows new codes", async ({
   page,
 }) => {
   await authenticator(page);
@@ -240,12 +240,7 @@ test("Lost your passkey? A recovery code creates a new one and lists the others"
     if (route.request().url().endsWith("/options")) {
       return route.fulfill(answers.shift() ?? { json: { options: creation } });
     }
-    const day = Date.UTC(2026, 9, 30);
-    const passkeys = [
-      { createdAt: day, lastUsedAt: day + 3_600_000, synced: true, current: false },
-      { createdAt: day + 86_400_000, lastUsedAt: null, synced: false, current: true },
-    ];
-    return route.fulfill({ json: { codesLeft: 9, passkeys } });
+    return route.fulfill({ json: { recoveryCodes: CODES } });
   });
   await page.goto("/");
   await page.getByText("Lost your passkey?").click();
@@ -261,12 +256,16 @@ test("Lost your passkey? A recovery code creates a new one and lists the others"
     "That recovery code doesn't work. Each code works once.",
   );
   await page.getByRole("button", { name: "Try again" }).click();
-  await expect(page.getByRole("heading", { name: "You're back in" })).toBeFocused();
-  await expect(page.getByText("9 recovery codes are left.")).toBeVisible();
-  await expect(page.getByRole("list", { name: "Passkeys" }).getByRole("listitem")).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "Save your recovery codes" })).toBeFocused();
+  await expect(page.getByText("Your other passkeys and your old recovery codes")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Recovery codes" }).getByRole("listitem")).toHaveText(
+    CODES,
+  );
   expect(bodies[0]).toEqual({ code: CODES[0] });
   expect(bodies[2]).toMatchObject({ code: CODES[0], credential: { type: "public-key" } });
   await checkScreen(page, "recovered");
+  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await page.getByText("I've saved these codes somewhere safe").click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.waitForURL("/");
 });

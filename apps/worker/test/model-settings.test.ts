@@ -4,8 +4,8 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { STARTER_MODEL } from "@opa/providers";
+import { app } from "@opa/server/app";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
 import { ORIGIN, sessionHeaders } from "./helpers/app";
@@ -35,6 +35,15 @@ const sse = (...lines: string[]) =>
       controller.close();
     },
   });
+
+/** Whether a model request offers tools: the Test's tool-call probe (M3-06 AC4) does. */
+const offersTools = (init?: RequestInit) => !!JSON.parse(String(init?.body ?? "{}")).tools;
+/** A Chat Completions stream that calls the probe's tool. */
+const toolCall = () => {
+  const call = { index: 0, id: "call_1", function: { name: "report_ready", arguments: "{}" } };
+  const chunk = { choices: [{ delta: { tool_calls: [call] }, finish_reason: "tool_calls" }] };
+  return new Response(sse(JSON.stringify(chunk), "[DONE]"));
+};
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -103,12 +112,15 @@ describe("model settings", () => {
       return new Response(sse(chunk, "[DONE]"));
     });
     const body = JSON.parse((await call("/model/test", { method: "POST" })).text);
-    expect(body).toMatchObject({ ok: true, tools: true });
+    // This server answers the probe in text, so tools are reported as not working.
+    expect(body).toMatchObject({ ok: true, tools: false, toolProbe: "ignored" });
     expect(body.latencyMs).toBeTypeOf("number");
     expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8788/v1/chat/completions");
     // No usage came back, so the ledger keeps the call unpriced, billed by the endpoint's host.
     const ledger = "SELECT provider_id, cost_micro_usd FROM usage WHERE model = 'echo'";
+    // The probe is a second call, so it is in the ledger too.
     expect((await env.DB.prepare(ledger).all()).results).toEqual([
+      { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
       { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
     ]);
   });
@@ -142,20 +154,33 @@ describe("model settings", () => {
     }
   });
 
-  it("keeps the key for a new model, but asks again for a new origin", async () => {
+  it("keeps the key for a new model, but asks again for a new origin or path", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
     const moved = await put("/model", { ...OPENAI, baseUrl: "https://other.test/v1", model: "m" });
     expect(moved).toEqual({ status: 400, text: '{"error":"key_required"}' });
+    // Same origin, another path: on a shared gateway host that can be another account.
+    const path = await put("/model", {
+      ...OPENAI,
+      baseUrl: "https://api.example.com/x/v1",
+      model: "m",
+    });
+    expect(path).toEqual({ status: 400, text: '{"error":"key_required"}' });
+    // A trailing slash is the same endpoint.
+    const slash = await put("/model", { ...OPENAI, baseUrl: `${OPENAI.baseUrl}/`, model: "m" });
+    expect(slash.status).toBe(200);
   });
 
   it("tests the saved key against its own origin and reports latency and tools", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) return toolCall();
       const chunk = (content: string) => JSON.stringify({ choices: [{ delta: { content } }] });
       return new Response(sse(chunk("rea"), chunk("dy"), "[DONE]"));
     });
     const res = await call("/model/test", { method: "POST" });
     const body = JSON.parse(res.text);
-    expect(body).toMatchObject({ ok: true, tools: true, reply: "ready" });
+    expect(body).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    const probe = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    expect(probe.tools).toMatchObject([{ function: { name: "report_ready" } }]);
     expect(body.latencyMs).toBeTypeOf("number");
     expect(res.text).not.toContain(CANARY);
     const [url, init] = fetch.mock.calls[0] ?? [];
@@ -203,13 +228,19 @@ describe("model settings", () => {
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
-    const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
+    const called = '{"tool_calls":[{"name":"report_ready","arguments":{}}]}';
+    const AI = {
+      run: async (_model: string, inputs: { tools?: unknown }) =>
+        inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]"),
+    } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
-    // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
-    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
+    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    // Both calls are billed, so the ledger has them. The first is priced: 25 × $0.293/M +
+    // 6 × $2.253/M. The probe reported no usage, so it is unpriced.
+    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai' ORDER BY rowid";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
       { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
+      { input_tokens: 0, cost_micro_usd: null },
     ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
@@ -217,5 +248,70 @@ describe("model settings", () => {
 
   it("keeps the saved key for switching back from the starter", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
+  });
+});
+
+describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
+  const preset = {
+    kind: "openai-chat",
+    providerId: "openai",
+    baseUrl: "https://api.openai.com/v1",
+  };
+  const event = (type: string, fields: object) => JSON.stringify({ type, ...fields });
+
+  it("moves a saved OpenAI key to Responses without asking for it again", async () => {
+    // Saved exactly as M2 saved it: kind `openai-chat`, the preset's provider and URL.
+    const saved = await put("/model", { ...preset, model: "gpt-5-mini", apiKey: CANARY });
+    expect(JSON.parse(saved.text).model).toMatchObject({
+      kind: "openai-chat",
+      api: "openai-responses",
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) {
+        const item = {
+          type: "function_call",
+          call_id: "fc_1",
+          name: "report_ready",
+          arguments: "{}",
+        };
+        return new Response(
+          sse(
+            event("response.output_item.done", { item }),
+            event("response.completed", { response: { status: "completed" } }),
+          ),
+        );
+      }
+      const done = {
+        response: { status: "completed", usage: { input_tokens: 9, output_tokens: 1 } },
+      };
+      return new Response(
+        sse(
+          event("response.output_text.delta", { delta: "ready" }),
+          event("response.completed", done),
+        ),
+      );
+    });
+    const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(url).toBe("https://api.openai.com/v1/responses");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${CANARY}`);
+    expect(JSON.parse(String(init?.body))).toMatchObject({ store: false });
+    // Another OpenAI-compatible host stays on Chat Completions.
+    expect(
+      JSON.parse((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).text).model,
+    ).toMatchObject({ api: "openai-chat" });
+  });
+
+  it("can't decrypt a key bound to one origin under another", async () => {
+    await put("/model", { ...preset, model: "gpt-5-mini", apiKey: CANARY });
+    const fetch = vi.spyOn(globalThis, "fetch");
+    // Bypass the route's own check: the vault's binding still refuses the key.
+    await env.DB.prepare(
+      "UPDATE model_providers SET base_url = 'https://eu.api.openai.com/v1'",
+    ).run();
+    const res = await call("/model/test", { method: "POST" });
+    expect(res).toEqual({ status: 409, text: '{"error":"key_required"}' });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

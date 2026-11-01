@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { exports } from "cloudflare:workers";
+import { API_CSP, APP_CSP, COMMON_HEADERS, userContent } from "@opa/server/security";
 import { describe, expect, it } from "vitest";
 import wrangler from "../../../wrangler.jsonc?raw";
 import staticHeaders from "../../web/public/_headers?raw";
-import { API_CSP, APP_CSP, COMMON_HEADERS, userContent } from "../src/security";
 
 const ORIGIN = "https://opa.example.workers.dev";
 const SIBLING = "https://evil.example.workers.dev"; // same site, different origin

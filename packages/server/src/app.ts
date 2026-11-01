@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createRepository } from "@opa/db/repository";
+import { systemStore } from "@opa/db/system";
 import { log } from "@opa/log";
 import { Hono } from "hono";
 import { chatRoutes } from "./chat";
-import type { AppEnv } from "./env";
+import type { AppEnv, AppPorts } from "./env";
 import { checkHealth, setupRequired } from "./health";
 import { settings } from "./model-settings";
+import { publicRateLimit } from "./rate-limit";
 import { recover } from "./recover";
 import { exactOrigin, securityHeaders } from "./security";
-import { authRoutes, sessionGuard, sessionRoutes } from "./session";
+import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
 import { usageRoutes } from "./usage";
@@ -19,7 +21,15 @@ const shared = new Hono<AppEnv>();
 shared.get("/api/health", async (c) => {
   const health = await checkHealth(c.env);
   c.header("Cache-Control", "no-store");
-  return c.json(health, health.status === "ok" ? 200 : 503);
+  const code = health.status === "ok" ? 200 : 503;
+  // Before the claim, the deploy and the Finish setup page need the detail. After it, only a
+  // signed-in user learns which checks failed or which secrets are missing. An unmigrated or
+  // unreachable database counts as unclaimed, as in the claim guard.
+  const claimed = await systemStore(c.env)
+    .setup.isClaimed()
+    .catch(() => false);
+  if (claimed && !(await currentSession(c))) return c.json({ status: health.status }, code);
+  return c.json(health, code);
 });
 
 // Secret routes fail closed when the vault didn't start: no fallback key and no plaintext mode
@@ -63,10 +73,12 @@ shared.get("/api/me", async (c) => {
 });
 
 /**
- * The app, with `extra` mounted at `/api` behind the same guards. The Worker passes the routes
- * that need its Durable Objects (worker-app.ts); apps/node, which can't load them, passes none.
+ * The app over a root's ports `P`, with `extra` mounted at `/api` behind the same guards. The
+ * Worker passes the routes that need its Durable Objects (apps/worker/src/worker-app.ts);
+ * apps/node, which has none, passes nothing. The ports arrive with each request, as Workers pass
+ * the env to `fetch`.
  */
-export function createApp(extra?: Hono<AppEnv>) {
+export function createApp<P extends AppPorts = AppPorts>(extra?: Hono<AppEnv<P>>) {
   const app = new Hono<AppEnv>();
   // Workers invocation logs are off (wrangler.jsonc), so this is the request log. It records the
   // route pattern, never the URL: a query string can carry a secret (ADR 0010 D11).
@@ -78,6 +90,7 @@ export function createApp(extra?: Hono<AppEnv>) {
   });
   app.use(securityHeaders);
   app.use(exactOrigin);
+  app.use(publicRateLimit);
   app.use(claimGuard);
   app.use(sessionGuard);
 

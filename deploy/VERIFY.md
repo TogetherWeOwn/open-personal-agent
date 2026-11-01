@@ -9,7 +9,7 @@ tomorrow. Add exactly these permissions:
 
 | Scope | Permission | Access | Needed for |
 |---|---|---|---|
-| Account | Workers Scripts | Edit | uploading the Worker with its Durable Object, Workflow, cron and assets; setting secrets; the workers.dev URL |
+| Account | Workers Scripts | Edit | uploading the Worker with its Durable Object, Workflow, rate limit, cron and assets; setting secrets; the workers.dev URL |
 | Account | D1 | Edit | creating the DB database and applying migrations |
 | Account | Workers R2 Storage | Edit | creating the FILES bucket |
 | Account | Account Settings | Read | looking up the account |
@@ -23,8 +23,10 @@ Leave these out:
 
 ## 2. Run the verification
 
-Under a throwaway prefix `opa-v-<yyyymmdd>-<rand>` it deploys, re-runs (must be up to date), upgrades with a
-dummy migration, checks health, tears everything down and writes a report.
+Under a throwaway prefix `opa-v-<yyyymmdd>-<rand>` it deploys, claims the deployment in a browser with a
+virtual passkey, onboards with the starter model on Workers AI and waits for a first answer
+(within the free daily allowance), re-runs (must be up to date), upgrades with a dummy migration,
+checks health, tears everything down and writes a report.
 
 - **GitHub:** put the token and the account ID in the `cf-verify` environment as
   `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, run **deploy-verify** on `main` and

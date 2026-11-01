@@ -3,6 +3,7 @@
 // Static assets get the same headers from apps/web/public/_headers; a test keeps the two equal.
 import { log } from "@opa/log";
 import type { Context, MiddlewareHandler } from "hono";
+import type { AppEnv } from "./env";
 
 /** The web app: same-origin code only, and chat loads no remote resources (D6). */
 export const APP_CSP =
@@ -37,6 +38,13 @@ export const securityHeaders: MiddlewareHandler = async (c, next) => {
 };
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * The client's address, for per-address limits. Behind another proxy (Node self-host) the
+ * operator names the header it sets.
+ */
+export const clientIp = (c: Context<AppEnv>) =>
+  c.req.header(c.env.OPA_CLIENT_IP_HEADER || "CF-Connecting-IP") ?? "unknown";
 
 /** The request's Origin is exactly this deployment's: the one Origin check (D2). */
 export const sameOrigin = (c: Context) => c.req.header("Origin") === new URL(c.req.url).origin;
