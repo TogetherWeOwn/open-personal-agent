@@ -120,4 +120,29 @@ describe("chatReducer", () => {
     // If it did run, its start reloads the chat again, even after a load that came too early.
     expect(chatReducer(lost, started()).conversations[0]?.stale).toBe(2);
   });
+
+  it("takes back a send a limit refused, and keeps the reason until the next send", () => {
+    const message = "You're sending messages quickly. Wait a minute, then try again.";
+    const refused = ev("turn.failed", { message, reason: "slow_down" }, "");
+    const state = run(send, refused);
+    expect(state.pending).toBe(null);
+    expect(state.conversations[0]).toMatchObject({ title: "New chat", messages: [] });
+    expect(state.limit).toEqual({
+      reason: "slow_down",
+      message,
+      conversationId: "c1",
+      text: "Plan my week",
+    });
+    expect(state.announcement).toBe(message);
+    expect(chatReducer(state, { ...send, id: "m2" }).limit).toBe(null);
+
+    // In a chat with history, only the refused send leaves it.
+    const reached = ev("turn.failed", { message: "Limit.", reason: "limit_reached" }, "");
+    const later = run(send, started(), ev("turn.completed"), { ...send, id: "m2" }, reached);
+    expect(later.conversations[0]?.messages.map((m) => m.id)).toEqual(["m1", "r-t1"]);
+    expect(later.conversations[0]?.title).toBe("Plan my week");
+    expect(later.limit?.reason).toBe("limit_reached");
+    // Another tab's refusal (this tab sent nothing) changes nothing here.
+    expect(run(reached).limit).toBe(null);
+  });
 });
