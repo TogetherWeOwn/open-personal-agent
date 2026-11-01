@@ -11,6 +11,7 @@ import {
   parseDays,
   type Retention,
   type RetentionKey,
+  type RetentionSettings as Settings,
   saveRetention,
 } from "./retention-api";
 
@@ -83,16 +84,16 @@ export function RetentionSettings() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!canSave || !on) return;
-    const value = (key: RetentionKey) => (on[key] ? parsed(key) : null);
+    // Only what changed here: a field left out keeps the server's value, so this page, if
+    // it's been open a while, can't undo a change made elsewhere to a field it didn't touch.
+    const changes: Partial<Settings> = {};
+    for (const { key } of FIELDS) {
+      const value = on[key] ? parsed(key) : null;
+      if (value !== saved?.[key]) Object.assign(changes, { [key]: value });
+    }
     setStatus("saving");
     try {
-      show(
-        await saveRetention({
-          messageDays: value("messageDays"),
-          toolOutputDays: value("toolOutputDays"),
-          memoryInboxDays: value("memoryInboxDays") as number,
-        }),
-      );
+      show(await saveRetention(changes));
       setStatus("saved");
     } catch {
       setStatus("failed");

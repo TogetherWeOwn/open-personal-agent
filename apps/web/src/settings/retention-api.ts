@@ -22,7 +22,8 @@ async function call(init?: RequestInit): Promise<Retention> {
 
 export const getRetention = () => call();
 
-export const saveRetention = (settings: RetentionSettings) =>
+/** Saves the fields given; the server keeps the others as they are. */
+export const saveRetention = (settings: Partial<RetentionSettings>) =>
   call({
     method: "PUT",
     headers: { "content-type": "application/json" },

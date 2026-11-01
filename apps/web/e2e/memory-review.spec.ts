@@ -294,14 +294,13 @@ test("sets how long chats, tool outputs and suggestions are kept, each with its 
   await inbox.fill("30");
   await card.getByRole("button", { name: "Save" }).click();
   await expect(card.getByRole("status")).toHaveText("Saved.");
-  expect(state.retentionPuts).toEqual([
-    { messageDays: 90, toolOutputDays: 30, memoryInboxDays: 30 },
-  ]);
+  // Only the fields changed here, so a change made elsewhere to the others stands.
+  expect(state.retentionPuts).toEqual([{ messageDays: 90, memoryInboxDays: 30 }]);
 
   // Switched off again, tool outputs are kept forever.
   await card.locator("label").filter({ hasText: "Remove old tool outputs" }).click();
   await card.getByRole("button", { name: "Save" }).click();
-  await expect.poll(() => state.retentionPuts.at(-1)).toMatchObject({ toolOutputDays: null });
+  await expect.poll(() => state.retentionPuts.at(-1)).toEqual({ toolOutputDays: null });
   await expect(page.getByRole("switch", { name: "Remove old tool outputs" })).not.toBeChecked();
 });
 
