@@ -82,24 +82,23 @@ export function localBlobStore(dir: string): R2Bucket {
      * One page of the keys a prefix names, in sidecar order: R2's listing over the sidecars.
      * Objects whose sidecar is missing (written before sidecars existed, or crashed between
      * the rename and the sidecar write) are not listed — `put` refuses the second case, and
-     * the first predates every prefix walk. `cursor` is the sidecar name to resume after.
+     * the first predates every prefix walk, so an upgraded deployment's pre-sidecar objects
+     * need an operator directory wipe once no account owns them. `cursor` is the sidecar name
+     * to resume after; resuming at the first name at or past it, so a cursor object deleted
+     * concurrently ends the page early instead of dropping every later key. A directory read
+     * failure throws — an empty page must never masquerade as a proven-empty prefix.
      */
     async list(options?: { prefix?: string; cursor?: string; limit?: number }) {
       const prefix = options?.prefix ?? "";
       const limit = options?.limit ?? 1000;
-      let names: string[];
-      try {
-        names = (await readdir(dir)).sort();
-      } catch {
-        return { objects: [], truncated: false as const };
-      }
+      const names = (await readdir(dir)).sort();
       const objects: { key: string; size: number; uploaded: Date }[] = [];
       let resume = options?.cursor === undefined;
       let cursor: string | undefined;
       for (const name of names) {
         if (!name.endsWith(".key")) continue;
         if (!resume) {
-          if (name === options?.cursor) resume = true;
+          if (options?.cursor !== undefined && name >= options.cursor) resume = true;
           else continue;
         }
         const key = await readFile(join(dir, name), "utf8").catch(() => null);

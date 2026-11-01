@@ -13,14 +13,17 @@
 // nobody remains, and handed to a survivor when somebody does. `used_setup_tokens` stays: a
 // spent token must never reopen `/setup` again.
 //
-// Ordering: stop the work first, purge R2, then one D1 batch, then purge again. Active tasks
-// go cancelled and running exports fail before any object moves, so a run the best-effort
+// Ordering: purge R2 first, stop the work, purge again, then one D1 batch, then a final
+// purge. The first purge throws before any row moves, so a store without a listing (or an
+// unreadable one) refuses the delete with the account and its work intact; active tasks go
+// cancelled and running exports fail before the second purge, so a run the best-effort
 // termination misses still finds a terminal row at its next step and stops without writing
 // (tasks M3-12 AC3, exports M3-20 AC1). The final pass catches what a step already past its
-// re-read wrote between the two purges — object deletes are idempotent, so a D1 failure
-// between the purges still retries clean. R2 has no transactions, so a failed object delete
-// throws before any row moves and a retry finds the rows still there; without a listing the
-// purge cannot prove the prefix empty, so the delete refuses rather than strand objects.
+// re-read wrote between the second purge and the batch — object deletes are idempotent, so
+// a D1 failure between the purges still retries clean. R2 has no transactions, so the final
+// pass failing after the batch surfaces `delete_failed` instead of claiming success with
+// objects possibly left behind; without a listing the purge cannot prove the prefix empty,
+// so the delete refuses rather than strand objects.
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { openD1 } from "./index";
 import { type DataBindings, isId } from "./repository";
@@ -123,7 +126,9 @@ export async function deleteUserData(
       : undefined;
   const promote = successor !== undefined && !remaining.some((r) => r.role === "owner");
 
-  // The still-active runs, for the best-effort termination after the batch.
+  // The still-active runs, for the best-effort termination after the batch. Both snapshots
+  // run before anything moves: the export rows go terminal in the stop below, so reading them
+  // after would find nothing left to terminate.
   const ownedTasks = await db
     .select({ instanceId: tasks.workflowInstanceId, status: tasks.status })
     .from(tasks)
@@ -131,9 +136,19 @@ export async function deleteUserData(
   const taskInstances = ownedTasks.flatMap((t) =>
     t.instanceId && (ACTIVE_TASK as readonly string[]).includes(t.status) ? [t.instanceId] : [],
   );
+  const ownedExports = await db
+    .select({ instanceId: dataExports.workflowInstanceId })
+    .from(dataExports)
+    .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running")));
+  const exportInstances = ownedExports.flatMap((r) => (r.instanceId ? [r.instanceId] : []));
 
-  // Stop the work first: a run the termination misses still finds a terminal row at its next
-  // step and stops without writing, so nothing lands under the prefix after the purge.
+  // Every object under the user's prefix: files, attachments, task outputs, export ZIPs and
+  // staged item files. One listing covers all four stores; nothing under `u/{userId}/` survives.
+  // First, before any row moves, so an unreadable store refuses with work and account intact.
+  await purgeUserPrefix(bindings.FILES, userId);
+
+  // Stop the work: a run the termination misses still finds a terminal row at its next step
+  // and stops without writing, so nothing lands under the prefix after the purge below.
   await db.batch([
     db
       .update(tasks)
@@ -145,22 +160,16 @@ export async function deleteUserData(
       .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running"))),
   ]);
 
-  // Every object under the user's prefix: files, attachments, task outputs, export ZIPs and
-  // staged item files. One listing covers all four stores; nothing under `u/{userId}/` survives.
+  // Second purge: catches what an active step wrote between the first purge and the stop.
   await purgeUserPrefix(bindings.FILES, userId);
 
-  // Fresh snapshot after the purge, so a run that started in between still has its journals
-  // deleted and its export instance terminated below.
+  // Fresh task snapshot after the purges, so a run that started in between still has its
+  // journals deleted below.
   const freshTasks = await db
     .select({ instanceId: tasks.workflowInstanceId })
     .from(tasks)
     .where(eq(tasks.userId, userId));
   const instanceIds = freshTasks.flatMap((t) => (t.instanceId ? [t.instanceId] : []));
-  const runningExports = await db
-    .select({ instanceId: dataExports.workflowInstanceId })
-    .from(dataExports)
-    .where(and(eq(dataExports.userId, userId), eq(dataExports.status, "running")));
-  const exportInstances = runningExports.flatMap((r) => (r.instanceId ? [r.instanceId] : []));
 
   // The cascade from the user row takes every user-data table (sessions, passkeys, DEKs,
   // secrets, conversations and their messages, approvals, attachments rows, usage, providers,
@@ -169,7 +178,8 @@ export async function deleteUserData(
   // batch: the owner reference would otherwise block the user delete, and the audit row lands
   // with a null user and no target, so the trail survives without naming the deleted account.
   // A running export row the stop above failed is already terminal; its ZIP and staged files
-  // are gone from the purge above, and its Workflow finds no scope and stops.
+  // are gone in the purges above, and its Workflow — terminated best-effort by the route from
+  // the pre-stop snapshot — finds no scope and stops.
   await db.batch([
     db
       .update(tasks)
