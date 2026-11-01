@@ -280,6 +280,7 @@ export const approvals = sqliteTable(
     stepUp: integer("step_up", { mode: "boolean" }).notNull(),
     scopes: text("scopes").notNull(), // JSON: the scopes the card may offer
     taint: text("taint"), // JSON: what tainted the context first, if anything did
+    costMicroUsd: integer("cost_micro_usd"), // what the call itself would spend, if it spends any
     canonical: text("canonical").notNull(),
     bindingHash: text("binding_hash").notNull(),
     status: text("status", {
