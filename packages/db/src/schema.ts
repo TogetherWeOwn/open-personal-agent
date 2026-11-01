@@ -69,6 +69,8 @@ export const sessions = sqliteTable(
     lastSeenAt: integer("last_seen_at").notNull().default(now),
     expiresAt: integer("expires_at").notNull(),
     revokedAt: integer("revoked_at"),
+    /** The last passkey step-up in this session; account actions need one in the last 5 minutes. */
+    stepUpAt: integer("step_up_at"),
   },
   (t) => [index("sessions_user_idx").on(t.userId, t.expiresAt)],
 );
@@ -102,7 +104,9 @@ export const webauthnChallenges = sqliteTable(
   "webauthn_challenges",
   {
     idHash: text("id_hash").primaryKey(),
-    kind: text("kind", { enum: ["claim", "recovery", "login"] }).notNull(),
+    kind: text("kind", {
+      enum: ["claim", "recovery", "recovery_code", "login", "step_up", "step_up_vault_reset"],
+    }).notNull(),
     challenge: text("challenge").notNull(),
     userId: text("user_id"),
     tokenHash: text("token_hash"),
@@ -124,7 +128,10 @@ export const recoveryCodes = sqliteTable(
   (t) => [index("recovery_codes_user_idx").on(t.userId, t.codeHash)],
 );
 
-/** Each user's DEK, AES-GCM-wrapped under KEK epoch `kek_version` with AAD `user_id|kek_version`. */
+/**
+ * Each user's DEK, AES-GCM-wrapped under KEK epoch `kek_version` with AAD `(user_id, kek_version)`
+ * (`@opa/vault` `aad.ts`). A rotation replaces the DEK, not only its wrap.
+ */
 export const userKeys = sqliteTable(
   "user_keys",
   {
@@ -139,7 +146,7 @@ export const userKeys = sqliteTable(
 
 /**
  * Envelope-encrypted per-user secrets (ADR 0010 D4). AAD is
- * `user_id|secret_id|purpose|binding|version`; `binding` includes the provider origin.
+ * `(user_id, secret_id, purpose, binding, version)`; `binding` includes the provider's base URL.
  */
 export const secrets = sqliteTable(
   "secrets",
@@ -216,6 +223,38 @@ export const messages = sqliteTable(
 );
 
 /**
+ * A file the user attached (M3-10). The bytes live in R2 under `u/{userId}/attachments/{id}`
+ * (the repository derives the key); this row holds what the server sniffed from its first bytes,
+ * never the type or size the client claimed. `message_id` is set when the message carrying it is
+ * sent; until then the file belongs to the composer that uploaded it.
+ */
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    mediaType: text("media_type").notNull(),
+    kind: text("kind", { enum: ["image", "pdf", "text"] }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    /**
+     * Whether the turn's model received the file, set when the message is sent (M3-10 AC2);
+     * null until then. The thread shows the plain wording for a file the model didn't read.
+     */
+    sentToModel: integer("sent_to_model", { mode: "boolean" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("attachments_user_message_idx").on(t.userId, t.messageId),
+    index("attachments_user_created_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+/**
  * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
  * table had no price for the model; `cost_source` says whether it was estimated or reported.
  * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls.
@@ -245,7 +284,7 @@ export const usage = sqliteTable(
 
 /**
  * A user's saved model providers (M3-06). The key lives envelope-encrypted in `secrets` (ADR 0010
- * D4), bound to `provider_id` and the origin of `base_url` (ADR 0006 #5). The Workers AI starter
+ * D4), bound to `provider_id` and `base_url`'s origin and path (ADR 0006 #5). The Workers AI starter
  * is a row too, with no URL and no key. `model` is the one saved and tested with it.
  */
 export const modelProviders = sqliteTable(
@@ -272,6 +311,52 @@ const providerRef = (name: string) =>
   text(name).references(() => modelProviders.id, { onDelete: "set null" });
 
 /**
+ * A durable run of the agent loop (M3-12): a promoted turn or explicit background work, executed
+ * by one Workflow instance (`workflow_instance_id`). The row is the task's authority: the
+ * Workflow mints its `UserScope` from `user_id` here, never from its instance params (AC9), and
+ * every step re-reads `status` before it acts, so `cancelled` stops the run (AC3). `state` is
+ * the loop's resumable state as JSON (history and turn state), written at step boundaries.
+ * Status words are the Tasks view vocabulary (M3-13), plus `queued` before the instance starts.
+ */
+export const tasks = sqliteTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    workflowInstanceId: text("workflow_instance_id").unique(),
+    /** What runs it: `turn` is the builtin loop continuing a conversation's turn. */
+    kind: text("kind").notNull(),
+    /** Which duration limit applies (M3-12 AC6): 30 minutes interactive, 6 hours background. */
+    mode: text("mode", { enum: ["interactive", "background"] }).notNull(),
+    status: text("status", {
+      enum: [
+        "queued",
+        "running",
+        "waiting_for_approval",
+        "budget_limited",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "interrupted",
+      ],
+    })
+      .notNull()
+      .default("queued"),
+    title: text("title"),
+    state: text("state"),
+    error: text("error"),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+    startedAt: integer("started_at"),
+    finishedAt: integer("finished_at"),
+  },
+  (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
+);
+
+/**
  * One row per user: onboarding answers and the model roles (COST-7). A role names a provider and
  * a model; a null Background role means the cheapest configured one. Embedding has no column
  * until it has a user (ADR 0008).
@@ -286,6 +371,50 @@ export const userSettings = sqliteTable("user_settings", {
   onboardedAt: integer("onboarded_at"),
   updatedAt: integer("updated_at").notNull().default(now),
 });
+
+/**
+ * The user's per-tool decision override (M3-02 AC2, EL fix 9). No row means the SEC-4 default for
+ * the tool's risk class. The policy engine enforces its floors whatever the row says.
+ */
+export const toolOverrides = sqliteTable(
+  "tool_overrides",
+  {
+    userId: userId(),
+    tool: text("tool").notNull(),
+    decision: text("decision", { enum: ["auto", "ask", "never"] }).notNull(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.tool] }),
+    check("tool_overrides_decision", sql`${t.decision} IN ('auto', 'ask', 'never')`),
+  ],
+);
+
+/**
+ * Standing approvals (M3-02 AC2, M3-07 AC3): this task, an hour, or always for one destination.
+ * Created only from an untainted context. A revoked row stays until the user is deleted.
+ */
+export const grants = sqliteTable(
+  "grants",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    tool: text("tool").notNull(),
+    scope: text("scope", { enum: ["task", "hour", "destination"] }).notNull(),
+    taskId: text("task_id"),
+    destination: text("destination"),
+    expiresAt: integer("expires_at"),
+    createdAt: createdAt(),
+    revokedAt: integer("revoked_at"),
+  },
+  (t) => [
+    index("grants_user_tool_idx").on(t.userId, t.tool),
+    check(
+      "grants_scope_target",
+      sql`(${t.scope} = 'task' AND ${t.taskId} IS NOT NULL) OR (${t.scope} = 'hour' AND ${t.expiresAt} IS NOT NULL) OR (${t.scope} = 'destination' AND ${t.destination} IS NOT NULL)`,
+    ),
+  ],
+);
 
 /**
  * Memory (ADR 0008). Only `MemoryService` (`./memory.ts`) reads or writes these tables; the

@@ -10,7 +10,9 @@
   "dependencies": {
     "@opa/core": "workspace:*",
     "@opa/db": "workspace:*",
+    "@opa/harness-builtin": "workspace:*",
     "@opa/log": "workspace:*",
+    "@opa/policy": "workspace:*",
     "@opa/pricing": "workspace:*",
     "@opa/providers": "workspace:*",
     "@opa/server": "workspace:*",

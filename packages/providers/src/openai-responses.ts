@@ -14,6 +14,7 @@ import type {
   ModelToolCall,
   ModelUsage,
 } from "@opa/core";
+import { attachmentText, dataUri } from "./attachments";
 import { aborted, error } from "./chat-chunks";
 import { canonicalOrigin } from "./credential-binding";
 import { type EndpointOptions, endpoint, listModels, openStream } from "./http";
@@ -80,8 +81,10 @@ export function responsesInput(
   for (const m of messages) {
     if (m.role === "tool") {
       input.push({ type: "function_call_output", call_id: m.toolCallId, output: m.content });
-    } else if (m.role !== "assistant") {
-      input.push({ role: m.role === "system" ? "developer" : "user", content: m.content });
+    } else if (m.role === "system") {
+      input.push({ role: "developer", content: m.content });
+    } else if (m.role === "user") {
+      input.push({ role: "user", content: m.attachments?.length ? userParts(m) : m.content });
     } else {
       // Reasoning items precede the reply they produced, as in the output they came from.
       if (m.reasoning && same(m.reasoning)) input.push(...m.reasoning.items);
@@ -92,6 +95,18 @@ export function responsesInput(
     }
   }
   return input;
+}
+
+/** A user message with files: text first, then each file in the Responses part shape. */
+function userParts(m: Extract<ModelMessage, { role: "user" }>): Record<string, unknown>[] {
+  return [
+    ...(m.content ? [{ type: "input_text", text: m.content }] : []),
+    ...(m.attachments ?? []).map((a): Record<string, unknown> => {
+      if (a.kind === "image") return { type: "input_image", image_url: dataUri(a) };
+      if (a.kind === "pdf") return { type: "input_file", filename: a.name, file_data: dataUri(a) };
+      return { type: "input_text", text: attachmentText(a) };
+    }),
+  ];
 }
 
 export function responsesTools(tools: readonly ModelTool[]): Record<string, unknown>[] {
@@ -249,6 +264,16 @@ export async function* replayResponses(
   yield { type: "done", finishReason };
 }
 
+/**
+ * OpenAI's families that take both image and PDF input, dated snapshots included (M3-10 AC2).
+ * A model outside them, or a text, audio or search variant inside one, is told no rather than
+ * sent a file on a guess.
+ */
+const FILE_FAMILIES =
+  /^(?:chatgpt-4o|gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5(?:\.\d+)?|o1|o3|o4-mini)(?:-|$)/;
+const TEXT_ONLY = /^(?:o1-mini|o1-preview|o3-mini)|audio|realtime|transcribe|tts|search/;
+const readsFiles = (model: string) => FILE_FAMILIES.test(model) && !TEXT_ONLY.test(model);
+
 export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): ModelProvider {
   const http = endpoint(options);
   const providerId = options.providerId;
@@ -258,8 +283,9 @@ export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): 
 
     listModels: () => listModels(http),
 
-    capabilities() {
-      return { tools: true, usageInStream: true };
+    capabilities(model: string) {
+      const files = readsFiles(model);
+      return { tools: true, usageInStream: true, imageInput: files, pdfInput: files };
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {

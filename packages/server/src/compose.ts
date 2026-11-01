@@ -20,6 +20,9 @@ export function masterKeySet(env: Env): Pick<Record<SecretName, boolean>, "OPA_M
   return { OPA_MASTER_KEY: env.VAULT_STATUS !== "key_invalid" };
 }
 
+/** Health's next step for the operator once a rotation is complete (crypto review C-1). */
+export const RETIRE_PREVIOUS_KEY = "delete OPA_MASTER_KEY_PREV";
+
 /** The keys a root passes in with its ports. */
 export interface MasterKeys {
   OPA_MASTER_KEY?: string | undefined;

@@ -97,19 +97,26 @@ export class Limits {
   /**
    * Reserves a call's worst case from today's budget and caps its `max_tokens` to what is left.
    * `null` means the budget can't cover a useful reply. A model with no price on file reserves
-   * nothing: the Usage page lists its calls as unpriced.
+   * nothing: the Usage page lists its calls as unpriced. `fileTokens` is the attached images'
+   * and PDFs' estimated input, which `chars` can't measure.
    */
-  reserve(turnId: string, providerId: string, model: string, chars: number): Reservation | null {
+  reserve(
+    turnId: string,
+    providerId: string,
+    model: string,
+    chars: number,
+    fileTokens = 0,
+  ): Reservation | null {
     const price = findPrice(providerId, model);
     if (!price) return { maxOutputTokens: MAX_OUTPUT_TOKENS, reservedMicroUsd: 0 };
     const spend = this.#spend();
     const held = Object.values(spend.held).reduce((sum, hold) => sum + hold.microUsd, 0);
-    const input = cost(price, inputTokens(chars), 0);
+    const input = cost(price, inputTokens(chars) + fileTokens, 0);
     const left = DAILY_SPEND_CAP_MICRO_USD - spend.spentMicroUsd - held - input;
     const affordable = Math.floor(left / price.outputUsdPerMTok);
     const maxOutputTokens = Math.min(MAX_OUTPUT_TOKENS, affordable);
     if (maxOutputTokens < MIN_OUTPUT_TOKENS) return null;
-    const reservedMicroUsd = cost(price, inputTokens(chars), maxOutputTokens);
+    const reservedMicroUsd = cost(price, inputTokens(chars) + fileTokens, maxOutputTokens);
     const hold = { microUsd: reservedMicroUsd, at: this.now() };
     this.kv.put("spend", { ...spend, held: { ...spend.held, [turnId]: hold } });
     return { maxOutputTokens, reservedMicroUsd };

@@ -1,17 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
+import type { StandingGrant, TaintState, ToolOverride } from "@opa/policy";
 import { estimate, findPrice } from "@opa/pricing";
-import { and, count, desc, eq, gte, inArray, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  notInArray,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
 import {
+  attachments,
+  auditLog,
   conversations,
+  grants,
   messages,
   modelProviders,
   secrets,
+  tasks,
+  toolOverrides,
   usage,
   userSettings,
   users,
@@ -46,25 +66,69 @@ export function scopeForAssistant(name: string): UserScope {
   return issue(userId);
 }
 
+/** One part of a multipart upload, as `complete` wants them back. */
+export interface UploadedPart {
+  partNumber: number;
+  etag: string;
+}
+
+/** A stored object's body, as the routes and the assistant read it. */
+export interface StoredObject {
+  /** The bytes as a stream, so a download is never buffered whole. */
+  body: ReadableStream | null;
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
 /** The parts of R2 and Durable Object namespaces used here; the Node root supplies its own. */
 export interface DataBindings<Stub, Id> {
   DB: AnyD1Database;
   FILES: {
     head(key: string): Promise<unknown>;
-    get(key: string): Promise<{ text(): Promise<string> } | null>;
+    get(key: string): Promise<StoredObject | null>;
     put(
       key: string,
-      value: string,
+      value: string | ReadableStream,
       options: { httpMetadata: { contentType: string } },
     ): Promise<unknown>;
+    delete(key: string): Promise<unknown>;
+    /**
+     * R2's multipart upload, for streaming a body whose length is not known up front: `put`
+     * there takes only a known-length stream. Absent where the store streams any body (Node).
+     */
+    createMultipartUpload?(
+      key: string,
+      options: { httpMetadata: { contentType: string } },
+    ): Promise<{
+      uploadPart(partNumber: number, value: Uint8Array): Promise<UploadedPart>;
+      complete(parts: UploadedPart[]): Promise<unknown>;
+      abort(): Promise<unknown>;
+    }>;
   };
   ASSISTANT: { idFromName(name: string): Id; get(id: Id): Stub };
 }
+
+/** An attachment row as routes and the thread read it: the sniffed facts, never the R2 key. */
+export type AttachmentRow = Pick<
+  typeof attachments.$inferSelect,
+  "id" | "name" | "mediaType" | "kind" | "sizeBytes" | "sentToModel" | "createdAt"
+>;
 
 /** The `user_settings` columns a route may write; the user and timestamps come from here. */
 export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
 >;
+
+/** An override change as the audit log records it (M3-02 AC7): the tool, both values, its risk. */
+export interface OverrideChange {
+  tool: string;
+  from: ToolOverride | null;
+  to: ToolOverride | null;
+  riskClass: string;
+}
+
+/** A standing grant as the store keeps it; `id` is what Settings revokes. */
+export type StoredGrant = StandingGrant & { id: string; createdAt: number };
 
 /** The `model_providers` columns a route may write. */
 export type ProviderValues = Pick<
@@ -72,9 +136,16 @@ export type ProviderValues = Pick<
   "kind" | "providerId" | "baseUrl" | "model" | "keySecretId"
 >;
 
+/** R2's smallest multipart part, except the last: an upload streams through in parts this size. */
+const PART_BYTES = 5 * 1024 * 1024;
+
 /** A conversation ID comes from the client, so it is checked before it reaches a query. */
 export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+
+/** The bound `scopeForTask` accepts, so a row it could never resolve is never written. */
+const isInstanceId = (id: unknown): id is string =>
+  typeof id === "string" && id.length >= 1 && id.length <= 128;
 
 /** The check also keeps a key inside the user's R2 prefix. */
 function checkId(id: string): string {
@@ -83,6 +154,29 @@ function checkId(id: string): string {
 }
 
 export type MessageStatus = "complete" | "streaming" | "interrupted" | "error";
+
+/** One `search_history` match: a window of the message around the text that matched. */
+export type HistoryHit = {
+  conversationId: string;
+  conversationTitle: string | null;
+  messageId: string;
+  role: "user" | "assistant";
+  snippet: string;
+  createdAt: number;
+};
+
+/** A task row (M3-12): the durable run's authority and state. */
+export type TaskRow = typeof tasks.$inferSelect;
+export type TaskStatus = TaskRow["status"];
+/** Statuses a task never leaves; a step that finds one does nothing (M3-12 AC3). */
+export const TASK_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "interrupted"] as const;
+/** Statuses from which a task may still be cancelled. */
+const TASK_CANCELLABLE_STATUSES = [
+  "queued",
+  "running",
+  "waiting_for_approval",
+  "budget_limited",
+] as const satisfies readonly TaskStatus[];
 
 /** A running chat turn: also its eviction checkpoint, so it is plain JSON. */
 export interface TurnRecord {
@@ -113,6 +207,23 @@ function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
 export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBindings<Stub, Id>) {
   const db = openD1(DB);
   return {
+    /**
+     * For the Workflow entrypoint only (the lint enforces it): the scope of the user whose task
+     * row names this Workflow instance, with the row itself (M3-12 AC9). The Workflow's instance
+     * params are never consulted — they are data, not authority — so a parameter naming another
+     * user mints nothing. `null` when no task row claims the instance.
+     */
+    scopeForTask: async (
+      instanceId: string,
+    ): Promise<{ scope: UserScope; task: TaskRow } | null> => {
+      if (!isInstanceId(instanceId)) return null;
+      const [task] = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.workflowInstanceId, instanceId))
+        .limit(1);
+      return task ? { scope: issue(task.userId), task } : null;
+    },
     /** Deployment-level checks that read no user's data. */
     deployment: {
       schemaVersion: () => readSchemaVersion(db),
@@ -137,6 +248,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       if (!issued.has(scope)) throw new Error("scope was not issued by the session layer");
       const { userId } = scope;
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
+      const attachmentKey = (id: string) => `u/${userId}/attachments/${checkId(id)}`;
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
       const getConversation = async (id: string) =>
@@ -164,8 +276,86 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             and(eq(secrets.id, modelProviders.keySecretId), eq(secrets.userId, userId)),
           )
           .where(and(eq(modelProviders.userId, userId), where));
-      const createConversation = async (id: string, title: string | null = null) => {
-        await db.insert(conversations).values({ id: checkId(id), userId, title });
+      /** The next message of a conversation; only a reply starts out streaming. */
+      const message = (
+        conversationId: string,
+        id: string,
+        role: "user" | "assistant" | "system",
+        content: string,
+      ) =>
+        db.insert(messages).values({
+          id,
+          userId,
+          conversationId,
+          seq: sql`(SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE conversation_id = ${conversationId})`,
+          role,
+          status: role === "assistant" ? "streaming" : "complete",
+          content,
+        });
+      /**
+       * A conversation's rows with the given roles, oldest first, each with its files' sniffed
+       * facts (M3-10). Only a user row has files; the others get `[]`.
+       */
+      const thread = async <Role extends "user" | "assistant" | "system">(
+        conversationId: string,
+        roles: Role[],
+      ) => {
+        const rows = await db
+          .select({
+            id: messages.id,
+            role: sql<Role>`${messages.role}`, // the filter below
+            status: messages.status,
+            content: messages.content,
+            createdAt: messages.createdAt,
+          })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.conversationId, conversationId),
+              eq(messages.userId, userId),
+              inArray(messages.role, roles),
+            ),
+          )
+          .orderBy(messages.seq);
+        const files = rows.length
+          ? await db
+              .select({
+                id: attachments.id,
+                messageId: attachments.messageId,
+                name: attachments.name,
+                mediaType: attachments.mediaType,
+                kind: attachments.kind,
+                sizeBytes: attachments.sizeBytes,
+                sentToModel: attachments.sentToModel,
+                createdAt: attachments.createdAt,
+              })
+              .from(attachments)
+              // Found through their messages, not by a list of message IDs: D1 binds at most
+              // 100 parameters a query, which a long chat would pass.
+              .innerJoin(messages, eq(messages.id, attachments.messageId))
+              .where(
+                and(
+                  eq(attachments.userId, userId),
+                  eq(messages.conversationId, conversationId),
+                  eq(messages.userId, userId),
+                ),
+              )
+              .orderBy(attachments.createdAt)
+          : [];
+        return rows.map((row) => ({
+          ...row,
+          attachments: files
+            .filter((f) => f.messageId === row.id)
+            .map(({ messageId: _m, ...file }) => file),
+        }));
+      };
+      const createConversation = async (
+        id: string,
+        title: string | null = null,
+        pin?: { provider: string; model: string },
+      ) => {
+        const model = { modelProvider: pin?.provider ?? null, model: pin?.model ?? null };
+        await db.insert(conversations).values({ id: checkId(id), userId, title, ...model });
       };
       return {
         /** The user's own `users` row; `undefined` if it was deleted. */
@@ -188,62 +378,116 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         getConversation,
         createConversation,
         chat: {
-          /** The conversation's messages oldest first, or `null` when it isn't the user's. */
+          /**
+           * The conversation's messages oldest first, or `null` when it isn't the user's. This is
+           * the model context, so it never holds the thread's model-switch lines.
+           */
           listMessages: async (conversationId: string) =>
             (await getConversation(conversationId))
-              ? db
-                  .select({
-                    id: messages.id,
-                    role: sql<"user" | "assistant">`${messages.role}`, // the filter below
-                    status: messages.status,
-                    content: messages.content,
-                    createdAt: messages.createdAt,
-                  })
-                  .from(messages)
-                  .where(
-                    and(
-                      eq(messages.conversationId, conversationId),
-                      eq(messages.userId, userId),
-                      inArray(messages.role, ["user", "assistant"]),
-                    ),
-                  )
-                  .orderBy(messages.seq)
+              ? thread(conversationId, ["user", "assistant"])
               : null,
+          /**
+           * What the chat shows: its messages and the `system` lines that record each model switch
+           * between them, oldest first. `null` when it isn't the user's.
+           */
+          listThread: async (conversationId: string) =>
+            (await getConversation(conversationId))
+              ? thread(conversationId, ["user", "assistant", "system"])
+              : null,
+          /**
+           * The caller's own messages containing `query` (M3-08 AC2), newest first. The query is
+           * matched literally (LIKE's wildcards are escaped), and the conversation join is bound
+           * to the same `user_id`, so a row can never surface through someone else's conversation.
+           * Case-insensitively for A–Z only: SQLite LIKE has no Unicode folding, so other scripts
+           * match exactly as typed (the tool description says so).
+           */
+          searchHistory: (query: string, limit: number): Promise<HistoryHit[]> => {
+            const like = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+            return db
+              .select({
+                conversationId: messages.conversationId,
+                conversationTitle: conversations.title,
+                messageId: messages.id,
+                role: sql<"user" | "assistant">`${messages.role}`, // the filter below
+                snippet: sql<string>`substr(${messages.content}, max(1, instr(lower(${messages.content}), lower(${query})) - 80), 240)`,
+                createdAt: messages.createdAt,
+              })
+              .from(messages)
+              .innerJoin(
+                conversations,
+                and(
+                  eq(conversations.id, messages.conversationId),
+                  eq(conversations.userId, userId),
+                ),
+              )
+              .where(
+                and(
+                  eq(messages.userId, userId),
+                  inArray(messages.role, ["user", "assistant"]),
+                  sql`${messages.content} LIKE ${like} ESCAPE '\\'`,
+                ),
+              )
+              .orderBy(desc(messages.createdAt))
+              .limit(Math.min(Math.max(Math.trunc(limit) || 1, 1), 50));
+          },
           /** Creates the conversation on its first message; `false` if the ID is someone else's. */
-          open: async (id: string, title: string) => {
+          /** Opens a conversation, creating it, with its own model if one is given, when it's new. */
+          open: async (id: string, title: string, pin?: { provider: string; model: string }) => {
             if (await getConversation(id)) return true;
             // A conflict is either another user's row or this user's from a concurrent open.
-            await createConversation(id, title).catch(() => {});
+            await createConversation(id, title, pin).catch(() => {});
             return (await getConversation(id)) !== undefined;
           },
-          /** Pins the conversation to a model, or back to the Chat role with `null`. */
+          /**
+           * Pins the conversation to a model, or back to the Chat role with `null`. A `line` is the
+           * thread's record of the switch, written with the pin or not at all.
+           */
           setModel: async (
             conversationId: string,
             pick: { provider: string; model: string } | null,
+            line?: { id: string; content: string },
           ) => {
+            if (!(await getConversation(conversationId))) return false;
             const set = { modelProvider: pick?.provider ?? null, model: pick?.model ?? null };
-            const done = await db
-              .update(conversations)
-              .set(set)
-              .where(own(conversationId))
-              .returning({ id: conversations.id });
-            return done.length > 0;
+            const update = db.update(conversations).set(set).where(own(conversationId));
+            if (!line) await update;
+            else await db.batch([update, message(conversationId, line.id, "system", line.content)]);
+            return true;
           },
-          /** Writes the user's message and the empty streaming reply after it, both or neither. */
-          startTurn: async (conversationId: string, text: string, replyId: string) => {
-            const message = (id: string, role: "user" | "assistant", content: string) =>
-              db.insert(messages).values({
-                id,
-                userId,
-                conversationId,
-                seq: sql`(SELECT coalesce(max(seq), 0) + 1 FROM messages WHERE conversation_id = ${conversationId})`,
-                role,
-                status: role === "user" ? "complete" : "streaming",
-                content,
-              });
+          /**
+           * Writes the user's message and the empty streaming reply after it, both or neither,
+           * and puts the message's files on it, each marked with whether the model received it
+           * (M3-10 AC2): only the user's own, still-unlinked uploads move.
+           */
+          startTurn: async (
+            conversationId: string,
+            text: string,
+            replyId: string,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            const userMessageId = crypto.randomUUID();
+            const link = (sentToModel: boolean) => {
+              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
+              return ids.length
+                ? [
+                    db
+                      .update(attachments)
+                      .set({ messageId: userMessageId, conversationId, sentToModel })
+                      .where(
+                        and(
+                          eq(attachments.userId, userId),
+                          inArray(attachments.id, ids),
+                          isNull(attachments.messageId),
+                        ),
+                      ),
+                  ]
+                : [];
+            };
             await db.batch([
-              message(crypto.randomUUID(), "user", text),
-              message(replyId, "assistant", ""),
+              message(conversationId, userMessageId, "user", text),
+              message(conversationId, replyId, "assistant", ""),
+              ...link(true),
+              ...link(false),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
             ]);
           },
@@ -335,6 +579,121 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
           },
         },
+        /** The per-tool overrides and standing grants the policy engine reads (M3-02). */
+        policy: {
+          /** Each tool's override; a tool with none is missing from the map. */
+          overrides: async () =>
+            new Map(
+              (
+                await db
+                  .select({ tool: toolOverrides.tool, decision: toolOverrides.decision })
+                  .from(toolOverrides)
+                  .where(eq(toolOverrides.userId, userId))
+              ).map((r) => [r.tool, r.decision]),
+            ),
+          /**
+           * Sets or clears one tool's override and writes its audit row, both or neither. `result`
+           * is `denied` for a refused change (a loosening without a step-up, or an irreversible
+           * tool to `auto`): only the audit row is written.
+           */
+          setOverride: async (change: OverrideChange, result: "ok" | "denied" = "ok") => {
+            const { tool, to } = change;
+            const audit = db.insert(auditLog).values({
+              userId,
+              action: "policy.override",
+              module: "policy",
+              targetId: tool,
+              result,
+              detail: JSON.stringify(change),
+            });
+            if (result === "denied") return void (await audit);
+            const own = and(eq(toolOverrides.userId, userId), eq(toolOverrides.tool, tool));
+            const set = { decision: to as ToolOverride, updatedAt: Date.now() };
+            await db.batch([
+              to === null
+                ? db.delete(toolOverrides).where(own)
+                : db
+                    .insert(toolOverrides)
+                    .values({ userId, tool, ...set })
+                    .onConflictDoUpdate({
+                      target: [toolOverrides.userId, toolOverrides.tool],
+                      set,
+                    }),
+              audit,
+            ]);
+          },
+          /** Grants not revoked and not expired at `now`, newest first; all tools unless `tool`. */
+          grants: async (now: number, tool?: string): Promise<StoredGrant[]> => {
+            const rows = await db
+              .select()
+              .from(grants)
+              .where(
+                and(
+                  eq(grants.userId, userId),
+                  tool === undefined ? undefined : eq(grants.tool, tool),
+                  isNull(grants.revokedAt),
+                  or(isNull(grants.expiresAt), gt(grants.expiresAt, now)),
+                ),
+              )
+              .orderBy(desc(grants.createdAt));
+            return rows.map((g) => ({
+              id: g.id,
+              tool: g.tool,
+              scope: g.scope,
+              createdAt: g.createdAt,
+              ...(g.taskId === null ? {} : { taskId: g.taskId }),
+              ...(g.destination === null ? {} : { destination: g.destination }),
+              ...(g.expiresAt === null ? {} : { expiresAt: g.expiresAt }),
+            }));
+          },
+          /**
+           * Stores a standing grant and its audit row. Refused from a tainted context (M3-02 AC2):
+           * the context's taint is a required argument, so no caller can skip the check.
+           */
+          grant: async (grant: StandingGrant, context: TaintState) => {
+            if (context.taint !== "trusted") throw new Error("grant from a tainted context");
+            const id = crypto.randomUUID();
+            await db.batch([
+              db.insert(grants).values({
+                id,
+                userId,
+                tool: grant.tool,
+                scope: grant.scope,
+                taskId: grant.taskId ?? null,
+                destination: grant.destination ?? null,
+                expiresAt: grant.expiresAt ?? null,
+              }),
+              db.insert(auditLog).values({
+                userId,
+                action: "policy.grant",
+                module: "policy",
+                targetId: id,
+                result: "ok",
+                detail: JSON.stringify(grant),
+              }),
+            ]);
+            return id;
+          },
+          /** Revokes one of the user's own live grants; `false` if it is missing or someone else's. */
+          revoke: async (id: string) => {
+            // One transaction, as a session revoke: `changes()` is the update's row count, so the
+            // audit row records what the update did.
+            const [update] = await db.batch([
+              db
+                .update(grants)
+                .set({ revokedAt: Date.now() })
+                .where(and(eq(grants.id, id), eq(grants.userId, userId), isNull(grants.revokedAt))),
+              db.insert(auditLog).values({
+                userId,
+                action: "policy.revoke",
+                module: "policy",
+                targetId: checkId(id),
+                result: sql`CASE WHEN changes() > 0 THEN 'ok' ELSE 'denied' END`,
+              }),
+            ]);
+            return update.meta.changes > 0;
+          },
+        },
         /**
          * Saved model providers (M3-06). A foreign key proves only that a row exists, so every
          * read here also matches the user: a role or conversation can never name another's key.
@@ -350,11 +709,42 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             await db.insert(modelProviders).values({ ...values, id, userId });
             return id;
           },
+          /**
+           * A new model also moves the roles and conversations that were on the old one, so a
+           * listing never shows one model while calls go to another. Other picks stay.
+           */
           update: async (id: string, values: Partial<ProviderValues>) => {
-            await db
-              .update(modelProviders)
-              .set({ ...values, updatedAt: Date.now() })
-              .where(ownProvider(id));
+            const old = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
+            if (!old) return;
+            const { model } = values;
+            const moved = model && old.model && model !== old.model ? old.model : null;
+            const on = (provider: SQLiteColumn, column: SQLiteColumn, owner: SQLiteColumn) =>
+              and(eq(owner, userId), eq(provider, id), eq(column, moved as string));
+            const { chatProvider, chatModel, backgroundProvider, backgroundModel } = userSettings;
+            await db.batch([
+              db
+                .update(modelProviders)
+                .set({ ...values, updatedAt: Date.now() })
+                .where(ownProvider(id)),
+              ...(moved && model
+                ? [
+                    db
+                      .update(userSettings)
+                      .set({ chatModel: model })
+                      .where(on(chatProvider, chatModel, userSettings.userId)),
+                    db
+                      .update(userSettings)
+                      .set({ backgroundModel: model })
+                      .where(on(backgroundProvider, backgroundModel, userSettings.userId)),
+                    db
+                      .update(conversations)
+                      .set({ model })
+                      .where(
+                        on(conversations.modelProvider, conversations.model, conversations.userId),
+                      ),
+                  ]
+                : []),
+            ]);
           },
           /** Removes the row and its key; roles and conversations naming it fall back. */
           remove: async (id: string) => {
@@ -372,6 +762,278 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]);
             return true;
           },
+        },
+        /**
+         * Attached files (M3-10): the row is created only after the object is stored, and every
+         * read matches the user, so another user's file ID reads as missing.
+         */
+        attachments: {
+          /**
+           * Streams an upload to the user's prefix; the caller sniffs and bounds it first.
+           * R2's `put` takes only a known-length stream, so a declared length goes through
+           * workerd's `FixedLengthStream` where the runtime offers one, and an undeclared one
+           * through a multipart upload in bounded parts — the whole file is never in memory
+           * on any path (M3-10 AC1). A store with no multipart (Node) streams any body.
+           */
+          putObject: async (
+            id: string,
+            body: ReadableStream<Uint8Array>,
+            contentType: string,
+            knownLength?: number,
+          ) => {
+            const key = attachmentKey(id);
+            const options = { httpMetadata: { contentType } };
+            const FixedLengthStream = (
+              globalThis as { FixedLengthStream?: new (length: number) => TransformStream }
+            ).FixedLengthStream;
+            if (knownLength !== undefined && FixedLengthStream) {
+              await FILES.put(key, body.pipeThrough(new FixedLengthStream(knownLength)), options);
+              return;
+            }
+            if (FILES.createMultipartUpload) {
+              const upload = await FILES.createMultipartUpload(key, options);
+              try {
+                // R2 wants every part but the last the same size, so each is cut at exactly
+                // `PART_BYTES` and a chunk that straddles the cut carries into the next part.
+                const parts: UploadedPart[] = [];
+                let part = new Uint8Array(PART_BYTES);
+                let filled = 0;
+                const reader = body.getReader();
+                for (let next = await reader.read(); !next.done; next = await reader.read()) {
+                  let chunk = next.value;
+                  while (chunk.byteLength) {
+                    const take = Math.min(chunk.byteLength, PART_BYTES - filled);
+                    part.set(chunk.subarray(0, take), filled);
+                    filled += take;
+                    chunk = chunk.subarray(take);
+                    if (filled === PART_BYTES) {
+                      parts.push(await upload.uploadPart(parts.length + 1, part));
+                      part = new Uint8Array(PART_BYTES);
+                      filled = 0;
+                    }
+                  }
+                }
+                if (filled || !parts.length) {
+                  parts.push(await upload.uploadPart(parts.length + 1, part.slice(0, filled)));
+                }
+                await upload.complete(parts);
+              } catch (err) {
+                await upload.abort().catch(() => {});
+                throw err;
+              }
+              return;
+            }
+            await FILES.put(key, body, options);
+          },
+          /** The stored bytes, or `null` when the object is gone. */
+          getObject: (id: string) => FILES.get(attachmentKey(id)),
+          /** Removes a stored object whose row was never (or is no longer) written. */
+          removeObject: (id: string) => FILES.delete(attachmentKey(id)),
+          create: async (values: {
+            id: string;
+            name: string;
+            mediaType: string;
+            kind: "image" | "pdf" | "text";
+            sizeBytes: number;
+          }) => {
+            await db.insert(attachments).values({ ...values, id: checkId(values.id), userId });
+          },
+          /** `undefined` when the row is missing or someone else's: answer 404 for both. */
+          get: async (id: string): Promise<AttachmentRow | undefined> =>
+            isId(id)
+              ? (
+                  await db
+                    .select({
+                      id: attachments.id,
+                      name: attachments.name,
+                      mediaType: attachments.mediaType,
+                      kind: attachments.kind,
+                      sizeBytes: attachments.sizeBytes,
+                      sentToModel: attachments.sentToModel,
+                      createdAt: attachments.createdAt,
+                    })
+                    .from(attachments)
+                    .where(and(eq(attachments.id, id), eq(attachments.userId, userId)))
+                    .limit(1)
+                )[0]
+              : undefined,
+          /** The user's own rows among `ids`, in upload order; foreign IDs are simply absent. */
+          getMany: async (ids: readonly string[]): Promise<AttachmentRow[]> =>
+            ids.length
+              ? db
+                  .select({
+                    id: attachments.id,
+                    name: attachments.name,
+                    mediaType: attachments.mediaType,
+                    kind: attachments.kind,
+                    sizeBytes: attachments.sizeBytes,
+                    sentToModel: attachments.sentToModel,
+                    createdAt: attachments.createdAt,
+                  })
+                  .from(attachments)
+                  .where(and(eq(attachments.userId, userId), inArray(attachments.id, [...ids])))
+                  .orderBy(attachments.createdAt)
+              : [],
+          /** Deletes the row and its object; `false` when it isn't the user's. */
+          remove: async (id: string) => {
+            if (!isId(id)) return false;
+            const gone = await db
+              .delete(attachments)
+              .where(and(eq(attachments.id, id), eq(attachments.userId, userId)))
+              .returning({ id: attachments.id });
+            if (!gone.length) return false;
+            await FILES.delete(attachmentKey(id));
+            return true;
+          },
+        },
+        /**
+         * Durable task runs (M3-12). Every write is one conditional update on the row's current
+         * status, so a cancel that lands mid-step is never overwritten by the run it stops: the
+         * run's next write simply matches no row and reports `false`.
+         */
+        tasks: {
+          /** `false` when the conversation isn't the user's. The row starts `queued`. */
+          create: async (input: {
+            id: string;
+            conversationId: string;
+            workflowInstanceId: string;
+            kind: string;
+            mode: TaskRow["mode"];
+            title?: string | null;
+            state?: string | null;
+          }): Promise<boolean> => {
+            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
+            if (!(await getConversation(input.conversationId))) return false;
+            await db.insert(tasks).values({
+              id: checkId(input.id),
+              userId,
+              conversationId: input.conversationId,
+              workflowInstanceId: input.workflowInstanceId,
+              kind: input.kind,
+              mode: input.mode,
+              title: input.title ?? null,
+              state: input.state ?? null,
+            });
+            return true;
+          },
+          /** The user's task row; `undefined` when it is missing or someone else's. */
+          get: async (id: string) =>
+            (
+              await db
+                .select()
+                .from(tasks)
+                .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+                .limit(1)
+            )[0],
+          /**
+           * Moves a task to `running`, stamping `started_at` the first time. Returns the row as
+           * updated, or `undefined` when it was already terminal (a cancelled task never runs).
+           */
+          markRunning: async (id: string, now: number) =>
+            (
+              await db
+                .update(tasks)
+                .set({
+                  status: "running",
+                  startedAt: sql`coalesce(${tasks.startedAt}, ${now})`,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(tasks.id, id),
+                    eq(tasks.userId, userId),
+                    notInArray(tasks.status, [...TASK_TERMINAL_STATUSES]),
+                  ),
+                )
+                .returning()
+            )[0],
+          /**
+           * Persists the loop's state at a step boundary, with a move between the two in-flight
+           * statuses when one is given. Endings go through `finish` or `cancel`, which stamp
+           * them. `false` when the task is cancelled or terminal: its steps write nothing.
+           */
+          saveState: async (
+            id: string,
+            state: string,
+            status?: "running" | "waiting_for_approval",
+          ) =>
+            (
+              await db
+                .update(tasks)
+                .set({
+                  state,
+                  updatedAt: Date.now(),
+                  ...(status === "running" || status === "waiting_for_approval" ? { status } : {}),
+                })
+                .where(
+                  and(
+                    eq(tasks.id, id),
+                    eq(tasks.userId, userId),
+                    notInArray(tasks.status, [...TASK_TERMINAL_STATUSES]),
+                  ),
+                )
+                .returning({ id: tasks.id })
+            ).length > 0,
+          /** Ends a task that is still active. `false` when it had already ended or was cancelled. */
+          finish: async (
+            id: string,
+            status: "succeeded" | "failed" | "budget_limited" | "interrupted",
+            error?: string,
+          ) => {
+            const now = Date.now();
+            return (
+              (
+                await db
+                  .update(tasks)
+                  .set({
+                    status,
+                    error: error ?? null,
+                    // A budget-limited task is paused, not finished: it may be continued.
+                    ...(status === "budget_limited" ? {} : { finishedAt: now }),
+                    updatedAt: now,
+                  })
+                  .where(
+                    and(
+                      eq(tasks.id, id),
+                      eq(tasks.userId, userId),
+                      notInArray(tasks.status, [...TASK_TERMINAL_STATUSES]),
+                    ),
+                  )
+                  .returning({ id: tasks.id })
+              ).length > 0
+            );
+          },
+          /** Sets `cancelled` on an active task. Terminating its Workflow is the caller's job. */
+          cancel: async (id: string) => {
+            const now = Date.now();
+            return (
+              (
+                await db
+                  .update(tasks)
+                  .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+                  .where(
+                    and(
+                      eq(tasks.id, id),
+                      eq(tasks.userId, userId),
+                      inArray(tasks.status, [...TASK_CANCELLABLE_STATUSES]),
+                    ),
+                  )
+                  .returning({ id: tasks.id })
+              ).length > 0
+            );
+          },
+        },
+        /**
+         * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they
+         * never appear among the user's files. IDs are content-free (a hash of the step's
+         * idempotency key), derived by the caller.
+         */
+        stepOutputs: {
+          put: (id: string, value: string) =>
+            FILES.put(`u/${userId}/task-outputs/${checkId(id)}`, value, {
+              httpMetadata: { contentType: "application/json" },
+            }),
+          get: (id: string) => FILES.get(`u/${userId}/task-outputs/${checkId(id)}`),
         },
         getFile: (id: string) => FILES.get(fileKey(id)),
         putFile: (id: string, value: string, contentType: string) =>

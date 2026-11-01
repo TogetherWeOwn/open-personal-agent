@@ -7,6 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { app } from "@opa/server/app";
 import { compose, type MasterKeys } from "@opa/server/compose";
 import type { AppPorts } from "@opa/server/env";
+import { runRotation } from "@opa/server/vault-rotation";
 import { Hono } from "hono";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
@@ -51,6 +52,8 @@ interface NodeBindings {
 
 export interface NodeApp {
   fetch(request: Request, bindings?: NodeBindings): Promise<Response>;
+  /** The Worker's cron (every 10 minutes): `main.ts` runs it on a timer. */
+  scheduled(): Promise<void>;
   db: DatabaseSync;
 }
 
@@ -82,6 +85,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,
     OPA_SETUP_TOKEN: vars.OPA_SETUP_TOKEN,
+    OPA_ATTACHMENT_MAX_BYTES: vars.OPA_ATTACHMENT_MAX_BYTES,
     // No proxy header named: key per-address limits on the socket, never on a header the client
     // sends, such as CF-Connecting-IP, which only Cloudflare sets.
     OPA_CLIENT_IP_HEADER: proxyHeader || SOCKET_ADDRESS_HEADER,
@@ -104,6 +108,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       }
       return app.fetch(forwarded, await env);
     },
+    scheduled: async () => runRotation(await env),
     db,
   };
 }

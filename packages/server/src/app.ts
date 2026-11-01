@@ -3,6 +3,7 @@ import { createRepository } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import { log } from "@opa/log";
 import { Hono } from "hono";
+import { attachmentRoutes } from "./attachments";
 import { chatRoutes } from "./chat";
 import type { AppEnv, AppPorts } from "./env";
 import { checkHealth, setupRequired } from "./health";
@@ -13,7 +14,10 @@ import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
+import { stepUpRoutes } from "./step-up";
+import { toolSettings } from "./tool-settings";
 import { usageRoutes } from "./usage";
+import { vaultRoutes } from "./vault-reset";
 
 /** The routes both runtimes serve. `createApp` puts them behind the guards. */
 const shared = new Hono<AppEnv>();
@@ -40,7 +44,9 @@ shared.use("/api/secrets/*", async (c, next) => {
   return c.json({ error: "vault_unavailable" }, 503);
 });
 
+shared.route("/api/settings/vault", vaultRoutes);
 shared.route("/api/settings", settings);
+shared.route("/api/settings", toolSettings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 shared.get("/setup", async (c) => {
@@ -59,9 +65,11 @@ shared.get("/setup", async (c) => {
 
 shared.route("/setup", setup);
 shared.route("/api/auth/recover", recover);
+shared.route("/api/auth/step-up", stepUpRoutes);
 shared.route("/api/auth", authRoutes);
 shared.route("/api/sessions", sessionRoutes);
 shared.route("/api", chatRoutes);
+shared.route("/api/attachments", attachmentRoutes);
 shared.route("/api/usage", usageRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */

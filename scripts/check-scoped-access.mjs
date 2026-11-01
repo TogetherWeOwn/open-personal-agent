@@ -54,6 +54,12 @@ export const RULES = [
     "MemoryService is the only way to memory (ADR 0008 #4): use forUser(scope).memory",
   ],
   [
+    "scope-minting",
+    /^(?:packages\/db\/|apps\/worker\/src\/task-workflow\.ts$)/,
+    /\bscopeForTask\b/g,
+    "only the Workflow entrypoint scopes a task, from its D1 row (M3-12 AC9)",
+  ],
+  [
     "master-key",
     /^(?:packages\/vault\/|(?:apps\/(?:worker|node)|packages\/server)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,

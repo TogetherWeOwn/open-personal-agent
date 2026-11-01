@@ -47,9 +47,11 @@ describe("the socket transport", () => {
     const ws = open();
     expect(onOpen).toHaveBeenCalledOnce();
     transport.send("c1", "Hi");
+    transport.send("c1", "", undefined, ["f1", "f2"]);
     transport.cancel();
     expect(ws.sent.map((s) => JSON.parse(s))).toEqual([
       { type: "chat.send", conversationId: "c1", text: "Hi" },
+      { type: "chat.send", conversationId: "c1", text: "", attachmentIds: ["f1", "f2"] },
       { type: "turn.cancel" },
     ]);
     const event = { v: 1, seq: 1, sessionId: "c1", turnId: "t1", type: "status", payload: {} };

@@ -90,10 +90,18 @@ export function createSocketTransport({
         current?.close();
       };
     },
-    send(conversationId, text) {
+    send(conversationId, text, model, attachmentIds) {
       if (socket?.readyState === OPEN) {
         lastSent = conversationId;
-        socket.send(JSON.stringify({ type: "chat.send", conversationId, text }));
+        socket.send(
+          JSON.stringify({
+            type: "chat.send",
+            conversationId,
+            text,
+            model,
+            ...(attachmentIds?.length ? { attachmentIds } : {}),
+          }),
+        );
         return;
       }
       reject(
