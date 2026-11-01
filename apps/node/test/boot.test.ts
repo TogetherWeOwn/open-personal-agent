@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SoftPasskey } from "@opa/server/test/softauthn";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { WebSocket } from "ws";
 
 // Behind a TLS-terminating proxy, as in production: browsers use this, the test connects directly.
 const PUBLIC = "https://agent.example";
@@ -19,6 +20,8 @@ const SECRETS = {
 let child: ChildProcess;
 let base = "";
 const dataDir = mkdtempSync(join(tmpdir(), "opa-boot-"));
+/** The owner's session cookies, saved by the claim test for the socket tests below. */
+const jar = new Map<string, string>();
 
 beforeAll(async () => {
   child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
@@ -101,10 +104,56 @@ describe("apps/node", () => {
     expect((await req("/setup", { token, credential })).status).toBe(200);
 
     expect(await (await req("/api/me")).json()).toMatchObject({ role: "owner" });
+    for (const [k, v] of cookies) jar.set(k, v);
     const missing = await req("/api/nope");
     expect([missing.status, await missing.json()]).toEqual([404, { error: "not_found" }]);
     // The token is spent: a second claim is refused.
     expect((await req("/setup/options", { token })).status).not.toBe(200);
+  });
+
+  it("rejects chat upgrades without a session (401)", async () => {
+    const ws = new WebSocket(`${base.replace(/^http/, "ws")}/api/chat`);
+    const status = await new Promise<number>((resolve, reject) => {
+      ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on("open", () => reject(new Error("upgrade opened without a session")));
+      ws.on("error", () => {}); // the status above is the assertion
+    });
+    ws.close();
+    expect(status).toBe(401);
+  });
+
+  it("refuses cross-origin chat upgrades (403)", async () => {
+    const cookie = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+    const ws = new WebSocket(`${base.replace(/^http/, "ws")}/api/chat`, {
+      headers: { cookie, origin: "https://evil.example" },
+    });
+    const status = await new Promise<number>((resolve, reject) => {
+      ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on("open", () => reject(new Error("upgrade opened cross-origin")));
+      ws.on("error", () => {}); // the status above is the assertion
+    });
+    ws.close();
+    expect(status).toBe(403);
+  });
+
+  it("opens same-origin upgrades through the bindings merge and caps frames", async () => {
+    const cookie = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+    const ws = new WebSocket(`${base.replace(/^http/, "ws")}/api/chat`, {
+      headers: { cookie, origin: PUBLIC },
+    });
+    await new Promise<void>((resolve, reject) => {
+      ws.on("open", () => resolve());
+      ws.on("unexpected-response", (_req, res) =>
+        reject(new Error(`upgrade rejected: ${res.statusCode}`)),
+      );
+      ws.on("error", reject);
+    });
+    // Past the 1 MiB cap: the server closes with 1009 before JSON.parse runs.
+    const closed = new Promise<number>((resolve) =>
+      ws.once("close", (code) => resolve(Number(code))),
+    );
+    ws.send(Buffer.alloc(2 << 20, 0x61));
+    expect(await closed).toBe(1009);
   });
 
   it("limits recovery codes per address from the configured proxy header", async () => {

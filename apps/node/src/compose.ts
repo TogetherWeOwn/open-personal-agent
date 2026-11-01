@@ -59,6 +59,12 @@ export interface NodeApp {
   db: DatabaseSync;
   /** The user's in-process assistant, one per user, as `/api/chat` and the routes reach it. */
   assistantFor(userId: string): NodeAssistant;
+  /**
+   * Refuses new turns, closes every chat tab and interrupts running turns, resolving once they
+   * have settled. Shutdown awaits it before closing the database, since upgraded sockets are
+   * not tracked by `server.close`.
+   */
+  shutdown(): Promise<void>;
 }
 
 /**
@@ -85,6 +91,9 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       if (!assistant) {
         assistant = new NodeAssistant(userId, { db, getEnv: () => env });
         assistants.set(userId, assistant);
+        // Settle what a restart left behind (streaming replies, dead budget holds) before the
+        // first turn needs to; the sweep runs once per process and never rejects.
+        void assistant.recover();
       }
       return assistant;
     },
@@ -139,5 +148,8 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     },
     db,
     assistantFor,
+    shutdown: async () => {
+      await Promise.all([...assistants.values()].map((assistant) => assistant.shutdown()));
+    },
   };
 }

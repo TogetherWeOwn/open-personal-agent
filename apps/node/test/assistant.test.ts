@@ -128,6 +128,130 @@ describe("NodeEventLog", () => {
   });
 });
 
+describe("NodeAssistant recovery", () => {
+  const PRICED = {
+    provider: "workers-ai",
+    model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  } as const;
+
+  /**
+   * A user whose dead turn is seeded before their assistant first runs its restart sweep: the
+   * seeding is synchronous, so it lands before the sweep's first awaited query resolves.
+   */
+  function seedDeadTurn() {
+    users += 1;
+    const userId = `assistant-recover-${users}`;
+    const conversationId = `conv-dead-${users}`;
+    const replyId = `reply-dead-${users}`;
+    const db = app.db as DatabaseSync;
+    db.prepare("INSERT INTO users (id, display_name, role) VALUES (?, 'Test', 'owner')").run(
+      userId,
+    );
+    db.prepare("INSERT INTO conversations (id, user_id, title) VALUES (?, ?, ?)").run(
+      conversationId,
+      userId,
+      "Dead",
+    );
+    db.prepare(
+      "INSERT INTO messages (id, user_id, conversation_id, seq, role, status, content) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(replyId, userId, conversationId, 1, "assistant", "streaming", "half-written");
+    const assistant = app.assistantFor(userId);
+    const reservation = assistant.limits.reserve(
+      `dead-turn-${users}:0`,
+      PRICED.provider,
+      PRICED.model,
+      100,
+    );
+    expect(reservation).not.toBeNull();
+    expect(assistant.limits.totals().heldMicroUsd).toBeGreaterThan(0);
+    return { userId, replyId, assistant };
+  }
+
+  it("interrupts a dead turn's reply and releases its hold on startup", async () => {
+    const { replyId, assistant } = seedDeadTurn();
+    await assistant.recover();
+
+    expect(assistant.limits.totals().heldMicroUsd).toBe(0);
+    expect(
+      (app.db as DatabaseSync)
+        .prepare("SELECT status, content FROM messages WHERE id = ?")
+        .get(replyId),
+    ).toEqual({ status: "interrupted", content: "half-written" });
+  });
+
+  it("keeps a stopped turn's reply and hold for its resume", async () => {
+    const { userId, replyId, assistant } = seedDeadTurn();
+    const db = app.db as DatabaseSync;
+    db.prepare("INSERT INTO conversations (id, user_id, title) VALUES (?, ?, ?)").run(
+      "conv-stop",
+      userId,
+      "Stopped",
+    );
+    db.prepare(
+      "INSERT INTO messages (id, user_id, conversation_id, seq, role, status, content) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("reply-stop", userId, "conv-stop", 1, "assistant", "streaming", "partial");
+    db.prepare(
+      "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      "stop-turn",
+      userId,
+      "conv-stop",
+      "reply-stop",
+      PRICED.provider,
+      PRICED.model,
+      "awaiting_approval",
+      "{}",
+    );
+    const reservation = assistant.limits.reserve("stop-turn:0", PRICED.provider, PRICED.model, 100);
+    expect(reservation).not.toBeNull();
+
+    await assistant.recover();
+
+    // The stopped turn's hold stays for its resume, and its reply stays streaming with the
+    // checkpointed text; only the dead turn without a saved stop was settled.
+    expect(assistant.limits.totals().heldMicroUsd).toBeGreaterThan(0);
+    expect(
+      db.prepare("SELECT status, content FROM messages WHERE id = ?").get("reply-stop"),
+    ).toEqual({ status: "streaming", content: "partial" });
+    expect(db.prepare("SELECT status FROM messages WHERE id = ?").get(replyId)).toEqual({
+      status: "interrupted",
+    });
+  });
+});
+
+describe("NodeAssistant shutdown", () => {
+  it("closes tabs and refuses new sends", async () => {
+    const { sessionId, assistant } = setup();
+    const tab = socket();
+    const conn = assistant.open(tab, sessionId, false);
+    await assistant.shutdown();
+
+    expect(tab.closed()).toMatchObject({ code: 1001, reason: "server shutdown" });
+    assistant.message(conn, send("conv-shut", "Hello"));
+    expect(ofType(tab, "turn.failed").at(-1)?.payload).toMatchObject({
+      message: "The server is shutting down.",
+    });
+  });
+
+  it("settles the running turn instead of hanging", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { sessionId, assistant } = setup(scripted(gate, true));
+    const tab = socket();
+    const conn = assistant.open(tab, sessionId, false);
+    assistant.message(conn, send("conv-shut-turn", "Hello"));
+    await until(tab, "turn.started");
+
+    const stopping = assistant.shutdown();
+    release();
+    await stopping;
+
+    expect(tab.closed()).toMatchObject({ code: 1001 });
+  });
+});
+
 describe("NodeAssistant", () => {
   it("completes a text turn with the turn's frames in order", async () => {
     const { userId, sessionId, assistant } = setup();

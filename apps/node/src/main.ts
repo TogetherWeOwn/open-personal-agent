@@ -24,8 +24,11 @@ const hostname = process.env.OPA_HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 8787);
 // The chat socket's upgrades (M3-23a): the route answers through this server, `noServer` so the
 // same port serves the app and the assistant, as the Worker's Durable Object does.
+// `maxPayload` caps a frame well above any send the route accepts (`MAX_TEXT`), so an oversized
+// frame closes with 1009 before `JSON.parse` runs; the `ws` default is 100 MiB.
 // `ws` types `noServer` as optional; it is set, so the cast only narrows that.
-const wss = new WebSocketServer({ noServer: true }) as unknown as WebSocketServerLike;
+const wsServer = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 });
+const wss = wsServer as unknown as WebSocketServerLike;
 const server = serve({ fetch: app.fetch, hostname, port, websocket: { server: wss } }, (info) => {
   console.log(`Open Personal Agent on http://${hostname}:${info.port}`);
 });
@@ -35,10 +38,24 @@ const TICK_MS = 10 * 60_000;
 void app.scheduled();
 const tick = setInterval(() => void app.scheduled(), TICK_MS);
 
-// Finish in-flight requests before closing the database; a second signal exits at once.
+// Finish in-flight requests and chat turns before closing the database. Upgraded sockets are
+// not tracked by `server.close`, so the assistants refuse new turns, close every tab (1001)
+// and interrupt their running turn first; only once it has settled does the database close.
+// A second signal exits at once.
+let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
+    if (stopping) process.exit(1);
+    stopping = true;
     clearInterval(tick);
-    server.close(() => app.db.close());
+    void (async () => {
+      await app.shutdown();
+      for (const client of wsServer.clients) client.close(1001, "server shutdown");
+      await new Promise<void>((resolve, reject) =>
+        wsServer.close((err) => (err ? reject(err) : resolve())),
+      );
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await app.db.close();
+    })().catch(() => process.exit(1));
   });
 }

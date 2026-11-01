@@ -262,6 +262,12 @@ export class NodeAssistant {
   /** Live frames each replaying tab hasn't been sent yet, by connection ID (see `#endReplay`). */
   readonly #held = new Map<number, HeldFrame[]>();
   #running: AbortController | null = null;
+  /** The turn slot's current run, so shutdown can wait for it to settle. */
+  #turnPromise: Promise<void> | null = null;
+  /** Set once the process starts shutting down: no new turn may start. */
+  #closing = false;
+  /** The restart sweep, at most once per process; a failure retries on the next turn. */
+  #recovery: Promise<void> | null = null;
   /** The latest checkpoint of each turn this process runs. */
   readonly #checkpoints = new Map<string, TurnCheckpoint>();
 
@@ -332,6 +338,10 @@ export class NodeAssistant {
       return;
     }
     if (msg?.type !== "chat.send") return;
+    if (this.#closing) {
+      reject(conn.socket, msg.conversationId, "The server is shutting down.");
+      return;
+    }
     const text = msg.text.trim();
     // One turn at a time is the concurrency limit: a second send waits for the first.
     if (this.#running) {
@@ -348,10 +358,26 @@ export class NodeAssistant {
     } else {
       const running = new AbortController();
       this.#running = running;
-      void this.#turn(conn, msg.conversationId, text, msg.model, msg.attachmentIds, running.signal)
-        // The model's failures are reported in the turn; this is D1 failing.
-        .catch(() => reject(conn.socket, msg.conversationId, "The reply couldn't be saved."))
+      // The model's failures are reported in the turn; a rejection here is D1 failing. The tab
+      // may be gone too (shutdown closes sockets), so that rejection never escapes either.
+      const done = this.#turn(
+        conn,
+        msg.conversationId,
+        text,
+        msg.model,
+        msg.attachmentIds,
+        running.signal,
+      )
+        .catch(() => {
+          try {
+            reject(conn.socket, msg.conversationId, "The reply couldn't be saved.");
+          } catch {
+            // The tab went away; nothing left to tell.
+          }
+        })
         .finally(() => this.#release(running));
+      this.#turnPromise = done;
+      done.catch(() => {});
     }
   }
 
@@ -393,6 +419,63 @@ export class NodeAssistant {
     this.#running = null;
   }
 
+  /**
+   * Settles what a restart left behind, at most once per process: a failure retries on the next
+   * call. Safe to call any time; it resolves once the sweep has run.
+   */
+  recover(): Promise<void> {
+    if (!this.#recovery) {
+      this.#recovery = this.#recover().catch(() => {
+        this.#recovery = null;
+      });
+    }
+    return this.#recovery;
+  }
+
+  /**
+   * The restart sweep (M3-23a review): in-memory checkpoints don't survive a restart, so any
+   * streaming reply still in D1 belongs to a turn that will never settle it, and any hold with
+   * no saved stop belongs to a turn that will never spend it. Streaming replies become
+   * `interrupted` (keeping their text, as `interrupt` does), and those holds go back
+   * uncharged. Stopped turns (approval, limit) keep both for their resume, as the worker's
+   * `onFiberRecovered` keeps them: their `turn_states` row names the reply to spare.
+   */
+  async #recover(): Promise<void> {
+    const repo = await this.#repo;
+    const byTurn = new Map<string, string[]>();
+    for (const hold of this.limits.heldIds()) {
+      const turnId = hold.split(":")[0] ?? hold;
+      byTurn.set(turnId, [...(byTurn.get(turnId) ?? []), hold]);
+    }
+    const stopped = new Set<string>();
+    for (const [turnId, holds] of byTurn) {
+      const row = await repo.turns.load(turnId);
+      if (row) {
+        stopped.add(row.replyId);
+        continue;
+      }
+      for (const hold of holds) this.limits.release(hold);
+    }
+    for (const conv of await repo.listConversations()) {
+      for (const m of (await repo.chat.listMessages(conv.id)) ?? []) {
+        if (m.role === "assistant" && m.status === "streaming" && !stopped.has(m.id)) {
+          await repo.chat.interrupt({ replyId: m.id, reply: m.content });
+        }
+      }
+    }
+  }
+
+  /**
+   * The process is shutting down: refuse new turns, close every tab (1001) and interrupt the
+   * running turn, then resolve once it has settled so the database can close under it.
+   */
+  async shutdown(): Promise<void> {
+    this.#closing = true;
+    for (const tab of [...this.#tabs.values()]) this.#closeLive(tab, 1001, "server shutdown");
+    this.#running?.abort();
+    await this.#turnPromise?.catch(() => {});
+  }
+
   async #turn(
     conn: NodeConnection,
     conversationId: string,
@@ -401,6 +484,9 @@ export class NodeAssistant {
     attachmentIds: readonly string[],
     signal: AbortSignal,
   ) {
+    // A restart drops in-memory checkpoints, so settle what it left behind before starting: a
+    // failure here is D1 failing, reported like any other turn failure by the caller.
+    await this.recover();
     if (!(await this.#sessionLive(conn))) return;
     const repo = await this.#repo;
     const chat = repo.chat;
@@ -469,55 +555,64 @@ export class NodeAssistant {
     // Reserved before anything is written, so a refused send leaves no trace, not even a
     // conversation.
     const chars = messageChars(messages);
-    // Checkpoint before the reservation and the first write, so a recovery can always name the
-    // turn and release what it holds.
-    stash(cp);
-    // The first call is reserved before anything is written, so a refused send leaves no trace,
-    // not even a conversation. The loop's budget spends this reservation on its first call and
-    // reserves later calls itself.
-    const firstHold = `${cp.turnId}:0`;
-    const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars, fileTokens);
-    if (!reservation) {
-      const message = "You've reached today's spending limit. It resets at midnight UTC.";
-      return reject(conn.socket, conversationId, message, "limit_reached");
-    }
-    cp.holds = [firstHold];
-    stash(cp);
-    const emit = this.#emitter(conversationId, cp.turnId);
-    const title = (text.split("\n", 1)[0] || attached[0]?.name || "").slice(0, 40);
+    // Everything from the first checkpoint to the loop runs under this `finally`: sends that
+    // never reach `#drive` (a refused reservation, a missing conversation, a D1 failure in the
+    // first write) delete their checkpoint on the way out, as `#drive`'s own `finally` does.
+    let drove = false;
     try {
-      if (!(await chat.open(conversationId, title, fresh))) {
-        this.limits.release(firstHold);
-        return reject(conn.socket, conversationId, "That conversation doesn't exist.");
+      // Checkpoint before the reservation and the first write, so a recovery can always name the
+      // turn and release what it holds.
+      stash(cp);
+      // The first call is reserved before anything is written, so a refused send leaves no
+      // trace, not even a conversation. The loop's budget spends this reservation on its first
+      // call and reserves later calls itself.
+      const firstHold = `${cp.turnId}:0`;
+      const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars, fileTokens);
+      if (!reservation) {
+        const message = "You've reached today's spending limit. It resets at midnight UTC.";
+        return reject(conn.socket, conversationId, message, "limit_reached");
       }
-      await picked.used?.();
-      await chat.startTurn(
-        conversationId,
-        text,
-        cp.replyId,
-        attached.map((row) => ({ id: row.id, sentToModel: sentIds.has(row.id) })),
-      );
-    } catch (err) {
-      this.limits.release(firstHold); // no call was made
-      throw err;
+      cp.holds = [firstHold];
+      stash(cp);
+      const emit = this.#emitter(conversationId, cp.turnId);
+      const title = (text.split("\n", 1)[0] || attached[0]?.name || "").slice(0, 40);
+      try {
+        if (!(await chat.open(conversationId, title, fresh))) {
+          this.limits.release(firstHold);
+          return reject(conn.socket, conversationId, "That conversation doesn't exist.");
+        }
+        await picked.used?.();
+        await chat.startTurn(
+          conversationId,
+          text,
+          cp.replyId,
+          attached.map((row) => ({ id: row.id, sentToModel: sentIds.has(row.id) })),
+        );
+      } catch (err) {
+        this.limits.release(firstHold); // no call was made
+        throw err;
+      }
+      cp.wrote = true;
+      stash(cp);
+      await this.#sweepTabs();
+      // The host names the turn; the loop never emits `turn.started` itself.
+      emit("turn.started", { messageId: cp.replyId });
+      // Plainly, per m3-ux §3.2: the file stays with the message, but this model won't read it.
+      for (const kind of skipped) emit("status", { text: UNREAD[kind] });
+      await this.#drive({
+        checkpoint: cp,
+        stash,
+        provider,
+        model,
+        firstHold: { id: firstHold, maxOutputTokens: reservation.maxOutputTokens },
+        history: messages,
+        state: newTurn(),
+        signal,
+      });
+      drove = true;
+    } finally {
+      if (!drove) this.#checkpoints.delete(cp.turnId);
     }
-    cp.wrote = true;
-    stash(cp);
-    await this.#sweepTabs();
-    // The host names the turn; the loop never emits `turn.started` itself.
-    emit("turn.started", { messageId: cp.replyId });
-    // Plainly, per m3-ux §3.2: the file stays with the message, but this model won't read it.
-    for (const kind of skipped) emit("status", { text: UNREAD[kind] });
-    await this.#drive({
-      checkpoint: cp,
-      stash,
-      provider,
-      model,
-      firstHold: { id: firstHold, maxOutputTokens: reservation.maxOutputTokens },
-      history: messages,
-      state: newTurn(),
-      signal,
-    });
   }
 
   /**
