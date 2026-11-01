@@ -125,6 +125,29 @@ export const TASK_LIMITS = {
 /** Step outputs larger than this are persisted as a reference to object storage (M3-12 AC4). */
 export const STEP_OUTPUT_INLINE_MAX_BYTES = 1024 * 1024;
 
+/**
+ * Replaces every exact occurrence of a guarded secret in a step output's strings, object keys
+ * included. Step outputs are persisted (and replayed from storage), so a provider or tool that
+ * echoes a key back must not fix it in durable state. One implementation for both task runtimes
+ * (the Workflows adapter and the Node journal, M3-23b); values under 8 chars are ignored by the
+ * callers, since they match too eagerly.
+ */
+export function redactSecrets<T>(value: T, secrets: readonly string[]): T {
+  if (secrets.length === 0) return value;
+  if (typeof value === "string") {
+    let out: string = value;
+    for (const secret of secrets) out = out.split(secret).join("[redacted]");
+    return out as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => redactSecrets(v, secrets)) as T;
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [redactSecrets(k, secrets), redactSecrets(v, secrets)]),
+    ) as T;
+  }
+  return value;
+}
+
 /** The step did not run because the task was cancelled first. Terminal for the task. */
 export class TaskCancelledError extends Error {
   constructor(readonly taskId: string) {
