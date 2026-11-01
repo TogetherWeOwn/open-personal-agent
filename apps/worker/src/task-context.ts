@@ -5,6 +5,7 @@
 // at step boundaries; budget and progress cross to the user's assistant by RPC (AC8); outputs
 // over 1 MiB persist as a reference to R2, and no guarded secret reaches a persisted output
 // (AC4). The adapter takes a structural stepper, so tests drive it without the Workflow engine.
+import type { WorkflowStep } from "cloudflare:workers";
 import {
   type JsonValue,
   redactSecrets,
@@ -37,7 +38,7 @@ export interface AssistantTaskRpc {
   releaseTaskCall(key: string): Promise<void>;
   startTask(taskId: string, budgetMicroUsd?: number): Promise<{ budgetMicroUsd: number }>;
   endTask(taskId: string): Promise<number>;
-  allowToolCall(callKey: string): Promise<boolean>;
+  allowToolCall(callKey: string, approved?: boolean): Promise<boolean>;
   taskProgress(progress: {
     conversationId: string;
     turnId: string;
@@ -152,7 +153,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
       deps.assistant.settleTaskCall(key, providerId, model, usage),
     release: (key) => deps.assistant.releaseTaskCall(key),
     end: () => deps.assistant.endTask(deps.taskId),
-    allowToolCall: (key) => deps.assistant.allowToolCall(key),
+    allowToolCall: (key, approved) => deps.assistant.allowToolCall(key, approved),
   };
 
   return {
@@ -224,4 +225,42 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
 async function outputId(key: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** The platform stepper's surface used here, without its serializable-type machinery. */
+type PlatformStepper = {
+  do(name: string, config: Record<string, unknown>, fn: () => Promise<unknown>): Promise<unknown>;
+  sleep(name: string, duration: number): Promise<void>;
+  waitForEvent(
+    name: string,
+    options: { type: string; timeout: number },
+  ): Promise<{ payload: unknown }>;
+};
+
+/** Maps the platform stepper to the port's: ms durations in, step outputs hidden from logs. */
+export function stepperFor(step: WorkflowStep): TaskStepper {
+  const platform = step as unknown as PlatformStepper;
+  return {
+    do: (name, config, fn) =>
+      platform.do(
+        name,
+        {
+          ...(config.retries
+            ? {
+                retries: {
+                  limit: config.retries.limit,
+                  delay: config.retries.delayMs,
+                  ...(config.retries.backoff ? { backoff: config.retries.backoff } : {}),
+                },
+              }
+            : {}),
+          ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
+          sensitive: "output", // step outputs are the user's content, not telemetry
+        },
+        () => fn(),
+      ) as never,
+    sleep: (name, durationMs) => platform.sleep(name, durationMs),
+    waitForEvent: (name, options) =>
+      platform.waitForEvent(name, { type: options.type, timeout: options.timeoutMs }) as never,
+  };
 }

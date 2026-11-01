@@ -29,6 +29,23 @@ export function createSocketTransport({
   let socket: Socket | null = null;
   let onEvent: (event: HarnessEvent) => void = () => {};
   let signedOut = false;
+  /**
+   * The last logged event seen, so a reconnect can ask for the rest of its turn (M3-03 AC11).
+   * One turn runs at a time. A settled turn is trimmed from the log, so its end clears this and
+   * a later reconnect reloads from D1 as before.
+   */
+  let cursor: { conversationId: string; turnId: string; seq: number } | null = null;
+  const note = (event: HarnessEvent) => {
+    if (event.seq === 0 || !event.turnId) return;
+    const settled =
+      event.type === "turn.completed" ||
+      event.type === "turn.cancelled" ||
+      event.type === "turn.interrupted" ||
+      event.type === "turn.failed";
+    cursor = settled
+      ? null
+      : { conversationId: event.sessionId, turnId: event.turnId, seq: event.seq };
+  };
   /** The conversation of the last send, which a 4401 close may leave without an answer. */
   let lastSent = "";
   /** A local rejection at `seq` 0, the same shape as the server's. */
@@ -57,18 +74,29 @@ export function createSocketTransport({
       let current: Socket | null = null;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const open = () => {
-        const ws = openSocket(url);
+        // A reconnect that will resume says so up front: the server then holds live frames
+        // until the replay is sent, so they arrive in order.
+        const ws = openSocket(cursor ? `${url}${url.includes("?") ? "&" : "?"}resume=1` : url);
         current = ws;
         ws.onopen = () => {
           retries = 0;
           socket = ws;
+          // Ask for what the dropped socket missed before the reload `onOpen` starts; live frames
+          // follow the replay, and the reducer drops any copy.
+          if (cursor) {
+            const { conversationId, turnId, seq } = cursor;
+            ws.send(JSON.stringify({ type: "resume", conversationId, turnId, afterSeq: seq }));
+          }
           onOpen();
         };
         ws.onmessage = ({ data }) => {
           if (typeof data !== "string") return;
           try {
             const event = JSON.parse(data) as HarnessEvent;
-            if (event.v === 1) handle(event);
+            if (event.v === 1) {
+              note(event);
+              handle(event);
+            }
           } catch {}
         };
         ws.onclose = ({ code }) => {

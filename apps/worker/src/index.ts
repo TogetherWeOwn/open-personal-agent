@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
+import { sweepExports } from "@opa/db/export";
+import { log } from "@opa/log";
+import { reconcileAllowances } from "@opa/server/allowances";
+import { runRetention } from "@opa/server/retention";
 import { runRotation } from "@opa/server/vault-rotation";
 import { compose, type WorkerEnv } from "./compose";
 import { workerApp } from "./worker-app";
 
 export { Assistant } from "./assistant";
+export { ExportWorkflow } from "./export-workflow";
 export { TaskWorkflow } from "./task-workflow";
 
 // capnweb (via agents) parks the whole cloudflare:workers module, env and master keys included, on
@@ -17,8 +22,23 @@ export default {
   async fetch(request, env, ctx) {
     return workerApp.fetch(request, await compose(env), ctx);
   },
-  // The */10 reconciler (ADR 0003 #4). For now it runs a pending key rotation (crypto review C-1).
+  // The */10 reconciler (ADR 0003 #4): a pending key rotation (crypto review C-1), the 70%
+  // allowance warnings (COST-5), the export expiry sweep (M3-20 AC1) and retention (M3-18).
+  // One `waitUntil` per part, each logging its own failure, so one never stops the others; the
+  // next tick tries again.
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(compose(env).then(runRotation));
+    const composed = compose(env);
+    ctx.waitUntil(composed.then(runRotation));
+    ctx.waitUntil(composed.then((e) => reconcileAllowances(e)));
+    ctx.waitUntil(
+      composed.then((c) =>
+        sweepExports(c).catch((error: unknown) => {
+          log.error("export.sweep", {
+            reason: error instanceof Error ? error.message : "error",
+          });
+        }),
+      ),
+    );
+    ctx.waitUntil(composed.then((e) => runRetention(e)));
   },
 } satisfies ExportedHandler<WorkerEnv>;

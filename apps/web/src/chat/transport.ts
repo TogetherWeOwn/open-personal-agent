@@ -52,7 +52,7 @@ export interface ChatTransport {
     model?: { provider: string; model: string },
     attachmentIds?: string[],
   ): void;
-  /** Stops the running turn, which then ends with `turn.interrupted`. */
+  /** Stops the running turn, which then ends with `turn.cancelled`. */
   cancel(): void;
   conversations(): Promise<ConversationSummary[]>;
   /** `null` when the conversation isn't on the server (yet). */
