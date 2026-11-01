@@ -663,6 +663,31 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           content,
         });
       /**
+       * Batch statements putting the caller's still-unlinked uploads on a message, each marked
+       * with whether the model received it (M3-10 AC2): only the user's own, still-unlinked
+       * uploads move, so a retry can link them again and a dequeue can release them.
+       */
+      const linkAttachments = (
+        conversationId: string,
+        userMessageId: string,
+        sentToModel: boolean,
+        ids: readonly string[],
+      ) =>
+        ids.length
+          ? [
+              db
+                .update(attachments)
+                .set({ messageId: userMessageId, conversationId, sentToModel })
+                .where(
+                  and(
+                    eq(attachments.userId, userId),
+                    inArray(attachments.id, [...ids]),
+                    isNull(attachments.messageId),
+                  ),
+                ),
+            ]
+          : [];
+      /**
        * A conversation's rows with the given roles, oldest first, each with its files' sniffed
        * facts (M3-10). Only a user row has files; the others get `[]`.
        */
@@ -902,23 +927,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             linked: readonly { id: string; sentToModel: boolean }[] = [],
           ) => {
             const userMessageId = crypto.randomUUID();
-            const link = (sentToModel: boolean) => {
-              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
-              return ids.length
-                ? [
-                    db
-                      .update(attachments)
-                      .set({ messageId: userMessageId, conversationId, sentToModel })
-                      .where(
-                        and(
-                          eq(attachments.userId, userId),
-                          inArray(attachments.id, ids),
-                          isNull(attachments.messageId),
-                        ),
-                      ),
-                  ]
-                : [];
-            };
+            const link = (sentToModel: boolean) =>
+              linkAttachments(
+                conversationId,
+                userMessageId,
+                sentToModel,
+                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
+              );
             await db.batch([
               message(conversationId, userMessageId, "user", text),
               message(conversationId, replyId, "assistant", ""),
@@ -926,6 +941,142 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ...link(false),
               db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
             ]);
+          },
+          /**
+           * Holds a send that arrived mid-run (M3-09 AC4): opens the conversation when it's new
+           * and writes the user's row with its files and its empty reply row, both, so the
+           * queued text is already in D1 and visible on reload. The pair keeps the thread's
+           * shape — each user row immediately followed by its reply — so the waiting exchange
+           * reads where it will settle. `null` when the ID is someone else's.
+           */
+          enqueue: async (
+            conversationId: string,
+            title: string,
+            text: string,
+            pin: { provider: string; model: string } | undefined,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            const userMessageId = crypto.randomUUID();
+            const replyId = crypto.randomUUID();
+            const link = (sentToModel: boolean) =>
+              linkAttachments(
+                conversationId,
+                userMessageId,
+                sentToModel,
+                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
+              );
+            if (!(await getConversation(conversationId))) {
+              // A conflict is either another user's row or this user's from a concurrent open.
+              await createConversation(conversationId, title, pin).catch(() => {});
+              if (!(await getConversation(conversationId))) return null;
+            }
+            await db.batch([
+              message(conversationId, userMessageId, "user", text),
+              message(conversationId, replyId, "assistant", ""),
+              ...link(true),
+              ...link(false),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+            return { messageId: userMessageId, replyId };
+          },
+          /**
+           * Notes a steer that joined its conversation's running turn (M3-09 AC4): only the
+           * user's row, since the running turn's reply answers it — there is no reply of its
+           * own. The row keeps the steer visible on reload and in later turns' history. `null`
+           * when the ID is missing or someone else's.
+           */
+          steer: async (conversationId: string, text: string) => {
+            if (!(await getConversation(conversationId))) return null;
+            const userMessageId = crypto.randomUUID();
+            await db.batch([
+              message(conversationId, userMessageId, "user", text),
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+            ]);
+            return userMessageId;
+          },
+          /**
+           * Starts a queued send's reply (M3-09 AC4): the rows are already stored, so this only
+           * marks each file with whether the now-known reading model receives it (M3-10 AC2).
+           * `false` when the conversation is missing or someone else's.
+           */
+          beginReply: async (
+            conversationId: string,
+            userMessageId: string,
+            linked: readonly { id: string; sentToModel: boolean }[] = [],
+          ) => {
+            if (!(await getConversation(conversationId))) return false;
+            const flag = (sentToModel: boolean) => {
+              const ids = linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id);
+              return ids.length
+                ? [
+                    db
+                      .update(attachments)
+                      .set({ sentToModel })
+                      .where(
+                        and(
+                          eq(attachments.userId, userId),
+                          eq(attachments.messageId, checkId(userMessageId)),
+                          inArray(attachments.id, [...ids]),
+                        ),
+                      ),
+                  ]
+                : [];
+            };
+            await db.batch([
+              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+              ...flag(true),
+              ...flag(false),
+            ]);
+            return true;
+          },
+          /**
+           * Cancels a queued send before it starts (M3-09 AC4): deletes the still-waiting pair —
+           * the user row and its still-empty reply — and releases its files back to unlinked, so
+           * a resend can link them again. The host dequeues from memory first, so it never names
+           * a started turn; the empty-reply guard below is defense in depth. `false` when the
+           * rows are already replying, settled, or someone else's.
+           */
+          dropQueued: async (conversationId: string, messageId: string, replyId: string) => {
+            if (!(await getConversation(conversationId))) return false;
+            const row = (
+              await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.id, checkId(messageId)),
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.role, "user"),
+                    eq(messages.userId, userId),
+                  ),
+                )
+                .limit(1)
+            )[0];
+            const reply = (
+              await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.id, checkId(replyId)),
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.role, "assistant"),
+                    eq(messages.status, "streaming"),
+                    eq(messages.userId, userId),
+                  ),
+                )
+                .limit(1)
+            )[0];
+            if (!row || !reply) return false;
+            await db.batch([
+              db.delete(messages).where(eq(messages.id, row.id)),
+              db.delete(messages).where(eq(messages.id, reply.id)),
+              db
+                .update(attachments)
+                .set({ messageId: null, conversationId: null, sentToModel: false })
+                .where(and(eq(attachments.userId, userId), eq(attachments.messageId, row.id))),
+            ]);
+            return true;
           },
           /**
            * A stopped turn's partial reply so far, still `streaming`: what a tab that loads the

@@ -172,6 +172,18 @@ export class Limits {
   }
 
   /**
+   * Milliseconds until `startTurn` would allow a turn; 0 when one is allowed now. The drain
+   * waits this long (plus a buffer) before retrying after a `slow_down`, instead of dropping
+   * the waiting sends.
+   */
+  msUntilTurnSlot(): number {
+    const now = this.now();
+    const recent = (this.kv.get<number[]>("turns") ?? []).filter((t) => now - t < MINUTE);
+    if (recent.length < TURNS_PER_MINUTE) return 0;
+    return Math.min(...recent.map((t) => t + MINUTE - now));
+  }
+
+  /**
    * Counts a tool call, or returns `false` past 60 in the last minute: the tool must not run.
    * `callKey` names the call, so a retried step asking again for the same call isn't counted
    * twice while it is still in the window. An `approved` call is counted but never refused: the

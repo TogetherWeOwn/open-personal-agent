@@ -114,7 +114,11 @@ export function parseTurnState(json: string): TurnState | null {
 
 /**
  * What a tab may send: `chat.send`, with the chat's own model if it names one and any uploaded
- * files by ID, `turn.cancel`, or `resume`. Anything else is ignored.
+ * files by ID, `turn.cancel`, `resume`, or the queue frames (M3-09 AC4) — `chat.steer`, text
+ * only, joining its conversation's running turn, and `chat.dequeue`, taking a waiting send
+ * back by the `messageId` its `turn.queued` carried. Anything else is ignored. The queue's
+ * events (`turn.queued`, `turn.steered`, `turn.dequeued`) are the server's half of the 09b wire;
+ * approvals still never ride the socket.
  */
 export function parse(message: unknown) {
   if (typeof message !== "string") return null;
@@ -129,6 +133,20 @@ export function parse(message: unknown) {
         : null;
     }
     const conversationId = String(msg.conversationId);
+    if (msg.type === "chat.steer" && typeof msg.text === "string" && isId(conversationId)) {
+      // Text-only: files on a steer are ignored, and a steer for a conversation with no
+      // running turn is heard as a send.
+      return {
+        type: "chat.steer",
+        conversationId,
+        text: msg.text,
+        model: undefined,
+        attachmentIds: [],
+      } as const;
+    }
+    if (msg.type === "chat.dequeue" && isId(conversationId) && isId(msg.messageId)) {
+      return { type: "chat.dequeue", conversationId, messageId: msg.messageId } as const;
+    }
     if (msg.type === "chat.send" && typeof msg.text === "string") {
       const { provider, model } = (msg.model ?? {}) as Partial<Record<string, unknown>>;
       const own =

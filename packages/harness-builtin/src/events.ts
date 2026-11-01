@@ -26,6 +26,10 @@ export type LoopEvent =
   | E<"limit.reached">
   | E<"turn.completed">
   | E<"turn.cancelled">
+  // A steer the host hands the turn mid-run (M3-09 AC4): yielded when the text joins the turn's
+  // messages, so the next step reads it. Queue and dequeue announcements never come from the
+  // loop, so they stay host-only events in `@opa/core`.
+  | E<"turn.steered">
   // The loop's failure carries no limit reason: a refused send never starts a turn.
   | { type: "turn.failed"; payload: { message: string } };
 
