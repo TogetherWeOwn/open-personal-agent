@@ -117,6 +117,19 @@ describe("export rows", () => {
     await alice.exports.finishFailed("e6", "done");
   });
 
+  it("refuses to ready a past-expiry row, leaving it running for the finish guard", async () => {
+    // e6 above is finished: the slot is free for an export whose expiry the clock passes.
+    await alice.exports.create({ id: "e6x", workflowInstanceId: "exp-e6x", expiresAt: 5000 });
+    // The conditional update requires expiresAt > now: a late finish claims nothing, at or
+    // past the boundary, and the row stays running for `export:finish` to expire.
+    expect(await alice.exports.finishReady("e6x", 9, 5000)).toBe(false);
+    expect(await alice.exports.finishReady("e6x", 9, 6000)).toBe(false);
+    expect((await alice.exports.get("e6x"))?.status).toBe("running");
+    // Before the expiry the same update still readies the row.
+    expect(await alice.exports.finishReady("e6x", 9, 4999)).toBe(true);
+    expect((await alice.exports.get("e6x"))?.status).toBe("ready");
+  });
+
   it("keeps keys under the user's export prefix", async () => {
     expect(alice.exports.key("e1")).toBe("u/alice/exports/e1.zip");
     expect(alice.exports.stagedPrefix("e1")).toBe("u/alice/exports/e1/staged/");

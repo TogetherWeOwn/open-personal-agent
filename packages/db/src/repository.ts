@@ -1362,8 +1362,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .limit(1)
             )[0],
           /**
-           * Marks a running export ready. `false` when it had already ended: a retry that finds
-           * one never overwrites it.
+           * Marks a running export ready. `false` when it had already ended, or when its
+           * expiry had passed: a late finish never turns a past-expiry row ready, even if
+           * the expiry landed between the caller's re-read and this conditional update.
            */
           finishReady: async (id: string, sizeBytes: number, now: number) =>
             (
@@ -1375,6 +1376,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                     eq(dataExports.id, id),
                     eq(dataExports.userId, userId),
                     eq(dataExports.status, "running"),
+                    gt(dataExports.expiresAt, now),
                   ),
                 )
                 .returning({ id: dataExports.id })
