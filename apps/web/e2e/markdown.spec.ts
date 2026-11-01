@@ -10,6 +10,17 @@ test.beforeEach(async ({ page }) => {
   await page.route("/api/settings", (route) => route.fulfill({ json: { onboarded: true } }));
 });
 
+test("Copy code says so when the browser refuses the clipboard", async ({ page }) => {
+  await page.addInitScript(() => {
+    navigator.clipboard.writeText = () => Promise.reject(new DOMException("denied"));
+  });
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Message" }).fill(MOCK_HOSTILE);
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Copy code" }).click();
+  await expect(page.getByRole("button", { name: /Couldn't copy/ })).toBeVisible();
+});
+
 for (const colorScheme of ["light", "dark"] as const) {
   for (const width of [375, 1280]) {
     test(`hostile Markdown, ${colorScheme}, ${width} px: no remote request, no script, axe clean`, async ({

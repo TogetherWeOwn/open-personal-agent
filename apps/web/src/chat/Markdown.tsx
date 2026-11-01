@@ -14,7 +14,7 @@ export function Markdown({ text, streaming = false }: { text: string; streaming?
   return (
     <ReactMarkdown
       skipHtml
-      remarkPlugins={[remarkGfm, nestHeadings]}
+      remarkPlugins={[remarkGfm, plainFootnotes, nestHeadings]}
       urlTransform={(url, key) => (key === "src" && isOwnFile(url) ? url : (safeHref(url) ?? ""))}
       components={{ ...COMPONENTS, pre: (p) => <CodeBlock {...p} copyable={!streaming} /> }}
     >
@@ -65,9 +65,17 @@ function claimedHost(text: string): string | null {
   }
 }
 
-function ExternalLink({ href, children }: { href: string; children: ReactNode }) {
+function ExternalLink({
+  href,
+  children,
+  hostInText = false,
+}: {
+  href: string;
+  children: ReactNode;
+  hostInText?: boolean;
+}) {
   const host = href.startsWith("mailto:") ? null : new URL(href).host;
-  const showHost = host && claimedHost(textOf(children).trim()) !== host;
+  const showHost = host && !hostInText && claimedHost(textOf(children).trim()) !== host;
   return (
     <a
       href={href}
@@ -104,7 +112,7 @@ function CodeBlock({
   children,
   copyable,
 }: ComponentProps<"pre"> & { copyable: boolean; node?: unknown }) {
-  const [copied, setCopied] = useState(false);
+  const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle");
   return (
     <div className="my-3">
       <Scroller label="Code" className="rounded-lg border border-border bg-surface-sunken">
@@ -112,15 +120,24 @@ function CodeBlock({
       </Scroller>
       {copyable && (
         <Button
-          onPress={() =>
-            navigator.clipboard.writeText(textOf(children).replace(/\n$/, "")).then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 2000);
-            })
-          }
+          onPress={async () => {
+            try {
+              await navigator.clipboard.writeText(textOf(children).replace(/\n$/, ""));
+              setCopy("copied");
+              setTimeout(() => setCopy("idle"), 2000);
+            } catch {
+              setCopy("failed"); // denied, or no Clipboard API; stays until the next try
+            }
+          }}
           className="mt-1 min-h-11 rounded-lg px-2 text-sm text-text-muted data-hovered:text-text"
         >
-          {copied ? "Copied" : "Copy code"}
+          {
+            {
+              idle: "Copy code",
+              copied: "Copied",
+              failed: "Couldn't copy. Select the code instead.",
+            }[copy]
+          }
         </Button>
       )}
     </div>
@@ -142,9 +159,11 @@ const COMPONENTS: Components = {
     const source = typeof src === "string" ? src : undefined;
     if (isOwnFile(source)) return <img src={source} alt={alt ?? ""} className="max-w-full" />;
     const href = safeHref(source);
-    const label = shortUrl(href) ?? alt ?? "not shown";
+    const label = shortUrl(href) ?? (alt || "not shown");
     return href ? (
-      <ExternalLink href={href}>Image: {label}</ExternalLink>
+      <ExternalLink href={href} hostInText>
+        Image: {label}
+      </ExternalLink>
     ) : (
       <span>Image: {label}</span>
     );
@@ -192,7 +211,35 @@ const COMPONENTS: Components = {
 };
 
 type Heading = { type: "heading"; depth: number };
-type Tree = { type: string; depth?: number; children?: Tree[] };
+type Tree = {
+  type: string;
+  depth?: number;
+  label?: string;
+  value?: string;
+  children?: Tree[] | undefined;
+};
+
+/**
+ * GFM footnotes need in-page `#` links and ids, which this renderer doesn't allow (and ids would
+ * repeat across replies). Keep the content as text instead: `x[^1]` reads "x[1]" and the note
+ * becomes a paragraph starting "[1] " where it was written.
+ */
+function plainFootnotes() {
+  const mark = (node: Tree) => `[${node.label}]`;
+  const visit = (node: Tree): Tree[] => {
+    if (node.type === "footnoteReference") return [{ type: "text", value: mark(node) }];
+    const children = node.children?.flatMap(visit);
+    if (node.type !== "footnoteDefinition") return [{ ...node, children }];
+    const [first, ...rest] = children ?? [];
+    const prefix: Tree = { type: "text", value: `${mark(node)} ` };
+    return first?.type === "paragraph"
+      ? [{ ...first, children: [prefix, ...(first.children ?? [])] }, ...rest]
+      : [{ type: "paragraph", children: [prefix] }, ...(first ? [first] : []), ...rest];
+  };
+  return (tree: Tree) => {
+    tree.children = tree.children?.flatMap(visit);
+  };
+}
 
 /**
  * The page's h1 is the conversation title, so a reply's headings start at h2 and never skip a

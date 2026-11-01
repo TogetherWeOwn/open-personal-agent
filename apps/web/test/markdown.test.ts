@@ -34,6 +34,18 @@ describe("Markdown (M3-10 AC3, R7 M3-7)", () => {
     expect(html("![cat](relative/cat.png)")).toContain("Image: cat");
   });
 
+  it("labels an image with no alt text, and names a remote image's host once", () => {
+    expect(html("![](relative/cat.png)")).toContain("Image: not shown");
+    expect(html("![cat](https://evil.example/cat.png)")).not.toContain("(evil.example)");
+  });
+
+  it("renders footnotes as plain text, with no links, ids or visible 'Footnotes' heading", () => {
+    const out = html("See this[^1].\n\n[^1]: The source.");
+    expect(out).toContain("See this[1].");
+    expect(out).toContain("[1] The source.");
+    expect(out).not.toMatch(/<(a|sup|h2|section)\b|\sid=|Footnotes|↩/);
+  });
+
   it("shows a link's host when the text hides it", () => {
     expect(html("[the docs](https://evil.example/x)")).toContain("(evil.example)");
     expect(html("<https://evil.example/x>")).not.toContain("(evil.example)");
