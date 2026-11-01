@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { HarnessEvent } from "@opa/core";
+import type { HarnessEvent, TurnLimit } from "@opa/core";
 import type { ConversationSummary, StoredMessage } from "./transport";
 
 /** The statuses D1 stores, so a loaded message keeps its own. */
@@ -18,6 +18,11 @@ export interface ChatState {
   pending: { conversationId: string; turnId: string | null; messageId: string } | null;
   /** Text for the polite live region: start, finish and failure, never each token. */
   announcement: string;
+  /**
+   * The last send a limit refused (M2-22), until the next send. It wrote nothing, so its message
+   * leaves the chat and its text goes back to the composer.
+   */
+  limit: { reason: TurnLimit; message: string; conversationId: string; text: string } | null;
 }
 
 export type ChatAction =
@@ -37,6 +42,7 @@ export const initialState = (id: string): ChatState => ({
   activeId: id,
   pending: null,
   announcement: "",
+  limit: null,
 });
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -67,6 +73,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ],
         })),
         pending,
+        limit: null,
       };
     }
     case "connected": {
@@ -121,6 +128,20 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
       pending: turn,
       announcement: "Assistant is working.",
     };
+  }
+  // A limit refused this tab's send: the server wrote nothing, so neither does this tab.
+  if (event.type === "turn.failed" && event.payload.reason && event.turnId === "") {
+    if (pending?.turnId !== null) return state;
+    const { conversationId } = pending;
+    const chat = state.conversations.find((c) => c.id === conversationId);
+    const text = chat?.messages.at(-2)?.text ?? "";
+    const next = update(state, conversationId, (c) => {
+      const messages = c.messages.slice(0, -2);
+      return { messages, ...(messages.length ? {} : { title: NEW_TITLE }) };
+    });
+    const { reason, message } = event.payload;
+    const limit = { reason, message, conversationId, text };
+    return { ...next, pending: null, limit, announcement: message };
   }
   // A rejection (`seq` 0) answers this tab's send before any turn started.
   const ours =
