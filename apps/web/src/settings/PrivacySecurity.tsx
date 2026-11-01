@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings › Privacy & security (M3-19 AC2, m3-ux §3.9): passkeys (add, rename, remove with
-// step-up), recovery codes (regenerate with step-up, shown once) and sessions (list, revoke,
-// sign out everywhere). Removing a passkey or signing out everywhere expires anything waiting
-// on approval, and the confirmations say so (M3-07 AC13). Approvals follows on top.
+// step-up), recovery codes (regenerate with step-up, shown once), sessions (list, revoke, sign
+// out everywhere) and Approvals (the policy, active grants with Revoke). Removing a passkey or
+// signing out everywhere expires anything waiting on approval, and the confirmations say so
+// (M3-07 AC13).
 import {
   type PublicKeyCredentialCreationOptionsJSON,
   startRegistration,
 } from "@simplewebauthn/browser";
 import { useEffect, useState } from "react";
-import { Heading, Input, Label, TextField } from "react-aria-components";
+import { Heading, Input, Label, Link, TextField } from "react-aria-components";
 import { cancelled } from "../auth/ui";
-import { dayOf } from "../models/settings-api";
+import { dayOf, settingsApi } from "../models/settings-api";
 import { Button } from "../ui";
 import {
+  type GrantRow,
+  grantScopeLabel,
   type PasskeyRow,
   privacyError,
   REGENERATE_CODES_CONFIRM,
@@ -45,6 +48,7 @@ const displayName = (p: PasskeyRow) => p.name ?? "Unnamed passkey";
 export function PrivacySecurity() {
   const [passkeys, setPasskeys] = useState<PasskeyRow[] | null>(null);
   const [sessions, setSessions] = useState<SessionRow[] | null>(null);
+  const [grants, setGrants] = useState<GrantRow[] | null>(null);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
@@ -60,13 +64,15 @@ export function PrivacySecurity() {
     setLoadError(false);
     setError(null);
     try {
-      const [keys, sess, codes] = await Promise.all([
+      const [keys, sess, standing, codes] = await Promise.all([
         api<{ passkeys: PasskeyRow[] }>("/passkeys"),
         api<{ sessions: SessionRow[] }>("/sessions"),
+        settingsApi<{ grants: GrantRow[] }>("/grants"),
         api<{ remaining: number }>("/recovery-codes"),
       ]);
       setPasskeys(keys.passkeys);
       setSessions(sess.sessions);
+      setGrants(standing.grants);
       setRemaining(codes.remaining);
     } catch {
       setLoadError(true);
@@ -117,7 +123,7 @@ export function PrivacySecurity() {
   const reloadKeys = () =>
     api<{ passkeys: PasskeyRow[] }>("/passkeys").then(({ passkeys }) => setPasskeys(passkeys));
 
-  if (loadError || passkeys === null || sessions === null || remaining === null)
+  if (loadError || passkeys === null || sessions === null || grants === null || remaining === null)
     return (
       <section aria-labelledby="privacy-heading" className="flex flex-col gap-4">
         <Heading level={2} id="privacy-heading" className="text-xl font-semibold">
@@ -436,6 +442,62 @@ export function PrivacySecurity() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <Heading level={3} className="text-lg font-semibold">
+          Approvals
+        </Heading>
+        <div className={card}>
+          <p>
+            Consequential actions ask you first. When you approve one, you can let it through just
+            this once — or stand the approval, so the same call skips the question next time.
+          </p>
+          <p className={hint}>
+            Each tool asks the way its risk class says it should; a tool that can’t be undone always
+            asks first. Set a tool to never run, or let it run without asking, in{" "}
+            <Link
+              href="/settings/apps"
+              className="font-medium text-accent underline underline-offset-2"
+            >
+              Apps &amp; tools
+            </Link>
+            .
+          </p>
+        </div>
+        {grants.length === 0 ? (
+          <p className={hint}>No standing approvals. Every consequential action will ask you.</p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {grants.map((g) => (
+              <li key={g.id} className={card}>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="font-semibold">
+                    <code>{g.tool}</code>
+                  </p>
+                  <p className={hint}>
+                    {grantScopeLabel(g)} · standing since {dayOf(g.createdAt)}
+                  </p>
+                </div>
+                <div className={rowButtons}>
+                  <Button
+                    variant="secondary"
+                    isDisabled={pending !== null}
+                    aria-label={`Revoke the ${g.tool} approval`}
+                    onPress={() =>
+                      void run(`ungrant:${g.id}`, async () => {
+                        await settingsApi(`/grants/${g.id}`, "DELETE");
+                        setGrants((prev) => prev?.filter((row) => row.id !== g.id) ?? null);
+                      })
+                    }
+                  >
+                    Revoke
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </section>
   );
