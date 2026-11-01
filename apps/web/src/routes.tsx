@@ -55,7 +55,7 @@ export const SETTINGS: {
   { id: "apps", label: "Apps & tools" },
   { id: "memory", label: "Memory" },
   { id: "spending", label: "Spending" },
-  { id: "privacy", label: "Privacy & security" },
+  { id: "privacy", label: "Privacy & security", shipped: true },
   { id: "deployment", label: "Deployment" },
 ];
 
@@ -82,8 +82,9 @@ function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
   if (page.id === "spending") return <Redirect to="/usage" />;
-  // Models and Agent engine already shipped with real screens; the table serves them instead of
-  // their placeholders, so the rebase keeps what `main` already gives those addresses.
+  // Models, Agent engine and Privacy & security already shipped with real screens; the table
+  // serves them instead of their placeholders, so the rebase keeps what `main` already gives
+  // those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
   return (
     <Page title={page.label}>
