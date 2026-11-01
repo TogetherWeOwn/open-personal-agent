@@ -90,7 +90,9 @@ describe("before the claim", () => {
     expect((await new Browser(weak).options("short")).status).toBe(503);
     const page = await new Browser(weak).req("/setup");
     expect(page.status).toBe(403);
-    expect(await page.text()).toContain("<h1>Replace the setup token</h1>");
+    const html = await page.text();
+    expect(html).toContain("<h1>Replace the setup token</h1>");
+    expect(html).toContain("--name &lt;your-worker-name&gt;");
   });
 
   it("stays closed while the setup token has too few distinct characters", async () => {

@@ -12,6 +12,8 @@ const PURPOSE: Record<string, string> = {
 // Only the vault and the composition root may name the master key, so it's the one not listed.
 const MASTER_KEY_PURPOSE =
   "encrypts the keys you save in the app. Keep a copy somewhere safe: without it they can't be recovered.";
+const RENAMED =
+  "<p>If you deployed under a different Worker name, add <code>--name &lt;your-worker-name&gt;</code> to each <code>wrangler secret put</code> command.</p>";
 const LOCAL =
   "<p>For local development, put the values in <code>.dev.vars</code> instead (copy <code>.dev.vars.example</code>) and restart <code>pnpm dev</code>.</p>";
 
@@ -66,10 +68,9 @@ export function finishSetupPage(health: Health): string {
       )
       .join("\n");
     steps.push(
-      "<li><p>Set the missing secrets. Make a random value for each one with:</p>" +
-        `${command(GENERATE)}<p>Then run each command below and paste its value when it asks.</p>` +
-        `<ul>${secrets}</ul>` +
-        "<p>If you deployed under a different Worker name, add <code>--name &lt;your-worker-name&gt;</code> to each command.</p></li>",
+      "<li><p>Set the missing secrets. Make a random value with:</p>" +
+        `${command(GENERATE)}<p>Run it again for each secret, so each one gets its own value. Then run each command below and paste its value when it asks.</p>` +
+        `<ul>${secrets}</ul>${RENAMED}</li>`,
     );
   }
   return page(
@@ -85,7 +86,7 @@ export function weakSetupTokenPage(): string {
     "Replace the setup token",
     "<p>The setup token, <code>OPA_SETUP_TOKEN</code>, is too short or too simple, so setup stays closed. Make a new random value:</p>" +
       `${command(GENERATE)}<p>Set it, keep a copy, then reload this page:</p>` +
-      `${command("npx wrangler secret put OPA_SETUP_TOKEN")}\n${LOCAL}`,
+      `${command("npx wrangler secret put OPA_SETUP_TOKEN")}${RENAMED}\n${LOCAL}`,
   );
 }
 

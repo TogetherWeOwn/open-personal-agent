@@ -48,6 +48,7 @@ describe("an unmigrated deployment with no secrets", () => {
       expect(html).toContain(`<pre><code>npx wrangler secret put ${name}</code></pre>`);
     }
     expect(html).toContain("crypto.getRandomValues(Buffer.alloc(32))");
+    expect(html).toContain("Run it again for each secret");
     expect(html).not.toMatch(/Error|\bat .+:\d+:\d+/);
   });
 });
