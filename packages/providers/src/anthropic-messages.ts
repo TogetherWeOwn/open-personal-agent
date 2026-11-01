@@ -12,11 +12,26 @@ import type {
 } from "@opa/core";
 import { ANTHROPIC_MESSAGES_API, messagesBody, type ReplayBlock } from "./anthropic-request";
 import { aborted, error } from "./chat-chunks";
+import { canonicalOrigin } from "./credential-binding";
 import { type EndpointOptions, endpoint, openStream } from "./http";
 import { sseData } from "./sse";
 
 /** Pinned; `messagesBody` leaves out the sampling parameters this version rejects. */
 const API_VERSION = "2026-10-21";
+
+/**
+ * The Anthropic preset talks Messages; any other host, Anthropic's own included under another
+ * preset, keeps its adapter. As with `usesOpenAIResponses`, the API follows the preset and is never
+ * part of `providerId`, so the key's binding is the same whichever adapter uses it.
+ */
+export function usesAnthropicMessages(providerId: string | null, baseUrl: string | null): boolean {
+  if (providerId !== "anthropic" || !baseUrl) return false;
+  try {
+    return canonicalOrigin(baseUrl) === "https://api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
 
 export interface AnthropicMessagesOptions extends EndpointOptions {
   providerId: string;

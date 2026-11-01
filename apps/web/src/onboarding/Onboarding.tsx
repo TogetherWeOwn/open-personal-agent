@@ -18,6 +18,11 @@ import {
 const STEPS = ["Claim", "About you", "Choose a model", "Test", "Costs and limits", "First chat"];
 const PRESETS = {
   openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+  anthropic: {
+    label: "Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+    model: "claude-sonnet-5-5",
+  },
   openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "" },
   custom: { label: "Other OpenAI-compatible", baseUrl: "", model: "" },
 } as const;
@@ -169,8 +174,8 @@ export function Onboarding() {
         <Radio value="api-key" className={card}>
           <span className="font-semibold">Use an API key</span>
           <span className="text-sm text-text-muted">
-            Bring a key from OpenAI, OpenRouter or another OpenAI-compatible provider. It's
-            encrypted on your server and never shown again.
+            Bring a key from OpenAI, Anthropic, OpenRouter or another OpenAI-compatible provider.
+            It's encrypted on your server and never shown again.
           </span>
         </Radio>
         <Radio value="starter" className={card}>

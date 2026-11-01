@@ -280,3 +280,53 @@ describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe("the Anthropic preset on Messages (M3-05 AC3)", () => {
+  const preset = {
+    kind: "openai-chat",
+    providerId: "anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+  };
+  const event = (type: string, fields: object = {}) => JSON.stringify({ type, ...fields });
+
+  it("saves an Anthropic key, tests it on Messages and shows its dated price", async () => {
+    const saved = await put("/model", { ...preset, model: "claude-sonnet-5-5", apiKey: CANARY });
+    expect(JSON.parse(saved.text).model).toMatchObject({
+      providerId: "anthropic",
+      api: "anthropic-messages",
+      key: { last4: CANARY.slice(-4) },
+    });
+    expect(saved.text).not.toContain(CANARY);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      const usage = { input_tokens: 9, output_tokens: 1 };
+      return new Response(
+        sse(
+          event("message_start", { message: { usage } }),
+          event("content_block_start", { index: 0, content_block: { type: "text", text: "" } }),
+          event("content_block_delta", { index: 0, delta: { type: "text_delta", text: "ready" } }),
+          event("message_delta", { delta: { stop_reason: "end_turn" }, usage }),
+          event("message_stop"),
+        ),
+      );
+    });
+    const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(tested).toMatchObject({
+      ok: true,
+      tools: true,
+      reply: "ready",
+      price: { inputUsdPerMTok: 2, outputUsdPerMTok: 10, verifiedAt: "2026-11-01" },
+    });
+    const [url, init] = fetch.mock.calls[0] ?? [];
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${CANARY}`);
+    expect(headers.get("anthropic-version")).toBe("2026-10-21");
+  });
+
+  it("keeps Anthropic's host under another preset on Chat Completions", async () => {
+    const other = { ...preset, providerId: "custom", model: "m", apiKey: CANARY };
+    expect(JSON.parse((await put("/model", other)).text).model).toMatchObject({
+      api: "openai-chat",
+    });
+  });
+});

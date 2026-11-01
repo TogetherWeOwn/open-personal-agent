@@ -2,6 +2,7 @@
 export {
   type AnthropicMessagesOptions,
   createAnthropicMessagesProvider,
+  usesAnthropicMessages,
 } from "./anthropic-messages";
 export { ANTHROPIC_MESSAGES_API } from "./anthropic-request";
 export {
