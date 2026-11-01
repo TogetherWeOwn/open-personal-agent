@@ -2,7 +2,7 @@
 // Settings › Apps & tools copy (M3-19 AC1, m3-ux §3.9): every risk class has a plain-words
 // label, and nothing here may name a builder.
 import { describe, expect, it } from "vitest";
-import { riskClassLabel, toolError } from "../src/settings/tool-copy";
+import { isNoopDefault, riskClassLabel, toolError } from "../src/settings/tool-copy";
 
 describe("riskClassLabel", () => {
   it("covers every risk class in plain words", () => {
@@ -30,5 +30,17 @@ describe("toolError", () => {
       e.name = name;
       expect(toolError(e)).toMatch(/wasn't confirmed/);
     }
+  });
+});
+
+describe("isNoopDefault", () => {
+  it("offers the one-click keep only where saving the default changes nothing", () => {
+    // Reads run either way; `ask` asks either way.
+    expect(isNoopDefault("read", "auto")).toBe(true);
+    expect(isNoopDefault("consequential", "ask")).toBe(true);
+    expect(isNoopDefault("irreversible", "ask")).toBe(true);
+    // An untouched reversible write still asks after outside content, while an explicit
+    // `auto` would not — so that default stays display-only.
+    expect(isNoopDefault("write_reversible", "auto")).toBe(false);
   });
 });

@@ -31,3 +31,11 @@ export const toolError = (e: unknown) =>
   (e as Error).name === "NotAllowedError" || (e as Error).name === "AbortError"
     ? "Your passkey wasn't confirmed, so nothing changed."
     : (TOOL_ERRORS[(e as Error).message] ?? "That didn't work. Try again in a moment.");
+
+/**
+ * Whether saving the effective default as the override changes nothing. Reads run either way
+ * and `ask` asks either way; but an untouched reversible write still asks after outside
+ * content while an explicit `auto` would not, so that default is never a one-click keep.
+ */
+export const isNoopDefault = (riskClass: RiskClass, def: Exclude<ToolOverride, null>) =>
+  def === "ask" || riskClass === "read";

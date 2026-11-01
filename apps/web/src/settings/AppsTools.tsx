@@ -9,7 +9,13 @@ import { settingsApi } from "../models/settings-api";
 import { Button } from "../ui";
 import { withAccountStepUp } from "./step-up";
 
-import { type RiskClass, riskClassLabel, type ToolOverride, toolError } from "./tool-copy";
+import {
+  isNoopDefault,
+  type RiskClass,
+  riskClassLabel,
+  type ToolOverride,
+  toolError,
+} from "./tool-copy";
 
 export interface ToolRow {
   name: string;
@@ -131,7 +137,7 @@ export function AppsTools() {
                       {isDefault && <span className={hint}>(default)</span>}
                       {locked && <span className={hint}>— locked: this can't be undone</span>}
                     </Radio>
-                    {value === "auto" && !locked && (
+                    {value === "auto" && !locked && tool.override === null && (
                       <p className={`${hint} pl-6`}>
                         Still asks first after reading outside content, before sending anything out,
                         or when it can't be undone.
@@ -151,15 +157,18 @@ export function AppsTools() {
               </Button>
             ) : (
               // Clicking the already-selected default fires no change event, so an
-              // untouched tool offers this explicit action to save its default as the
-              // override — the same click for mouse and keyboard.
-              <Button
-                onPress={() => change(tool, tool.default)}
-                variant="secondary"
-                isDisabled={pending === tool.name}
-              >
-                Keep this default always
-              </Button>
+              // untouched tool offers this explicit action — but only where saving the
+              // default changes nothing. An explicit `auto` on a reversible write would
+              // stop asking after outside content, so that default stays display-only.
+              isNoopDefault(tool.riskClass, tool.default) && (
+                <Button
+                  onPress={() => change(tool, tool.default)}
+                  variant="secondary"
+                  isDisabled={pending === tool.name}
+                >
+                  Keep this default always
+                </Button>
+              )
             )}
             <p className={hint}>Connectors and skills are coming later.</p>
           </li>
