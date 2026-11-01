@@ -19,6 +19,9 @@
     "dev:web": "pnpm --filter @opa/web dev",
     "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
+    "teardown:cloudflare": "node scripts/teardown-cloudflare.mjs",
+    "verify:cloudflare": "node scripts/verify-cloudflare.mjs",
+    "docs:verify": "node scripts/generate-verify-guide.mjs",
     "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker",
     "lint": "biome check .",
     "format": "biome format --write .",
@@ -27,7 +30,7 @@
     "test:unit": "vitest run --project unit",
     "test:worker": "vitest run --project worker",
     "test:harness": "vitest run --project harness",
-    "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs",
+    "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs && node scripts/generate-verify-guide.mjs --check",
     "notices": "node scripts/generate-notices.mjs"
   },
   "devDependencies": {
