@@ -7,6 +7,7 @@ import { Setup } from "./auth/Setup";
 import { SignIn } from "./auth/SignIn";
 import { createMockTransport } from "./chat/mock-transport";
 import { Onboarding } from "./onboarding/Onboarding";
+import { Usage } from "./usage/Usage";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
@@ -31,7 +32,7 @@ function fragmentToken(hash: string): string {
 // Mocked until the Assistant DO transport (M2-13) lands.
 const transport = createMockTransport();
 
-type View = "setup" | "sign-in" | "onboarding" | "chat";
+type View = "setup" | "sign-in" | "onboarding" | "chat" | "usage";
 
 /** Who is asking decides the screen. Anything but a signed-in user is kept from the chat. */
 async function route(): Promise<View | null> {
@@ -44,6 +45,7 @@ async function route(): Promise<View | null> {
   }
   if (!me?.ok) return "sign-in";
   if (window.location.pathname === "/onboarding") return "onboarding";
+  if (window.location.pathname === "/usage") return "usage";
   const settings = await fetch("/api/settings").catch(() => null);
   const { onboarded } = ((await settings?.json().catch(() => null)) ?? {}) as {
     onboarded?: boolean;
@@ -65,6 +67,7 @@ function Root() {
   if (view === "sign-in") return <SignIn />;
   if (view === "onboarding") return <Onboarding />;
   if (view === "chat") return <App transport={transport} />;
+  if (view === "usage") return <Usage />;
   return null;
 }
 
