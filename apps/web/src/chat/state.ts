@@ -275,6 +275,21 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     }
     case "usage.updated":
       return state;
+    // The M3 events (steps, tools, approvals, limits) get their timeline with the cards that
+    // render them; until then they leave the thread as it is.
+    case "turn.cancelled":
+    case "step.started":
+    case "step.completed":
+    case "tool.called":
+    case "tool.result":
+    case "approval.requested":
+    case "approval.resolved":
+    case "context.tainted":
+    case "task.promoted":
+    case "limit.reached":
+    case "artifact.created":
+    case "memory.proposed":
+      return state;
   }
 }
 

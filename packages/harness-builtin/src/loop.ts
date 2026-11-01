@@ -16,7 +16,6 @@ import {
   decide,
   type PolicyDecision,
   type RegisteredTool,
-  type RiskClass,
   type StandingGrant,
   type TaintState,
   type ToolManifest,

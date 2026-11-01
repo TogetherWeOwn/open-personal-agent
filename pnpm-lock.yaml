@@ -158,7 +158,11 @@ importers:
         specifier: 4.13.14
         version: 4.13.14
 
-  packages/core: {}
+  packages/core:
+    dependencies:
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../policy
 
   packages/db:
     dependencies:
