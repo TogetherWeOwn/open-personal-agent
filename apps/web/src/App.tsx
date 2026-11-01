@@ -485,7 +485,7 @@ export function App({ transport }: AppProps) {
         </main>
       </div>
       {!chat && <Screen params={matched?.params ?? {}} />}
-      <div role="status" className="sr-only">
+      <div role="status" className="sr-only" hidden={!chat}>
         {state.announcement}
       </div>
     </>
