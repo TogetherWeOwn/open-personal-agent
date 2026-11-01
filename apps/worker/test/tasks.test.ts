@@ -53,6 +53,13 @@ describe("task rows", () => {
     expect(await repo.scopeForTask("x".repeat(129))).toBeNull();
   });
 
+  it("refuses to create a task no Workflow instance could resolve", async () => {
+    await expect(
+      alice.tasks.create({ ...makeTask("t9", "ca"), workflowInstanceId: "x".repeat(129) }),
+    ).rejects.toThrow(/invalid instance id/);
+    expect(await alice.tasks.get("t9")).toBeUndefined();
+  });
+
   it("runs, saves state and finishes; a terminal row doesn't move again", async () => {
     const running = await alice.tasks.markRunning("t1", 1_000);
     expect(running?.status).toBe("running");
@@ -60,6 +67,10 @@ describe("task rows", () => {
     expect(await bob.tasks.markRunning("t1", 2_000)).toBeUndefined();
     expect(await alice.tasks.saveState("t1", '{"turn":1}')).toBe(true);
     expect(await alice.tasks.saveState("t1", '{"turn":2}', "waiting_for_approval")).toBe(true);
+    // Only the two in-flight statuses pass; an ending smuggled past the type is dropped.
+    const sneaky = "succeeded" as unknown as "running";
+    expect(await alice.tasks.saveState("t1", '{"turn":2}', sneaky)).toBe(true);
+    expect((await alice.tasks.get("t1"))?.status).toBe("waiting_for_approval");
     expect((await alice.tasks.get("t1"))?.state).toBe('{"turn":2}');
     expect(await alice.tasks.finish("t1", "succeeded")).toBe(true);
     expect((await alice.tasks.get("t1"))?.finishedAt).not.toBeNull();
