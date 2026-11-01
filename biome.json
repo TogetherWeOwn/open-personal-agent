@@ -8,5 +8,11 @@
   "linter": { "enabled": true, "rules": { "preset": "recommended" } },
   "css": { "parser": { "tailwindDirectives": true } },
   "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } },
+  "overrides": [
+    {
+      "includes": ["scripts/**"],
+      "linter": { "rules": { "correctness": { "usePlaywrightValidDescribeCallback": "off" } } }
+    }
+  ],
   "assist": { "enabled": true, "actions": { "source": { "organizeImports": "on" } } }
 }
