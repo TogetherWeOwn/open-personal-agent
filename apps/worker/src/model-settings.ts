@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Onboarding answers and model settings (M2-15). Keys arrive in a POST body, go straight into the
 // vault, and never come back: responses carry the last 4 characters only (ADR 0010 D4).
+import type { ModelUsage } from "@opa/core";
 import { createRepository } from "@opa/db/repository";
 import { credentialBinding, isLoopbackHost, STARTER_MODEL } from "@opa/providers";
 import { encrypt, type UserScope as VaultScope } from "@opa/vault";
@@ -145,6 +146,7 @@ settings.post("/model/test", async (c) => {
   const started = Date.now();
   let firstTokenMs: number | null = null;
   let reply = "";
+  let usage: ModelUsage | null = null;
   const signal = AbortSignal.timeout(TEST_TIMEOUT_MS);
   const consume = async () => {
     const request = { model, messages: TEST_PROMPT, maxOutputTokens: 16 };
@@ -152,6 +154,8 @@ settings.post("/model/test", async (c) => {
       if (event.type === "text.delta") {
         firstTokenMs ??= Date.now() - started;
         reply += event.text;
+      } else if (event.type === "usage") {
+        usage = event.usage;
       } else if (event.type === "error") {
         return { code: event.code, message: event.message };
       }
@@ -165,6 +169,12 @@ settings.post("/model/test", async (c) => {
     ),
   );
   const failure = await Promise.race([consume(), timedOut]);
+  // A test that ran is a real, billed call, so it goes in the ledger like a chat turn, unpriced
+  // when the provider reported no usage. One rejected before any output (a bad key) ran no model.
+  const call = { providerId: resolved.billingId ?? provider.id, model, usage };
+  if (usage || !failure || firstTokenMs !== null) {
+    await createRepository(c.env).forUser(c.var.session.scope).usage.record(call);
+  }
   if (failure) {
     // The provider writes this text. If it echoes any 8 characters of the key, drop it: a saved
     // key never returns to the browser, even in part beyond its last 4 (ADR 0010 D4).

@@ -117,7 +117,7 @@ export class Assistant extends Agent<Bindings> {
       conversationId,
       turnId: crypto.randomUUID(),
       replyId: crypto.randomUUID(),
-      providerId: provider.id,
+      providerId: picked.billingId ?? provider.id,
       model,
       reply: "",
       usage: null,

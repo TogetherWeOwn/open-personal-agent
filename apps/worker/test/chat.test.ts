@@ -166,8 +166,9 @@ describe("chat transport", () => {
     const ledger = await db
       .prepare("SELECT provider_id, model FROM usage WHERE conversation_id = 'conv-6'")
       .all();
+    // The ledger names who bills the call from its endpoint, not the provider ID typed for it.
     expect(ledger.results).toEqual([
-      { provider_id: "openai", model: "gpt-x" },
+      { provider_id: "api.example.com", model: "gpt-x" },
       { provider_id: "workers-ai", model: STARTER_MODEL },
     ]);
   });

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { estimate, findPrice } from "@opa/pricing";
+import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
@@ -81,6 +82,19 @@ export interface TurnRecord {
   called: boolean;
 }
 
+/** One model call for the ledger. `providerId` is who bills it (`billingProviderId`). */
+export type LedgerCall = Pick<TurnRecord, "providerId" | "model" | "usage">;
+
+/** A call's ledger values, priced from the table; the cost columns stay null without a price. */
+function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
+  const price = findPrice(providerId, model);
+  const row = { id: crypto.randomUUID(), providerId, model, ...counts };
+  if (!price || !counts) return row;
+  const { costMicroUsd, neurons } = estimate(price, counts);
+  const costSource = "estimated" as const;
+  return { ...row, costMicroUsd, neurons, costSource, priceVerifiedAt: price.verifiedAt };
+}
+
 export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBindings<Stub, Id>) {
   const db = openD1(DB);
   return {
@@ -91,6 +105,17 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       probeStorage: () => FILES.head("health/probe"),
       /** A fixed name outside the `u:<userId>` space. */
       healthObject: () => ASSISTANT.get(ASSISTANT.idFromName("health")),
+      /**
+       * Workers AI neurons all users' calls used since `since`: one total, no rows. The free
+       * allowance is the Cloudflare account's, so one user's share would overstate what is left.
+       */
+      workersAiNeurons: async (since: number) =>
+        (
+          await db
+            .select({ n: sql<number>`coalesce(sum(${usage.neurons}), 0)`.mapWith(Number) })
+            .from(usage)
+            .where(gte(usage.createdAt, since))
+        )[0]?.n ?? 0,
     },
 
     forUser(scope: UserScope) {
@@ -173,7 +198,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * Finishes a reply and writes the call's usage ledger row (ADR 0006) in one transaction.
-           * Pricing joins in M2-21, so cost is 0. A call that never started gets no row.
+           * A call that never started gets no row.
            */
           settle: async (turn: TurnRecord, status: MessageStatus) => {
             await db.batch([
@@ -184,17 +209,38 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ...(turn.called
                 ? [
                     db.insert(usage).values({
-                      id: crypto.randomUUID(),
+                      ...ledgerValues(turn),
                       userId,
                       conversationId: turn.conversationId,
                       messageId: turn.replyId,
-                      providerId: turn.providerId,
-                      model: turn.model,
-                      ...turn.usage,
                     }),
                   ]
                 : []),
             ]);
+          },
+        },
+        /** The ledger the Usage page reads (PRD §17). */
+        usage: {
+          /** Calls since `since`, per provider, model and cost source; one query. */
+          totals: (since: number) =>
+            db
+              .select({
+                providerId: usage.providerId,
+                model: usage.model,
+                costSource: usage.costSource,
+                calls: count(),
+                inputTokens: sql<number>`sum(${usage.inputTokens})`.mapWith(Number),
+                outputTokens: sql<number>`sum(${usage.outputTokens})`.mapWith(Number),
+                costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.mapWith(Number),
+                priceVerifiedAt: sql<string | null>`min(${usage.priceVerifiedAt})`,
+              })
+              .from(usage)
+              .where(and(eq(usage.userId, userId), gte(usage.createdAt, since)))
+              .groupBy(usage.providerId, usage.model, usage.costSource)
+              .orderBy(usage.providerId, usage.model),
+          /** A call outside a chat turn, such as the settings Test button. */
+          record: async (call: LedgerCall) => {
+            await db.insert(usage).values({ ...ledgerValues(call), userId });
           },
         },
         /** Onboarding answers and the chat model (M2-15). The key itself is in `secrets`. */

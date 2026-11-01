@@ -106,6 +106,11 @@ describe("model settings", () => {
     expect(body).toMatchObject({ ok: true, tools: true });
     expect(body.latencyMs).toBeTypeOf("number");
     expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:8788/v1/chat/completions");
+    // No usage came back, so the ledger keeps the call unpriced, billed by the endpoint's host.
+    const ledger = "SELECT provider_id, cost_micro_usd FROM usage WHERE model = 'echo'";
+    expect((await env.DB.prepare(ledger).all()).results).toEqual([
+      { provider_id: "127.0.0.1:8788", cost_micro_usd: null },
+    ]);
   });
 
   it("takes plain HTTP to a LAN host on Node with private hosts allowed", async () => {
@@ -164,9 +169,17 @@ describe("model settings", () => {
     const MODEL_FETCH = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       Response.json({ error: { message: "refused" } }, { status: 403 }),
     );
+    const ledger = async () => (await dump("usage")).split("api.example.com").length;
+    const before = await ledger();
     await call("/model/test", { method: "POST" }, { MODEL_FETCH });
     expect(MODEL_FETCH.mock.calls[0]?.[0]).toBe("https://api.example.com/v1/chat/completions");
     expect(global).not.toHaveBeenCalled();
+    expect(await ledger()).toBe(before); // a rejected test ran no model, so it isn't a call
+    // A stream cut off after output did run the model: it is a call, unpriced.
+    const cut = async () =>
+      new Response(sse(JSON.stringify({ choices: [{ delta: { content: "re" } }] }), "{"));
+    await call("/model/test", { method: "POST" }, { MODEL_FETCH: vi.fn(cut) });
+    expect(await ledger()).toBe(before + 1);
   });
 
   it("never returns a provider error that echoes part of the key", async () => {
@@ -189,9 +202,15 @@ describe("model settings", () => {
       { AI: undefined as unknown as Ai },
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
-    const AI = { run: async () => sse('{"response":"ready"}', "[DONE]") } as unknown as Ai;
+    const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
+    const AI = { run: async () => sse('{"response":"ready"}', usage, "[DONE]") } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
     expect(tested).toMatchObject({ ok: true, tools: false, reply: "ready" });
+    // The test call is billed, so the ledger has it, priced: 25 × $0.293/M + 6 × $2.253/M.
+    const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai'";
+    expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
+      { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
+    ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
   });

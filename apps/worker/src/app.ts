@@ -11,6 +11,7 @@ import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
+import { usageRoutes } from "./usage";
 
 /** The routes both runtimes serve. `createApp` puts them behind the guards. */
 const shared = new Hono<AppEnv>();
@@ -51,6 +52,7 @@ shared.route("/api/auth/recover", recover);
 shared.route("/api/auth", authRoutes);
 shared.route("/api/sessions", sessionRoutes);
 shared.route("/api", chatRoutes);
+shared.route("/api/usage", usageRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */
 shared.get("/api/me", async (c) => {

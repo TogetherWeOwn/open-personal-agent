@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Contract tests for the storage bindings. The Worker project runs them against D1 and R2, the
 // Node project against apps/node's SQLite and local-directory adapters (`selfhost-parity`).
+// A relative path: this file sits outside every workspace package, and apps/node has no `@opa/db`.
+
 import { describe, expect, it } from "vitest";
+import { createRepository, scopeFromSession } from "../../packages/db/src/repository";
 
 let tables = 0;
 
@@ -98,6 +101,79 @@ export function blobStoreContract(name: string, bucket: () => R2Bucket) {
       expect(await (await bucket().get("contract/../x"))?.text()).toBe("one");
       await bucket().delete(["contract/../x", "x"]);
       expect(await bucket().head("x")).toBeNull();
+    });
+  });
+}
+
+/**
+ * The usage ledger's statements through the repository (M2-21), against a migrated database:
+ * `chat.settle` and `usage.record` write priced rows; `usage.totals` and
+ * `deployment.workersAiNeurons` read them back.
+ */
+export function usageLedgerContract(name: string, migrated: () => Promise<D1Database>) {
+  describe(`${name}: usage ledger contract`, () => {
+    it("writes priced and unpriced rows and sums them per model and cost source", async () => {
+      const DB = await migrated();
+      const userId = `ledger-${++tables}`;
+      await DB.prepare("INSERT INTO users (id, display_name, role) VALUES (?, 'L', 'owner')")
+        .bind(userId)
+        .run();
+      const stub = {} as never;
+      const repo = createRepository({ DB, FILES: stub, ASSISTANT: stub });
+      const { chat, usage } = repo.forUser(scopeFromSession({ userId }));
+      const counts = { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0 };
+      const turn = (model: string, replyId: string) => ({
+        conversationId: `c-${userId}`,
+        turnId: "t",
+        replyId,
+        providerId: "workers-ai",
+        model,
+        reply: "Hi",
+        usage: counts,
+        called: true,
+      });
+      const before = Date.now() - 1;
+      expect(await chat.open(`c-${userId}`, "Ledger")).toBe(true);
+      for (const [model, replyId] of [
+        ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", `r1-${userId}`],
+        ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", `r2-${userId}`],
+        ["@cf/unlisted", `r3-${userId}`],
+      ] as const) {
+        await chat.startTurn(`c-${userId}`, "Hello", replyId);
+        await chat.settle(turn(model, replyId), "complete");
+      }
+      expect(await usage.totals(before)).toEqual([
+        {
+          providerId: "workers-ai",
+          model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+          costSource: "estimated",
+          calls: 2,
+          inputTokens: 2000,
+          outputTokens: 1000,
+          costMicroUsd: 2840,
+          priceVerifiedAt: "2026-11-01",
+        },
+        {
+          providerId: "workers-ai",
+          model: "@cf/unlisted",
+          costSource: null,
+          calls: 1,
+          inputTokens: 1000,
+          outputTokens: 500,
+          costMicroUsd: null,
+          priceVerifiedAt: null,
+        },
+      ]);
+      const neurons = repo.deployment.workersAiNeurons;
+      expect(await neurons(before)).toBe(260);
+      await usage.record({ providerId: "openai", model: "gpt-4.1-mini", usage: counts });
+      expect((await usage.totals(before)).find((r) => r.providerId === "openai")).toMatchObject({
+        calls: 1,
+        costMicroUsd: 1200,
+        costSource: "estimated",
+      });
+      const later = Date.now() + 1000;
+      expect([await usage.totals(later), await neurons(later)]).toEqual([[], 0]);
     });
   });
 }

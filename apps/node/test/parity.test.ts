@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { unstable_readConfig } from "wrangler";
-import { blobStoreContract, databaseContract } from "../../../test/contract/storage";
+import {
+  blobStoreContract,
+  databaseContract,
+  usageLedgerContract,
+} from "../../../test/contract/storage";
 import { localBlobStore } from "../src/blobs";
 import { APP_ROUTES } from "../src/compose";
 import { openSqlite, sqliteD1 } from "../src/d1";
@@ -19,6 +23,10 @@ afterAll(() => {
 
 databaseContract("SQLite", () => sqliteD1(sqlite));
 blobStoreContract("local files", () => localBlobStore(join(dir, "files")));
+usageLedgerContract("SQLite", async () => {
+  migrate(sqlite, join(import.meta.dirname, "../../../migrations"));
+  return sqliteD1(sqlite);
+});
 
 describe("Node composition", () => {
   it("applies the same migrations as wrangler, once", () => {
