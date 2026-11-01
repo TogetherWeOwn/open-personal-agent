@@ -165,6 +165,12 @@ export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
 >;
 
+/** An action whose title a search matched, for rows with a result in `result`'s class. */
+export interface ActivityMatch {
+  action: string;
+  result: "any" | "success" | "error" | "refused";
+}
+
 /** An audit row a user's own change writes with it; `detail` is a fact, never a secret or content. */
 export interface AuditRow {
   action: string;
@@ -2046,6 +2052,64 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         audit: {
           list: () =>
             db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
+          /**
+           * One page of the activity log (M3-19 AC3), newest first, from `since` on and before
+           * row `before`. `actions` narrows to those actions and `otherThan` to every action but
+           * those; `text` matches the action, target or detail literally (LIKE's wildcards
+           * escaped), or a row of one of `textActions` whose result is in that entry's class: a
+           * success (`ok`, `redeemed`), an `error`, another refusal, or `any`. `hide` drops an
+           * action with a given result.
+           */
+          page: (o: {
+            since: number;
+            before?: number | undefined;
+            limit: number;
+            actions?: readonly string[] | undefined;
+            otherThan?: readonly string[] | undefined;
+            text?: string | undefined;
+            textActions?: readonly ActivityMatch[] | undefined;
+            hide?: readonly { action: string; result?: string }[];
+          }) => {
+            const like = o.text && `%${o.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+            const matches = (column: SQLiteColumn) => sql`${column} LIKE ${like} ESCAPE '\\'`;
+            return db
+              .select()
+              .from(auditLog)
+              .where(
+                and(
+                  eq(auditLog.userId, userId),
+                  gte(auditLog.createdAt, o.since),
+                  o.before === undefined ? undefined : lt(auditLog.id, o.before),
+                  o.actions ? inArray(auditLog.action, [...o.actions]) : undefined,
+                  // One bound JSON array: D1 allows only 100 bound parameters a query.
+                  o.otherThan
+                    ? sql`${auditLog.action} NOT IN (SELECT value FROM json_each(${JSON.stringify(o.otherThan)}))`
+                    : undefined,
+                  like
+                    ? or(
+                        matches(auditLog.action),
+                        matches(auditLog.targetId),
+                        matches(auditLog.detail),
+                        o.textActions?.length
+                          ? sql`EXISTS (SELECT 1 FROM json_each(${JSON.stringify(o.textActions)}) m
+                              WHERE json_extract(m.value, '$.action') = ${auditLog.action}
+                              AND CASE json_extract(m.value, '$.result')
+                                WHEN 'any' THEN 1
+                                WHEN 'success' THEN ${auditLog.result} IN ('ok', 'redeemed')
+                                WHEN 'error' THEN ${auditLog.result} = 'error'
+                                ELSE ${auditLog.result} NOT IN ('ok', 'redeemed', 'error') END)`
+                          : undefined,
+                      )
+                    : undefined,
+                  ...(o.hide ?? []).map(
+                    (h) =>
+                      sql`NOT (${auditLog.action} = ${h.action}${h.result === undefined ? sql`` : sql` AND ${auditLog.result} = ${h.result}`})`,
+                  ),
+                ),
+              )
+              .orderBy(desc(auditLog.id))
+              .limit(o.limit);
+          },
           /** One row of the user's own trail. */
           add: async (row: AuditRow) => {
             await db.insert(auditLog).values(auditValues(userId, row));

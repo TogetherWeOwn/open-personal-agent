@@ -2,7 +2,7 @@
 // Retention (COST-10, M3-18): the settings, the daily sweep with its counts (AC1), the reconciler's
 // upload collection (AC2), and the rule that a chat with a live task is never deleted (AC3).
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import { DAY_MS, LIVE_TASK_STATUSES, retentionStore } from "@opa/db/retention";
+import { AUDIT_DAYS, DAY_MS, LIVE_TASK_STATUSES, retentionStore } from "@opa/db/retention";
 import { runRetention } from "@opa/server/retention";
 import { describe, expect, it } from "vitest";
 import { claim, count, db, env, freshDatabase } from "./helpers/app";
@@ -214,6 +214,8 @@ describe("the daily sweep", () => {
         toolOutputs: 0,
         proposals: 0,
         stepOutputs: 0,
+        auditRows: 0,
+        auditMore: false,
         users: 2,
         failed: 0,
       },
@@ -404,6 +406,80 @@ describe("the daily sweep", () => {
       },
       expect.objectContaining({ userId: null, result: "error", conversations: 1, failed: 1 }),
     ]);
+  });
+
+  it("removes activity-log rows older than 365 days, everyone's, and keeps the rest (M3-19 AC3)", async () => {
+    await user("u1");
+    const row = (userId: string | null, action: string, at: number) =>
+      db
+        .prepare(
+          "INSERT INTO audit_log (user_id, action, module, result, created_at) VALUES (?, ?, 'test', 'ok', ?)",
+        )
+        .bind(userId, action, at);
+    await db.batch([
+      row("u1", "old", NOW - (AUDIT_DAYS + 1) * DAY_MS),
+      row(null, "old", NOW - (AUDIT_DAYS + 30) * DAY_MS),
+      row("u1", "kept", NOW - (AUDIT_DAYS - 1) * DAY_MS),
+      row(null, "kept", NOW - DAY_MS),
+    ]);
+    expect(await store().sweep(NOW)).toMatchObject({ auditRows: 2, failed: 0 });
+    const left = await db
+      .prepare("SELECT action FROM audit_log WHERE module = 'test'")
+      .all<{ action: string }>();
+    expect(left.results.map((r) => r.action)).toEqual(["kept", "kept"]);
+    const [deployment] = (await sweepRows()).filter((r) => r.userId === null);
+    expect(deployment).toMatchObject({ result: "ok", auditRows: 2, auditMore: false });
+  });
+
+  it("continues an activity-log backlog on the day's later ticks until it is gone", async () => {
+    const backlog = 10 * 500 + 1;
+    await db
+      .prepare(
+        `INSERT INTO audit_log (user_id, action, module, result, created_at)
+          WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+          SELECT NULL, 'old', 'test', 'ok', ? FROM n`,
+      )
+      .bind(backlog, NOW - (AUDIT_DAYS + 1) * DAY_MS)
+      .run();
+    const ports = { DB: env.DB, FILES: env.FILES };
+    const passes = async () =>
+      (
+        await db
+          .prepare("SELECT detail FROM audit_log WHERE action = 'retention.audit' ORDER BY id")
+          .all<{ detail: string }>()
+      ).results.map((r) => JSON.parse(r.detail));
+    // The day's sweep stops at its bound and says rows are left.
+    await runRetention(ports, NOW);
+    expect(await count("audit_log", "module = 'test'")).toBe(1);
+    expect((await sweepRows()).at(-1)).toMatchObject({ auditRows: 5000, auditMore: true });
+    // The next tick finishes them; the one after has nothing to continue.
+    await runRetention(ports, NOW + 600_000);
+    await runRetention(ports, NOW + 1_200_000);
+    expect(await count("audit_log", "module = 'test'")).toBe(0);
+    expect(await passes()).toEqual([{ auditRows: 1, auditMore: false }]);
+  });
+
+  it("retries a failed activity-log pass on the next tick, not the next day", async () => {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, module, result, created_at) VALUES (NULL, 'old', 'test', 'ok', ?)",
+      )
+      .bind(NOW - (AUDIT_DAYS + 1) * DAY_MS)
+      .run();
+    const failing = Object.assign(Object.create(env.DB), {
+      prepare: (query: string) => {
+        if (/^delete from "audit_log"/i.test(query)) throw new Error("D1 is busy");
+        return env.DB.prepare(query);
+      },
+    });
+    await runRetention({ DB: failing, FILES: env.FILES }, NOW);
+    expect((await sweepRows()).at(-1)).toMatchObject({
+      result: "error",
+      auditRows: null,
+      auditMore: true,
+    });
+    await runRetention({ DB: env.DB, FILES: env.FILES }, NOW + 600_000);
+    expect(await count("audit_log", "module = 'test'")).toBe(0);
   });
 
   it("keeps an abandoned upload's row when its object can't be deleted, for the next tick", async () => {

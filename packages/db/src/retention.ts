@@ -4,7 +4,7 @@
 // never wakes a Durable Object, and it records what it removed as audit rows (AC1). A chat with a
 // task that is still queued, running, waiting or paused, or with an approval still waiting for
 // the user, is never deleted (AC3).
-import { and, eq, gt, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { openD1 } from "./index";
 import { memoryService } from "./memory";
@@ -74,6 +74,12 @@ export interface SweepCounts {
   stepOutputs: number;
 }
 
+/** One pass over the activity log: rows removed (`null` if it failed), and whether any may be left. */
+export interface AuditPass {
+  auditRows: number | null;
+  auditMore: boolean;
+}
+
 /** Rows a statement deletes or rewrites at once; a sweep repeats it up to `SWEEP_ROUNDS` times. */
 export const SWEEP_BATCH = 100;
 const SWEEP_ROUNDS = 10;
@@ -85,6 +91,13 @@ export const UPLOAD_TTL_MS = DAY_MS;
 const CLOCK_SLACK_MS = 3_600_000;
 
 export const sweepAction = "retention.sweep";
+/** A further pass over the activity log, the same day, while the last one left rows behind. */
+export const auditSweepAction = "retention.audit";
+
+/** The activity log keeps this many days (M3-19 AC3); the daily sweep removes older rows. */
+export const AUDIT_DAYS = 365;
+/** Audit rows are small, so more at a time than the user's data. */
+const AUDIT_BATCH = 500;
 
 /** The tool messages' content in a task's saved state, replaced by a line that says why. */
 export function removeToolOutputs(state: string, days: number): string | null {
@@ -263,6 +276,40 @@ export function retentionStore({ DB, FILES }: Bindings) {
     return removed;
   };
 
+  /**
+   * Deletes audit rows older than `cutoff`, users' and the deployment's alike, oldest first in
+   * bounded rounds. Row IDs only grow, so each round's scan stops at the first young row. `more`
+   * says the last round was full: rows may be left for the next pass.
+   */
+  const sweepAudit = async (cutoff: number): Promise<AuditPass> => {
+    let total = 0;
+    for (let round = 0; round < SWEEP_ROUNDS; round++) {
+      const result = await db
+        .delete(auditLog)
+        .where(
+          inArray(
+            auditLog.id,
+            db
+              .select({ id: auditLog.id })
+              .from(auditLog)
+              .where(lt(auditLog.createdAt, cutoff))
+              .orderBy(auditLog.id)
+              .limit(AUDIT_BATCH),
+          ),
+        );
+      const n = result.meta.changes;
+      total += n;
+      if (n < AUDIT_BATCH) return { auditRows: total, auditMore: false };
+    }
+    return { auditRows: total, auditMore: true };
+  };
+
+  /** A pass that throws counts as nothing done, with rows left: the next tick tries again. */
+  const auditPass = (now: number) =>
+    sweepAudit(now - AUDIT_DAYS * DAY_MS).catch(
+      (): AuditPass => ({ auditRows: null, auditMore: true }),
+    );
+
   return {
     /** Whether a sweep has run since `since`: the sweep's deployment row says so. */
     sweptSince: async (since: number) =>
@@ -347,14 +394,47 @@ export function retentionStore({ DB, FILES }: Bindings) {
           });
         }
       }
+      // The activity log's own retention: one deployment-wide pass, counted in the totals row.
+      // One that left rows or failed is continued by `continueAudit` on the next ticks.
+      const audit = await auditPass(now);
       await db.insert(auditLog).values({
         userId: null,
         action: sweepAction,
         module: "retention",
-        result: failed ? "error" : "ok",
-        detail: JSON.stringify({ ...totals, users: rows.length, failed }),
+        result: failed || audit.auditRows === null ? "error" : "ok",
+        detail: JSON.stringify({ ...totals, ...audit, users: rows.length, failed }),
       });
-      return { ...totals, users: rows.length, failed };
+      return { ...totals, ...audit, users: rows.length, failed };
+    },
+
+    /**
+     * One more bounded pass over the activity log when the day's last one, since `since`, left
+     * rows behind or failed: a log that grows faster than one pass a day still catches up, a
+     * tick at a time. `null` when there is nothing to continue.
+     */
+    continueAudit: async (since: number, now: number): Promise<AuditPass | null> => {
+      const [last] = await db
+        .select({ detail: auditLog.detail })
+        .from(auditLog)
+        .where(
+          and(
+            isNull(auditLog.userId),
+            inArray(auditLog.action, [sweepAction, auditSweepAction]),
+            sql`${auditLog.createdAt} >= ${since}`,
+          ),
+        )
+        .orderBy(desc(auditLog.id))
+        .limit(1);
+      if (!last || !(JSON.parse(last.detail ?? "{}") as Partial<AuditPass>).auditMore) return null;
+      const audit = await auditPass(now);
+      await db.insert(auditLog).values({
+        userId: null,
+        action: auditSweepAction,
+        module: "retention",
+        result: audit.auditRows === null ? "error" : "ok",
+        detail: JSON.stringify(audit),
+      });
+      return audit;
     },
 
     /**
