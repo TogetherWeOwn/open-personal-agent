@@ -4,7 +4,7 @@
 // background and downloadable for one hour. While one is being made the button waits on it
 // instead of starting another; the list below is the row history newest first.
 import { useEffect, useState } from "react";
-import { Heading, Link } from "react-aria-components";
+import { Heading } from "react-aria-components";
 import { Button, buttonClass, Card, CardHeader } from "../ui";
 import { type DataExport, formatBytes, listExports, startExport } from "./export-api";
 
@@ -45,9 +45,15 @@ function ExportRow({ row }: { row: DataExport }) {
         )}
       </div>
       {row.status === "ready" && (
-        <Link href={`/api/exports/${row.id}`} className={buttonClass("secondary")}>
+        // A plain anchor, not the router's Link: the download is a file response the SPA
+        // must not intercept into a client-side navigation.
+        <a
+          href={`/api/exports/${row.id}`}
+          download={`export-${row.id}.zip`}
+          className={buttonClass("secondary")}
+        >
           Download
-        </Link>
+        </a>
       )}
     </li>
   );
@@ -57,19 +63,27 @@ export function PrivacySettings() {
   const [rows, setRows] = useState<DataExport[] | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [reloads, setReloads] = useState(0);
   const runningId = rows?.find((row) => row.status === "running")?.id ?? null;
   const running = runningId !== null;
 
   useEffect(() => {
     let cancelled = false;
+    // A failed load says so and offers a retry: an empty list would read as "no exports".
+    setLoadFailed(false);
     listExports().then(
       (exports) => !cancelled && setRows(exports),
-      () => !cancelled && setRows([]),
+      () => {
+        if (cancelled) return;
+        setRows([]);
+        setLoadFailed(true);
+      },
     );
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloads]);
 
   // While an export is being made, refresh the list until it lands somewhere.
   useEffect(() => {
@@ -103,6 +117,15 @@ export function PrivacySettings() {
         </p>
         {rows === null ? (
           <p className="text-sm text-text-muted">Loading…</p>
+        ) : loadFailed ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="alert" className="text-danger">
+              Couldn't load your exports.
+            </p>
+            <Button variant="secondary" onPress={() => setReloads((n) => n + 1)}>
+              Try again
+            </Button>
+          </div>
         ) : (
           <>
             {running && (
