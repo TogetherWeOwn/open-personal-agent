@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import {
-  canonicalOrigin,
-  credentialBinding,
-  legacyCredentialBinding,
-} from "../src/credential-binding";
+import { canonicalOrigin, credentialBinding } from "../src/credential-binding";
 
 // Stands in for the vault (M2-07): AES-256-GCM with the ADR 0010 D4 secret AAD
 // `user_id|secret_id|purpose|binding|version`.
@@ -25,11 +21,12 @@ describe("credential binding", () => {
     ]) {
       expect(credentialBinding("openai", url)).toBe("model:openai|https://api.openai.com/v1");
     }
+    // The root keeps its `/`, so this form never equals an origin-only binding saved earlier.
     expect(credentialBinding("openai", "https://api.openai.com/")).toBe(
-      "model:openai|https://api.openai.com",
+      "model:openai|https://api.openai.com/",
     );
-    expect(legacyCredentialBinding("openai", "https://api.openai.com/v1")).toBe(
-      "model:openai|https://api.openai.com",
+    expect(credentialBinding("openai", "https://api.openai.com")).toBe(
+      "model:openai|https://api.openai.com/",
     );
   });
 

@@ -27,18 +27,15 @@ export function canonicalOrigin(baseUrl: string): string {
   return url.origin;
 }
 
-/** The `binding` value for a model credential's AAD. `/v1` and `/v1/` are one endpoint. */
-export function credentialBinding(providerId: string, baseUrl: string): string {
-  // Validates the provider and URL first; the WHATWG parser has already normalized the path.
-  const origin = legacyCredentialBinding(providerId, baseUrl);
-  return `${origin}${new URL(baseUrl).pathname.replace(/\/+$/, "")}`;
-}
-
 /**
- * The origin-only binding keys were saved with before the path was bound (crypto review I-2).
- * Only for reading such a key once, to save it again under `credentialBinding`.
+ * The `binding` value for a model credential's AAD. `/v1` and `/v1/` are one endpoint. The path
+ * is always present (`/` for the root), so no binding in this form equals one saved before the
+ * path was bound (crypto review I-2): such a key is entered again, as for a changed URL.
  */
-export function legacyCredentialBinding(providerId: string, baseUrl: string): string {
+export function credentialBinding(providerId: string, baseUrl: string): string {
   if (!PROVIDER_ID.test(providerId)) throw new Error("Invalid provider id");
-  return `model:${providerId}|${canonicalOrigin(baseUrl)}`;
+  // Validates the URL first; the WHATWG parser has already normalized the path.
+  const origin = canonicalOrigin(baseUrl);
+  const path = new URL(baseUrl).pathname.replace(/\/+$/, "") || "/";
+  return `model:${providerId}|${origin}${path}`;
 }

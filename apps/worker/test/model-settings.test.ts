@@ -3,7 +3,7 @@
 // and tool support.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { legacyCredentialBinding, STARTER_MODEL } from "@opa/providers";
+import { STARTER_MODEL } from "@opa/providers";
 import { encrypt, type UserScope, type Vault } from "@opa/vault";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app";
@@ -230,17 +230,34 @@ describe("model settings", () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
   });
 
-  it("re-saves a key bound to the origin only under its path, once", async () => {
-    // A key as saved before its binding covered the path (crypto review I-2).
+  it("asks for the key again when it was saved before its binding covered the path", async () => {
+    // A key as saved before its binding covered the path (crypto review I-2), in the old
+    // origin-only form. Nothing stored says which path it was saved for, and the saved URL is
+    // only data, so it is never opened as-is: at its old path, or at another path written to D1.
     const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
     const row = await env.DB.prepare("SELECT model_key_secret_id AS id FROM user_settings").first();
     const secretId = row?.id as string;
-    const binding = legacyCredentialBinding("openai", OPENAI.baseUrl);
+    const binding = "model:openai|https://api.example.com";
     const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
     await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
-    const secret = "SELECT binding, version FROM secrets WHERE id = ?";
-    const before = await env.DB.prepare(secret).bind(secretId).first<{ version: number }>();
 
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
+      );
+    });
+    const required = { status: 409, text: '{"error":"key_required"}' };
+    expect(await call("/model/test", { method: "POST" })).toEqual(required);
+    await env.DB.prepare(
+      "UPDATE user_settings SET base_url = 'https://api.example.com/x/v1'",
+    ).run();
+    expect(await call("/model/test", { method: "POST" })).toEqual(required);
+    expect(fetch).not.toHaveBeenCalled();
+    await env.DB.prepare("UPDATE user_settings SET base_url = ?").bind(OPENAI.baseUrl).run();
+  });
+
+  it("does not open a saved key when the stored path changes", async () => {
+    expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       return new Response(
         sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
@@ -252,16 +269,15 @@ describe("model settings", () => {
     expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
       `Bearer ${CANARY}`,
     );
-    expect(await env.DB.prepare(secret).bind(secretId).first()).toEqual({
-      binding: "model:openai|https://api.example.com/v1",
-      version: (before?.version ?? 0) + 1,
-    });
-    // Now bound to the path: pointing the saved URL at another path on the host, in D1, fails.
+    // Pointing the saved URL at another path on the host, in D1, fails rather than sending the key.
     await env.DB.prepare(
       "UPDATE user_settings SET base_url = 'https://api.example.com/x/v1'",
     ).run();
-    const moved = await call("/model/test", { method: "POST" });
-    expect(moved).toEqual({ status: 409, text: '{"error":"key_required"}' });
+    expect(await call("/model/test", { method: "POST" })).toEqual({
+      status: 409,
+      text: '{"error":"key_required"}',
+    });
+    expect(fetch.mock.calls).toHaveLength(1);
     await env.DB.prepare("UPDATE user_settings SET base_url = ?").bind(OPENAI.baseUrl).run();
   });
 });
