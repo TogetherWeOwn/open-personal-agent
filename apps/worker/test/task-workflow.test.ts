@@ -409,6 +409,36 @@ describe("task workflow", () => {
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
+  it("a task offering a third party's tool is tainted by its description (R7 §5.9)", async () => {
+    const { taskId, instanceId } = await makeTask();
+    // Never called: only its description, which a third party wrote, reaches the model.
+    const lookup = tool("lookup", "read", async () => ({ ok: true, content: "x" }));
+    const offered: LoopTool = { ...lookup, author: "third_party" };
+    const fetch = tool("fetch", "read", async () => ({ ok: true, content: "fetched" }));
+    const egress = [{ id: "web", kind: "third_party" as const, dataEgress: true }];
+    const fetchTool = { ...fetch, manifest: { ...fetch.manifest, destinations: egress } };
+    fetchTool.execute = fetch.execute.bind(fetch);
+    let batchId = "";
+    const approve = async () => {
+      // The egress read asks (floor_tainted_egress) instead of running silently.
+      expect(fetch.calls).toBe(0);
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      expect(JSON.stringify(state.turn.taint)).toContain("lookup description");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    const stepper = new FakeStepper([approve]);
+    const replies: Reply[] = [{ calls: [["fetch", { q: "y" }]] }, { text: "done" }];
+    const { promise } = await run(replies, instanceId, stepper, [offered, fetchTool]);
+    await promise;
+    expect(stepper.waits).toBe(1);
+    expect(fetch.calls).toBe(1);
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
+  });
+
   it("bookkeeping that fails after the hold never repeats the model call", async () => {
     const { taskId, instanceId } = await makeTask();
     const { promise, streams } = await run([{ text: "hi" }], instanceId, new FakeStepper(), [], {
