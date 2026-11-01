@@ -228,7 +228,8 @@ export default {
       return Response.json({ id: instance.id });
     }
     if (url.pathname === "/t3/status" && request.method === "GET") {
-      return Response.json(await env.VERIFY_WORKFLOW.get(url.searchParams.get("id") ?? ""));
+      const handle = await env.VERIFY_WORKFLOW.get(url.searchParams.get("id") ?? "");
+      return Response.json(await handle.status());
     }
     if (url.pathname === "/t3/ledger" && request.method === "GET") {
       const instance = url.searchParams.get("instance") ?? "";
