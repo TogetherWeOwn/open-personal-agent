@@ -47,6 +47,9 @@ const fresh = {
 
 interface Stub {
   learn: boolean;
+  /** The retention settings as the server holds them; each PUT body is kept too. */
+  retention: { messageDays: number | null; toolOutputDays: number | null; memoryInboxDays: number };
+  retentionPuts: unknown[];
   decisions: string[];
   /** Whether the session has stepped up; export answers `step_up_required` until it has. */
   steppedUp: boolean;
@@ -90,6 +93,8 @@ async function passkey(page: Page) {
 async function stub(page: Page): Promise<Stub> {
   const state: Stub = {
     learn: true,
+    retention: { messageDays: null, toolOutputDays: 30, memoryInboxDays: 14 },
+    retentionPuts: [],
     decisions: [],
     steppedUp: false,
     proposals: [conflict, fresh],
@@ -106,6 +111,24 @@ async function stub(page: Page): Promise<Stub> {
       state.learn = (route.request().postDataJSON() as { learnFromChats: boolean }).learnFromChats;
     }
     await route.fulfill({ json: { learnFromChats: state.learn } });
+  });
+  await page.route("/api/settings/retention", async (route) => {
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON();
+      state.retentionPuts.push(body);
+      state.retention = { ...state.retention, ...body };
+    }
+    await route.fulfill({
+      json: {
+        ...state.retention,
+        defaults: { messageDays: null, toolOutputDays: 30, memoryInboxDays: 14 },
+        bounds: {
+          messageDays: { min: 7, max: 3650 },
+          toolOutputDays: { min: 1, max: 3650 },
+          memoryInboxDays: { min: 1, max: 90 },
+        },
+      },
+    });
   });
   await page.route("/api/auth/step-up/session**", async (route) => {
     if (new URL(route.request().url()).pathname.endsWith("/options")) {
@@ -243,6 +266,42 @@ test("turns Learn from our chats off, and Memory says so", async ({ page }) => {
     "href",
     "/settings/memory",
   );
+});
+
+test("sets how long chats, tool outputs and suggestions are kept, each with its default", async ({
+  page,
+}) => {
+  const state = await stub(page);
+  await page.goto("/settings/memory");
+  const card = page.getByRole("region", { name: "How long I keep things" });
+  await expect(card.getByText("Default: kept forever.")).toBeVisible();
+  await expect(card.getByText("Default: 30 days.")).toBeVisible();
+  await expect(card.getByText("Default: 14 days.")).toBeVisible();
+  const chats = page.getByRole("switch", { name: "Delete old chats" });
+  await expect(chats).not.toBeChecked();
+  await expect(page.getByRole("switch", { name: "Remove old tool outputs" })).toBeChecked();
+  const inbox = page.getByRole("textbox", { name: "Forget unconfirmed suggestions after (days)" });
+  await expect(inbox).toHaveValue("14");
+  await axe(page);
+
+  // Kept forever until switched on; then it needs a number of days in range.
+  await card.locator("label").filter({ hasText: "Delete old chats" }).click();
+  const chatDays = page.getByRole("textbox", { name: /Delete a chat after/ });
+  await chatDays.fill("3");
+  await expect(card.getByText("Enter a whole number from 7 to 3650.")).toBeVisible();
+  await expect(card.getByRole("button", { name: "Save" })).toBeDisabled();
+  await chatDays.fill("90");
+  await inbox.fill("30");
+  await card.getByRole("button", { name: "Save" }).click();
+  await expect(card.getByRole("status")).toHaveText("Saved.");
+  // Only the fields changed here, so a change made elsewhere to the others stands.
+  expect(state.retentionPuts).toEqual([{ messageDays: 90, memoryInboxDays: 30 }]);
+
+  // Switched off again, tool outputs are kept forever.
+  await card.locator("label").filter({ hasText: "Remove old tool outputs" }).click();
+  await card.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => state.retentionPuts.at(-1)).toEqual({ toolOutputDays: null });
+  await expect(page.getByRole("switch", { name: "Remove old tool outputs" })).not.toBeChecked();
 });
 
 test("says so when Memory can't check the Learn from our chats setting", async ({ page }) => {

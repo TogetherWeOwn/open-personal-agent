@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Settings › Memory (m3-ux §3.9; M3-15 AC5). "Learn from our chats" means the assistant may use
 // `remember`. Off, it isn't offered the tool at all, so new notes come only from the Memory
-// screen. Nothing is learned in the background in M3.
+// screen. Nothing is learned in the background in M3. Retention (M3-18 AC1) has its own card.
 import { useEffect, useState } from "react";
 import { Link, Switch } from "react-aria-components";
 import { learnSetting } from "../memory/api";
 import { Card, CardHeader, Skeleton } from "../ui";
+import { RetentionSettings } from "./RetentionSettings";
 
 const link = "font-medium text-accent underline underline-offset-2";
 
@@ -72,6 +73,7 @@ export function MemorySettings() {
           </p>
         )}
       </Card>
+      <RetentionSettings />
     </div>
   );
 }
