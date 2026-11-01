@@ -5,7 +5,7 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/compose";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
@@ -106,5 +106,138 @@ describe("task rows", () => {
     expect(await (await alice.stepOutputs.get("out1"))?.text()).toBe('{"big":true}');
     expect(await bob.stepOutputs.get("out1")).toBeNull();
     expect(() => bob.stepOutputs.get("../../alice/task-outputs/out1")).toThrow(/invalid id/);
+  });
+
+  it("records which limit stopped a budget-limited task, and clears it on success", async () => {
+    await alice.tasks.create(makeTask("t10", "ca"));
+    await alice.tasks.markRunning("t10", 1_000);
+    expect(await alice.tasks.finish("t10", "budget_limited", "too many tools", "tools")).toBe(true);
+    expect((await alice.tasks.get("t10"))?.limitKind).toBe("tools");
+    // A paused task resumes: succeeding clears the kind and stamps the end.
+    expect(await alice.tasks.finish("t10", "succeeded")).toBe(true);
+    const done = await alice.tasks.get("t10");
+    expect(done?.limitKind).toBeNull();
+    expect(done?.finishedAt).not.toBeNull();
+  });
+
+  it("a repeated pause finish keeps the pause timestamp stable", async () => {
+    await alice.tasks.create(makeTask("t14", "ca"));
+    await alice.tasks.markRunning("t14", 1_000);
+    expect(await alice.tasks.finish("t14", "budget_limited", undefined, "calls")).toBe(true);
+    const pausedAt = (await alice.tasks.get("t14"))?.updatedAt ?? 0;
+    expect((await alice.tasks.get("t14"))?.status).toBe("budget_limited");
+    // The 7-day pause wait times out with no Continue; the run's end writes the same pause
+    // again. The timestamp must not move, or the Tasks view's elapsed clock (frozen at the
+    // pause) would count the idle wait as run time.
+    const later = vi.spyOn(Date, "now").mockReturnValue(pausedAt + 7 * 86_400_000);
+    try {
+      expect(await alice.tasks.finish("t14", "budget_limited", undefined, "calls")).toBe(true);
+    } finally {
+      later.mockRestore();
+    }
+    expect((await alice.tasks.get("t14"))?.updatedAt).toBe(pausedAt);
+    // A pause under a different kind still moves the row.
+    expect(await alice.tasks.finish("t14", "budget_limited", undefined, "duration")).toBe(true);
+    expect((await alice.tasks.get("t14"))?.limitKind).toBe("duration");
+    // A repeated terminal ending still reports "already ended", never success.
+    expect(await alice.tasks.finish("t14", "succeeded")).toBe(true);
+    expect(await alice.tasks.finish("t14", "succeeded")).toBe(false);
+  });
+
+  it("clears the limit kind when a paused task resumes or is cancelled", async () => {
+    await alice.tasks.create(makeTask("t13", "ca"));
+    await alice.tasks.markRunning("t13", 1_000);
+    expect(await alice.tasks.finish("t13", "budget_limited", "too many calls", "calls")).toBe(true);
+    expect((await alice.tasks.get("t13"))?.limitKind).toBe("calls");
+    // Resuming moves back to running, so the pause's kind no longer describes the row.
+    const resumed = await alice.tasks.markRunning("t13", 2_000);
+    expect(resumed?.status).toBe("running");
+    expect(resumed?.limitKind).toBeNull();
+    expect(await alice.tasks.finish("t13", "budget_limited", "too slow", "duration")).toBe(true);
+    // Continuing (M3-17) moves back to running too, so its kind clears the same way; a
+    // task that isn't paused has nothing to continue.
+    expect(await alice.tasks.resume("t13")).toBe(true);
+    const continued = await alice.tasks.get("t13");
+    expect(continued?.status).toBe("running");
+    expect(continued?.limitKind).toBeNull();
+    expect(await alice.tasks.resume("t13")).toBe(false);
+    expect(await alice.tasks.finish("t13", "budget_limited", "too slow", "duration")).toBe(true);
+    // Cancelling ends it, so the kind clears with the move to cancelled.
+    expect(await alice.tasks.cancel("t13")).toBe(true);
+    const cancelled = await alice.tasks.get("t13");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.limitKind).toBeNull();
+  });
+
+  it("lists runs with their conversation and spend, and filters them", async () => {
+    await alice.tasks.create({ ...makeTask("t11", "ca"), title: "Report" });
+    await alice.tasks.create(makeTask("t12", "ca"));
+    const call = {
+      providerId: "openai",
+      model: "gpt-4.1-mini",
+      usage: { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0, reasoningTokens: 0 },
+    };
+    await alice.usage.record({ ...call, taskId: "t11" });
+    await alice.usage.record({ ...call, taskId: "t11" });
+    await alice.usage.record({
+      providerId: "unpriced-vendor",
+      model: "mystery",
+      usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0 },
+      taskId: "t11",
+    }); // no price on file: counted, but missing from the subtotal
+    await alice.usage.record(call); // a chat turn: no task, so no run may claim it
+    // Another user's call can't attach to the task at all (TWO-427 L-4): the owner
+    // trigger refuses the write (drizzle wraps the abort as a failed query), so no
+    // foreign spend can leak into the subtotal.
+    await expect(bob.usage.record({ ...call, taskId: "t11" })).rejects.toThrow(
+      /Failed query: insert into "usage"/,
+    );
+    await expect(alice.usage.record({ ...call, taskId: "../x" })).rejects.toThrow(/invalid id/);
+
+    const listed = await alice.tasks.list();
+    const report = listed.find((t) => t.id === "t11");
+    expect(report).toMatchObject({
+      title: "Report",
+      conversationId: "ca",
+      conversationTitle: "Alice's",
+      kind: "turn",
+      mode: "background",
+      status: "queued",
+      limitKind: null,
+      calls: 3,
+      unpricedCalls: 1,
+    });
+    expect(typeof report?.costMicroUsd).toBe("number");
+    // No calls yet reads as zero calls and unknown cost, never as nulls.
+    expect(listed.find((t) => t.id === "t12")).toMatchObject({
+      calls: 0,
+      unpricedCalls: 0,
+      costMicroUsd: null,
+    });
+    // Newest first.
+    expect(listed[0]?.createdAt).toBeGreaterThanOrEqual(listed.at(-1)?.createdAt ?? 0);
+
+    const details = await alice.tasks.details("t11");
+    expect(details).toMatchObject({
+      id: "t11",
+      calls: 3,
+      unpricedCalls: 1,
+      conversationTitle: "Alice's",
+    });
+    expect(details?.costMicroUsd).toBe(report?.costMicroUsd);
+    expect(await alice.tasks.details("missing")).toBeUndefined();
+    expect(await bob.tasks.details("t11")).toBeUndefined(); // someone else's run
+
+    expect((await alice.tasks.list({ status: ["queued", "bogus"] })).map((t) => t.id)).toContain(
+      "t11",
+    ); // unknown statuses are ignored
+    expect((await alice.tasks.list({ status: ["running"] })).some((t) => t.id === "t11")).toBe(
+      false,
+    );
+    expect(await alice.tasks.list({ since: Date.now() + 3_600_000 })).toEqual([]);
+    expect(await alice.tasks.list({ until: 0 })).toEqual([]);
+    expect(await alice.tasks.list({ limit: 1 })).toHaveLength(1);
+    expect(await alice.tasks.list({ limit: 0 })).toHaveLength(1); // clamped to one
+    expect((await alice.tasks.list({ limit: 500 })).length).toBeGreaterThan(1); // clamped to 200
   });
 });
