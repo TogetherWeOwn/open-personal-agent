@@ -3,19 +3,33 @@
 // change or forget, each with its source, a diff when it changes a note, and when it expires.
 // Nothing is applied until the user picks; an unanswered suggestion expires to rejected. The
 // same list will show in Inbox › Memories to confirm.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Heading } from "react-aria-components";
 import { Banner, Button, Card, Toast, TrustChip } from "../ui";
 import { type Decision, decide, expiresIn, listProposals, memoryError, type Proposal } from "./api";
 import { MemoryDiff } from "./MemoryDiff";
 import { NoteMeta } from "./NoteRow";
 
+/**
+ * A change whose notes were edited or deleted since: the list sends no targets for it, and
+ * accepting it would fail, so it can only be kept as a note of its own or dismissed.
+ */
+const orphaned = (p: Proposal) => p.op !== "create" && p.targets.length === 0;
+
 /** The choices for each kind of suggestion, the accepting one first. */
 function choices(p: Proposal): [Decision, string][] {
   if (p.op === "delete") {
+    return orphaned(p)
+      ? [["reject", "Dismiss"]]
+      : [
+          ["accept", "Forget it"],
+          ["reject", "Keep it"],
+        ];
+  }
+  if (orphaned(p)) {
     return [
-      ["accept", "Forget it"],
-      ["reject", "Keep it"],
+      ["keep-both", "Remember this"],
+      ["reject", "Don't remember"],
     ];
   }
   if (p.targets.length > 0) {
@@ -52,6 +66,13 @@ function Suggestion({ p, onDecide }: { p: Proposal; onDecide: (d: Decision) => v
             <span className="sr-only">From the source: </span>“{p.sourceExcerpt}”
           </blockquote>
         )}
+        {orphaned(p) && (
+          <p className="text-sm">
+            {forget
+              ? "The note this would forget was already changed or deleted."
+              : "The note this would change was edited or deleted since."}
+          </p>
+        )}
         {!forget && p.targets.length > 0 && (
           <MemoryDiff before={p.targets.map((t) => t.text).join(" ")} after={p.text} />
         )}
@@ -82,15 +103,41 @@ export function Waiting({
 }) {
   const [proposals, setProposals] = useState<Proposal[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [announcement, setAnnouncement] = useState("");
-  // A discarded suggestion is held behind Undo for 10 s, as a delete is (Flow C1). If the page
-  // goes away first, nothing is sent: the suggestion just waits again, which is the safe side.
+  // A discarded suggestion is held behind Undo for 10 s, as a delete is (Flow C1), and sent when
+  // the toast closes or the screen or page goes away, so it doesn't come back somewhere else.
   const [discarded, setDiscarded] = useState<Proposal | null>(null);
+  const discardedRef = useRef<Proposal | null>(null);
+  discardedRef.current = discarded;
+  useEffect(() => {
+    const flush = () => {
+      const p = discardedRef.current;
+      if (!p) return;
+      discardedRef.current = null;
+      fetch(`/api/memory/proposals/${p.id}/reject`, { method: "POST", keepalive: true }).catch(
+        () => {},
+      );
+      setDiscarded(null);
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
 
   const load = useCallback(() => {
     listProposals().then(
-      (r) => setProposals(r.proposals),
-      () => setProblem("I couldn't load the suggestions waiting for you."),
+      (r) => {
+        setProposals(r.proposals);
+        setLoadFailed(false);
+        setProblem(null);
+      },
+      () => {
+        setLoadFailed(true);
+        setProblem("I couldn't load the suggestions waiting for you.");
+      },
     );
   }, []);
   useEffect(load, [load]);
@@ -139,6 +186,11 @@ export function Waiting({
       {problem && (
         <Banner tone="danger" alert>
           {problem}
+          {loadFailed && (
+            <Button className="ml-2" onPress={load}>
+              Try again
+            </Button>
+          )}
         </Banner>
       )}
       {!heading && proposals !== null && list.length === 0 && (
@@ -160,14 +212,20 @@ export function Waiting({
           onAction={() => {
             setProposals((all) => [discarded, ...(all ?? [])]);
             setDiscarded(null);
+            discardedRef.current = null;
             setAnnouncement("Undone. The suggestion is back.");
           }}
           onClose={() => {
             run(discarded, "reject");
             setDiscarded(null);
+            discardedRef.current = null;
           }}
         >
-          Discarded “{discarded.text}”.
+          {orphaned(discarded)
+            ? "Dismissed."
+            : discarded.op === "delete"
+              ? `Kept “${discarded.targets.map((t) => t.text).join("; ")}”.`
+              : `Discarded “${discarded.text}”.`}
         </Toast>
       )}
     </section>

@@ -47,17 +47,25 @@ const fresh = {
 
 interface Stub {
   decisions: string[];
+  /** What the list returns; the conflict and the new fact by default. */
+  proposals: Record<string, unknown>[];
+  /** The next list request fails, once. */
+  listFails?: boolean;
 }
 
 async function stub(page: Page): Promise<Stub> {
-  const state: Stub = { decisions: [] };
+  const state: Stub = { decisions: [], proposals: [conflict, fresh] };
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/memory**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/memory/proposals") {
-      const open = [conflict, fresh].filter(
-        (p) => !state.decisions.some((d) => d.startsWith(p.id)),
+      if (state.listFails) {
+        state.listFails = false;
+        return route.fulfill({ status: 500, json: { error: "internal_error" } });
+      }
+      const open = state.proposals.filter(
+        (p) => !state.decisions.some((d) => d.startsWith(p.id as string)),
       );
       return route.fulfill({ json: { expired: 0, proposals: open } });
     }
@@ -122,6 +130,51 @@ test("keeps both, or discards with Undo before anything is sent", async ({ page 
   await expect(page.getByText("Nothing is waiting for you.")).toBeVisible();
   expect(state.decisions).toEqual(["p1:keep-both", "p2:reject"]);
   await axe(page);
+});
+
+test("a change to a note edited since offers to add it as a new note", async ({ page }) => {
+  const state = await stub(page);
+  state.proposals = [{ ...conflict, targets: [] }];
+  await page.goto("/memory/waiting");
+  await expect(
+    page.getByText("The note this would change was edited or deleted since."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use the new one" })).toBeHidden();
+  await page.getByRole("button", { name: "Remember this" }).click();
+  await expect.poll(() => state.decisions).toEqual(["p1:keep-both"]);
+});
+
+test("keeping a note a suggestion would forget names the note in the toast", async ({ page }) => {
+  const state = await stub(page);
+  state.proposals = [{ ...fromWeb, id: "p3", text: "", op: "delete", targets: [leeds] }];
+  await page.goto("/memory/waiting");
+  await page.getByRole("button", { name: "Keep it" }).click();
+  await expect(page.getByRole("region", { name: "Notifications" })).toContainText(
+    "Kept “Sam lives in Leeds”.",
+  );
+});
+
+test("a failed load offers Try again", async ({ page }) => {
+  const state = await stub(page);
+  state.listFails = true;
+  await page.goto("/memory/waiting");
+  await expect(page.getByRole("alert")).toContainText(
+    "I couldn't load the suggestions waiting for you.",
+  );
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("button", { name: "Remember this" })).toBeVisible();
+  await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("leaving the page sends a discard waiting behind Undo", async ({ page }) => {
+  const state = await stub(page);
+  await page.goto("/memory/waiting");
+  await page.getByRole("button", { name: "Don't remember" }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+  );
+  await expect.poll(() => state.decisions).toEqual(["p2:reject"]);
+  await expect(page.getByRole("region", { name: "Notifications" })).toBeHidden();
 });
 
 for (const width of [375, 1280]) {
