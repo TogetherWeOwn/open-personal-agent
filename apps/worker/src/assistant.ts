@@ -37,6 +37,7 @@ import {
   type TurnState,
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
+import type { AllowanceWarnings } from "@opa/server/allowances";
 import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import {
   Agent,
@@ -255,7 +256,14 @@ export class Assistant extends Agent<Bindings> {
         stepsPerTask: TASK_LIMITS.steps,
       },
       ...this.limits.totals(),
+      // Only the owner's assistant gets these: the reconciler writes them there (COST-5).
+      allowance: this.ctx.storage.kv.get<AllowanceWarnings>("allowance-warnings") ?? null,
     };
+  }
+
+  /** The reconciler's latest allowance warnings (M3-17 AC4); each run replaces the last. */
+  setAllowanceWarnings(warnings: AllowanceWarnings): void {
+    this.ctx.storage.kv.put("allowance-warnings", warnings);
   }
 
   /**

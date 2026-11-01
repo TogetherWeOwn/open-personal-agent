@@ -22,6 +22,8 @@ export interface Spending {
   /** The UTC month the figures are for, as its first instant. */
   month: number;
   userId: string;
+  /** The reconciler's warnings at 70% of a Cloudflare allowance (COST-5); the owner's only. */
+  allowanceWarnings?: { id: string; percent: number }[];
 }
 
 export async function getSpending(): Promise<Spending> {
@@ -63,7 +65,10 @@ function isSpending(v: unknown): v is Spending {
     (s.warning === null || s.warning === 50 || s.warning === 80 || s.warning === 100) &&
     typeof s.hardCapReached === "boolean" &&
     isNum(s.month) &&
-    typeof s.userId === "string"
+    typeof s.userId === "string" &&
+    (s.allowanceWarnings === undefined ||
+      (Array.isArray(s.allowanceWarnings) &&
+        s.allowanceWarnings.every((w) => typeof w?.id === "string" && isNum(w.percent))))
   );
 }
 
