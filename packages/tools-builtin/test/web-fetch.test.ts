@@ -29,13 +29,13 @@ describe("URL policy (M3-08 AC1)", () => {
     "http://[fe80::1]/",
     "not a url",
   ])("refuses %s", (raw) => {
-    expect(checkFetchUrl(raw).ok).toBe(false);
+    expect(checkFetchUrl(raw, []).ok).toBe(false);
   });
 
   it.each(["https://example.com/a?b=c", "http://1.1.1.1/", "https://[2606:4700:4700::1111]/"])(
     "allows %s",
     (raw) => {
-      expect(checkFetchUrl(raw).ok).toBe(true);
+      expect(checkFetchUrl(raw, []).ok).toBe(true);
     },
   );
 
@@ -74,7 +74,7 @@ describe("web_fetch", () => {
           "<body><script>steal()</script><h1>Sailings</h1><p>First boat at 06:30.</p></body></html>",
       ),
     );
-    const out = await webFetchTool({ fetch }).execute(
+    const out = await webFetchTool({ fetch, ownHosts: [] }).execute(
       { url: "https://ferries.example/timetable" },
       signal(),
     );
@@ -105,7 +105,7 @@ describe("web_fetch", () => {
     const ok = fakeFetch((url) =>
       url.endsWith("/old") ? redirect("/new") : page("<p>landed</p>"),
     );
-    const out = await webFetchTool({ fetch: ok.fetch }).execute(
+    const out = await webFetchTool({ fetch: ok.fetch, ownHosts: [] }).execute(
       { url: "https://example.com/old" },
       signal(),
     );
@@ -114,7 +114,10 @@ describe("web_fetch", () => {
     expect(ok.asked).toEqual(["https://example.com/old", "https://example.com/new"]);
 
     const loop = fakeFetch(() => redirect("/again"));
-    const capped = webFetchTool({ fetch: loop.fetch }, { ...WEB_FETCH_CAPS, maxRedirects: 2 });
+    const capped = webFetchTool(
+      { fetch: loop.fetch, ownHosts: [] },
+      { ...WEB_FETCH_CAPS, maxRedirects: 2 },
+    );
     const refused = await capped.execute({ url: "https://example.com/again" }, signal());
     expect(refused.ok).toBe(false);
     expect(refused.content).toContain("redirected more than 2 times");
@@ -123,7 +126,7 @@ describe("web_fetch", () => {
 
   it("reads only the allowlisted content types, and not a missing one", async () => {
     const pdf = fakeFetch(() => page("%PDF-1.7", "application/pdf"));
-    const out = await webFetchTool({ fetch: pdf.fetch }).execute(
+    const out = await webFetchTool({ fetch: pdf.fetch, ownHosts: [] }).execute(
       { url: "https://example.com/x.pdf" },
       signal(),
     );
@@ -131,7 +134,7 @@ describe("web_fetch", () => {
     expect(out.content).toContain("application/pdf");
 
     const bare = fakeFetch(() => new Response(new Uint8Array([104, 105]), { status: 200 }));
-    const missing = await webFetchTool({ fetch: bare.fetch }).execute(
+    const missing = await webFetchTool({ fetch: bare.fetch, ownHosts: [] }).execute(
       { url: "https://example.com/x" },
       signal(),
     );
@@ -139,7 +142,7 @@ describe("web_fetch", () => {
     expect(missing.content).toContain("didn't say what type");
 
     const json = fakeFetch(() => page('{"a":1}', "application/json"));
-    const read = await webFetchTool({ fetch: json.fetch }).execute(
+    const read = await webFetchTool({ fetch: json.fetch, ownHosts: [] }).execute(
       { url: "https://example.com/x.json" },
       signal(),
     );
@@ -149,7 +152,7 @@ describe("web_fetch", () => {
   it("caps the body it reads and the text it shows", async () => {
     const caps = { ...WEB_FETCH_CAPS, maxBytes: 16, maxChars: 10 };
     const big = fakeFetch(() => page(`<p>${"x".repeat(100)}</p>`));
-    const out = await webFetchTool({ fetch: big.fetch }, caps).execute(
+    const out = await webFetchTool({ fetch: big.fetch, ownHosts: [] }, caps).execute(
       { url: "https://example.com/big" },
       signal(),
     );
@@ -157,10 +160,10 @@ describe("web_fetch", () => {
     expect(out.content).toContain("larger than 16 bytes");
 
     const long = fakeFetch(() => page("abcdefghijklmnop", "text/plain"));
-    const shown = await webFetchTool({ fetch: long.fetch }, { ...caps, maxBytes: 1024 }).execute(
-      { url: "https://example.com/t" },
-      signal(),
-    );
+    const shown = await webFetchTool(
+      { fetch: long.fetch, ownHosts: [] },
+      { ...caps, maxBytes: 1024 },
+    ).execute({ url: "https://example.com/t" }, signal());
     expect(shown.content).toContain("abcdefghij");
     expect(shown.content).toContain("[Truncated at 10 characters.]");
     expect(shown.content).not.toContain("klmnop");
@@ -172,7 +175,7 @@ describe("web_fetch", () => {
         `<html><head><title>${"T".repeat(120_000)}</title></head><body><p>short body</p></body></html>`,
       ),
     );
-    const out = await webFetchTool({ fetch }).execute(
+    const out = await webFetchTool({ fetch, ownHosts: [] }).execute(
       { url: "https://example.com/long" },
       signal(),
     );
@@ -183,7 +186,7 @@ describe("web_fetch", () => {
 
   it("stops at a cross-host redirect so the new host gets its own approval", async () => {
     const { fetch, asked } = fakeFetch(() => redirect("https://other.example/landing"));
-    const out = await webFetchTool({ fetch }).execute(
+    const out = await webFetchTool({ fetch, ownHosts: [] }).execute(
       { url: "https://news.example/story" },
       signal(),
     );
@@ -195,7 +198,7 @@ describe("web_fetch", () => {
 
   it("stops at a same-host redirect to another port so the new URL gets its own approval", async () => {
     const { fetch, asked } = fakeFetch(() => redirect("https://example.com:8443/admin"));
-    const out = await webFetchTool({ fetch }).execute(
+    const out = await webFetchTool({ fetch, ownHosts: [] }).execute(
       { url: "https://example.com/start" },
       signal(),
     );
@@ -210,7 +213,7 @@ describe("web_fetch", () => {
         ? redirect("https://example.com/new")
         : page("<p>landed</p>"),
     );
-    const out = await webFetchTool({ fetch: ok.fetch }).execute(
+    const out = await webFetchTool({ fetch: ok.fetch, ownHosts: [] }).execute(
       { url: "http://example.com/old" },
       signal(),
     );
@@ -226,7 +229,10 @@ describe("web_fetch", () => {
           init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
         }),
     );
-    const tool = webFetchTool({ fetch: hang.fetch }, { ...WEB_FETCH_CAPS, timeoutMs: 20 });
+    const tool = webFetchTool(
+      { fetch: hang.fetch, ownHosts: [] },
+      { ...WEB_FETCH_CAPS, timeoutMs: 20 },
+    );
     const out = await tool.execute({ url: "https://slow.example/" }, signal());
     expect(out.ok).toBe(false);
     expect(out.content).toContain("took longer");
@@ -234,7 +240,7 @@ describe("web_fetch", () => {
 
   it("reports HTTP failures and unreachable hosts without tainting", async () => {
     const gone = fakeFetch(() => page("nope", "text/plain", 404));
-    const out = await webFetchTool({ fetch: gone.fetch }).execute(
+    const out = await webFetchTool({ fetch: gone.fetch, ownHosts: [] }).execute(
       { url: "https://example.com/gone" },
       signal(),
     );
@@ -245,7 +251,7 @@ describe("web_fetch", () => {
     const down = fakeFetch(() => {
       throw new TypeError("fetch failed");
     });
-    const failed = await webFetchTool({ fetch: down.fetch }).execute(
+    const failed = await webFetchTool({ fetch: down.fetch, ownHosts: [] }).execute(
       { url: "https://down.example/" },
       signal(),
     );
@@ -254,7 +260,7 @@ describe("web_fetch", () => {
   });
 
   it("names the host as its target", () => {
-    const tool = webFetchTool({ fetch: fakeFetch(() => page("")).fetch });
+    const tool = webFetchTool({ fetch: fakeFetch(() => page("")).fetch, ownHosts: [] });
     expect(tool.target?.({ url: "https://sub.example.com:8443/a" })).toBe("sub.example.com");
     expect(tool.target?.({ url: "junk" })).toBeUndefined();
   });

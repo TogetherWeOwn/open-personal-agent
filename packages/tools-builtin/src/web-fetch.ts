@@ -18,10 +18,12 @@ export type WebFetchPorts = {
   /**
    * Every hostname serving the deployment (workers.dev, custom domains, …). Unknown DNS aliases
    * can't be told apart from anywhere else at this layer — no resolver exists in the tool path
-   * on Workers — so the host must list each one. Entries may carry capitals, a port or unicode;
-   * they are normalized the same way request hosts are before comparing.
+   * on Workers — so the host must list each one. Required, with no default: a host that forgets
+   * it fails to compile instead of silently fetching the deployment itself. Entries may carry
+   * capitals, a port or unicode; they are normalized the same way request hosts are before
+   * comparing.
    */
-  ownHosts?: readonly string[];
+  ownHosts: readonly string[];
 };
 
 export type WebFetchCaps = {
@@ -174,7 +176,7 @@ export type UrlCheck = { ok: true; url: URL } | { ok: false; error: string };
  * redirect target. `ownHosts` is the deployment's own hostname: fetching it is refused, so a
  * page (or an injected instruction) can't make the tool read the app itself.
  */
-export function checkFetchUrl(raw: string, ownHosts: readonly string[] = []): UrlCheck {
+export function checkFetchUrl(raw: string, ownHosts: readonly string[]): UrlCheck {
   let url: URL;
   try {
     url = new URL(raw);

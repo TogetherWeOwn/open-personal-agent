@@ -48,6 +48,7 @@ export function fakePorts(over: Partial<BuiltinToolPorts> = {}): BuiltinToolPort
   const store = new Map<string, { content: string; type: string }>();
   return {
     fetch: fakeFetch(() => page("<title>Hi</title><p>hello from the web</p>")).fetch,
+    ownHosts: [],
     searchHistory: async (): Promise<HistoryHit[]> => [],
     ...filePorts(store, "alice"),
     ...over,
