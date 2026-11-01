@@ -20,7 +20,8 @@ artifactRoutes.get("/", async (c) => {
   const cursor = before === undefined ? undefined : Number(before);
   if (cursor !== undefined && !Number.isSafeInteger(cursor))
     return c.json({ error: "bad_request" }, 400);
-  if (beforeId !== undefined && (cursor === undefined || !isId(beforeId)))
+  // The cursor is both halves or neither: a time alone would skip the rest of a tie.
+  if ((cursor === undefined) !== (beforeId === undefined) || (beforeId && !isId(beforeId)))
     return c.json({ error: "bad_request" }, 400);
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const artifacts = await user.artifacts.list({
