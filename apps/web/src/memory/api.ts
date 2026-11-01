@@ -56,6 +56,24 @@ export type Decision = "accept" | "keep-both" | "reject";
 export const decide = (id: string, decision: Decision) =>
   memoryApi<{ memory: Note } | undefined>(`/proposals/${id}/${decision}`, "POST");
 
+/** The `opa-memory-export/v1` download: a plain link, so the session cookie authorises it. */
+export const EXPORT_URL = "/api/memory/export";
+
+/** Settings › Memory's "Learn from our chats" (M3-15 AC5). */
+export async function learnSetting(value?: boolean): Promise<boolean> {
+  const res = await fetch("/api/settings/memory", {
+    method: value === undefined ? "GET" : "PUT",
+    ...(value === undefined
+      ? {}
+      : {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ learnFromChats: value }),
+        }),
+  });
+  if (!res.ok) throw new Error(String(res.status));
+  return ((await res.json()) as { learnFromChats: boolean }).learnFromChats;
+}
+
 /** "Expires in 9 days"; "Expires today" in the last 24 hours. */
 export function expiresIn(ts: number | null, now = Date.now()) {
   const days = Math.floor(((ts ?? now) - now) / 86_400_000);

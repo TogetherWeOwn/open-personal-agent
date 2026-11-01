@@ -1,15 +1,42 @@
 // SPDX-License-Identifier: Apache-2.0
 // Memory (m3-ux §3.7, M3-15): what the assistant remembers, in sections — Waiting for you,
-// Recently learned, About you (standing instructions) and Notes — with search, Edit, Delete and
-// bulk delete.
+// Recently learned, About you (standing instructions) and Notes — with search, Edit, Delete, bulk
+// delete and Export.
 //
 // Every delete says a backup is kept for 30 days (AC3). A delete is held while its Undo toast is
 // open and sent when the toast closes, the screen goes away or the page unloads, so the server's
 // forget stays a true hard delete and Undo never needs a restore.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Heading, Input, Label, SearchField, TextArea, TextField } from "react-aria-components";
-import { Banner, Button, ConfirmDialog, EmptyState, Page, Skeleton, Toast } from "../ui";
-import { addNote, BACKUP_LINE, listNotes, memoryError, type Note } from "./api";
+import {
+  Heading,
+  Input,
+  Label,
+  Link,
+  SearchField,
+  TextArea,
+  TextField,
+} from "react-aria-components";
+import {
+  Banner,
+  Button,
+  ConfirmDialog,
+  EmptyState,
+  Menu,
+  MenuItem,
+  Page,
+  Skeleton,
+  Toast,
+} from "../ui";
+import {
+  addNote,
+  BACKUP_LINE,
+  EXPORT_URL,
+  learnSetting,
+  listNotes,
+  memoryError,
+  type Note,
+} from "./api";
+import { Knows } from "./Knows";
 import { NoteMeta, NoteRow } from "./NoteRow";
 import { Waiting } from "./Waiting";
 
@@ -45,6 +72,8 @@ export function Memory() {
   const [confirming, setConfirming] = useState(false);
   const [allRecent, setAllRecent] = useState(false);
   const [draft, setDraft] = useState("");
+  const [learning, setLearning] = useState(true);
+  const [knows, setKnows] = useState(false);
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
   const keys = useRef(new Map<string, string>());
 
@@ -56,6 +85,9 @@ export function Memory() {
     } catch {
       setFailed(true);
     }
+  }, []);
+  useEffect(() => {
+    learnSetting().then(setLearning, () => {});
   }, []);
   useEffect(() => {
     const timer = setTimeout(() => load(query.trim()), query ? 250 : 0);
@@ -159,6 +191,21 @@ export function Memory() {
       <p role="status" className="sr-only">
         {announcement}
       </p>
+      <div className="-mt-4 flex justify-end">
+        <Menu label="Export" variant="secondary">
+          <MenuItem onAction={() => setKnows(true)}>View what my assistant knows about me</MenuItem>
+          <MenuItem onAction={() => window.location.assign(EXPORT_URL)}>Download JSON</MenuItem>
+        </Menu>
+      </div>
+      {!learning && (
+        <Banner>
+          I'm not saving new memories.{" "}
+          <Link href="/settings/memory" className="font-medium text-accent underline">
+            Turn this on in Settings.
+          </Link>
+        </Banner>
+      )}
+      <Knows isOpen={knows} onOpenChange={setKnows} />
       {!shown && <Waiting onDecided={() => load(query.trim())} />}
       <SearchField value={query} onChange={setQuery} className="flex flex-col gap-1">
         <Label className="text-sm font-medium">Search notes</Label>

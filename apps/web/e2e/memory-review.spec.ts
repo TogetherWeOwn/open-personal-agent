@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Waiting for you (M3-15 AC2; m3-ux §3.7, Flow C).
+// Waiting for you, export and Settings › Memory (M3-15 AC2, AC4, AC5; m3-ux §3.7, §3.9).
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
@@ -46,13 +46,25 @@ const fresh = {
 };
 
 interface Stub {
+  learn: boolean;
   decisions: string[];
 }
 
 async function stub(page: Page): Promise<Stub> {
-  const state: Stub = { decisions: [] };
+  const state: Stub = { learn: true, decisions: [] };
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
+  await page.route("/api/settings", (route) =>
+    route.fulfill({
+      json: { onboarded: true, providers: [], roles: { chat: null, background: null } },
+    }),
+  );
+  await page.route("/api/settings/memory", async (route) => {
+    if (route.request().method() === "PUT") {
+      state.learn = (route.request().postDataJSON() as { learnFromChats: boolean }).learnFromChats;
+    }
+    await route.fulfill({ json: { learnFromChats: state.learn } });
+  });
   await page.route("/api/memory**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/memory/proposals") {
@@ -67,6 +79,12 @@ async function stub(page: Page): Promise<Stub> {
       return decision === "reject"
         ? route.fulfill({ status: 204 })
         : route.fulfill({ json: { memory: { ...conflict, op: "update" } } });
+    }
+    if (path === "/api/memory/export") {
+      return route.fulfill({
+        headers: { "content-disposition": 'attachment; filename="memory.opa-memory.json"' },
+        json: { format: "opa-memory-export/v1", memories: [] },
+      });
     }
     const accepted = state.decisions.includes("p1:accept");
     return route.fulfill({
@@ -122,6 +140,41 @@ test("keeps both, or discards with Undo before anything is sent", async ({ page 
   await expect(page.getByText("Nothing is waiting for you.")).toBeVisible();
   expect(state.decisions).toEqual(["p1:keep-both", "p2:reject"]);
   await axe(page);
+});
+
+test("exports as Markdown in a sheet and as an opa-memory-export/v1 download", async ({ page }) => {
+  await stub(page);
+  await page.goto("/memory");
+  await page.getByRole("button", { name: "Export" }).click();
+  await page.getByRole("menuitem", { name: "View what my assistant knows about me" }).click();
+  const sheet = page.getByRole("dialog", { name: "What my assistant knows about me" });
+  await expect(sheet.getByRole("heading", { name: "Notes" })).toBeVisible();
+  await expect(sheet).toContainText("Sam lives in Leeds (you told me; From a chat;");
+  await axe(page);
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Export" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("menuitem", { name: "Download JSON" }).click();
+  expect((await download).suggestedFilename()).toBe("memory.opa-memory.json");
+});
+
+test("turns Learn from our chats off, and Memory says so", async ({ page }) => {
+  const state = await stub(page);
+  await page.goto("/settings/memory");
+  const toggle = page.getByRole("switch", { name: "Learn from our chats" });
+  await expect(toggle).toBeChecked();
+  await axe(page);
+  // RAC hides the input itself; a person presses the label.
+  await page.locator("label").filter({ hasText: "Learn from our chats" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+  await expect(toggle).not.toBeChecked();
+  expect(state.learn).toBe(false);
+  await page.getByRole("link", { name: "Memory", exact: true }).last().click();
+  await expect(page.getByText("I'm not saving new memories.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Turn this on in Settings." })).toHaveAttribute(
+    "href",
+    "/settings/memory",
+  );
 });
 
 for (const width of [375, 1280]) {
