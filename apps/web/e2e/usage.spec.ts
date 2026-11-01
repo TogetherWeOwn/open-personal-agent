@@ -178,6 +178,42 @@ test("labels every cost by model and flags old and missing prices", async ({ pag
   await expect(page.getByRole("table", { name: "Billed by OpenAI, today" })).toBeVisible();
 });
 
+test("breaks the month down by conversation, task and day, and exports each as CSV", async ({
+  page,
+}) => {
+  await open(page, body(period, period));
+  await page.getByRole("tab", { name: "Chat" }).click();
+  const chats = page.getByRole("table", { name: "By conversation, this month" });
+  await expect(chats.getByRole("link", { name: "=Plan the trip" })).toHaveAttribute(
+    "href",
+    "/c/c1",
+  );
+  await expect(chats).toContainText("Deleted chats and model tests2about $0.40 + 1 unpriced");
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe("usage-month-by-conversation.csv");
+  const csv = await (await file.createReadStream()).toArray();
+  // A title a spreadsheet would run as a formula is quoted out of it.
+  expect(Buffer.concat(csv).toString()).toBe(
+    "Conversation,Messages,Unpriced messages,Cost (USD)\r\n'=Plan the trip,4,0,3.000000\r\nDeleted chats and model tests,2,1,0.400000\r\n",
+  );
+
+  await page.getByRole("tab", { name: "Task" }).click();
+  await expect(page.getByRole("link", { name: "Compare flights" })).toHaveAttribute(
+    "href",
+    "/activity/tasks/t1",
+  );
+  await page.getByRole("tab", { name: "Day" }).click();
+  await expect(
+    page.getByRole("img", { name: /^Cost by day this month\. Highest: Nov 9, 2026/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show as table" }).click();
+  const byDay = page.getByRole("table", { name: "By day, this month" });
+  await expect(byDay.getByRole("row")).toHaveCount(11);
+  await expect(byDay.getByRole("row", { name: /Nov 2, 2026/ })).toContainText("1about $0.04");
+});
+
 test("nothing used yet still shows the plan; a member has no meter", async ({ page }) => {
   await open(page, body(empty, empty, null));
   await expect(page.getByRole("meter")).toHaveCount(0);
@@ -253,6 +289,12 @@ for (const colorScheme of ["light", "dark"] as const) {
       const { violations } = await new AxeBuilder({ page }).analyze();
       expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
       await expect(page).toHaveScreenshot(`usage-${colorScheme}-${width}.png`, { fullPage: true });
+      if (width === 375) {
+        // The by-day chart on the narrowest screen: one bar a day still fits.
+        await page.getByRole("tab", { name: "Day" }).click();
+        const breakdown = page.getByRole("region", { name: "Breakdown" });
+        await expect(breakdown).toHaveScreenshot(`usage-day-${colorScheme}-375.png`);
+      }
     });
   }
 }

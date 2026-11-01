@@ -98,3 +98,18 @@ export const dateWords = (date: string, style: "medium" | "short" = "medium") =>
   );
 
 export const messages = (n: number) => `${num.format(n)} ${n === 1 ? "message" : "messages"}`;
+
+/**
+ * Rows as CSV. A cell that a spreadsheet would run as a formula (a conversation title can be
+ * anything) gets a leading apostrophe, so opening the file never runs it.
+ */
+export function toCsv(rows: (string | number)[][]) {
+  const cell = (v: string | number) => {
+    const s = typeof v === "number" ? String(v) : /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+    return /[",\n\r]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+  };
+  return `${rows.map((r) => r.map(cell).join(",")).join("\r\n")}\r\n`;
+}
+
+/** Costs in CSV are plain US dollars to six places: the ledger's micro-dollars. */
+export const csvUsd = (micro: number | null) => (micro === null ? "" : (micro / 1e6).toFixed(6));
