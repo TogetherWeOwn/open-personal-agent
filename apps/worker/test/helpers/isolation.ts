@@ -22,7 +22,10 @@ export interface Seeded {
   name: string;
   id: string;
   headers: Record<string, string>;
+  /** The session `headers` signs in with. */
   session: string;
+  /** Another live session of the user's, for the route that revokes one. */
+  spareSession: string;
   conversation: string;
   message: string;
   memory: string;
@@ -62,7 +65,7 @@ export async function wipe() {
 
 /**
  * Seeds `name` with a conversation and its messages, a memory, a paused task, an attachment in
- * R2, a model provider with an encrypted key, a grant, a usage row and a session. The provider
+ * R2, a model provider with an encrypted key, a grant, a usage row and two sessions. The provider
  * and the attachment go through their routes, so the vault and R2 paths are the real ones.
  */
 export async function seed(name: string, role: "owner" | "member"): Promise<Seeded> {
@@ -82,6 +85,12 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   const session = (await db
     .prepare("SELECT id FROM sessions WHERE user_id = ?")
     .bind(id)
+    .first<string>("id")) as string;
+  // A second session, signed in elsewhere: the one revoking it tests, so `session` stays live.
+  await sessionHeaders(id);
+  const spareSession = (await db
+    .prepare("SELECT id FROM sessions WHERE user_id = ? AND id != ?")
+    .bind(id, session)
     .first<string>("id")) as string;
   const user = { headers };
 
@@ -172,7 +181,7 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   ]);
 
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
-  const ids = { ...items, grant, usage };
+  const ids = { ...items, spareSession, grant, usage };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }
