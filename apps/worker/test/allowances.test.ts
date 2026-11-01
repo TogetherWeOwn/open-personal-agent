@@ -32,6 +32,27 @@ describe("allowance meters", () => {
     expect(byId.workers_ai_neurons).toMatchObject({ used: 7100, limit: 10_000 });
   });
 
+  it("counts every stored object, not only uploads, across pages of the listing", async () => {
+    const before = (await allowanceMeters(env)).find((m) => m.id === "r2_storage")?.used ?? 0;
+    // An offloaded step output and a saved file: neither has an attachment row.
+    await env.FILES.put("u/x/task-outputs/abc", "x".repeat(1500));
+    await env.FILES.put("u/x/files/f1", "y".repeat(500));
+    const pages: number[] = [];
+    const list = env.FILES.list.bind(env.FILES);
+    const paged = {
+      ...env,
+      FILES: Object.assign(Object.create(env.FILES), {
+        list: (o: R2ListOptions) => {
+          pages.push(1);
+          return list({ ...o, limit: 1 }); // one object a page, to cross pages
+        },
+      }),
+    };
+    const after = (await allowanceMeters(paged)).find((m) => m.id === "r2_storage")?.used ?? 0;
+    expect(after - before).toBe(2000);
+    expect(pages.length).toBeGreaterThan(1);
+  });
+
   it("warns at 70% of any meter, never below", () => {
     const meter = (id: "d1_cap" | "r2_storage", used: number) => ({
       id,

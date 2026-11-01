@@ -93,6 +93,15 @@ export interface DataBindings<Stub, Id> {
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
     /**
+     * R2's listing, a page at a time with each object's size: the allowance meter (COST-5) sums
+     * the whole bucket with it. Absent where the store has none (Node).
+     */
+    list?(options: { cursor?: string; limit?: number }): Promise<{
+      objects: { size: number }[];
+      truncated: boolean;
+      cursor?: string;
+    }>;
+    /**
      * R2's multipart upload, for streaming a body whose length is not known up front: `put`
      * there takes only a known-length stream. Absent where the store streams any body (Node).
      */
@@ -259,15 +268,32 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         const size = (await raw.prepare("PRAGMA page_size").first<number>("page_size")) ?? 0;
         return pages * size;
       },
-      /** What every user's stored files add up to: the sum of the object rows' sizes. */
-      fileBytes: async () =>
-        (
-          await db
-            .select({
-              n: sql<number>`coalesce(sum(${attachments.sizeBytes}), 0)`.mapWith(Number),
-            })
-            .from(attachments)
-        )[0]?.n ?? 0,
+      /**
+       * What the file store holds, in bytes: every object, whoever wrote it (uploads, saved
+       * outputs, offloaded step outputs, exports). Where the store can't list (Node), the sum of
+       * the attachment rows' sizes stands in.
+       */
+      fileBytes: async () => {
+        if (FILES.list) {
+          let bytes = 0;
+          let cursor: string | undefined;
+          do {
+            const page = await FILES.list({ limit: 1000, ...(cursor ? { cursor } : {}) });
+            for (const object of page.objects) bytes += object.size;
+            cursor = page.truncated ? page.cursor : undefined;
+          } while (cursor);
+          return bytes;
+        }
+        return (
+          (
+            await db
+              .select({
+                n: sql<number>`coalesce(sum(${attachments.sizeBytes}), 0)`.mapWith(Number),
+              })
+              .from(attachments)
+          )[0]?.n ?? 0
+        );
+      },
       /**
        * The owner's assistant, for deployment-wide notices only the owner sees (the allowance
        * warnings, COST-5); `null` before the claim.
