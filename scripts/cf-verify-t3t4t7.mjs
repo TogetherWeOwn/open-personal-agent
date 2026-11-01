@@ -644,7 +644,9 @@ async function t7run(prefix, deps, { model }) {
       );
     } catch (error) {
       if (isCapacityError(error))
-        throw new Inconclusive(`T7: Workers AI cap or limit (${error.message}): stopping inconclusive`);
+        throw new Inconclusive(
+          `T7: Workers AI cap or limit (${error.message}): stopping inconclusive`,
+        );
       throw error;
     }
     // Score the fixture's normalized list — the same calls it executed — not the raw shape.

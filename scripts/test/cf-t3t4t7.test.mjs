@@ -161,9 +161,9 @@ describe("t4 coverage", () => {
 
 describe("t7 tool-call shapes", () => {
   it("normalizes the flat and the OpenAI-nested response shapes", () => {
-    expect(normalizeToolCalls({ tool_calls: [{ name: "add", arguments: { a: 1, b: 2 } }] })).toEqual(
-      [{ name: "add", arguments: { a: 1, b: 2 } }],
-    );
+    expect(
+      normalizeToolCalls({ tool_calls: [{ name: "add", arguments: { a: 1, b: 2 } }] }),
+    ).toEqual([{ name: "add", arguments: { a: 1, b: 2 } }]);
     expect(
       normalizeToolCalls({
         choices: [
@@ -175,7 +175,13 @@ describe("t7 tool-call shapes", () => {
     expect(
       normalizeToolCalls({
         tool_calls: [{ name: "add", arguments: { a: 1, b: 2 } }],
-        choices: [{ message: { tool_calls: [{ function: { name: "lookupRecord", arguments: { id: "rec-1" } } }] } }],
+        choices: [
+          {
+            message: {
+              tool_calls: [{ function: { name: "lookupRecord", arguments: { id: "rec-1" } } }],
+            },
+          },
+        ],
       }),
     ).toEqual([{ name: "lookupRecord", arguments: { id: "rec-1" } }]);
     expect(normalizeToolCalls({})).toEqual([]);
@@ -201,7 +207,8 @@ describe("t4 reconnect bookkeeping", () => {
         instances.push(this);
       }
       addEventListener(type, fn) {
-        (this.handlers[type] ??= []).push(fn);
+        if (!this.handlers[type]) this.handlers[type] = [];
+        this.handlers[type].push(fn);
       }
       send() {}
       close() {

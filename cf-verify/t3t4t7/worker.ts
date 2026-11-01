@@ -169,10 +169,20 @@ export interface NormalizedCall {
  * Mirror: normalizeToolCalls in scripts/cf-verify-t3t4t7.mjs.
  */
 export function normalizeToolCalls(raw: {
-  tool_calls?: { name?: string; arguments?: unknown; function?: { name?: string; arguments?: unknown } }[];
-  choices?: { message?: {
-    tool_calls?: { name?: string; arguments?: unknown; function?: { name?: string; arguments?: unknown } }[];
-  } }[];
+  tool_calls?: {
+    name?: string;
+    arguments?: unknown;
+    function?: { name?: string; arguments?: unknown };
+  }[];
+  choices?: {
+    message?: {
+      tool_calls?: {
+        name?: string;
+        arguments?: unknown;
+        function?: { name?: string; arguments?: unknown };
+      }[];
+    };
+  }[];
 }): NormalizedCall[] {
   const nested = raw?.choices?.[0]?.message?.tool_calls;
   const list = Array.isArray(nested) && nested.length ? nested : (raw?.tool_calls ?? []);
@@ -281,10 +291,7 @@ export default {
       // Object.hasOwn, not `in`: `"constructor" in STUBS` is true.
       const outside = (tools ?? []).filter((t) => !Object.hasOwn(STUBS, t?.function?.name));
       if (outside.length) {
-        return Response.json(
-          { rejected: outside.map((t) => t?.function?.name) },
-          { status: 400 },
-        );
+        return Response.json({ rejected: outside.map((t) => t?.function?.name) }, { status: 400 });
       }
       const started = Date.now();
       let raw: Parameters<typeof normalizeToolCalls>[0];
