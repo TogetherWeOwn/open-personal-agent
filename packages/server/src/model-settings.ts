@@ -11,7 +11,7 @@ import {
   usesAnthropicMessages,
   usesOpenAIResponses,
 } from "@opa/providers";
-import { decrypt, encrypt, type UserScope as VaultScope } from "@opa/vault";
+import { decrypt, encrypt, userState, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
 import {
   billerOf,
@@ -182,6 +182,9 @@ async function keyedValues(
   let secretId = current?.keySecretId ?? null;
   if (apiKey) {
     if (!c.env.VAULT) return { status: 503, error: "vault_unavailable" } as const;
+    // A user whose DEK no longer opens can't save a key until they reset (crypto review C-1).
+    const blocked = await vaultBlocked(c);
+    if (blocked) return blocked;
     secretId ??= crypto.randomUUID();
     const input = { secretId, purpose: PURPOSE, binding, plaintext: apiKey, caller: CALLER };
     await encrypt(c.env.VAULT, vaultScope(c), input);
@@ -208,10 +211,22 @@ async function keyedValues(
       () => "ok" as const,
       (error) => ((error as { code?: unknown }).code === "decrypt_failed" ? "closed" : "fault"),
     );
-    if (opened === "closed") return { status: 400, error: "key_required" } as const;
+    if (opened === "closed")
+      return (await vaultBlocked(c)) ?? { status: 400, error: "key_required" };
     if (opened === "fault") return { status: 503, error: "vault_unavailable" } as const;
   }
   return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
+}
+
+/**
+ * Why the user's vault can't take or give a key: `reset_required` when no held key opens their DEK,
+ * so they reset; `unavailable` when it is under a newer epoch than this instance runs. Else null.
+ */
+async function vaultBlocked(c: Ctx): Promise<{ status: Failure; error: string } | null> {
+  const state = c.env.VAULT ? await userState(c.env.VAULT, vaultScope(c)) : "unavailable";
+  if (state === "reset_required") return { status: 409, error: "vault_reset_required" };
+  if (state === "unavailable") return { status: 503, error: "vault_unavailable" };
+  return null;
 }
 
 /** Whether a saved provider has the body's provider, origin and path: the key's own endpoint. */

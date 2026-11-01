@@ -20,7 +20,13 @@ export interface SqlDatabase {
 export const SESSION_IDLE_MS = 30 * 86_400_000;
 const LIVE = "revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?";
 
-export type ChallengeKind = "claim" | "recovery" | "recovery_code" | "login";
+/** `step_up_*`: a signed-in user's fresh assertion, good for that one action only. */
+export type ChallengeKind =
+  | "claim"
+  | "recovery"
+  | "recovery_code"
+  | "login"
+  | "step_up_vault_reset";
 
 /** A session row to insert. The cookie value never reaches the store, only its hash. */
 export interface NewSession {
@@ -273,6 +279,31 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             counter: number;
             transports: string | null;
           }>(),
+      /** The user's passkeys, for a step-up's `allowCredentials`. */
+      ofUser: async (userId: string) =>
+        (
+          await db
+            .prepare("SELECT id, transports FROM passkeys WHERE user_id = ?")
+            .bind(userId)
+            .all<{ id: string; transports: string | null }>()
+        ).results,
+      /** Records a step-up: the passkey's counter and the audit row, together. */
+      steppedUp: async (s: {
+        passkeyId: string;
+        userId: string;
+        counter: number;
+        action: string;
+        now: number;
+      }) => {
+        await db.batch([
+          db
+            .prepare(
+              "UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ? AND user_id = ?",
+            )
+            .bind(s.counter, s.now, s.passkeyId, s.userId),
+          audit(s.userId, "auth.step_up", "auth", "ok", s.action),
+        ]);
+      },
     },
 
     sessions: {

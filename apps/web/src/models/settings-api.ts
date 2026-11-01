@@ -103,6 +103,8 @@ const ERRORS: Record<string, string> = {
   chat_role:
     "This provider is your chat model. Choose a different chat model first, then remove it.",
   vault_unavailable: "Keys can't be saved until the server's master key is fixed.",
+  vault_reset_required:
+    "Your saved keys can't be opened with this server's master key. Reset them, then enter your key again.",
   ai_unavailable: "Workers AI isn't connected to this deployment. Use an API key instead.",
   not_found: "That was already removed. The list has been refreshed.",
 };
