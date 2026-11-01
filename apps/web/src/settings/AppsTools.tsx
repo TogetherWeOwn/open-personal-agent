@@ -119,9 +119,15 @@ export function AppsTools() {
               {CHOICES.map(({ value, label }) => {
                 const locked = value === "auto" && tool.locked;
                 // An untouched tool behaves as its default: show it selected and say so.
+                // Clicking that preselected row fires no change event (it is already
+                // selected), so confirm it explicitly: the click saves the default as
+                // the override, keeping explicit `auto` one click away.
                 const isDefault = tool.override === null && value === tool.default;
                 return (
-                  <div key={value}>
+                  <div
+                    key={value}
+                    onClick={isDefault && !locked ? () => void change(tool, value) : undefined}
+                  >
                     <Radio
                       value={value}
                       isDisabled={locked || pending === tool.name}
