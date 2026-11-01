@@ -2,10 +2,10 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { exports, env as workerEnv } from "cloudflare:workers";
 import { SCHEMA_VERSION } from "@opa/db";
+import { app } from "@opa/server/app";
+import { type Health, setupRequired } from "@opa/server/health";
 import { beforeAll, describe, expect, it } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
-import { type Health, setupRequired } from "../src/health";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 

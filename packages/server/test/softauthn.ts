@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // A software passkey (ES256, "none" attestation) so tests run a real registration ceremony
 // inside workerd without a browser. Taken from the M2-08 spike; `get` answers a login.
-import { base64url } from "../../src/auth";
+import { base64url } from "../src/auth";
 
 const encoder = new TextEncoder();
 

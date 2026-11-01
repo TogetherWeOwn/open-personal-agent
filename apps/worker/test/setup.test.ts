@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-2 (setup claim) and TWO-375 M2-12 (POST-only setup, recovery mode on rotation).
-import { describe, expect, it } from "vitest";
+
 import {
   base64url,
   CHALLENGE_COOKIE,
@@ -8,7 +8,8 @@ import {
   newRecoveryCode,
   SESSION_COOKIE,
   sha256,
-} from "../src/auth";
+} from "@opa/server/auth";
+import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
 import { Browser, count, db, env, freshDatabase, passkey, TABLES, TOKEN } from "./helpers/app";
 

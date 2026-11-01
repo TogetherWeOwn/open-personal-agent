@@ -42,7 +42,11 @@ export async function sha256(value: string): Promise<string> {
 /** Compares two secrets in constant time. Hashing first makes the lengths equal. */
 export async function secretsEqual(a: string, b: string): Promise<boolean> {
   const [x, y] = await Promise.all([digest(a), digest(b)]);
-  return crypto.subtle.timingSafeEqual(x, y);
+  // A Workers extension to WebCrypto; apps/node fills it in (`workers-globals.ts`).
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual(a: ArrayBufferView, b: ArrayBufferView): boolean;
+  };
+  return subtle.timingSafeEqual(x, y);
 }
 
 /**

@@ -36,7 +36,7 @@ async function probe(fn: () => Promise<unknown>): Promise<boolean> {
   } catch {
     return false;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
