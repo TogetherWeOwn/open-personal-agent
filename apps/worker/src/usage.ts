@@ -77,12 +77,13 @@ usageRoutes.get("/", async (c) => {
     user.profile(),
   ]);
   // The allowance is the Cloudflare account's, so its total includes everyone's calls; only the
-  // owner, who runs the account, sees it. A member's view would reveal others' activity.
+  // owner, who runs the account, sees it. A member's view would reveal others' activity. The
+  // count is this deployment's calls only: other apps on the account use the allowance too.
   const allowance =
     profile?.role === "owner"
       ? {
           neuronsPerDay: workersAiAllowance.neuronsPerDay,
-          neuronsUsed: await repo.deployment.workersAiNeurons(utcDay), // UTC days, as Cloudflare
+          neuronsUsedHere: await repo.deployment.workersAiNeurons(utcDay), // UTC days, as Cloudflare
           resetsAt: utcDay + DAY,
         }
       : null;

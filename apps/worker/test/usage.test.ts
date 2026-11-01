@@ -77,7 +77,7 @@ describe("usage ledger", () => {
       { name: "Llama 3.3 70B (fast)", costMicroUsd: 1420, priceVerifiedAt: "2026-11-01" },
     ]);
     expect(body.month).toEqual(body.today);
-    expect(body.allowance).toMatchObject({ neuronsPerDay: 10000, neuronsUsed: 130 });
+    expect(body.allowance).toMatchObject({ neuronsPerDay: 10000, neuronsUsedHere: 130 });
     expect((body.allowance?.resetsAt ?? 1) % 86_400_000).toBe(0);
   });
 
