@@ -95,7 +95,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
       return {
         ...toTop(state, pending.conversationId, (c) => ({
-          title: c.messages.length ? c.title : (text.split("\n", 1)[0]?.slice(0, 40) ?? text),
+          // The first message names the chat; a model switch before it doesn't count.
+          title: c.messages.some((m) => m.role === "user")
+            ? c.title
+            : (text.split("\n", 1)[0]?.slice(0, 40) ?? text),
           messages: [
             ...c.messages,
             { id: action.id, role: "user", text, status: "complete" },
@@ -186,7 +189,7 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     const text = chat?.messages.at(-2)?.text ?? "";
     const next = update(state, conversationId, (c) => {
       const messages = c.messages.slice(0, -2);
-      return { messages, ...(messages.length ? {} : { title: NEW_TITLE }) };
+      return { messages, ...(messages.some((m) => m.role === "user") ? {} : { title: NEW_TITLE }) };
     });
     const { reason, message } = event.payload;
     const limit = { reason, message, conversationId, text };

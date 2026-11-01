@@ -201,4 +201,18 @@ describe("chatReducer", () => {
     expect(system?.map((m) => m.text)).toEqual([failed]);
     expect(rolledBack.conversations[0]?.model).toBe(null);
   });
+
+  it("titles a chat switched before its first message from that message", () => {
+    const switched: ChatAction = {
+      type: "model",
+      id: "c1",
+      noticeId: "n1",
+      pick: { provider: "p1", model: "gpt-4.1-mini" },
+      notice: "Switched to GPT-4.1 mini via OpenAI",
+    };
+    expect(run(switched, send).conversations[0]?.title).toBe("Plan my week");
+    // A limit refusing that first message gives the title back.
+    const refused = ev("turn.failed", { message: "Slow down.", reason: "slow_down" }, "");
+    expect(run(switched, send, refused).conversations[0]?.title).toBe("New chat");
+  });
 });

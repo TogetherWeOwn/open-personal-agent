@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { type Dispatch, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { type Dispatch, useEffect, useReducer, useRef, useState } from "react";
 import { Button, Heading, Link } from "react-aria-components";
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
@@ -81,18 +81,16 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     };
   }, [visible]);
 
-  // A switch in a chat the server hasn't seen yet (nothing sent) can't be saved; it is retried
-  // on the next connect and when the chat's first turn starts.
+  // A switch the server hasn't saved yet, for a chat it hasn't seen (nothing sent) or while the
+  // save is in flight. The chat's sends carry it, so its first reply already uses it.
   const pendingPins = useRef(new Map<string, RolePick | null>());
-  const applyPin = useCallback(async (id: string) => {
-    if (!pendingPins.current.has(id)) return;
-    try {
-      await setConversationModel(id, pendingPins.current.get(id) ?? null);
-      pendingPins.current.delete(id);
-    } catch {
-      // Still unknown to the server; the next retry will land it.
-    }
-  }, []);
+  // Removing a provider in Settings clears the server's pins on it, so a pin naming one that is
+  // gone follows the Chat role here too.
+  const live = (pick: RolePick | null | undefined) =>
+    pick && (!modelSettings || modelSettings.providers.some((p) => p.id === pick.provider))
+      ? pick
+      : null;
+  const pinned = live(active.model);
 
   // The Worker serves the Finish setup page while `/api/health` reports `setup_required`.
   useEffect(() => {
@@ -119,16 +117,16 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     const connected = () => {
       dispatch({ type: "connected" });
       void list();
-      for (const id of pendingPins.current.keys()) void applyPin(id);
     };
     return transport.connect((event) => {
       if (event.type === "turn.started") {
         if (!known.current.has(event.sessionId)) void list();
-        void applyPin(event.sessionId);
+        // The turn's send saved the chat's model with it.
+        pendingPins.current.delete(event.sessionId);
       }
       dispatch({ type: "event", event });
     }, connected);
-  }, [transport, applyPin]);
+  }, [transport]);
 
   // The open chat reloads once stale, and so does a running turn's: only a load can end a turn
   // whose last events were missed while disconnected.
@@ -152,7 +150,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
   const send = (text: string): boolean => {
     if (state.pending || !text.trim()) return false;
     dispatch({ type: "send", id: newId(), text });
-    transport.send(active.id, text);
+    transport.send(active.id, text, live(pendingPins.current.get(active.id)) ?? undefined);
     return true;
   };
 
@@ -165,28 +163,30 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     const effective = pick ?? modelSettings.roles.chat;
     if (!effective) return;
     const { modelName, providerName } = describePick(modelSettings, effective);
-    const previous = active.model;
+    const { id } = active;
+    const previous = pinned;
     const noticeId = newId();
     dispatch({
       type: "model",
-      id: active.id,
+      id,
       noticeId,
       pick,
       notice: `Switched to ${modelName} via ${providerName}`,
     });
+    pendingPins.current.set(id, pick);
+    const settled = () => pendingPins.current.get(id) === pick && pendingPins.current.delete(id);
     void (async () => {
       try {
-        await setConversationModel(active.id, pick);
+        await setConversationModel(id, pick);
+        settled();
       } catch (e) {
-        // A brand-new chat isn't on the server yet; the pin follows when it is (see applyPin).
-        if ((e as Error).message === "not_found") {
-          pendingPins.current.set(active.id, pick);
-          return;
-        }
+        // A brand-new chat isn't on the server yet; its first send carries the pick.
+        if ((e as Error).message === "not_found") return;
+        settled();
         // The failure line takes the place of the optimistic "Switched to" line.
         dispatch({
           type: "model",
-          id: active.id,
+          id,
           noticeId,
           pick: previous,
           notice: "Couldn't switch the model, so nothing changed.",
@@ -195,7 +195,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
     })();
   };
 
-  const noModel = modelSettings !== null && !modelSettings.roles.chat && !active.model;
+  const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
 
   return (
     <div className="flex h-dvh">
@@ -255,7 +255,7 @@ export function App({ transport, onNavigate, visible = true }: AppProps) {
           onNoModel={noModel ? goModels : undefined}
           chip={
             modelSettings && (
-              <ModelChip settings={modelSettings} pinned={active.model} onSwitch={switchModel} />
+              <ModelChip settings={modelSettings} pinned={pinned} onSwitch={switchModel} />
             )
           }
         />

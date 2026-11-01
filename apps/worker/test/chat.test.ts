@@ -83,8 +83,11 @@ async function openTab(br: Browser, path = "/api/chat", origin = ORIGIN) {
   );
   const until = (type: HarnessEvent["type"]) =>
     vi.waitFor(() => expect(events.map((e) => e.type)).toContain(type), SOCKET_WAIT);
-  const send = (conversationId: string, text: string) =>
-    ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
+  const send = (
+    conversationId: string,
+    text: string,
+    model?: { provider: string; model: string },
+  ) => ws.send(JSON.stringify({ type: "chat.send", conversationId, text, model }));
   return { res, ws, events, until, send, closed };
 }
 
@@ -192,6 +195,24 @@ describe("chat transport", () => {
       "From the starter",
       "Back to you",
     ]);
+
+    // A chat picked before the server had it sends its model with its first message, and that
+    // reply already uses it; the pick is saved with the new chat.
+    const own = { provider: String(keyedRow?.id), model: "gpt-z" };
+    tab.events.length = 0;
+    tab.send?.("conv-7", "Hi from a new chat", own);
+    await tab.until?.("turn.completed");
+    expect(JSON.parse(fetch.mock.calls[2]?.[1]?.body as string).model).toBe("gpt-z");
+    expect((await user.getConversation("conv-7"))?.model).toBe("gpt-z");
+    // A pick naming no saved provider of this user's is refused, and writes nothing.
+    tab.events.length = 0;
+    tab.send?.("conv-8", "Hi", { provider: "not-mine", model: "gpt-z" });
+    const refused = {
+      type: "turn.failed",
+      payload: { message: "Pick a model in Settings first." },
+    };
+    await vi.waitFor(() => expect(tab.events).toMatchObject([refused]), SOCKET_WAIT);
+    expect(await count("conversations", "id = 'conv-8'")).toBe(0);
   });
 
   it.each([
