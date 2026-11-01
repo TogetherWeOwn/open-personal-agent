@@ -121,9 +121,12 @@ export async function caseHost(DB: D1Database, vector: Vector, goal: Goal, profi
     .bind(userId)
     .run();
   const stub = {} as never;
-  const memory = createRepository({ DB, FILES: stub, ASSISTANT: stub }).forUser(
+  const user = createRepository({ DB, FILES: stub, ASSISTANT: stub }).forUser(
     scopeFromSession({ userId }),
-  ).memory;
+  );
+  const { memory } = user;
+  const conversationId = `conv-${crypto.randomUUID()}`;
+  await user.createConversation(conversationId);
   const document = vector.document(goal);
   if (vector.id === "recalled-memory") {
     // Saved by the assistant without the user asserting it: an `inferred` row.
@@ -220,18 +223,27 @@ export async function caseHost(DB: D1Database, vector: Vector, goal: Goal, profi
 
   const model = obedientModel(vector.deliver);
   let ids = 0;
+  let batchId = ""; // the batch a resumed turn runs under, as the DO host keeps it
   const host: LoopHost = {
     provider: model.provider,
     model: "stub",
     tools: registry,
     policy: policyFor(profile),
     now: () => NOW,
-    newId: () => `s${++ids}`,
+    newId: () => `${userId}-s${++ids}`, // the cases share one database
+    // The approval rows behind a resumed batch, claimed and finished as the DO host does.
+    approvals: {
+      claim: async (toolCallId) =>
+        (await user.approvals.claim(batchId, `appr_${toolCallId}`, NOW)) ? null : "unclaimed",
+      finish: (toolCallId, outcome) =>
+        user.approvals.finish(batchId, `appr_${toolCallId}`, outcome).then(() => {}),
+    },
   };
 
   /** Runs the turn (or resumes it) to where it stops. */
   async function run(turn: TurnState): Promise<{ events: LoopEvent[]; outcome: TurnOutcome }> {
     state = turn;
+    batchId = turn.pending?.batchId ?? "";
     const events: LoopEvent[] = [];
     const gen = runTurn(host, HISTORY, turn, new AbortController().signal);
     for (;;) {
@@ -241,7 +253,13 @@ export async function caseHost(DB: D1Database, vector: Vector, goal: Goal, profi
     }
   }
 
-  return { run, memory, executed, fetched, read: model.read };
+  /** Where the turn's approvals are bound: the user, this turn, its conversation (C2). */
+  const binding = {
+    userId,
+    tools: registry,
+    context: { kind: "turn", id: "turn-1", conversationId } as const,
+  };
+  return { run, user, binding, memory, executed, fetched, read: model.read };
 }
 
 /** The arguments a goal's call carries once the stub has filled in the user's secret. */
