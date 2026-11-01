@@ -631,8 +631,7 @@ function updateTurn(
   if (!ensured || !at) return state;
   const mutated = mutate(ensured.turn);
   const outcome =
-    (mutated.outcome === "waiting" || mutated.outcome === "limited") &&
-    PROGRESS.has(event.type)
+    (mutated.outcome === "waiting" || mutated.outcome === "limited") && PROGRESS.has(event.type)
       ? ("running" as const)
       : mutated.outcome;
   const turn = { ...mutated, outcome, updatedAt: Date.now() };

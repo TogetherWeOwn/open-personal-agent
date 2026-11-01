@@ -639,14 +639,11 @@ describe("turn timeline (M3-09)", () => {
     // A late usage flush while paused never resumes the turn on its own.
     const flushed = chatReducer(
       limited,
-      ev(
-        "usage.updated",
-        {
-          usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, reasoningTokens: 0 },
-          providerId: "openai",
-          model: "gpt-4.1-mini",
-        },
-      ),
+      ev("usage.updated", {
+        usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, reasoningTokens: 0 },
+        providerId: "openai",
+        model: "gpt-4.1-mini",
+      }),
     );
     expect(turnOf(flushed)?.outcome).toBe("limited");
     // A queued send behind the paused turn leaves the outcome alone too.
@@ -668,10 +665,7 @@ describe("turn timeline (M3-09)", () => {
     const running = run(send, started(), ev("step.started", { stepId: "s1", label: "L" }));
     expect(turnOf(running)?.outcome).toBe("running");
     // The terminal event trimmed with the settled turn; the load is the only word.
-    const settled = chatReducer(
-      running,
-      load("c1", msg("u1", "Hi"), msg("r-t1", "Done.")),
-    );
+    const settled = chatReducer(running, load("c1", msg("u1", "Hi"), msg("r-t1", "Done.")));
     expect(settled.pending).toBe(null);
     expect(turnOf(settled)?.outcome).toBe("succeeded");
 
@@ -685,7 +679,10 @@ describe("turn timeline (M3-09)", () => {
     expect(turnOf(cut)?.outcome).toBe("interrupted");
 
     // A still-streaming reply leaves the running turn alone.
-    const live = chatReducer(running, load("c1", msg("u1", "Hi"), msg("r-t1", "Half", "streaming")));
+    const live = chatReducer(
+      running,
+      load("c1", msg("u1", "Hi"), msg("r-t1", "Half", "streaming")),
+    );
     expect(turnOf(live)?.outcome).toBe("running");
     expect(live.pending).toMatchObject({ turnId: "t1" });
   });
