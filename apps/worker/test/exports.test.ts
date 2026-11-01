@@ -4,7 +4,7 @@
 // again, and every item type the export walks lists its rows.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { createRepository, scopeFromSession } from "@opa/db/repository";
+import { createRepository, isUniqueViolation, scopeFromSession } from "@opa/db/repository";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { WorkerEnv } from "../src/compose";
 
@@ -41,6 +41,20 @@ describe("export rows", () => {
     expect(await alice.exports.get("e9")).toBeUndefined();
   });
 
+  it("rejects a second running export while one runs", async () => {
+    // e1 above is still running: the partial unique index refuses a second `running` row.
+    // D1 hides the violated constraint in the cause under drizzle's wrapper, so the test
+    // reads it the way the route does.
+    const raced = await alice.exports
+      .create({ id: "e1b", workflowInstanceId: "exp-e1b", expiresAt: 3600000 })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(isUniqueViolation(raced)).toBe(true);
+    expect(await alice.exports.get("e1b")).toBeUndefined();
+  });
+
   it("mints the scope from the row's user_id, never from a claim about it", async () => {
     const minted = await repo.scopeForExport("exp-e1");
     expect(minted?.scope.userId).toBe("alice");
@@ -55,8 +69,11 @@ describe("export rows", () => {
   });
 
   it("lists newest first, only the user's own", async () => {
-    await alice.exports.create({ id: "e2", workflowInstanceId: "exp-e2", expiresAt: 3600000 });
+    // Bob's export starts while Alice's e1 still runs: the one-running rule is per user.
     await bob.exports.create({ id: "e3", workflowInstanceId: "exp-e3", expiresAt: 3600000 });
+    // e1's slot frees only when it finishes: one export runs at a time.
+    await alice.exports.finishFailed("e1", "done");
+    await alice.exports.create({ id: "e2", workflowInstanceId: "exp-e2", expiresAt: 3600000 });
     // `created_at` ticks in seconds; pin the order so the test asserts it, not the clock.
     await env.DB.batch([
       env.DB.prepare("UPDATE exports SET created_at = 1000 WHERE id = 'e1'"),
@@ -67,6 +84,8 @@ describe("export rows", () => {
   });
 
   it("running finds the in-flight export, none once it finished", async () => {
+    // e2 above still runs: finishing it frees Alice's slot for e4.
+    await alice.exports.finishFailed("e2", "done");
     await alice.exports.create({ id: "e4", workflowInstanceId: "exp-e4", expiresAt: 3600000 });
     expect((await alice.exports.running())?.id).toBe("e4");
     expect((await bob.exports.running())?.id).toBe("e3");
@@ -82,16 +101,20 @@ describe("export rows", () => {
   });
 
   it("a finished export never moves again, and nobody finishes another's", async () => {
+    // e4b above still runs: finishing it frees Alice's slot for e5.
+    await alice.exports.finishFailed("e4b", "done");
     await alice.exports.create({ id: "e5", workflowInstanceId: "exp-e5", expiresAt: 3600000 });
     expect(await alice.exports.finishFailed("e5", "boom")).toBe(true);
     expect((await alice.exports.get("e5"))?.error).toBe("boom");
     // Terminal rows stay terminal, whatever the caller claims.
     expect(await alice.exports.finishReady("e5", 1, 4001)).toBe(false);
     expect(await alice.exports.finishFailed("e5", "again")).toBe(false);
-    // Bob names Alice's row and fails the user match, twice over.
+    // Bob names Alice's rows and fails the user match, twice over; her own run stays running.
+    await alice.exports.create({ id: "e6", workflowInstanceId: "exp-e6", expiresAt: 3600000 });
     expect(await bob.exports.finishReady("e5", 1, 4001)).toBe(false);
-    expect(await bob.exports.finishFailed("e4b", "smuggled")).toBe(false);
-    expect((await alice.exports.get("e4b"))?.status).toBe("running");
+    expect(await bob.exports.finishFailed("e6", "smuggled")).toBe(false);
+    expect((await alice.exports.get("e6"))?.status).toBe("running");
+    await alice.exports.finishFailed("e6", "done");
   });
 
   it("keeps keys under the user's export prefix", async () => {

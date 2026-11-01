@@ -156,9 +156,11 @@ describe("executeExport", () => {
 
     const names = zipNames(await zipBytes(id));
     for (const type of EXPORT_ITEM_TYPES) {
-      if (type === "artifacts" || type === "attachments") continue;
+      // Messages stage one file per conversation, not one messages.json.
+      if (type === "artifacts" || type === "attachments" || type === "messages") continue;
       expect(names).toContain(`${type}.json`);
     }
+    expect(names).toContain("messages/ca.json");
     expect(names).toContain("artifacts.json");
     expect(names).toContain("artifacts/files/tool-output.txt");
     expect(names).toContain("artifacts/task-outputs/offloaded.json");
@@ -223,12 +225,13 @@ describe("sweepExports", () => {
     await env.FILES.put(`${alice.exports.stagedPrefix(ready.id)}leftover.json`, "{}");
     const failed = await makeExport(now - 1);
     await alice.exports.finishFailed(failed.id, "boom");
-    const stuck = await makeExport(now - 1);
-    await env.FILES.put(`${alice.exports.stagedPrefix(stuck.id)}partial.json`, "{}");
-    // Still live: the same expiry, a later clock.
+    // Still live: the same expiry, a later clock. It finishes before the stuck run starts:
+    // one export runs at a time.
     const live = await makeExport(now + 1_000);
     await alice.exports.finishReady(live.id, 7, now - 2);
     await env.FILES.put(`u/alice/exports/${live.id}.zip`, "zip");
+    const stuck = await makeExport(now - 1);
+    await env.FILES.put(`${alice.exports.stagedPrefix(stuck.id)}partial.json`, "{}");
 
     expect(await sweepExports(env, () => now)).toEqual({ expired: 3 });
     expect((await alice.exports.get(ready.id))?.status).toBe("expired");
