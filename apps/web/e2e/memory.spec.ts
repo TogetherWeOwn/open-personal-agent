@@ -230,7 +230,7 @@ test("an edit that no longer matches the search leaves the results", async ({ pa
   await stubMemory(page);
   await page.goto("/memory");
   await page.getByLabel("Search notes").fill("leeds");
-  await expect(page.getByText("Prefers trains to planes")).toBeHidden();
+  await expect(page.getByText("Likes green tea")).toBeHidden();
   await page.getByRole("button", { name: "Edit: Sam lives in Leeds" }).click();
   await page.getByLabel("Edit note").fill("Sam lives in Paris");
   await page.getByRole("button", { name: "Save" }).click();
