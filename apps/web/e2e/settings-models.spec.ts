@@ -95,7 +95,27 @@ async function stubSettings(page: Page): Promise<Stub> {
       return route.fulfill({ status: 204 });
     }
     if (method === "POST") {
-      const { providerId, model } = body as { providerId: string; model: string };
+      const { kind, providerId, model } = body as {
+        kind: string;
+        providerId: string;
+        model: string;
+      };
+      if (kind === "workers-ai") {
+        const starter = provider({
+          id: `p${stub.providers.length + 1}`,
+          kind,
+          api: kind,
+          providerId: null,
+          baseUrl: null,
+          providerName: "Cloudflare: Workers AI",
+          model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+          modelName: "Llama 3.3 70B",
+          key: null,
+          price: null,
+        });
+        stub.providers.push(starter);
+        return route.fulfill({ status: 201, json: starter });
+      }
       const added = provider({
         id: `p${stub.providers.length + 1}`,
         providerId,
@@ -151,6 +171,14 @@ test("lists each provider with its key's last 4 and dates, and never the key (M3
   await page.keyboard.press("Escape");
   await expect(page.getByText("Chat model · Background model").first()).toBeVisible();
   expect(await page.content()).not.toContain(KEY);
+});
+
+test("labels the keyless starter as chat only (TWO-697 T7)", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: "Add the Workers AI starter (no key)" }).click();
+  const row = page.getByRole("listitem").filter({ hasText: "Llama 3.3 70B" });
+  await expect(row).toContainText("Starter — chat only, add a key for tools");
+  await expect(page.getByText("Starter — chat only, add a key for tools")).toHaveCount(1);
 });
 
 test("changes the Background role, and back to automatic (M3-06 AC2)", async ({ page }) => {

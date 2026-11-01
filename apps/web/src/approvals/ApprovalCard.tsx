@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The approval card and the multi-action card (M3-07 AC6, AC7, AC11; m3-ux §3.3). One component
 // for the thread and the Inbox. Nothing has focus by default and Enter alone never approves
-// (UX-04): the user tabs to the button and presses Space, or clicks it.
+// (UX-04): the user tabs to the button and presses Space, or clicks it. In `sample` mode (onboarding's
+// Safety step) its buttons work but act on nothing.
 import type { ApprovalDecision, ApprovalItem } from "@opa/core";
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useState } from "react";
 import { Label, Radio, RadioGroup } from "react-aria-components";
@@ -98,6 +99,7 @@ export function ApprovalCard({
   context,
   idPrefix = "approval",
   where,
+  sample = false,
 }: {
   batch: PendingBatch;
   level?: number;
@@ -107,6 +109,8 @@ export function ApprovalCard({
   idPrefix?: string;
   /** Its chat's title, in the card's name, so two alike cards in the Inbox stay apart. */
   where?: string;
+  /** Onboarding's sample: a "Sample" badge, and an answer only shows how it works. */
+  sample?: boolean;
 }) {
   const headingId = `${idPrefix}-${batch.batchId}`;
   const now = useExpiryClock(batch.expiresAt);
@@ -119,6 +123,7 @@ export function ApprovalCard({
   const [moved, setMoved] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const [tried, setTried] = useState(false);
   const hintId = useId();
   const toggleId = (approvalId: string) => `${idPrefix}-toggle-${approvalId}`;
 
@@ -149,6 +154,10 @@ export function ApprovalCard({
   const expired = batch.expiresAt <= now;
 
   const submit = async (allow: boolean) => {
+    if (sample) {
+      setTried(true);
+      return;
+    }
     const decisions: ApprovalDecision[] = items.map((i) => {
       const approve = allow && !removed.has(i.approvalId);
       return {
@@ -188,7 +197,11 @@ export function ApprovalCard({
       labelledBy={where ? `${headingId} ${headingId}-in` : headingId}
       className={expired ? "opacity-60" : ""}
     >
-      <CardHeader id={headingId} level={level} title={title} />
+      <CardHeader id={headingId} level={level} title={title}>
+        {sample && (
+          <span className="rounded-full border border-border-strong px-2 text-sm">Sample</span>
+        )}
+      </CardHeader>
       {multi && <p>{items.map((i) => actionOf(i.tool)).join(" · ")}</p>}
       {where && (
         <span id={`${headingId}-in`} className="sr-only">
@@ -296,6 +309,12 @@ export function ApprovalCard({
       {sending && (
         <p role="status" className="text-sm">
           Sending your answer…
+        </p>
+      )}
+      {/* Always present in a sample, so the line is announced when it appears. */}
+      {sample && (
+        <p role="status" className={tried ? "" : "sr-only"}>
+          {tried && "That's how it works. Nothing was sent."}
         </p>
       )}
       {failure && (

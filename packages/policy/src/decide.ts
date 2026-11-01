@@ -132,3 +132,17 @@ export function decide(input: PolicyInput): PolicyDecision {
       return ask("default_consequential");
   }
 }
+
+/**
+ * The SEC-4 defaults above in the user's words, one line per risk class: onboarding's Safety step
+ * and its checklist sheet (m3-ux §3.12). Beside `decide`, so a change to a default changes its line
+ * in the same diff.
+ */
+export const DEFAULT_POLICY_LINES: Record<RiskClass, string> = {
+  read: "I look things up and read your files without asking.",
+  write_reversible:
+    "I make changes you can undo, like saving a file, without asking, unless I've just read something from outside.",
+  consequential:
+    "I ask you first before I send, post or spend anything. After reading something from outside, I ask every time.",
+  irreversible: "Anything that can't be undone also needs your passkey.",
+};

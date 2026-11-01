@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@opa/core": "workspace:*",
+    "@opa/policy": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",
     "lucide-react": "1.63.0",
     "react": "19.3.1",

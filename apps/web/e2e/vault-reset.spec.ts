@@ -249,6 +249,9 @@ test("onboarding offers the reset when saving the model finds unopenable keys", 
       reset = true;
       return route.fulfill({ status: 204 });
     }
+    if (path === "/api/settings/model/test") {
+      return route.fulfill({ json: { ok: true, latencyMs: 300, tools: true, reply: "ready" } });
+    }
     if (path === "/api/settings/model") {
       puts.push(route.request().postDataJSON());
       return reset
@@ -262,7 +265,7 @@ test("onboarding offers the reset when saving the model finds unopenable keys", 
   await page.getByLabel("What should your assistant call you?").fill("Sam");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByText("Saved key ending in WXYZ. Leave blank to keep it.")).toBeVisible();
-  await page.getByRole("button", { name: "Save and continue" }).click();
+  await page.getByRole("button", { name: "Save and test" }).click();
   await expect(panel(page)).toBeVisible();
 
   await resetButton(page).click();
@@ -270,8 +273,8 @@ test("onboarding offers the reset when saving the model finds unopenable keys", 
   await expect(panel(page)).toHaveCount(0);
   await expect(page.getByText(/Leave blank to keep it/)).toHaveCount(0);
   await page.getByLabel("API key", { exact: true }).fill(KEY);
-  await page.getByRole("button", { name: "Save and continue" }).click();
-  await expect(page.getByRole("heading", { name: "Test", level: 2 })).toBeVisible();
+  await page.getByRole("button", { name: "Save and test" }).click();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
   expect(puts.at(-1)).toMatchObject({ apiKey: KEY });
 });
 

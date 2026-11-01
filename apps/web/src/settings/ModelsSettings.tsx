@@ -29,6 +29,7 @@ import {
   per100Messages,
   priceChecked,
   type SavedProvider,
+  STARTER_LABEL,
   settingsApi,
   settingsError,
   type TestResult,
@@ -122,6 +123,7 @@ function ProviderCard({ row, badges, isChat, onChanged, onVaultLocked }: CardPro
         <div>
           <ModelLabel row={row} />
           {badges.length > 0 && <p className="text-sm text-text-muted">{badges.join(" · ")}</p>}
+          {row.kind === "workers-ai" && <p className="text-sm">{STARTER_LABEL}</p>}
         </div>
       </div>
       {row.key ? (
