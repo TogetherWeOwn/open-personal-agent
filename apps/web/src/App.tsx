@@ -476,11 +476,11 @@ export function App({ transport }: AppProps) {
                 />
               )
             }
-          config={config}
-          files={pendingFiles[active.id] ?? []}
-          onPick={pick}
-          onRemove={removeFile}
-          onRetry={retryFile}
+            config={config}
+            files={pendingFiles[active.id] ?? []}
+            onPick={pick}
+            onRemove={removeFile}
+            onRetry={retryFile}
           />
         </main>
       </div>
