@@ -379,8 +379,43 @@ export const tasks = sqliteTable(
     updatedAt: integer("updated_at").notNull().default(now),
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
+    /** When the retention sweep removed the tool outputs from `state` (M3-18 AC1). */
+    outputsRemovedAt: integer("outputs_removed_at"),
   },
   (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
+);
+
+/**
+ * A data export (M3-20 AC1): the Workflow-built ZIP of every item type. The Workflow instance is
+ * named here (`workflow_instance_id`), so `scopeForExport` mints its authority from this row
+ * alone — instance params are never consulted, as with tasks (M3-12 AC9). The ZIP itself lives
+ * in R2 under `u/{userId}/exports/{id}.zip` (the repository derives the key); item files stream
+ * through `u/{userId}/exports/{id}/staged/` while the run builds it. `expires_at` is stamped at
+ * creation (1 hour out): the reconciler deletes the object then, and the same bound frees a run
+ * that never finishes. The row stays as the user's history. One export runs at a time per user:
+ * the partial unique index below rejects a second `running` row, so two racing POSTs cannot
+ * start two Workflow runs — the loser answers 409 `already_running` like the check did.
+ */
+export const dataExports = sqliteTable(
+  "exports",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    status: text("status", { enum: ["running", "ready", "failed", "expired"] })
+      .notNull()
+      .default("running"),
+    workflowInstanceId: text("workflow_instance_id").unique(),
+    sizeBytes: integer("size_bytes"),
+    error: text("error"),
+    createdAt: createdAt(),
+    readyAt: integer("ready_at"),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [
+    index("exports_user_idx").on(t.userId, t.createdAt),
+    index("exports_sweep_idx").on(t.status, t.expiresAt),
+    uniqueIndex("exports_running_user_unique").on(t.userId).where(sql`${t.status} = 'running'`),
+  ],
 );
 
 /**
@@ -458,6 +493,15 @@ export const userSettings = sqliteTable("user_settings", {
   backgroundProvider: providerRef("background_provider"),
   backgroundModel: text("background_model"),
   onboardedAt: integer("onboarded_at"),
+  /**
+   * Retention (COST-10, M3-18 AC1), applied by the daily sweep. A chat with no new message for
+   * this many days is deleted; 0 keeps chats forever.
+   */
+  messageRetentionDays: integer("message_retention_days").notNull().default(0),
+  /** Tool outputs in finished tasks are removed after this many days; 0 keeps them. */
+  toolOutputRetentionDays: integer("tool_output_retention_days").notNull().default(30),
+  /** Unconfirmed memory suggestions expire to rejected after this many days (M3-15 AC2). */
+  memoryInboxDays: integer("memory_inbox_days").notNull().default(14),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 

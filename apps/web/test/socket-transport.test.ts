@@ -91,6 +91,28 @@ describe("the socket transport", () => {
     expect(events).toMatchObject([failed, failed]);
   });
 
+  it("resumes the running turn on a reconnect, and stops once it has settled (M3-03 AC11)", () => {
+    vi.useFakeTimers();
+    const { sockets, open } = setup();
+    const frame = (seq: number, type: string) =>
+      JSON.stringify({ v: 1, seq, sessionId: "c1", turnId: "t1", type, payload: {} });
+    const first = open();
+    first.onmessage?.({ data: frame(3, "turn.started") });
+    first.onmessage?.({ data: frame(4, "message.delta") });
+    first.onclose?.({ code: 1006 });
+    vi.advanceTimersByTime(500);
+    const second = open();
+    expect(second.sent.map((s) => JSON.parse(s))).toEqual([
+      { type: "resume", conversationId: "c1", turnId: "t1", afterSeq: 4 },
+    ]);
+    // The turn settles: its rows leave the log, so the next reconnect asks for nothing.
+    second.onmessage?.({ data: frame(5, "turn.completed") });
+    second.onclose?.({ code: 1006 });
+    vi.advanceTimersByTime(500);
+    expect(open().sent).toEqual([]);
+    expect(sockets).toHaveLength(3);
+  });
+
   it("reads the conversation list and a conversation's messages; a 404 is null", async () => {
     const list = { conversations: [{ id: "c1", title: "Plan", updatedAt: 1 }] };
     const { transport } = setup({
