@@ -246,7 +246,7 @@ export function Breakdown({ data }: { data: UsageData }) {
     <p className="text-sm">
       {num.format(period.unpricedCalls)}{" "}
       {period.unpricedCalls === 1 ? "message has" : "messages have"} no price on file, so the total
-      leaves {period.unpricedCalls === 1 ? "it" : "them"} out. The provider's own bill has the cost.
+      leaves {period.unpricedCalls === 1 ? "it" : "them"} out. Their cost isn't tracked here.
     </p>
   );
   const byPeriod = (body: ReactNode) => (
