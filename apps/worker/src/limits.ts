@@ -11,8 +11,6 @@ import { estimate, findPrice, type ModelPrice } from "@opa/pricing";
 export const TURNS_PER_MINUTE = 30;
 /** Tool calls a user may make in any 60 seconds, chat and tasks together (COST-2). */
 export const TOOL_CALLS_PER_MINUTE = 60;
-/** Model calls in one turn. A chat turn makes one; the tool loop (M3) raises it. */
-export const MAX_CALLS_PER_TURN = 1;
 /** The default daily cap, in micro-USD at published prices. */
 export const DAILY_SPEND_CAP_MICRO_USD = 5_000_000;
 /** `max_tokens` when the budget allows it. */
@@ -66,7 +64,7 @@ interface Spend {
   /** The UTC day's start; a new day starts from zero. */
   day: number;
   spentMicroUsd: number;
-  /** Reservations of calls still running, by hold ID. */
+  /** Reservations of calls still running, by hold ID (the loop host uses one per model call). */
   held: Record<string, Hold>;
 }
 
@@ -116,9 +114,6 @@ export interface CallScope {
 const inputTokens = (chars: number) => Math.ceil(chars / 2);
 
 export class Limits {
-  /** Model calls per running turn. A turn runs in one process, so memory is enough. */
-  readonly #calls = new Map<string, number>();
-
   constructor(
     private readonly kv: Kv,
     private readonly now: () => number = Date.now,
@@ -172,13 +167,14 @@ export class Limits {
   /**
    * Counts a tool call, or returns `false` past 60 in the last minute: the tool must not run.
    * `callKey` names the call, so a retried step asking again for the same call isn't counted
-   * twice while it is still in the window.
+   * twice while it is still in the window. An `approved` call is counted but never refused: the
+   * user's approval gates it, and it still takes a slot from the calls after it.
    */
-  toolCall(callKey?: string): boolean {
-    return this.#rate("tools", TOOL_CALLS_PER_MINUTE, callKey);
+  toolCall(callKey?: string, { approved = false } = {}): boolean {
+    return this.#rate("tools", TOOL_CALLS_PER_MINUTE, callKey, approved);
   }
 
-  #rate(key: string, perMinute: number, callKey?: string): boolean {
+  #rate(key: string, perMinute: number, callKey?: string, force = false): boolean {
     const now = this.now();
     // Entries are times, or `[time, callKey]` for a call that names itself.
     const recent = (this.kv.get<(number | [number, string])[]>(key) ?? []).filter(
@@ -186,16 +182,8 @@ export class Limits {
     );
     if (callKey !== undefined && recent.some((e) => typeof e !== "number" && e[1] === callKey))
       return true;
-    if (recent.length >= perMinute) return false;
+    if (recent.length >= perMinute && !force) return false;
     this.kv.put(key, [...recent, callKey === undefined ? now : [now, callKey]]);
-    return true;
-  }
-
-  /** Counts a model call in a turn, or returns `false` past the per-turn cap. */
-  call(turnId: string): boolean {
-    const calls = (this.#calls.get(turnId) ?? 0) + 1;
-    if (calls > MAX_CALLS_PER_TURN) return false;
-    this.#calls.set(turnId, calls);
     return true;
   }
 
@@ -411,7 +399,6 @@ export class Limits {
   }
 
   #end(holdId: string, charge: (reserved: number) => number) {
-    this.#calls.delete(holdId);
     const spend = this.#spend();
     const { [holdId]: hold, ...held } = spend.held;
     if (hold === undefined) return;

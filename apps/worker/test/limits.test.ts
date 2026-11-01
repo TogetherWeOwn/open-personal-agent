@@ -40,13 +40,6 @@ describe("turn rate", () => {
     clock.now += 1;
     expect(l.startTurn()).toBe(true);
   });
-
-  it("caps model calls per turn", () => {
-    const { limits: l } = limits();
-    expect(l.call("t1")).toBe(true);
-    expect(l.call("t1")).toBe(false);
-    expect(l.call("t2")).toBe(true);
-  });
 });
 
 describe("daily spend", () => {
@@ -182,6 +175,18 @@ describe("tool call rate, retries", () => {
       expect(l.toolCall(`inst:tool:${i + 1}`)).toBe(true);
     expect(l.toolCall("inst:tool:61")).toBe(false);
     expect(l.toolCall("inst:tool:1")).toBe(true); // a retry of a counted call still runs
+  });
+
+  it("counts an approved call past the limit, so it holds a slot for its own minute", () => {
+    const { limits: l, clock } = limits();
+    for (let i = 0; i < TOOL_CALLS_PER_MINUTE; i++) expect(l.toolCall(`inst:tool:${i}`)).toBe(true);
+    clock.now += 30_000;
+    expect(l.toolCall("inst:approved", { approved: true })).toBe(true);
+    expect(l.toolCall("inst:approved", { approved: true })).toBe(true); // its retry counts once
+    // The first 60 age out; the approved call is still in the window.
+    clock.now += 30_000;
+    for (let i = 1; i < TOOL_CALLS_PER_MINUTE; i++) expect(l.toolCall(`inst:late:${i}`)).toBe(true);
+    expect(l.toolCall("inst:late:60")).toBe(false);
   });
 });
 
