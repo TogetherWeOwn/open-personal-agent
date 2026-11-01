@@ -7,9 +7,9 @@ import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { STARTER_MODEL } from "@opa/providers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { pickModel, resolveChatModel } from "../src/chat-model";
-import type { WorkerEnv } from "../src/compose";
+import type { Env } from "../src/env";
 
-const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
+const env = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
 const repo = createRepository(env);
 const scope = (userId: string) => scopeFromSession({ userId });
 const OPENAI = "https://api.openai.com/v1";
