@@ -992,7 +992,7 @@ describe("approvals in the DO host (M3-07a)", () => {
     const turn = {
       conversationId: "conv-evict",
       turnId: started?.turnId ?? "",
-      replyId: (started?.payload as { messageId: string }).messageId,
+      replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
       providerId: "scripted",
       model: "test-model",
     };
@@ -1032,7 +1032,7 @@ describe("approvals in the DO host (M3-07a)", () => {
         snapshot: {
           conversationId: "conv-evict2",
           turnId: started?.turnId ?? "",
-          replyId: (started?.payload as { messageId: string }).messageId,
+          replyId: (started?.payload as { messageId?: string } | undefined)?.messageId ?? "",
           providerId: "scripted",
           model: "test-model",
           reply: "Sending.",
