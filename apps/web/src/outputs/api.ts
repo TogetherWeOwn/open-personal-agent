@@ -53,11 +53,17 @@ interface Pending {
 }
 
 const pending = new Map<string, Pending>();
+// Sent deletes stay hidden from lists already loaded; a refused one comes back via `failed`.
+const gone = new Set<string>();
 let failed: Artifact[] = [];
-let snapshot: { pending: Artifact[]; failed: Artifact[] } = { pending: [], failed: [] };
+let snapshot: { pending: Artifact[]; gone: string[]; failed: Artifact[] } = {
+  pending: [],
+  gone: [],
+  failed: [],
+};
 const listeners = new Set<() => void>();
 const changed = () => {
-  snapshot = { pending: [...pending.values()].map((p) => p.artifact), failed };
+  snapshot = { pending: [...pending.values()].map((p) => p.artifact), gone: [...gone], failed };
   for (const listener of listeners) listener();
 };
 
@@ -66,12 +72,14 @@ function send(id: string, keepalive = false) {
   if (!entry) return;
   clearTimeout(entry.timer);
   pending.delete(id);
+  gone.add(id);
   fetch(`/api/artifacts/${encodeURIComponent(id)}`, { method: "DELETE", keepalive })
     .then((res) => {
       // Already gone counts as deleted.
       if (!res.ok && res.status !== 404) throw new Error("delete_failed");
     })
     .catch(() => {
+      gone.delete(id);
       failed = [...failed, entry.artifact];
       changed();
     });
@@ -103,7 +111,7 @@ window.addEventListener("pagehide", () => {
   for (const id of [...pending.keys()]) send(id, true);
 });
 
-/** The deletes waiting out their Undo window, and the ones the server refused. */
+/** The deletes waiting out their Undo window, the ones sent, and the ones the server refused. */
 export function useDeletes() {
   return useSyncExternalStore(
     (listener) => {

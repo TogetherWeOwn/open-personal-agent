@@ -199,6 +199,8 @@ test("deletes after the Undo window, and Undo keeps the file", async ({ page }) 
   await expect
     .poll(() => seen.filter((r) => r.startsWith("DELETE")))
     .toEqual(["DELETE /api/artifacts/plan"]);
+  // Sent is gone: the list keeps it hidden after the Undo window closes.
+  await expect(page.getByRole("link", { name: /trip-plan\.md/ })).toHaveCount(0);
 });
 
 test("says so when the file doesn't exist", async ({ page }) => {
@@ -217,4 +219,33 @@ test("the chat's menu opens its files", async ({ page }) => {
   await page.getByRole("menuitem", { name: "Files in this chat" }).click();
   await expect(page).toHaveURL(/\/activity\/outputs\?conversation=.+$/);
   await expect(h1(page)).toHaveText("Outputs");
+});
+
+test("the source chat link opens that chat, not the one that was open", async ({ page }) => {
+  const made: ReturnType<typeof file>[] = [];
+  await serve(page, made);
+  await page.goto("/");
+  const send = async (text: string) => {
+    await page.getByRole("textbox", { name: "Message" }).fill(text);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("main").getByRole("heading")).toHaveText(text);
+  };
+  const filesInChat = async () => {
+    await page.getByRole("button", { name: "Chat options" }).click();
+    await page.getByRole("menuitem", { name: "Files in this chat" }).click();
+    return new URL(page.url()).searchParams.get("conversation") ?? "";
+  };
+  await send("Plan the Orkney trip");
+  const trip = await filesInChat();
+  made.push(file({ id: "plan", name: "trip-plan.md", conversationId: trip }));
+  await page.goBack();
+  await page.getByRole("button", { name: "New chat" }).click();
+  await send("Work notes");
+
+  await filesInChat();
+  await page.getByRole("button", { name: "All files" }).click();
+  await page.getByRole("link", { name: /trip-plan\.md/ }).click();
+  await page.getByRole("link", { name: "Open source chat" }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${trip}$`));
+  await expect(page.getByRole("main").getByRole("heading")).toHaveText("Plan the Orkney trip");
 });

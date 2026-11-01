@@ -103,7 +103,7 @@ export function Outputs() {
   const [more, setMore] = useState(false);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const { pending } = useDeletes();
+  const { pending, gone } = useDeletes();
   const filterId = useId();
 
   useEffect(() => {
@@ -151,7 +151,7 @@ export function Outputs() {
     );
   };
 
-  const hidden = new Set(pending.map((a) => a.id));
+  const hidden = new Set([...pending.map((a) => a.id), ...gone]);
   const shown = files?.filter((f) => !hidden.has(f.id)) ?? [];
   const known = chats.some((c) => c.id === chat);
   return (

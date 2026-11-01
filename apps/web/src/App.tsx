@@ -83,6 +83,15 @@ export function App({ transport }: AppProps) {
     document.title = pageTitle("Chat");
     if (hasNavigated()) heading.current?.focus();
   }, [chat]);
+  // `/c/:conversationId` (Outputs' source link, a reload) opens that chat once the list has it.
+  // Keyed on the address alone, so picking another chat afterwards isn't undone.
+  const linked = matched?.params.conversationId;
+  const linkedListed = state.conversations.some((c) => c.id === linked);
+  useEffect(() => {
+    if (!linked || !linkedListed) return;
+    dispatch({ type: "select", id: linked });
+    setThreadOpen(true);
+  }, [linked, linkedListed]);
   const active = state.conversations.find((c) => c.id === state.activeId) ?? state.conversations[0];
   if (!active) throw new Error("no conversation");
 
