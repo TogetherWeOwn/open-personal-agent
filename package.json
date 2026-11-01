@@ -18,18 +18,26 @@
     "dev": "pnpm build && wrangler dev --local",
     "dev:web": "pnpm --filter @opa/web dev",
     "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "deploy:dry-run": "pnpm build && wrangler deploy --dry-run --outdir dist/worker",
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "pnpm -r typecheck",
-    "test": "vitest run"
+    "test": "vitest run --project unit --project worker",
+    "test:unit": "vitest run --project unit",
+    "test:worker": "vitest run --project worker",
+    "test:harness": "vitest run --project harness",
+    "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs",
+    "notices": "node scripts/generate-notices.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
     "@cloudflare/vitest-plugin": "1.4.11",
     "@cloudflare/workers-types": "5.20261031.1",
+    "@vitest/coverage-istanbul": "5.0.5",
     "typescript": "5.9.3",
     "vitest": "5.0.5",
-    "wrangler": "4.156.0"
+    "wrangler": "4.156.0",
+    "yaml": "2.9.1"
   }
 }
