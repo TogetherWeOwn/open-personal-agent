@@ -100,11 +100,12 @@ export interface DataBindings<Stub, Id> {
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
     /**
-     * R2's listing, a page at a time with each object's size: the allowance meter (COST-5) sums
-     * the whole bucket with it. Absent where the store has none (Node).
+     * R2's listing, a page at a time: the allowance meter (COST-5) sums the whole bucket's sizes
+     * with it, and the retention sweep (M3-18) lists a prefix by upload time. Absent where the
+     * store has none (Node); both then leave those objects alone.
      */
-    list?(options: { cursor?: string; limit?: number }): Promise<{
-      objects: { size: number }[];
+    list?(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
+      objects: { key: string; size: number; uploaded: Date }[];
       truncated: boolean;
       cursor?: string;
     }>;
@@ -1374,6 +1375,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   backgroundProvider: userSettings.backgroundProvider,
                   backgroundModel: userSettings.backgroundModel,
                   onboardedAt: userSettings.onboardedAt,
+                  learnFromChats: userSettings.learnFromChats,
                 })
                 .from(users)
                 .leftJoin(userSettings, eq(userSettings.userId, users.id))
