@@ -11,7 +11,7 @@ import {
   usesAnthropicMessages,
   usesOpenAIResponses,
 } from "@opa/providers";
-import { encrypt, type UserScope as VaultScope } from "@opa/vault";
+import { decrypt, encrypt, type UserScope as VaultScope } from "@opa/vault";
 import { type Context, Hono } from "hono";
 import {
   billerOf,
@@ -70,7 +70,7 @@ const apiOf = (row: Provider) =>
 
 /** A saved provider as the browser sees it: the key's last 4 and dates, never the key (SEC-7). */
 function providerView(row: Provider) {
-  // `last4` is null for keys shorter than 8 characters; the join still finds the row.
+  // `last4` is null for keys shorter than 20 characters; the join still finds the row.
   const keyed = row.keyCreatedAt !== null && row.kind !== "workers-ai";
   const billingId = billerOf(row);
   return {
@@ -197,6 +197,19 @@ async function keyedValues(
     ) {
       return { status: 400, error: "key_required" } as const;
     }
+    // Keeping the key is only honest if it still opens under this binding. One sealed before the
+    // binding covered the path does not (crypto review I-2), and neither does one whose master
+    // key is gone; both are entered again rather than accepted here and refused at chat.
+    if (!c.env.VAULT) return { status: 503, error: "vault_unavailable" } as const;
+    const ref = { secretId, purpose: PURPOSE, binding, caller: CALLER };
+    // Only a key that doesn't open is entered again; a vault fault, such as an audit row that
+    // can't be written, says nothing about the key and must not ask the user to replace it.
+    const opened = await decrypt(c.env.VAULT, vaultScope(c), ref).then(
+      () => "ok" as const,
+      (error) => ((error as { code?: unknown }).code === "decrypt_failed" ? "closed" : "fault"),
+    );
+    if (opened === "closed") return { status: 400, error: "key_required" } as const;
+    if (opened === "fault") return { status: 503, error: "vault_unavailable" } as const;
   }
   return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
 }

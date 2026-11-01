@@ -164,11 +164,20 @@ describe("the D1 vault store", () => {
     const rotated = (
       await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}`, OPA_MASTER_KEY_PREV: PREV })
     ).VAULT as Vault;
+    const sealed = "SELECT ciphertext, iv, last4 FROM secrets WHERE id = 's1'";
+    // Re-key writes last4 again from the plaintext (L-1), not the stored value.
+    await env.DB.prepare("UPDATE secrets SET last4 = 'XXXX' WHERE id = 's1'").run();
+    const before = await env.DB.prepare(sealed).first();
     expect(await rewrap(rotated, { caller: "test" })).toEqual({ rewrapped: 1 });
     const versions = await env.DB.prepare("SELECT kek_version FROM user_keys").all();
     expect(versions.results).toEqual([{ kek_version: 2 }]);
-    const after = (await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}` })).VAULT as Vault;
-    expect(await decrypt(after, scope, { ...input, caller: "test" })).toBe(
+    // Re-keyed: the secret was sealed again under the new DEK, with a fresh IV.
+    const after = await env.DB.prepare(sealed).first();
+    expect(after?.iv).not.toEqual(before?.iv);
+    expect(after?.ciphertext).not.toEqual(before?.ciphertext);
+    expect(after?.last4).toBe("trip");
+    const current = (await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}` })).VAULT as Vault;
+    expect(await decrypt(current, scope, { ...input, caller: "test" })).toBe(
       "sk-canary-d1-round-trip",
     );
   });
@@ -204,11 +213,85 @@ describe("the D1 vault store", () => {
     )
       .bind(junk, junk)
       .run();
-    const row = { userId: "u1", kekVersion: 2, wrappedDek: junk, iv: junk };
-    await expect(d1VaultStore(env).replaceUserKey(row, 1)).rejects.toThrow();
+    const from = { userId: "u1", kekVersion: 1, wrappedDek: junk, iv: junk };
+    const to = { ...from, kekVersion: 2 };
+    const before = await d1VaultStore(env).userSecrets("u1");
+    const change = { from, to, before, after: before };
+    await expect(d1VaultStore(env).rekeyUser(change)).rejects.toThrow();
     const rows = await env.DB.prepare(
       "SELECT kek_version FROM user_keys WHERE user_id = 'u1' ORDER BY 1",
     ).all();
     expect(rows.results).toEqual([{ kek_version: 1 }, { kek_version: 2 }]);
+    await env.DB.prepare("DELETE FROM user_keys WHERE user_id = 'u1' AND kek_version = 1").run();
+  });
+
+  it("re-keys a user in one batch: a failure mid-batch leaves everything as it was", async () => {
+    const id = "u4";
+    await env.DB.prepare(
+      `INSERT INTO users (id, display_name, role) VALUES ('${id}', 'D', 'member')`,
+    ).run();
+    const old = (await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}` })).VAULT as Vault;
+    for (const secretId of ["s4", "s5"]) {
+      const plaintext = `sk-${secretId}-0123456789abcdef`;
+      await encrypt(old, scopeOf(id), { ...input, secretId, plaintext, caller: "test" });
+    }
+    const snapshot = async () => [
+      (await env.DB.prepare(`SELECT * FROM user_keys WHERE user_id = '${id}'`).all()).results,
+      (await env.DB.prepare(`SELECT * FROM secrets WHERE user_id = '${id}' ORDER BY id`).all())
+        .results,
+    ];
+    const before = await snapshot();
+    // Fail u4's batch (its DEK row and two secrets) after the DEK row and the first secret.
+    // Other users' batches, u1's, go through.
+    const failing = {
+      prepare: (sql: string) => env.DB.prepare(sql),
+      batch: (statements: D1PreparedStatement[]) =>
+        env.DB.batch(
+          statements.length !== 3
+            ? statements
+            : [
+                ...statements.slice(0, 2),
+                env.DB.prepare("SELECT * FROM no_such_table"),
+                ...statements.slice(2),
+              ],
+        ),
+    } as unknown as D1Database;
+    const third = `3:${key()}`;
+    const vault = (
+      await compose({ ...env, DB: failing, OPA_MASTER_KEY: third, OPA_MASTER_KEY_PREV: `2:${KEY}` })
+    ).VAULT as Vault;
+    await expect(rewrap(vault, { caller: "test" })).rejects.toThrow();
+    expect(await snapshot()).toEqual(before);
+    for (const secretId of ["s4", "s5"]) {
+      expect(await decrypt(old, scopeOf(id), { ...input, secretId, caller: "test" })).toBe(
+        `sk-${secretId}-0123456789abcdef`,
+      );
+    }
+  });
+
+  it("writes a secret and its audit row together, and never under a replaced DEK", async () => {
+    const store = d1VaultStore(env);
+    const [dek] = await store.userKeys("u1");
+    const secret = { id: "s6", userId: "u1", purpose: "model_api_key", binding: "b", version: 1 };
+    const row = { ...secret, ciphertext: new Uint8Array(16), iv: new Uint8Array(12), last4: null };
+    const audit = {
+      userId: "u1",
+      action: "vault.encrypt",
+      module: "stale",
+      targetId: "s6",
+      result: "ok",
+      detail: null,
+    } as const;
+    if (!dek) throw new Error("no DEK");
+    await expect(
+      store.putSecret(row, { ...dek, iv: new Uint8Array(12).fill(7) }, audit),
+    ).rejects.toThrow("secret not written");
+    const written = async () => [
+      await env.DB.prepare("SELECT count(*) AS n FROM secrets WHERE id = 's6'").first(),
+      await env.DB.prepare("SELECT count(*) AS n FROM audit_log WHERE module = 'stale'").first(),
+    ];
+    expect(await written()).toEqual([{ n: 0 }, { n: 0 }]);
+    await store.putSecret(row, dek, audit);
+    expect(await written()).toEqual([{ n: 1 }, { n: 1 }]);
   });
 });

@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Envelope encryption for per-user secrets (ADR 0010 D4, D4.1). Each user has a random 256-bit
-// DEK, AES-GCM-wrapped under the deployment KEK with AAD `user_id|kek_version`. Each secret is
-// AES-256-GCM under its user's DEK with AAD `user_id|secret_id|purpose|binding|version`.
+// DEK, AES-GCM-wrapped under the deployment KEK with AAD `(user_id, kek_version)`. Each secret is
+// AES-256-GCM under its user's DEK with AAD `(user_id, secret_id, purpose, binding, version)`,
+// both in the versioned encoding of `aad.ts`. A KEK rotation re-keys: every user gets a new DEK.
 // No runtime dependencies, and no export returns key material, a DEK or a `CryptoKey` (D4.1 #4,
-// #5). Storage and audit are a port that the composition root implements.
+// #5). No DEK is ever unwrapped as extractable. Storage and audit are a port that the composition
+// root implements.
+import { type AadFormat, dekAad, secretAad } from "./aad";
 import { importKek, type Kek, vaultError } from "./kek";
 
 /** The closed set of things a secret can be used for (D4.1 #5). */
@@ -55,11 +58,25 @@ export interface VaultStore {
    * newer epoch: during a rolling rotation, an old-epoch Worker can't enrol a user.
    */
   insertUserKey(row: WrappedDek): Promise<void>;
-  /** Atomically moves the user's `oldKekVersion` row to `row`; rejects if `row`'s epoch exists. */
-  replaceUserKey(row: WrappedDek, oldKekVersion: number): Promise<void>;
+  /** Every `secrets` row of the user. */
+  userSecrets(userId: string): Promise<SealedSecret[]>;
+  /**
+   * One batch: replaces the DEK row `from` with `to` and the user's secrets `before` with `after`
+   * (same ids). It writes nothing and returns false unless `from` is still stored and `before` is
+   * still exactly the user's secrets. Rejects, writing nothing, if `to`'s epoch row exists.
+   */
+  rekeyUser(change: {
+    from: WrappedDek;
+    to: WrappedDek;
+    before: SealedSecret[];
+    after: SealedSecret[];
+  }): Promise<boolean>;
   getSecret(userId: string, secretId: string): Promise<SealedSecret | null>;
-  /** Inserts or replaces the user's row with this id; rejects if it writes nothing. */
-  putSecret(row: SealedSecret): Promise<void>;
+  /**
+   * One batch: inserts or replaces the user's secret with this id, and writes `audit`, only while
+   * the DEK row `dek` it was sealed under is stored. Rejects, writing neither, otherwise.
+   */
+  putSecret(row: SealedSecret, dek: WrappedDek, audit: VaultAuditRow): Promise<void>;
   /** Rejects if the row isn't written: vault calls fail closed on audit (D4.1 #6). */
   audit(row: VaultAuditRow): Promise<void>;
 }
@@ -115,25 +132,18 @@ export async function encrypt(
   input: SecretRef & { plaintext: string },
 ): Promise<{ version: number }> {
   const state = stateOf(vault);
-  return audited(state, scope, input, "vault.encrypt", async () => {
+  return audited(state, scope, input, "vault.encrypt", async (audit) => {
     const { userId } = scope;
-    const { secretId, purpose, binding, plaintext } = input;
-    const version = ((await state.store.getSecret(userId, secretId))?.version ?? 0) + 1;
-    const dek = await userDek(state, userId, true);
+    const { secretId: id, purpose, binding, plaintext } = input;
+    const version = ((await state.store.getSecret(userId, id))?.version ?? 0) + 1;
+    const { key, format, row: dekRow } = await userDek(state, userId, true);
     const iv = randomIv();
-    const aad = encodeAad(userId, secretId, purpose, binding, version);
-    const ciphertext = await gcm("encrypt", dek, iv, aad, encoder.encode(plaintext));
-    const last4 = plaintext.length >= 8 ? plaintext.slice(-4) : null;
-    await state.store.putSecret({
-      id: secretId,
-      userId,
-      purpose,
-      binding,
-      version,
-      ciphertext,
-      iv,
-      last4,
-    });
+    const aad = secretAad(format, { userId, id, purpose, binding, version });
+    const ciphertext = await gcm("encrypt", key, iv, aad, encoder.encode(plaintext));
+    const row = { id, userId, purpose, binding, version, ciphertext, iv, last4: last4(plaintext) };
+    // The audit row commits with the secret, or neither does (L-2). The write also fails if a
+    // rotation re-keyed the user since `userDek`, so nothing is sealed under a replaced DEK.
+    await state.store.putSecret(row, dekRow, audit);
     return { version };
   });
 }
@@ -147,13 +157,18 @@ export async function decrypt(vault: Vault, scope: UserScope, input: SecretRef):
     if (!row || row.id !== secretId || row.purpose !== purpose || row.binding !== binding) {
       throw vaultError("decrypt_failed");
     }
-    const dek = await userDek(state, scope.userId, false);
-    const aad = encodeAad(scope.userId, secretId, purpose, binding, row.version);
-    return new TextDecoder().decode(await gcm("decrypt", dek, row.iv, aad, row.ciphertext));
+    const { key, format } = await userDek(state, scope.userId, false);
+    const aad = secretAad(format, { ...row, userId: scope.userId });
+    return new TextDecoder().decode(await gcm("decrypt", key, row.iv, aad, row.ciphertext));
   });
 }
 
-/** Re-wraps every older-epoch DEK under the current KEK. Secrets keep their DEKs, untouched. */
+/**
+ * Re-keys every user whose DEK is under an older epoch: a new DEK, wrapped under the current KEK,
+ * and each of the user's secrets re-sealed under it in the v2 AAD format, one batch per user. So a
+ * KEK or DEK taken before the rotation opens nothing written after it, and once the old epoch is
+ * retired, no copy of the data from before it opens either (crypto review C-2).
+ */
 export async function rewrap(
   vault: Vault,
   options: { caller: string },
@@ -161,14 +176,19 @@ export async function rewrap(
   const state = stateOf(vault);
   const { current, store } = state;
   let rewrapped = 0;
+  // A user whose secrets change while being re-keyed is retried, a few times at most.
+  const conflicts = new Map<string, number>();
   for (const old of state.keks.values()) {
     if (old === current) continue;
     for (let rows = await store.userKeysAt(old.version, 100); rows.length > 0; ) {
       for (const row of rows) {
-        // Extractable only for this re-wrap; the key never leaves the function.
-        const dek = await unwrapDek(old, row, true);
-        await store.replaceUserKey(await wrapDek(current, row.userId, dek), old.version);
-        rewrapped++;
+        if (await rekeyUser(state, old, row)) {
+          rewrapped++;
+          continue;
+        }
+        const tries = (conflicts.get(row.userId) ?? 0) + 1;
+        if (tries > 3) throw vaultError("rewrap_conflict");
+        conflicts.set(row.userId, tries);
       }
       rows = await store.userKeysAt(old.version, 100);
     }
@@ -223,15 +243,18 @@ function record(state: State, row: VaultAuditRow): Promise<void> {
   });
 }
 
-/** Runs an encrypt or decrypt and audits it. No audit row, no result (D4.1 #6). */
+/**
+ * Runs an encrypt or decrypt and audits it. No audit row, no result (D4.1 #6). An encrypt writes
+ * its `ok` row itself, in the same batch as the secret.
+ */
 async function audited<T>(
   state: State,
   scope: UserScope,
   input: SecretRef,
   action: "vault.encrypt" | "vault.decrypt",
-  run: () => Promise<T>,
+  run: (ok: VaultAuditRow) => Promise<T>,
 ): Promise<T> {
-  // `|` separates AAD fields, so the free-form ones before `binding` can't contain it.
+  // `|` separates v1 AAD fields, so the free-form ones before `binding` can't contain it.
   const ids = [scope?.userId, input.secretId, input.caller];
   if (
     ids.some((id) => typeof id !== "string" || id === "" || id.includes("|")) ||
@@ -251,14 +274,20 @@ async function audited<T>(
   const encrypting = action === "vault.encrypt";
   let value: T;
   try {
-    value = await run();
+    value = await run({ ...row, result: "ok" });
   } catch {
     // Best effort: the call fails either way, with a fixed message and no cause.
     await state.store.audit({ ...row, result: encrypting ? "error" : "denied" }).catch(() => {});
     throw vaultError(encrypting ? "encrypt_failed" : "decrypt_failed");
   }
-  await record(state, { ...row, result: "ok" });
+  if (!encrypting) await record(state, { ...row, result: "ok" });
   return value;
+}
+
+interface Dek {
+  key: CryptoKey;
+  format: AadFormat;
+  row: WrappedDek;
 }
 
 /**
@@ -266,41 +295,100 @@ async function audited<T>(
  * With `create`, a user with no DEK gets a new one. A user whose only DEK is under an unknown or
  * retired epoch gets none: a new DEK would silently orphan their old secrets.
  */
-async function userDek(state: State, userId: string, create: boolean): Promise<CryptoKey> {
+async function userDek(state: State, userId: string, create: boolean): Promise<Dek> {
   const rows = await state.store.userKeys(userId);
   const row =
     rows.find((r) => r.kekVersion === state.current.version) ??
     rows.find((r) => state.keks.has(r.kekVersion));
   const kek = row && state.keks.get(row.kekVersion);
-  if (row && kek && row.userId === userId) return unwrapDek(kek, row, false);
+  if (row && kek && row.userId === userId) return { ...(await unwrapDek(kek, row)), row };
   if (rows.length > 0 || !create) throw vaultError("decrypt_failed");
 
-  const fresh = (await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, [
-    "encrypt",
-    "decrypt",
-  ])) as CryptoKey;
-  await state.store.insertUserKey(await wrapDek(state.current, userId, fresh));
+  await state.store.insertUserKey((await newDek(state.current, userId)).row);
   // Re-read, so two concurrent first encrypts agree on whichever row was stored.
   return userDek(state, userId, false);
 }
 
-async function wrapDek(kek: Kek, userId: string, dek: CryptoKey): Promise<WrappedDek> {
-  const iv = randomIv();
-  const params = { name: "AES-GCM", iv, additionalData: encodeAad(userId, kek.version) };
-  const wrappedDek = new Uint8Array(await crypto.subtle.wrapKey("raw", dek, kek.key, params));
-  return { userId, kekVersion: kek.version, wrappedDek, iv };
+/**
+ * Moves one user from `old` to a new DEK under the current KEK, re-sealing each secret with a fresh
+ * IV. False if the user's rows changed meanwhile; then nothing was written.
+ */
+async function rekeyUser(state: State, old: Kek, from: WrappedDek): Promise<boolean> {
+  const { userId } = from;
+  const { key: oldKey, format } = await unwrapDek(old, from);
+  const before = await state.store.userSecrets(userId);
+  const { key, row: to } = await newDek(state.current, userId);
+  const after: SealedSecret[] = [];
+  for (const secret of before) {
+    if (secret.userId !== userId) throw vaultError("rewrap_failed");
+    // A secret that no longer opens stops the rotation: re-keying would drop it for good.
+    const plaintext = await gcm(
+      "decrypt",
+      oldKey,
+      secret.iv,
+      secretAad(format, secret),
+      secret.ciphertext,
+    ).catch(() => {
+      throw vaultError("rewrap_failed");
+    });
+    const iv = randomIv();
+    const ciphertext = await gcm("encrypt", key, iv, secretAad(2, secret), plaintext);
+    // Recomputed, so a last4 kept before L-1 for a short secret goes with its old ciphertext.
+    const shown = last4(new TextDecoder().decode(plaintext));
+    plaintext.fill(0);
+    after.push({ ...secret, ciphertext, iv, last4: shown });
+  }
+  return state.store.rekeyUser({ from, to, before, after });
 }
 
-function unwrapDek(kek: Kek, row: WrappedDek, extractable: boolean): Promise<CryptoKey> {
-  const params = {
-    name: "AES-GCM",
-    iv: row.iv,
-    additionalData: encodeAad(row.userId, row.kekVersion),
-  };
-  return crypto.subtle.unwrapKey("raw", row.wrappedDek, kek.key, params, "AES-GCM", extractable, [
+/** Only for long secrets: four characters of a short one are too much of it (crypto review L-1). */
+function last4(plaintext: string): string | null {
+  return plaintext.length >= 20 ? plaintext.slice(-4) : null;
+}
+
+/**
+ * A fresh DEK wrapped under `kek` in the v2 format, and the same DEK unwrapped again as a
+ * non-extractable key: the extractable one exists only to be wrapped, and never leaves here.
+ */
+async function newDek(kek: Kek, userId: string): Promise<{ key: CryptoKey; row: WrappedDek }> {
+  const fresh = (await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, [
     "encrypt",
     "decrypt",
-  ]);
+  ])) as CryptoKey;
+  const iv = randomIv();
+  const params = { name: "AES-GCM", iv, additionalData: dekAad(2, userId, kek.version) };
+  const wrappedDek = new Uint8Array(await crypto.subtle.wrapKey("raw", fresh, kek.key, params));
+  const row = { userId, kekVersion: kek.version, wrappedDek, iv };
+  return { key: (await unwrapDek(kek, row)).key, row };
+}
+
+/** Unwraps a DEK as non-extractable, trying the v2 AAD and then v1. GCM accepts only the right one. */
+async function unwrapDek(
+  kek: Kek,
+  row: WrappedDek,
+): Promise<{ key: CryptoKey; format: AadFormat }> {
+  for (const format of [2, 1] as const) {
+    const params = {
+      name: "AES-GCM",
+      iv: row.iv,
+      additionalData: dekAad(format, row.userId, row.kekVersion),
+    };
+    try {
+      const key = await crypto.subtle.unwrapKey(
+        "raw",
+        row.wrappedDek,
+        kek.key,
+        params,
+        "AES-GCM",
+        false,
+        ["encrypt", "decrypt"],
+      );
+      return { key, format };
+    } catch {
+      // The other format, or a key that isn't this KEK's.
+    }
+  }
+  throw vaultError("decrypt_failed");
 }
 
 async function gcm(
@@ -313,10 +401,6 @@ async function gcm(
   return new Uint8Array(
     await crypto.subtle[op]({ name: "AES-GCM", iv, additionalData: aad }, key, data),
   );
-}
-
-function encodeAad(...fields: (string | number)[]): Bytes {
-  return new Uint8Array(encoder.encode(fields.join("|")));
 }
 
 /** A fresh random 96-bit GCM IV. */

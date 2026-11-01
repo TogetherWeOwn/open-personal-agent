@@ -5,6 +5,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { STARTER_MODEL } from "@opa/providers";
 import { app } from "@opa/server/app";
+import { encrypt, type UserScope, type Vault } from "@opa/vault";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
@@ -248,6 +249,102 @@ describe("model settings", () => {
 
   it("keeps the saved key for switching back from the starter", async () => {
     expect((await put("/model", { ...OPENAI, model: "gpt-y" })).status).toBe(200);
+  });
+
+  it("asks for the key again when it was saved before its binding covered the path", async () => {
+    // A key as saved before its binding covered the path (crypto review I-2), in the old
+    // origin-only form. Nothing stored says which path it was saved for, and the saved URL is
+    // only data, so it is never opened as-is: at its old path, or at another path written to D1.
+    const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
+    const chatKey =
+      "SELECT key_secret_id AS id FROM model_providers " +
+      "WHERE id = (SELECT chat_provider FROM user_settings)";
+    const row = await env.DB.prepare(chatKey).first();
+    const secretId = row?.id as string;
+    const binding = "model:openai|https://api.example.com";
+    const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
+    await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
+
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
+      );
+    });
+    const required = { status: 409, text: '{"error":"key_required"}' };
+    expect(await call("/model/test", { method: "POST" })).toEqual(required);
+    const move =
+      "UPDATE model_providers SET base_url = ? WHERE id = (SELECT chat_provider FROM user_settings)";
+    await env.DB.prepare(move).bind("https://api.example.com/x/v1").run();
+    expect(await call("/model/test", { method: "POST" })).toEqual(required);
+    expect(fetch).not.toHaveBeenCalled();
+    await env.DB.prepare(move).bind(OPENAI.baseUrl).run();
+  });
+
+  it("does not accept a keyless save that keeps a key it can no longer open", async () => {
+    // The saved key above is sealed under the old origin-only binding, so no current read can
+    // open it. A save without a replacement key must say so at save time, on onboarding's route
+    // and on the provider update, rather than reporting success and failing later at chat.
+    const { VAULT } = await compose({ ...env, OPA_MASTER_KEY: KEY });
+    const chatKey =
+      "SELECT key_secret_id AS id FROM model_providers " +
+      "WHERE id = (SELECT chat_provider FROM user_settings)";
+    const row = await env.DB.prepare(chatKey).first();
+    const secretId = row?.id as string;
+    const binding = "model:openai|https://api.example.com";
+    const input = { secretId, purpose: "model_api_key" as const, binding, plaintext: CANARY };
+    await encrypt(VAULT as Vault, { userId: "u1" } as UserScope, { ...input, caller: "t" });
+
+    const required = { status: 400, text: '{"error":"key_required"}' };
+    expect(await put("/model", { ...OPENAI, model: "gpt-new" })).toEqual(required);
+    // The refused save changed nothing: the Chat role still names the earlier model.
+    expect(JSON.parse((await call("")).text).model.model).not.toBe("gpt-new");
+
+    const view = JSON.parse((await call("")).text);
+    const provider = view.providers.find(
+      (p: { providerId: string; baseUrl: string }) =>
+        p.providerId === "openai" && p.baseUrl === OPENAI.baseUrl,
+    ) as { id: string };
+    const update = { providerId: "openai", baseUrl: OPENAI.baseUrl, model: "gpt-new" };
+    expect(await put(`/providers/${provider.id}`, update)).toEqual(required);
+  });
+
+  it("reports a vault fault on a keyless save as unavailable, not as a key to replace", async () => {
+    expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
+    // The key opens, but its decrypt can't be audited, so the vault refuses it (fails closed).
+    await env.DB.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const unavailable = { status: 503, text: '{"error":"vault_unavailable"}' };
+      expect(await put("/model", { ...OPENAI, model: "gpt-new" })).toEqual(unavailable);
+    } finally {
+      await env.DB.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect((await put("/model", { ...OPENAI, model: "gpt-new" })).status).toBe(200);
+  });
+
+  it("does not open a saved key when the stored path changes", async () => {
+    expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        sse(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }), "[DONE]"),
+      );
+    });
+    expect(JSON.parse((await call("/model/test", { method: "POST" })).text)).toMatchObject({
+      ok: true,
+    });
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      `Bearer ${CANARY}`,
+    );
+    const sent = fetch.mock.calls.length;
+    // Pointing the saved URL at another path on the host, in D1, fails rather than sending the key.
+    const move =
+      "UPDATE model_providers SET base_url = ? WHERE id = (SELECT chat_provider FROM user_settings)";
+    await env.DB.prepare(move).bind("https://api.example.com/x/v1").run();
+    expect(await call("/model/test", { method: "POST" })).toEqual({
+      status: 409,
+      text: '{"error":"key_required"}',
+    });
+    expect(fetch.mock.calls).toHaveLength(sent);
+    await env.DB.prepare(move).bind(OPENAI.baseUrl).run();
   });
 });
 

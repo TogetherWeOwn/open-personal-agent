@@ -118,7 +118,9 @@ export async function resolveChatModel(
   const binding = credentialBinding(providerId, baseUrl);
   const ref = { secretId, purpose: MODEL_KEY_PURPOSE, binding, caller } as const;
   // The vault takes the repository's scope too; its own brand keeps it from importing `@opa/db`.
-  // A lost master key makes saved keys unreadable; the user enters theirs again.
+  // A lost master key makes saved keys unreadable; the user enters theirs again. So does a key
+  // saved before its binding covered the base path: nothing stored says which path it was saved
+  // for, so it is never opened against the saved URL as it stands (crypto review I-2).
   const apiKey = await decrypt(env.VAULT, scope as unknown as VaultScope, ref).catch(() => null);
   if (apiKey === null) return { error: "key_required" };
   // The base URL is the user's, so on Node this goes through the SSRF-guarded fetch (ADR 0010 D8).
