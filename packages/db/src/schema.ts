@@ -47,6 +47,15 @@ export const setupState = sqliteTable(
   (t) => [check("setup_state_single_row", sql`${t.id} = 1`)],
 );
 
+/**
+ * Every `sha256(OPA_SETUP_TOKEN)` that has claimed or recovered the deployment. A token in here
+ * never opens `/setup` again, even if the operator puts it back as the secret.
+ */
+export const usedSetupTokens = sqliteTable("used_setup_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  usedAt: integer("used_at").notNull().default(now),
+});
+
 /** Session IDs are stored only as hashes. 30 days idle, 90 days absolute (ADR 0010 D2). */
 export const sessions = sqliteTable(
   "sessions",
@@ -85,6 +94,7 @@ export const passkeys = sqliteTable(
  * Pending WebAuthn challenges, keyed by the SHA-256 of the browser's challenge cookie. A ceremony
  * consumes its row with `DELETE … RETURNING`, so each challenge works once. `user_id` is the
  * account the ceremony is for; on a claim that account doesn't exist yet, so it has no foreign key.
+ * `token_hash` binds a claim or recovery challenge to the setup token it was issued under.
  */
 export const webauthnChallenges = sqliteTable(
   "webauthn_challenges",
@@ -93,6 +103,7 @@ export const webauthnChallenges = sqliteTable(
     kind: text("kind", { enum: ["claim", "recovery", "login"] }).notNull(),
     challenge: text("challenge").notNull(),
     userId: text("user_id"),
+    tokenHash: text("token_hash"),
     expiresAt: integer("expires_at").notNull(),
   },
   (t) => [index("webauthn_challenges_expires_idx").on(t.expiresAt)],

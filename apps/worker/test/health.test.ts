@@ -15,7 +15,7 @@ const SECRETS = {
   OPA_SETUP_TOKEN: "test-setup-token",
 };
 const TABLES = `audit_log conversations messages passkeys recovery_codes schema_version secrets
-  sessions setup_state usage user_keys users webauthn_challenges`.split(/\s+/);
+  sessions setup_state usage used_setup_tokens user_keys users webauthn_challenges`.split(/\s+/);
 
 async function health(bindings: Env = env): Promise<[number, Health]> {
   const res = await app.request("/api/health", {}, bindings);
