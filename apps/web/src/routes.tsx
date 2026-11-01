@@ -5,6 +5,7 @@
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
 import { Memory } from "./memory/Memory";
+import { Waiting } from "./memory/Waiting";
 import { Output, Outputs } from "./outputs/Outputs";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
@@ -59,7 +60,7 @@ export const SETTINGS: {
   { id: "apps", label: "Apps & tools" },
   { id: "memory", label: "Memory" },
   { id: "spending", label: "Spending", shipped: true },
-  { id: "privacy", label: "Privacy & security" },
+  { id: "privacy", label: "Privacy & security", shipped: true },
   { id: "deployment", label: "Deployment" },
 ];
 
@@ -85,8 +86,9 @@ function SettingsList() {
 function SettingsPage({ params }: { params: Record<string, string> }) {
   const page = SETTINGS.find((s) => s.id === params.page);
   if (!page) return <NotFound />;
-  // Models and Agent engine already shipped with real screens; the table serves them instead of
-  // their placeholders, so the rebase keeps what `main` already gives those addresses.
+  // Models, Agent engine, Spending and Privacy & security already shipped with real
+  // screens; the table serves them instead of their placeholders, so the rebase keeps what
+  // `main` already gives those addresses.
   if (page.shipped) return <Settings page={page.id as ShippedSettingsPage} />;
   return (
     <Page title={page.label}>
@@ -105,10 +107,11 @@ export function NotFound() {
 }
 
 // m3-ux §1.2 names this screen "Waiting for you", so the two Memory addresses don't look alike.
-const waiting = placeholder(
-  "Waiting for you",
-  "I'll remember things you tell me, like your preferences and ongoing projects.",
-  "You can always see and change them here.",
+const waiting = () => (
+  <Page title="Waiting for you">
+    {go("/memory", "All of Memory")}
+    <Waiting heading={false} />
+  </Page>
 );
 
 export const routes: Route[] = [
