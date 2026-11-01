@@ -49,23 +49,29 @@ export function localBlobStore(dir: string): R2Bucket {
       };
     },
     async put(key: string, value: Body) {
-      // Stream to a temp file, then sidecar, then rename — in that order. A reader never
-      // sees half an object; the sidecar's content is the key, so rewriting it is
-      // idempotent and a sidecar failure leaves the old object (body and sidecar) in
-      // place instead of deleting a body the rename already replaced. A crash between
-      // the sidecar write and the rename leaves a sidecar naming the old body (listed
-      // as before) or a missing body (`list` skips it, the next `put` rewrites it).
+      // Stream to a temp file, publish the sidecar, then the body — in that order. A reader
+      // never sees half an object; the sidecar's content is the key, so republishing it is
+      // idempotent and a sidecar failure leaves the old object (body and sidecar) in place
+      // instead of deleting a body the rename already replaced. The sidecar itself publishes
+      // through a temp file renamed over it: `writeFile` truncates before writing, so a
+      // failure mid-write would otherwise leave the old body with an unreadable sidecar the
+      // listing skips. The sidecar temp keeps no `.key` suffix, so `list` ignores one a
+      // crash leaves behind; a crash between the two renames leaves a sidecar naming the
+      // old body (listed as before).
       const temp = join(dir, `.tmp-${randomUUID()}`);
+      const sidecarTemp = join(dir, `.tmp-${randomUUID()}`);
       try {
         if (value instanceof ReadableStream) {
           await pipeline(Readable.fromWeb(value as never), createWriteStream(temp));
         } else {
           await writeFile(temp, new Uint8Array(await new Response(value).arrayBuffer()));
         }
-        await writeFile(sidecarOf(key), key, "utf8");
+        await writeFile(sidecarTemp, key, "utf8");
+        await rename(sidecarTemp, sidecarOf(key));
         await rename(temp, pathOf(key));
       } catch (err) {
         await rm(temp, { force: true });
+        await rm(sidecarTemp, { force: true });
         throw err;
       }
       return head(key);
