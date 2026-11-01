@@ -51,6 +51,8 @@ taskStoreContract(
 /**
  * A stepper that persists (and replays) step outputs the way the Workflow engine does,
  * shared across one harness's reconnects the way the engine's history survives a resume.
+ * Consumed waits persist their payload under their name, so a resume replays a finished
+ * wait instead of timing out.
  */
 class SharedStepper implements TaskStepper {
   readonly persisted = new Map<string, JsonValue>();
@@ -64,12 +66,15 @@ class SharedStepper implements TaskStepper {
   }
   async sleep(): Promise<void> {}
   async waitForEvent<T extends JsonValue>(
-    _name: string,
+    name: string,
     options: { type: string; timeoutMs: number },
   ): Promise<{ payload: T }> {
+    const hit = this.persisted.get(name) as { payload: T } | undefined;
+    if (hit !== undefined) return { payload: hit.payload };
     const at = this.events.findIndex((e) => e.type === options.type);
     if (at < 0) throw new Error("waitForEvent timed out: no event was posted");
     const [next] = this.events.splice(at, 1);
+    this.persisted.set(name, JSON.parse(JSON.stringify({ payload: next?.payload })) as JsonValue);
     return { payload: next?.payload as T };
   }
 }

@@ -351,5 +351,18 @@ export function taskContextContract(
         h.ctx.waitForEvent("w2", { type: "never-posted", timeoutMs: 20 }),
       ).rejects.toThrow();
     });
+
+    it("replays a consumed wait after a resume instead of timing out", async () => {
+      const h = await connect();
+      await h.postEvent("approval", { decision: "approve" });
+      expect(await h.ctx.waitForEvent("w", { type: "approval", timeoutMs: 2000 })).toEqual({
+        payload: { decision: "approve" },
+      });
+      // A reconnected context over the same task and instance — a crash-resume — replays
+      // the consumed approval instead of waiting on an event that is already gone.
+      expect(await h.reconnect().waitForEvent("w", { type: "approval", timeoutMs: 50 })).toEqual({
+        payload: { decision: "approve" },
+      });
+    });
   });
 }
