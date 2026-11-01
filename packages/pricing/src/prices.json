@@ -1,0 +1,70 @@
+{
+  "currency": "USD",
+  "workersAi": {
+    "neuronsPerDay": 10000,
+    "usdPer1000Neurons": 0.011,
+    "resetsAtUtc": "00:00",
+    "verifiedAt": "2026-11-01",
+    "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/"
+  },
+  "providers": {
+    "workers-ai": {
+      "name": "Cloudflare: Workers AI",
+      "billedBy": "cloudflare-workers-ai",
+      "billingUrl": "https://dash.cloudflare.com/?to=/:account/ai/workers-ai"
+    },
+    "openai": {
+      "name": "OpenAI",
+      "billedBy": "provider",
+      "billingUrl": "https://platform.openai.com/usage"
+    },
+    "openrouter": {
+      "name": "OpenRouter",
+      "billedBy": "provider",
+      "billingUrl": "https://openrouter.ai/activity"
+    }
+  },
+  "models": [
+    {
+      "providerId": "workers-ai",
+      "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      "name": "Llama 3.3 70B (fast)",
+      "inputUsdPerMTok": 0.293,
+      "outputUsdPerMTok": 2.253,
+      "neuronsPerMInputTok": 26668,
+      "neuronsPerMOutputTok": 204805,
+      "verifiedAt": "2026-11-01",
+      "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/"
+    },
+    {
+      "providerId": "openai",
+      "model": "gpt-4.1-mini",
+      "name": "GPT-4.1 mini",
+      "inputUsdPerMTok": 0.4,
+      "cachedInputUsdPerMTok": 0.1,
+      "outputUsdPerMTok": 1.6,
+      "verifiedAt": "2026-11-01",
+      "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+      "providerId": "openai",
+      "model": "gpt-4.1",
+      "name": "GPT-4.1",
+      "inputUsdPerMTok": 2,
+      "cachedInputUsdPerMTok": 0.5,
+      "outputUsdPerMTok": 8,
+      "verifiedAt": "2026-11-01",
+      "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+      "providerId": "openai",
+      "model": "gpt-4o-mini",
+      "name": "GPT-4o mini",
+      "inputUsdPerMTok": 0.15,
+      "cachedInputUsdPerMTok": 0.075,
+      "outputUsdPerMTok": 0.6,
+      "verifiedAt": "2026-11-01",
+      "source": "https://developers.openai.com/api/docs/pricing"
+    }
+  ]
+}

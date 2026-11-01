@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The scoped repository layer (ADR 0010 D3): the only code that reads the DB, FILES and ASSISTANT
 // bindings, derives R2 keys or names Durable Objects. scripts/check-scoped-access.mjs enforces it.
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { estimate, findPrice } from "@opa/pricing";
+import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { AnyD1Database } from "drizzle-orm/d1";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
@@ -79,6 +80,19 @@ export interface TurnRecord {
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | null;
   /** The model call has started, so the messages exist and the call belongs in the ledger. */
   called: boolean;
+}
+
+/** The ledger's cost columns for a turn: all null when the table has no price for its model. */
+function priced({ providerId, model, usage: counts }: TurnRecord) {
+  const price = findPrice(providerId, model);
+  if (!price || !counts) return {};
+  const { costMicroUsd, neurons } = estimate(price, counts);
+  return {
+    costMicroUsd,
+    neurons,
+    costSource: "estimated",
+    priceVerifiedAt: price.verifiedAt,
+  } as const;
 }
 
 export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBindings<Stub, Id>) {
@@ -172,8 +186,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]);
           },
           /**
-           * Finishes a reply and writes the call's usage ledger row (ADR 0006) in one transaction.
-           * Pricing joins in M2-21, so cost is 0. A call that never started gets no row.
+           * Finishes a reply and writes the call's usage ledger row (ADR 0006) in one transaction,
+           * priced from the price table. A call that never started gets no row.
            */
           settle: async (turn: TurnRecord, status: MessageStatus) => {
             await db.batch([
@@ -191,11 +205,40 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                       providerId: turn.providerId,
                       model: turn.model,
                       ...turn.usage,
+                      ...priced(turn),
                     }),
                   ]
                 : []),
             ]);
           },
+        },
+        /** The ledger the Usage page reads (PRD §17). */
+        usage: {
+          /** Calls since `since`, per provider, model and cost source; one query. */
+          totals: (since: number) =>
+            db
+              .select({
+                providerId: usage.providerId,
+                model: usage.model,
+                costSource: usage.costSource,
+                calls: count(),
+                inputTokens: sql<number>`sum(${usage.inputTokens})`.mapWith(Number),
+                outputTokens: sql<number>`sum(${usage.outputTokens})`.mapWith(Number),
+                costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.mapWith(Number),
+                priceVerifiedAt: sql<string | null>`min(${usage.priceVerifiedAt})`,
+              })
+              .from(usage)
+              .where(and(eq(usage.userId, userId), gte(usage.createdAt, since)))
+              .groupBy(usage.providerId, usage.model, usage.costSource)
+              .orderBy(usage.providerId, usage.model),
+          /** Workers AI neurons the user's calls used since `since`. */
+          neurons: async (since: number) =>
+            (
+              await db
+                .select({ n: sql<number>`coalesce(sum(${usage.neurons}), 0)`.mapWith(Number) })
+                .from(usage)
+                .where(and(eq(usage.userId, userId), gte(usage.createdAt, since)))
+            )[0]?.n ?? 0,
         },
         /** Onboarding answers and the chat model (M2-15). The key itself is in `secrets`. */
         settings: {

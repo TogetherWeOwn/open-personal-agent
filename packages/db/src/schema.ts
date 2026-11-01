@@ -208,7 +208,11 @@ export const messages = sqliteTable(
   (t) => [index("messages_user_conversation_idx").on(t.userId, t.conversationId, t.seq)],
 );
 
-/** One row per model call; cost is in millionths of a US dollar. */
+/**
+ * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
+ * table had no price for the model; `cost_source` says whether it was estimated or reported.
+ * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls.
+ */
 export const usage = sqliteTable(
   "usage",
   {
@@ -223,7 +227,10 @@ export const usage = sqliteTable(
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
-    costMicroUsd: integer("cost_micro_usd").notNull().default(0),
+    costMicroUsd: integer("cost_micro_usd"),
+    costSource: text("cost_source", { enum: ["estimated", "reported"] }),
+    priceVerifiedAt: text("price_verified_at"),
+    neurons: integer("neurons"),
     createdAt: createdAt(),
   },
   (t) => [index("usage_user_idx").on(t.userId, t.createdAt)],
