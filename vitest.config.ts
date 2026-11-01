@@ -13,6 +13,7 @@ export default defineConfig({
         },
       },
       "apps/worker",
+      "spikes/harness",
     ],
   },
 });

@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - spikes/*
 
 # Dependency lifecycle scripts run only for this allowlist (ADR 0010 D12).
 onlyBuiltDependencies:

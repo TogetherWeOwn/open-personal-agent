@@ -1,0 +1,8 @@
+// M2-16 spike, builtin-loop only (bundle size). No nodejs_compat flag on purpose: the harness must run without Node APIs.
+{
+  "name": "opa-spike-builtin",
+  "main": "src/builtin-worker.ts",
+  "compatibility_date": "2026-10-23",
+  "durable_objects": { "bindings": [{ "name": "BUILTIN", "class_name": "BuiltinSession" }] },
+  "exports": { "BuiltinSession": { "type": "durable-object", "storage": "sqlite" } }
+}

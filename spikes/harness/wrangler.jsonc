@@ -1,0 +1,16 @@
+// M2-16 spike: both variants for wrangler dev and tests. No nodejs_compat flag on purpose: the harness must run without Node APIs.
+{
+  "name": "opa-spike-both",
+  "main": "src/both-worker.ts",
+  "compatibility_date": "2026-10-23",
+  "durable_objects": {
+    "bindings": [
+      { "name": "BUILTIN", "class_name": "BuiltinSession" },
+      { "name": "AISDK", "class_name": "AISDKSession" }
+    ]
+  },
+  "exports": {
+    "BuiltinSession": { "type": "durable-object", "storage": "sqlite" },
+    "AISDKSession": { "type": "durable-object", "storage": "sqlite" }
+  }
+}
