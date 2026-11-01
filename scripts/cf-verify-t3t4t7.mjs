@@ -109,11 +109,13 @@ export function normalizeToolCalls(raw) {
   });
 }
 
-/** A Workers AI cap/limit failure (daily neuron limit, 429, capacity): stop inconclusive. */
+/** A Workers AI cap/limit failure: the fixture answers 429 `ai-capacity`, and `call`
+ * surfaces it as `error.status`/`error.body`. Match only those — never the message, which
+ * carries the fixture URL with the campaign's 8-hex prefix (a prefix containing `429`
+ * would turn any HTTP error into inconclusive). */
 export function isCapacityError(error) {
   if (error?.status === 429) return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /ai-capacity|429|rate.?limit|capacity|quota|neuron|daily.?limit/i.test(message);
+  return error?.body?.error === "ai-capacity";
 }
 
 /**
@@ -303,14 +305,27 @@ async function fixtureUrl(prefix, deps) {
   return `https://${manifest.worker}.${domain}.workers.dev`;
 }
 
+/**
+ * The generated per-campaign config. The template's relative `main` would resolve under the
+ * generated config's directory (`.wrangler/opa-t3t4t7/<prefix>/`), where no worker exists —
+ * so substitute the absolute fixture entrypoint.
+ */
+export function renderDeployConfig(prefix, model) {
+  return fs
+    .readFileSync(TEMPLATE, "utf8")
+    .replaceAll("__PREFIX__", prefix)
+    .replaceAll("__T7_MODEL__", model)
+    .replace(
+      '"main": "worker.ts"',
+      `"main": ${JSON.stringify(path.join(ROOT, "cf-verify", "t3t4t7", "worker.ts"))}`,
+    );
+}
+
 async function deploy(prefix, deps, { model }) {
   if (!model) throw new Error("deploy needs --model (the pinned starter under test)");
   if (/["\\\n\r]/.test(model)) throw new Error("deploy: --model is not JSON-safe");
   const { secrets, bearer } = authOf(deps.env);
-  const config = fs
-    .readFileSync(TEMPLATE, "utf8")
-    .replaceAll("__PREFIX__", prefix)
-    .replaceAll("__T7_MODEL__", model);
+  const config = renderDeployConfig(prefix, model);
   const dir = path.join(ROOT, ".wrangler", "opa-t3t4t7", prefix);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "wrangler.json");
@@ -595,10 +610,21 @@ async function t4run(prefix, deps) {
     note(prefix, "t4", { phase: "reconnect", tab: at, catchupMs: ms });
     if (ms > 10_000) throw new Error(`T4: tab ${at} catch-up took ${ms} ms (>10 s)`);
   };
+  // The plan's minutes 30 and 45 are 20 and 35 minutes into the active period (after
+  // the opening 10 idle minutes): trigger on elapsed time, not the message index.
+  const activeStart = Date.now();
+  const reconnected = { one: false, all: false };
   for (let m = 0; m < 20; m++) {
     tabs[m % 3].ws.send(JSON.stringify({ chat: `synthetic-${m}` }));
-    if (m === 9) await reconnect(tabs[0], 0);
-    if (m === 14) for (let t = 0; t < 3; t++) await reconnect(tabs[t], t);
+    const elapsed = Date.now() - activeStart;
+    if (!reconnected.one && elapsed >= 20 * 60_000) {
+      await reconnect(tabs[0], 0);
+      reconnected.one = true;
+    }
+    if (!reconnected.all && elapsed >= 35 * 60_000) {
+      for (let t = 0; t < 3; t++) await reconnect(tabs[t], t);
+      reconnected.all = true;
+    }
     await sleep(2 * 60_000);
   }
   await sleep(10 * 60_000);
@@ -611,6 +637,8 @@ async function t4run(prefix, deps) {
     coverage,
     metering: "unverified: isolated DO GB-s deltas need an operator read",
   });
+  // The plan expects all 20 chats in the server log: a lost chat must fail, not pass.
+  if (total !== 20) throw new Error(`T4: server logged ${total} chats, expected 20`);
   if (coverage.some((c) => c.missing.length || c.duplicated.length))
     throw new Error("T4: a tab missed or duplicated events");
   return { total };

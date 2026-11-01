@@ -16,6 +16,7 @@ import {
   normalizeToolCalls,
   openSocket,
   redact,
+  renderDeployConfig,
   scoreTurn,
   stubResult,
   teardown,
@@ -190,10 +191,29 @@ describe("t7 tool-call shapes", () => {
     const http429 = new Error("POST https://x: HTTP 429");
     http429.status = 429;
     expect(isCapacityError(http429)).toBe(true);
-    expect(isCapacityError(new Error("daily neuron limit reached"))).toBe(true);
-    expect(isCapacityError(new Error("ai-capacity"))).toBe(true);
+    const capBody = new Error("POST https://x: HTTP 500");
+    capBody.status = 500;
+    capBody.body = { error: "ai-capacity" };
+    expect(isCapacityError(capBody)).toBe(true);
+    // A campaign prefix containing 429 in the fixture URL must not match: the message
+    // is never scored, only status and body.
+    const prefix429 = new Error(
+      "GET https://opa-v-q4-20261101-a1b24294-t3t4t7.<subdomain>.workers.dev/t4/log: HTTP 500",
+    );
+    prefix429.status = 500;
+    expect(isCapacityError(prefix429)).toBe(false);
+    expect(isCapacityError(new Error("daily neuron limit reached"))).toBe(false);
+    expect(isCapacityError(new Error("ai-capacity"))).toBe(false);
     expect(isCapacityError(new Error("fixture deploy failed"))).toBe(false);
     expect(isCapacityError(new Error("model-not-allowed"))).toBe(false);
+  });
+  it("renders a generated config whose main resolves to an existing file", () => {
+    const rendered = renderDeployConfig(Q4, "some-model");
+    expect(rendered).toContain(Q4);
+    const match = rendered.match(/"main":\s*"([^"]+)"/);
+    expect(match).not.toBeNull();
+    expect(path.isAbsolute(match[1])).toBe(true);
+    expect(fs.existsSync(match[1])).toBe(true);
   });
 });
 
