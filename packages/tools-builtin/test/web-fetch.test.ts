@@ -263,6 +263,9 @@ describe("web_fetch", () => {
     const tool = webFetchTool({ fetch: fakeFetch(() => page("")).fetch, ownHosts: [] });
     expect(tool.target?.({ url: "https://sub.example.com:8443/a" })).toBe("sub.example.com");
     expect(tool.target?.({ url: "junk" })).toBeUndefined();
+    // One spelling per host, so a destination grant can't be matched by a look-alike spelling.
+    expect(tool.target?.({ url: "https://EXAMPLE.com./a" })).toBe("example.com");
+    expect(tool.target?.({ url: "https://bücher.example/" })).toBe("xn--bcher-kva.example");
   });
 });
 

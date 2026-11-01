@@ -4,6 +4,7 @@
 // (M2-16 note). It fails closed: a keyword it doesn't know, or a keyword value it can't check (a
 // tuple `items`, a string `maxLength`), makes every input invalid, so a schema can't look stricter
 // than it is checked.
+import { CANONICAL_LIMITS, CanonicalError, jcs } from "@opa/policy";
 
 type Schema = Record<string, unknown>;
 
@@ -132,19 +133,79 @@ export function validate(schema: Schema, value: unknown, path = "input"): string
 }
 
 /**
+ * Why `text` can't be read one way only, or `null`. `JSON.parse` keeps the last of two equal keys,
+ * so `{"to":"a","to":"b"}` could show one recipient and send to the other; an approval binds the
+ * parsed value, so such text is refused instead (crypto review C3). `text` is valid JSON already.
+ */
+function ambiguity(text: string): string | null {
+  const open: (Set<string> | null)[] = []; // an object's keys so far; `null` for an array
+  let key = false; // the next string is an object key
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      let end = i + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      const keys = open.at(-1);
+      if (keys && key) {
+        const name = JSON.parse(text.slice(i, end + 1)) as string;
+        if (keys.has(name)) return `the key "${name}" appears twice`;
+        keys.add(name);
+        key = false;
+      }
+      i = end;
+    } else if (ch === "{" || ch === "[") {
+      open.push(ch === "{" ? new Set() : null);
+      key = ch === "{";
+      if (open.length > CANONICAL_LIMITS.depth) return "they are nested too deeply";
+    } else if (ch === "}" || ch === "]") {
+      open.pop();
+      key = false;
+    } else if (ch === ",") {
+      key = open.at(-1) != null;
+    }
+  }
+  return null;
+}
+
+/** An integer JSON can carry but a double can't: it was rounded when it was parsed. */
+function unsafeInteger(value: unknown): boolean {
+  if (typeof value === "number") return Number.isInteger(value) && !Number.isSafeInteger(value);
+  if (Array.isArray(value)) return value.some(unsafeInteger);
+  if (isRecord(value)) return Object.values(value).some(unsafeInteger);
+  return false;
+}
+
+/**
  * Parses the JSON text the model wrote for a call and validates it. The input of a tool is always
- * an object (the manifest's schema is `type: "object"`).
+ * an object (the manifest's schema is `type: "object"`). Input that an approval couldn't bind
+ * exactly is refused before the schema runs: duplicate keys, integers past 2^53, lone surrogates,
+ * and values nested too deeply (M3-07 AC1, crypto review C3). Size is the schema's business here;
+ * a gated call too large to approve is refused when it would ask.
  */
 export function parseInput(
   schema: Schema,
   text: string,
 ): { ok: true; input: Record<string, unknown> } | { ok: false; error: string } {
   let input: unknown;
+  const source = text.trim() === "" ? "{}" : text;
   try {
-    input = JSON.parse(text.trim() === "" ? "{}" : text);
+    input = JSON.parse(source);
   } catch {
     return { ok: false, error: "The arguments are not valid JSON." };
   }
+  let strict = ambiguity(source);
+  if (!strict && unsafeInteger(input)) {
+    strict = "an integer is too large to keep exactly; send it as a string";
+  }
+  if (!strict) {
+    try {
+      jcs(input, Number.POSITIVE_INFINITY);
+    } catch (e) {
+      if (!(e instanceof CanonicalError)) throw e;
+      strict = e.message;
+    }
+  }
+  if (strict) return { ok: false, error: `The arguments can't be used: ${strict}.` };
   const problems = validate({ ...schema, type: "object" }, input);
   if (problems.length > 0 || !isRecord(input)) {
     return {
@@ -156,14 +217,7 @@ export function parseInput(
 }
 
 /**
- * Canonical JSON: object keys sorted, no whitespace. The `tool.called` and approval payloads use it,
- * so the same arguments always read (and later hash, M3-07) the same.
+ * Canonical JSON (RFC 8785): the `tool.called` and approval payloads use it, so the same
+ * arguments always read, and hash (M3-07), the same. Only parsed input reaches it.
  */
-export function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
+export const canonical = (value: unknown): string => jcs(value, Number.POSITIVE_INFINITY);

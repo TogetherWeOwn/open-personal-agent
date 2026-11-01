@@ -539,9 +539,12 @@ export function webFetchTool(ports: WebFetchPorts, caps: WebFetchCaps = WEB_FETC
       destinations: [{ id: "web", kind: "third_party", dataEgress: true }],
       scopes: ["web:read"],
     },
+    // The host in one canonical form (lowercase punycode, no trailing dot, no port): the card
+    // headlines it, the approval binds it and a destination grant matches it exactly, so a
+    // spelling of the same host never matches as another (M3-07 AC1, crypto review C5).
     target(input) {
       try {
-        return new URL(String(input.url ?? "")).hostname || undefined;
+        return bareHost(new URL(String(input.url ?? "")).hostname) || undefined;
       } catch {
         return undefined;
       }
