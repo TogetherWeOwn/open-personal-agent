@@ -155,6 +155,39 @@ function authorized(request: Request, env: FixtureEnv): boolean {
 
 type StubArgs = Record<string, unknown>;
 
+/** One model-requested tool call in driver-facing shape. */
+export interface NormalizedCall {
+  name: string;
+  arguments: unknown;
+}
+
+/**
+ * Both tool-call response shapes Workers AI models return, in one place. Most models answer
+ * `{ tool_calls: [{ name, arguments }] }`; OpenAI-format models (Cloudflare's own
+ * function-calling example sends `type: "function"`) answer
+ * `{ choices: [{ message: { tool_calls: [{ function: { name, arguments } }] } }] }`.
+ * Mirror: normalizeToolCalls in scripts/cf-verify-t3t4t7.mjs.
+ */
+export function normalizeToolCalls(raw: {
+  tool_calls?: { name?: string; arguments?: unknown; function?: { name?: string; arguments?: unknown } }[];
+  choices?: { message?: {
+    tool_calls?: { name?: string; arguments?: unknown; function?: { name?: string; arguments?: unknown } }[];
+  } }[];
+}): NormalizedCall[] {
+  const nested = raw?.choices?.[0]?.message?.tool_calls;
+  const list = Array.isArray(nested) && nested.length ? nested : (raw?.tool_calls ?? []);
+  return list.map((c) => {
+    const fn = c?.function ?? c;
+    return { name: fn?.name ?? "", arguments: fn?.arguments };
+  });
+}
+
+/** Workers AI cap/limit failures (daily neuron limit, 429, capacity): the window stops, not fails. */
+export function isAiCapacityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /429|rate.?limit|capacity|quota|neuron|daily.?limit/i.test(message);
+}
+
 /** Validate one model's tool arguments against the stub's schema and run it. */
 function runStub(name: string, args: unknown): unknown {
   const a = (typeof args === "string" ? JSON.parse(args) : args) as StubArgs;
@@ -246,22 +279,34 @@ export default {
       // Boundary: the fixture never offers a non-stub tool to the model. Anything outside the
       // registry is rejected here and scored as a model failure driver-side, never executed.
       // Object.hasOwn, not `in`: `"constructor" in STUBS` is true.
-      const outside = (tools ?? []).filter((t) => !Object.hasOwn(STUBS, t.function.name));
+      const outside = (tools ?? []).filter((t) => !Object.hasOwn(STUBS, t?.function?.name));
       if (outside.length) {
-        return Response.json({ rejected: outside.map((t) => t.function.name) }, { status: 400 });
+        return Response.json(
+          { rejected: outside.map((t) => t?.function?.name) },
+          { status: 400 },
+        );
       }
       const started = Date.now();
-      const raw = (await env.AI.run(
-        model as never,
-        {
-          messages,
-          tools,
-          max_tokens: 512,
-        } as never,
-      )) as { tool_calls?: { name: string; arguments?: unknown }[] };
+      let raw: Parameters<typeof normalizeToolCalls>[0];
+      try {
+        raw = (await env.AI.run(
+          model as never,
+          {
+            messages,
+            tools,
+            max_tokens: 512,
+          } as never,
+        )) as Parameters<typeof normalizeToolCalls>[0];
+      } catch (error) {
+        // A cap or limit error is a stop-inconclusive signal for the driver, never a 500.
+        if (isAiCapacityError(error))
+          return Response.json({ error: "ai-capacity" }, { status: 429 });
+        return Response.json({ error: "ai-error" }, { status: 500 });
+      }
       // Execute each requested stub with the model's own arguments and return the results, so
       // the driver scores the final result — not just the name — without another model round.
-      const calls = raw?.tool_calls ?? [];
+      // `calls` is the normalized list the driver scores; `raw` stays for evidence.
+      const calls = normalizeToolCalls(raw ?? {});
       const executions = calls.map((c) => {
         if (!Object.hasOwn(STUBS, c.name)) return { name: c.name, error: "not-a-stub" };
         try {
@@ -270,7 +315,7 @@ export default {
           return { name: c.name, error: error instanceof Error ? error.message : String(error) };
         }
       });
-      return Response.json({ model, raw, executions, latencyMs: Date.now() - started });
+      return Response.json({ model, raw, calls, executions, latencyMs: Date.now() - started });
     }
     return new Response("not found", { status: 404 });
   },
