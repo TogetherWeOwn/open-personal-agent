@@ -115,7 +115,25 @@ describe("cancel discipline (AC3)", () => {
   it("a stop persists as the step's output, so the engine neither retries nor re-reads it", async () => {
     const { ctx, stepper } = await context({}, "cancelled");
     await expect(ctx.step("s1", async () => "done")).rejects.toBeInstanceOf(TaskCancelledError);
-    expect(stepper.persisted.get("s1")).toEqual({ __opaStepStopped: "cancelled" });
+    expect(stepper.persisted.get("s1")).toEqual({ stopped: "cancelled" });
+  });
+
+  it("a cancelled task neither sleeps nor waits", async () => {
+    const { ctx, stepper } = await context({}, "cancelled");
+    const waited = vi.spyOn(stepper, "waitForEvent");
+    const slept = vi.spyOn(stepper, "sleep");
+    await expect(ctx.sleep("nap", 1_000)).rejects.toBeInstanceOf(TaskCancelledError);
+    await expect(
+      ctx.waitForEvent("approval", { type: "approval", timeoutMs: 1_000 }),
+    ).rejects.toBeInstanceOf(TaskCancelledError);
+    expect(slept).not.toHaveBeenCalled();
+    expect(waited).not.toHaveBeenCalled();
+  });
+
+  it("returns a step's value as-is even when it looks like an adapter marker", async () => {
+    const { ctx } = await context();
+    const lookalike = { stopped: "cancelled", ref: "x", __opaStepOutputRef: "y" } as const;
+    expect(await ctx.step("s1", async () => lookalike)).toEqual(lookalike);
   });
 
   it("gives each step its idempotency key and refuses a reused name", async () => {
@@ -167,6 +185,7 @@ describe("step outputs (AC4)", () => {
     const small = await ctx.step("small", async () => ({
       note: `the key is ${canary}, ok`,
       nested: [canary],
+      [canary]: "as a key",
     }));
     expect(leaks(JSON.stringify(small))).toBe(false);
     const big = `${"y".repeat(1024 * 1024)}${canary}`;
@@ -220,11 +239,17 @@ describe("budget and progress over DO RPC (AC8)", () => {
     await rpc.releaseTaskCall("inst:llm");
   });
 
-  it("broadcasts progress to the user's tabs in the v1 envelope", async () => {
-    await runInDurableObject(alice.assistant(), (instance: Assistant) => {
+  it("broadcasts progress to the user's tabs in the v1 envelope, closing ended sessions first", async () => {
+    await runInDurableObject(alice.assistant(), async (instance: Assistant) => {
       const sent: string[] = [];
-      (instance as unknown as { broadcast: (m: string) => void }).broadcast = (m) => sent.push(m);
-      instance.taskProgress({
+      const ended = { state: { sessionId: "sess-ended" }, close: vi.fn() };
+      const raw = instance as unknown as {
+        broadcast: (m: string) => void;
+        getConnections: () => Iterable<unknown>;
+      };
+      raw.broadcast = (m) => sent.push(m);
+      raw.getConnections = () => [ended];
+      await instance.taskProgress({
         conversationId: "ca",
         turnId: "turn1",
         taskId: "taskX",
@@ -232,8 +257,11 @@ describe("budget and progress over DO RPC (AC8)", () => {
         type: "step.started",
         payload: { stepId: "s1", label: "Thinking" },
       });
-      expect(sent).toHaveLength(1);
-      expect(JSON.parse(sent[0] as string)).toMatchObject({
+      expect(ended.close).toHaveBeenCalledWith(4401, "unauthenticated");
+      // The SDK broadcasts its own startup message too; ours is the one in the v1 envelope.
+      const ours = sent.map((m) => JSON.parse(m)).filter((m) => m.v === 1);
+      expect(ours).toHaveLength(1);
+      expect(ours[0]).toMatchObject({
         v: 1,
         seq: 7,
         sessionId: "ca",

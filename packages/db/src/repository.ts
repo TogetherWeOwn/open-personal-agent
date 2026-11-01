@@ -61,6 +61,10 @@ export type SettingsUpdate = Partial<
 export const isId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
 
+/** The bound `scopeForTask` accepts, so a row it could never resolve is never written. */
+const isInstanceId = (id: unknown): id is string =>
+  typeof id === "string" && id.length >= 1 && id.length <= 128;
+
 /** The check also keeps a key inside the user's R2 prefix. */
 function checkId(id: string): string {
   if (!isId(id)) throw new Error("invalid id");
@@ -120,9 +124,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
     scopeForTask: async (
       instanceId: string,
     ): Promise<{ scope: UserScope; task: TaskRow } | null> => {
-      if (typeof instanceId !== "string" || instanceId.length < 1 || instanceId.length > 128) {
-        return null;
-      }
+      if (!isInstanceId(instanceId)) return null;
       const [task] = await db
         .select()
         .from(tasks)
@@ -338,6 +340,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             title?: string | null;
             state?: string | null;
           }): Promise<boolean> => {
+            if (!isInstanceId(input.workflowInstanceId)) throw new Error("invalid instance id");
             if (!(await getConversation(input.conversationId))) return false;
             await db.insert(tasks).values({
               id: checkId(input.id),
@@ -383,14 +386,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .returning()
             )[0],
           /**
-           * Persists the loop's state at a step boundary, with a status change when one is
-           * given. `false` when the task is cancelled or terminal: its steps write nothing.
+           * Persists the loop's state at a step boundary, with a move between the two in-flight
+           * statuses when one is given. Endings go through `finish` or `cancel`, which stamp
+           * them. `false` when the task is cancelled or terminal: its steps write nothing.
            */
-          saveState: async (id: string, state: string, status?: TaskStatus) =>
+          saveState: async (
+            id: string,
+            state: string,
+            status?: "running" | "waiting_for_approval",
+          ) =>
             (
               await db
                 .update(tasks)
-                .set({ state, updatedAt: Date.now(), ...(status ? { status } : {}) })
+                .set({
+                  state,
+                  updatedAt: Date.now(),
+                  ...(status === "running" || status === "waiting_for_approval" ? { status } : {}),
+                })
                 .where(
                   and(
                     eq(tasks.id, id),
