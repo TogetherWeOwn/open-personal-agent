@@ -2,11 +2,18 @@
 // `builtin-loop` (M3-03b, ADR 0005 #7, M2-16 note): our own tool loop over the ModelProvider port.
 // It holds no storage: everything a turn needs to resume is plain data in `TurnState`, which the
 // host persists with the turn (M3-03c), so a turn can stop and go on in another process.
-import type { ModelMessage, ModelProvider, ModelToolCall, ModelUsage } from "@opa/core";
+import type {
+  FinishReason,
+  ModelMessage,
+  ModelProvider,
+  ModelToolCall,
+  ModelUsage,
+} from "@opa/core";
 import {
   addContext,
   type ContextEvent,
   decide,
+  type PolicyDecision,
   type RegisteredTool,
   type RiskClass,
   type StandingGrant,
@@ -82,8 +89,13 @@ export function continueTurn(state: TurnState): void {
   state.counts = { calls: 0, tools: 0 };
 }
 
-/** A checked call that may run now. */
-type Run = { call: ModelToolCall; tool: LoopTool; risk: RiskClass; input: Record<string, unknown> };
+/** A call whose input is valid, waiting for its policy decision. */
+type Run = {
+  call: ModelToolCall;
+  tool: LoopTool;
+  manifest: ToolManifest;
+  input: Record<string, unknown>;
+};
 
 const ev = <T extends LoopEvent["type"]>(
   type: T,
@@ -158,43 +170,54 @@ export async function* runTurn(
     }
   }
 
-  /** Runs the calls policy allows: reads in parallel, then the rest one at a time, in order. */
-  async function* execute(runs: Run[]): AsyncGenerator<LoopEvent> {
-    const begin = (run: Run) => {
-      const step = { run, id: host.newId(), began: host.now() };
-      // Through an async function, so a tool that throws before its promise still yields an error.
-      const out = (async () => run.tool.execute(run.input, signal))().catch(failed);
-      return { ...step, out };
-    };
-    const started = (s: ReturnType<typeof begin>) =>
-      ev("step.started", { stepId: s.id, label: s.run.call.name, toolCallId: s.run.call.id });
-    async function* finish(s: ReturnType<typeof begin>): AsyncGenerator<LoopEvent> {
-      const out = await s.out;
-      stepId = s.id;
-      yield* result(s.run.call, out.ok, out.content);
-      const was = state.taint.taint;
-      state.taint = addContext(
-        state.taint,
-        out.context ?? { kind: "tool", label: s.run.call.name },
-      );
-      const source = state.taint.sources[0];
-      if (was === "trusted" && state.taint.taint === "untrusted" && source) {
-        // `context.tainted` names web, file or tool; an untrusted memory arrives through a tool.
-        const kind = source.kind === "memory" ? "tool" : source.kind;
-        yield ev("context.tainted", { stepId, source: { kind, label: source.label } });
+  /**
+   * Decides and runs calls in the model's order. Each call is decided against the taint when it
+   * starts, so a write after an untrusted read is decided as tainted. Consecutive reads start
+   * together; any other call starts after everything before it has finished. Returns the calls
+   * that ask; with `approved`, the user already said yes, so an `ask` runs.
+   */
+  async function* execute(runs: Run[], approved = false): AsyncGenerator<LoopEvent, Run[]> {
+    const asks: Run[] = [];
+    for (let i = 0; i < runs.length && !signal.aborted; ) {
+      let end = i + 1;
+      const isRead = (r: Run | undefined) => r?.manifest.riskClass === "read";
+      while (isRead(runs[i]) && isRead(runs[end])) end++;
+      const group = [];
+      for (const run of runs.slice(i, end)) {
+        const d = decision(run.tool, run.manifest, run.input);
+        if (!d || d.outcome === "deny") {
+          yield* skip(run.call, deniedText(d, approved), "denied");
+        } else if (d.outcome === "ask" && !approved) {
+          asks.push(run);
+        } else {
+          const id = host.newId();
+          const began = host.now();
+          // Through an async function, so a tool that throws before its promise yields an error.
+          const out = (async () => run.tool.execute(run.input, signal))()
+            .catch(failed)
+            .then((o) => ({ ...o, ended: host.now() }));
+          group.push({ run, id, began, out });
+          yield ev("step.started", { stepId: id, label: run.call.name, toolCallId: run.call.id });
+        }
       }
-      const status = out.ok ? "ok" : "error";
-      yield ev("step.completed", { stepId: s.id, status, durationMs: host.now() - s.began });
+      for (const { run, id, began, out } of group) {
+        const o = await out;
+        stepId = id;
+        yield* result(run.call, o.ok, o.content);
+        const was = state.taint.taint;
+        state.taint = addContext(state.taint, o.context ?? { kind: "tool", label: run.call.name });
+        const source = state.taint.sources[0];
+        if (was === "trusted" && state.taint.taint === "untrusted" && source) {
+          // `context.tainted` names web, file or tool; an untrusted memory arrives through a tool.
+          const kind = source.kind === "memory" ? "tool" : source.kind;
+          yield ev("context.tainted", { stepId, source: { kind, label: source.label } });
+        }
+        const status = o.ok ? "ok" : "error";
+        yield ev("step.completed", { stepId: id, status, durationMs: o.ended - began });
+      }
+      i = end;
     }
-    const reads = runs.filter((r) => r.risk === "read").map(begin);
-    for (const s of reads) yield started(s);
-    for (const s of reads) yield* finish(s);
-    for (const run of runs.filter((r) => r.risk !== "read")) {
-      if (signal.aborted) return;
-      const s = begin(run);
-      yield started(s);
-      yield* finish(s);
-    }
+    return asks;
   }
 
   /** Closes every call of the last assistant message that has no result, or only a placeholder. */
@@ -237,6 +260,7 @@ export async function* runTurn(
     const calls: ModelToolCall[] = [];
     let usage: ModelUsage | null = null;
     let failure: string | undefined;
+    let finish: FinishReason | undefined;
     try {
       for await (const event of host.provider.stream({
         model: host.model,
@@ -250,6 +274,7 @@ export async function* runTurn(
           yield ev("message.delta", { text: event.text });
         } else if (event.type === "tool_call") calls.push(event.toolCall);
         else if (event.type === "usage") usage = event.usage;
+        else if (event.type === "done") finish = event.finishReason;
         else if (event.type === "error") failure = event.message;
       }
     } catch (e) {
@@ -266,6 +291,10 @@ export async function* runTurn(
     );
     const repeated = calls.some((c) => ids.has(c.id) || !ids.add(c.id));
     if (!signal.aborted && !failure && repeated) failure = "The model repeated a tool call id.";
+    // A reply cut short with no calls is not an answer; the partial text is kept.
+    if (!failure && calls.length === 0 && finish !== undefined && finish in CUT_SHORT) {
+      failure = CUT_SHORT[finish as keyof typeof CUT_SHORT];
+    }
 
     // A cancel or failure keeps the partial text and drops the calls, which never ran.
     const ok = !signal.aborted && failure === undefined;
@@ -297,7 +326,7 @@ export async function* runTurn(
     }
     state.counts.tools += calls.length;
 
-    // Validate, then decide, every call against the taint the step started with (M3-03 AC2–3).
+    // Validate every call before policy sees it (M3-03 AC2).
     const runs: Run[] = [];
     for (const call of calls) {
       const entry = host.tools.get(call.name);
@@ -307,28 +336,30 @@ export async function* runTurn(
       yield ev("tool.called", { toolCallId: call.id, tool: call.name, args, risk });
       if (!entry || !parsed) {
         yield* skip(call, `There is no tool named "${call.name}".`, "error");
-        continue;
-      }
-      if (!parsed.ok) {
+      } else if (!parsed.ok) {
         yield* skip(call, parsed.error, "error");
-        continue;
-      }
-      const d = decision(entry.tool, entry.manifest, parsed.input);
-      if (!d || d.outcome === "deny") {
-        const why = !d
-          ? "The policy couldn't be read"
-          : d.rule === "override_never"
-            ? "The user has turned this tool off"
-            : "Policy doesn't allow this call";
-        yield* skip(call, `${why}, so it didn't run.`, "denied");
-      } else if (d.outcome !== "ask") {
-        runs.push({ call, tool: entry.tool, risk, input: parsed.input });
       } else {
-        // Approvals are wired in M3-03b (3/3); until then a call that asks doesn't run.
-        yield* skip(call, "This call needs the user's approval, so it didn't run.", "denied");
+        runs.push({ call, tool: entry.tool, manifest: entry.manifest, input: parsed.input });
       }
     }
-    yield* execute(runs);
+    const asks = yield* execute(runs);
+    // Approvals are wired in M3-03b (3/3); until then a call that asks doesn't run.
+    for (const a of asks) {
+      yield* skip(a.call, "This call needs the user's approval, so it didn't run.", "denied");
+    }
     if (signal.aborted) return yield* cancelled();
   }
+}
+
+const CUT_SHORT = {
+  length: "The reply was cut off at the output limit.",
+  content_filter: "The provider's content filter stopped the reply.",
+};
+
+function deniedText(d: PolicyDecision | null, approved: boolean): string {
+  if (!d) return "The policy couldn't be read, so the call didn't run.";
+  if (approved) return "Policy no longer allows this call.";
+  return d.rule === "override_never"
+    ? "The user has turned this tool off."
+    : "Policy doesn't allow this call.";
 }

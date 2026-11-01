@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from "vitest";
-import { continueTurn, newTurn, TURN_LIMITS } from "../src/index";
+import { continueTurn, newTurn, type ToolOutput, TURN_LIMITS } from "../src/index";
 import { drain, history, host, ofType, scripted, tool, types } from "./helpers";
 
 describe("tool input (M3-03 AC2)", () => {
@@ -68,10 +68,55 @@ describe("several calls in one step (M3-03 AC3)", () => {
     ]);
     // Every call has a result, so the stored history stays valid for every provider.
     expect(state.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual([
+      "page",
+      "page",
       "This call needs the user's approval, so it didn't run.",
-      "page",
-      "page",
     ]);
+  });
+
+  it("keeps the model's order across writes and decides each call on the taint when it starts", async () => {
+    const order: string[] = [];
+    const log =
+      (name: string, untrusted = false) =>
+      async (): Promise<ToolOutput> => {
+        order.push(`${name} start`);
+        await new Promise((r) => setTimeout(r, name === "slow" ? 20 : 1));
+        order.push(`${name} end`);
+        return { ok: true, content: name, ...(untrusted ? {} : { context: { kind: "system" } }) };
+      };
+    const save = tool("save", "write_reversible", log("save"));
+    const tools = [tool("slow", "read", log("slow")), tool("fast", "read", log("fast")), save];
+    tools.push(tool("fetch", "read", log("fetch", true)));
+    const { provider } = scripted([
+      {
+        calls: [
+          ["slow", { q: "1" }],
+          ["fast", { q: "2" }],
+          ["save", { q: "3" }],
+          ["fast", { q: "4" }],
+          ["fetch", { q: "5" }],
+          ["save", { q: "6" }],
+        ],
+      },
+    ]);
+    const { events } = await drain(host(provider, tools, { now: () => Date.now() }), newTurn());
+    expect(order).toEqual([
+      "slow start",
+      "fast start",
+      "fast end",
+      "slow end",
+      "save start",
+      "save end",
+      "fast start",
+      "fetch start",
+      "fast end",
+      "fetch end",
+      // The second save comes after an untrusted read, so it asks instead of running.
+    ]);
+    expect(save.inputs).toEqual([{ q: "3" }]);
+    // A fast read isn't charged for the slow one beside it.
+    const durations = ofType(events, "step.completed").map((e) => e.payload.durationMs);
+    expect(durations[2]).toBeLessThan(15);
   });
 });
 
@@ -184,6 +229,23 @@ describe("per-turn limits (M3-03 AC7)", () => {
 });
 
 describe("failures", () => {
+  it("doesn't call a reply cut off at the output limit completed", async () => {
+    const { provider } = scripted([{ text: "Half a sen" }]);
+    const cut = {
+      ...provider,
+      async *stream(req: Parameters<typeof provider.stream>[0]) {
+        for await (const e of provider.stream(req)) {
+          yield e.type === "done" ? { ...e, finishReason: "length" as const } : e;
+        }
+      },
+    };
+    const state = newTurn();
+    const { events, outcome } = await drain(host(cut, []), state);
+    expect(outcome).toBe("failed");
+    expect(ofType(events, "turn.failed")[0]?.payload.message).toContain("output limit");
+    expect(state.messages).toEqual([{ role: "assistant", content: "Half a sen" }]);
+  });
+
   it("turns a throwing tool into an error result and a failed stream into turn.failed", async () => {
     const boom = tool("boom", "read", () => {
       throw new Error("kaput");
