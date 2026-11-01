@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // §17 Persistence (PRD §11 #9, conversations): claim a fresh deployment, onboard with the mock
-// model, chat, then reload and restart the dev server on the same state. The restart also evicts
-// the Assistant Durable Object, so the conversation has to come back from D1.
-import type { HarnessEvent } from "@opa/core";
+// model, chat through the composer, then reload and restart the dev server on the same state. The
+// restart also evicts the Assistant Durable Object, so the conversation has to come back from D1.
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { startStack } from "./stack.mjs";
 
@@ -11,7 +10,6 @@ test.describe.configure({ mode: "serial" });
 let stack: Awaited<ReturnType<typeof startStack>>;
 let context: BrowserContext;
 let page: Page;
-const conversationId = crypto.randomUUID();
 
 test.beforeAll(async ({ browser }) => {
   stack = await startStack({ port: 8791 });
@@ -37,26 +35,38 @@ test.afterAll(async () => {
   await stack?.close();
 });
 
-/** Sends one message over the chat socket and resolves with the turn's events. */
-function chat(text: string): Promise<HarnessEvent[]> {
-  return page.evaluate(
-    ({ conversationId, text }) =>
-      new Promise<HarnessEvent[]>((resolve, reject) => {
-        const events: HarnessEvent[] = [];
-        const ws = new WebSocket(`${location.origin.replace(/^http/, "ws")}/api/chat`);
-        ws.onopen = () => ws.send(JSON.stringify({ type: "chat.send", conversationId, text }));
-        ws.onerror = () => reject(new Error("chat socket failed"));
-        ws.onmessage = (msg) => {
-          const event = JSON.parse(msg.data) as HarnessEvent;
-          events.push(event);
-          if (["turn.completed", "turn.failed", "turn.interrupted"].includes(event.type)) {
-            ws.close();
-            resolve(events);
-          }
-        };
-      }),
-    { conversationId, text },
-  );
+/** The chat's ID, from the server's list. The page makes it up when the chat starts. */
+let conversationId = "";
+
+/**
+ * Resolves once the chat socket is open: the page lists the conversations on every connect. A send
+ * before that is answered with "Not connected".
+ */
+function socketOpen() {
+  return page.waitForResponse((res) => new URL(res.url()).pathname === "/api/conversations");
+}
+
+/** Sends one message through the composer and waits for the streamed reply in the log. */
+async function chat(text: string, reply: string) {
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await composer.fill(text);
+  await composer.press("Enter");
+  const log = page.getByRole("log", { name: "Messages" });
+  await expect(log.getByText(reply, { exact: true })).toBeVisible();
+  // Stop turns back into Send once the turn ends.
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(composer).toHaveValue("");
+}
+
+/** Opens the saved chat from the list and checks that its messages render. */
+async function openSaved(turns: { role: string; content: string }[]) {
+  await page.getByRole("option", { name: "Remember the blue door" }).click();
+  const log = page.getByRole("log", { name: "Messages" });
+  for (const { role, content } of turns) {
+    await expect(
+      log.getByText(role === "user" ? `You: ${content}` : content, { exact: true }),
+    ).toBeVisible();
+  }
 }
 
 async function messages() {
@@ -90,36 +100,46 @@ test("claim with a passkey and onboard with the mock model", async () => {
   await expect(page.getByText("ms to the first word")).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Got it" }).click();
+  const open = socketOpen();
   await page.getByRole("button", { name: "Start chatting" }).click();
   await page.waitForURL("/");
+  await open;
   await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
 });
 
 test("a chat turn streams the mock model's reply and is saved", async () => {
-  const events = await chat("Remember the blue door");
-  expect(events.map((e) => e.type)).toContain("message.delta");
-  expect(events.at(-1)).toMatchObject({ type: "turn.completed", sessionId: conversationId });
-  expect(events.find((e) => e.type === "message.completed")?.payload).toEqual({
-    text: firstTurn[1]?.content,
-  });
+  await chat("Remember the blue door", "You said: Remember the blue door");
+  await expect(page.getByRole("option", { name: "Remember the blue door" })).toBeVisible();
+
+  const res = await page.request.get("/api/conversations");
+  expect(res.status()).toBe(200);
+  const { conversations } = (await res.json()) as {
+    conversations: { id: string; title: string }[];
+  };
+  expect(conversations).toHaveLength(1);
+  expect(conversations[0]?.title).toBe("Remember the blue door");
+  conversationId = conversations[0]?.id ?? "";
   expect(await messages()).toEqual(firstTurn);
 });
 
 test("the conversation survives a reload", async () => {
+  const open = socketOpen();
   await page.reload();
-  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await open;
+  await openSaved(firstTurn);
   expect(await messages()).toEqual(firstTurn);
 });
 
 test("the conversation and the session survive a dev-server restart", async () => {
   await stack.restart();
+  const open = socketOpen();
   await page.reload();
-  // Still signed in: the chat, not the sign-in screen.
-  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await open;
+  // Still signed in: the chat, not the sign-in screen, with the saved chat in the list.
+  await openSaved(firstTurn);
   expect(await messages()).toEqual(firstTurn);
   // The saved key still opens, and the next turn continues the same conversation.
-  const events = await chat("What colour was the door?");
-  expect(events.at(-1)?.type).toBe("turn.completed");
+  await chat("What colour was the door?", "You said: What colour was the door?");
   expect(await messages()).toEqual([
     ...firstTurn,
     { role: "user", content: "What colour was the door?" },
