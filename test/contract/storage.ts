@@ -441,14 +441,73 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       const removal = await memory.forget(tainted, [fact], web);
       if (update.status !== "proposed" || created.status !== "proposed") throw new Error("gate");
       if (removal.status !== "proposed") throw new Error("gate");
-      expect(await memory.reject(created.proposal.memoryId)).toBe(true);
+      expect(await memory.reject(screen, created.proposal.memoryId)).toBe(true);
       expect(await indexed("Ignore")).toBe(0);
-      const accepted = await memory.accept(update.proposal.memoryId);
+      const accepted = await memory.accept(screen, update.proposal.memoryId);
       expect(accepted).toMatchObject({ status: "saved", memory: { trust: "external" } });
-      expect(await memory.accept(update.proposal.memoryId)).toEqual({ status: "not_found" });
+      expect(await memory.accept(screen, update.proposal.memoryId)).toEqual({
+        status: "not_found",
+      });
       // The removal named the version that was just superseded, so it no longer applies.
-      expect(await memory.accept(removal.proposal.memoryId)).toEqual({ status: "not_found" });
+      expect(await memory.accept(screen, removal.proposal.memoryId)).toEqual({
+        status: "not_found",
+      });
       expect((await memory.list()).map((m) => m.text)).toEqual(["Sam lives in Paris"]);
+    });
+
+    it("never lets an assistant accept or reject a proposal, tainted or not", async () => {
+      const { memory } = await user();
+      const taintedProposal = await memory.create(tainted, "Likes jazz", "fact", web);
+      const untaintedProposal = await memory.create(
+        inferred,
+        "Always reply in French",
+        "instruction",
+        said,
+      );
+      if (taintedProposal.status !== "proposed" || untaintedProposal.status !== "proposed") {
+        throw new Error("gate");
+      }
+      const ids = [taintedProposal.proposal.memoryId, untaintedProposal.proposal.memoryId];
+      for (const actor of [tainted, inferred, chat, { via: "system" } as const]) {
+        for (const id of ids) {
+          expect(await memory.accept(actor, id)).toEqual({ status: "forbidden" });
+          expect(await memory.reject(actor, id)).toBe(false);
+        }
+      }
+      // Refusals leave both proposals untouched, and the user path is unchanged.
+      expect((await memory.proposals()).map((p) => p.id)).toEqual([...ids].reverse());
+      expect(await memory.list()).toEqual([]);
+      expect(await memory.accept(screen, ids[0] ?? "")).toMatchObject({ status: "saved" });
+      expect(await memory.reject(screen, ids[1] ?? "")).toBe(true);
+      expect((await memory.list()).map((m) => m.text)).toEqual(["Likes jazz"]);
+    });
+
+    it("makes an accepted instruction the user's, keeping its source and superseding its target", async () => {
+      const { memory } = await user();
+      const rule = saved(
+        await memory.create(screen, "Always reply in English", "instruction", said),
+      );
+      const proposed = await memory.update(tainted, rule, "Always reply in French", web);
+      if (proposed.status !== "proposed") throw new Error("gate");
+      expect((await memory.proposals())[0]).toMatchObject({
+        kind: "instruction",
+        trust: "external",
+        source: "web",
+        sourceRef: "https://example.com/page",
+        targetIds: [rule],
+      });
+      expect(await memory.accept(screen, proposed.proposal.memoryId)).toMatchObject({
+        status: "saved",
+        memory: {
+          kind: "instruction",
+          trust: "user",
+          source: "web",
+          sourceRef: "https://example.com/page",
+          text: "Always reply in French",
+        },
+      });
+      expect(await memory.get(rule)).toBeUndefined();
+      expect((await memory.list()).map((m) => m.text)).toEqual(["Always reply in French"]);
     });
 
     it("lets a racing forget and edit both succeed only if nothing of the memory is left", async () => {
@@ -470,14 +529,16 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       const { memory } = await user();
       const proposed = await memory.create(tainted, "Likes jazz", "fact", web);
       if (proposed.status !== "proposed") throw new Error("gate");
-      const twice = await Promise.all([1, 2].map(() => memory.accept(proposed.proposal.memoryId)));
+      const twice = await Promise.all(
+        [1, 2].map(() => memory.accept(screen, proposed.proposal.memoryId)),
+      );
       expect(twice.map((o) => o.status).sort()).toEqual(["not_found", "saved"]);
       const fact = (await memory.list())[0]?.id ?? "";
       const removal = await memory.forget(tainted, [fact], web);
       if (removal.status !== "proposed") throw new Error("gate");
       const [accepted, rejected] = await Promise.all([
-        memory.accept(removal.proposal.memoryId),
-        memory.reject(removal.proposal.memoryId),
+        memory.accept(screen, removal.proposal.memoryId),
+        memory.reject(screen, removal.proposal.memoryId),
       ]);
       expect((await memory.list()).length).toBe(accepted.status === "deleted" ? 0 : 1);
       expect(accepted.status === "deleted" && rejected).toBe(false);
@@ -534,12 +595,12 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
         status: "not_found",
       });
       expect(await b.memory.forget(screen, [fact], said)).toEqual({ status: "not_found" });
-      expect(await b.memory.accept(proposalId)).toEqual({ status: "not_found" });
-      expect(await b.memory.reject(proposalId)).toBe(false);
+      expect(await b.memory.accept(screen, proposalId)).toEqual({ status: "not_found" });
+      expect(await b.memory.reject(screen, proposalId)).toBe(false);
       // Nothing of A's moved: the fact is current and the proposal still waits for A.
       expect((await a.memory.list()).map((m) => m.id)).toEqual([fact]);
       expect((await a.memory.proposals()).map((p) => p.id)).toEqual([proposalId]);
-      expect(await a.memory.reject(proposalId)).toBe(true);
+      expect(await a.memory.reject(screen, proposalId)).toBe(true);
     });
 
     it("never accepts an expired proposal", async () => {
@@ -550,7 +611,9 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
         .bind(proposed.proposal.memoryId)
         .run();
       expect(await memory.proposals()).toEqual([]);
-      expect(await memory.accept(proposed.proposal.memoryId)).toEqual({ status: "not_found" });
+      expect(await memory.accept(screen, proposed.proposal.memoryId)).toEqual({
+        status: "not_found",
+      });
       expect(await memory.list()).toEqual([]);
       expect(await memory.search("old")).toEqual([]);
     });

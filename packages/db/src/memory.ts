@@ -7,7 +7,7 @@
 //   didn't assert (an assistant can't overwrite downwards);
 // - secrets are redacted before anything is stored.
 // Rows are superseded, never overwritten, and forget is a hard delete (the FTS5 triggers in
-// migration 0005 drop the index entries in the same statement).
+// migration 0006 drop the index entries in the same statement).
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
@@ -353,9 +353,11 @@ export function memoryService(db: Db, userId: string) {
       gated(actor, "delete", ids, "", null, from),
     /**
      * The user accepts a proposal (M3-15); it is applied as if they had made it, except that a
-     * fact keeps the trust of where it came from. An accepted instruction is the user's.
+     * fact keeps the trust of where it came from. An accepted instruction is the user's. Only the
+     * user can accept: an assistant-minted service must not promote its own proposal.
      */
-    accept: async (id: string): Promise<WriteOutcome> => {
+    accept: async (actor: MemoryActor, id: string): Promise<WriteOutcome> => {
+      if (actor.via !== "user") return { status: "forbidden" };
       const proposal = (
         await db
           .select()
@@ -382,8 +384,9 @@ export function memoryService(db: Db, userId: string) {
       const saved = await write({ id, trust, status: "active" }, targetIds);
       return saved ? { status: "saved", memory: saved } : { status: "not_found" };
     },
-    /** The user rejects a proposal: it is deleted, it was never a memory. */
-    reject: async (id: string) =>
+    /** The user rejects a proposal: it is deleted, it was never a memory. Only the user can. */
+    reject: async (actor: MemoryActor, id: string) =>
+      actor.via === "user" &&
       (
         await db
           .delete(memories)
