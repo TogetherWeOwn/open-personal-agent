@@ -88,7 +88,8 @@ export function Memory() {
   const [confirming, setConfirming] = useState(false);
   const [allRecent, setAllRecent] = useState(false);
   const [draft, setDraft] = useState("");
-  const [learning, setLearning] = useState(true);
+  // Whether "Learn from our chats" is on; null when the setting couldn't be read.
+  const [learning, setLearning] = useState<boolean | null>(true);
   const [knows, setKnows] = useState(false);
   const [standing, setStanding] = useState(false);
   // A saved edit gets a new id; its row keeps the old key so focus stays on it.
@@ -107,7 +108,7 @@ export function Memory() {
     }
   }, []);
   useEffect(() => {
-    learnSetting().then(setLearning, () => {});
+    learnSetting().then(setLearning, () => setLearning(null));
   }, []);
   useEffect(() => {
     const timer = setTimeout(() => load(query.trim()), query ? 250 : 0);
@@ -261,11 +262,13 @@ export function Memory() {
           </MenuItem>
         </Menu>
       </div>
-      {!learning && (
+      {learning !== true && (
         <Banner>
-          I'm not saving new memories.{" "}
+          {learning === false
+            ? "I'm not saving new memories."
+            : "I couldn't check whether I'm saving new memories."}{" "}
           <Link href="/settings/memory" className="font-medium text-accent underline">
-            Turn this on in Settings.
+            {learning === false ? "Turn this on in Settings." : "Check in Settings."}
           </Link>
         </Banner>
       )}

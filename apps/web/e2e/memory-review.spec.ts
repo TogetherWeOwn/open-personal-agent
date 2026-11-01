@@ -245,6 +245,19 @@ test("turns Learn from our chats off, and Memory says so", async ({ page }) => {
   );
 });
 
+test("says so when Memory can't check the Learn from our chats setting", async ({ page }) => {
+  await stub(page);
+  await page.route("/api/settings/memory", (route) =>
+    route.fulfill({ status: 500, json: { error: "internal_error" } }),
+  );
+  await page.goto("/memory");
+  await expect(page.getByText("I couldn't check whether I'm saving new memories.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Check in Settings." })).toHaveAttribute(
+    "href",
+    "/settings/memory",
+  );
+});
+
 test("a change to a note edited since offers to add it as a new note", async ({ page }) => {
   const state = await stub(page);
   state.proposals = [{ ...conflict, targets: [] }];

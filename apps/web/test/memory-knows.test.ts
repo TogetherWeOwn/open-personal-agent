@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { Markdown } from "../src/chat/Markdown";
 import type { Note } from "../src/memory/api";
 import { knowsMarkdown } from "../src/memory/markdown";
 
@@ -33,5 +36,23 @@ describe("knowsMarkdown", () => {
     const md = knowsMarkdown([note({ text: "**bold** [x](https://evil.example)" })]);
     expect(md).toContain("\\*\\*bold\\*\\* \\[x\\]\\(https://evil\\.example\\)");
     expect(md).toContain("## About you\n\n_Nothing yet._");
+  });
+});
+
+describe("knowsMarkdown, rendered", () => {
+  const html = (text: string) =>
+    renderToStaticMarkup(createElement(Markdown, { text: knowsMarkdown([note({ text })]) }));
+
+  it("shows an entity in a note as typed", () => {
+    expect(html("Fish &amp; chips")).toContain("Fish &amp;amp; chips");
+  });
+
+  it("keeps a multiline note's line breaks and indentation", () => {
+    const out = html("Packing list:\n  - passport\n\n  - charger");
+    // One bullet: the dashes stay text, indented by non-breaking spaces; the blank line closes up.
+    expect(out).toContain(
+      "<li>Packing list:<br/>\n\u00a0\u00a0- passport<br/>\n\u00a0\u00a0- charger <em>",
+    );
+    expect(out.match(/<li>/g)).toHaveLength(1);
   });
 });
