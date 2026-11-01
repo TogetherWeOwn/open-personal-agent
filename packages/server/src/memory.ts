@@ -82,7 +82,8 @@ memoryRoutes.post("/", async (c) => {
   const body = await c.req.json().catch(() => null);
   const text = textOf(body);
   if (!text) return c.json({ error: "invalid_text" }, 400);
-  const kind = body?.kind === "instruction" ? "instruction" : "fact";
+  const kind = body?.kind ?? "fact";
+  if (kind !== "fact" && kind !== "instruction") return c.json({ error: "invalid_kind" }, 400);
   const user = userOf(c);
   return reply(c, await user.memory.create(screen, text, kind, typed), await titlesOf(user));
 });
@@ -137,6 +138,9 @@ memoryRoutes.get("/export", async (c) => {
     "Content-Disposition",
     `attachment; filename="memory-${exportedAt.slice(0, 10)}.opa-memory.json"`,
   );
+  const supersedes = new Map<string, string[]>();
+  for (const l of links)
+    supersedes.set(l.memoryId, [...(supersedes.get(l.memoryId) ?? []), l.targetId]);
   return c.json({
     format: "opa-memory-export/v1",
     exportedAt,
@@ -152,12 +156,16 @@ memoryRoutes.get("/export", async (c) => {
       conversationId: m.conversationId,
       createdAt: new Date(m.createdAt).toISOString(),
       lastUsedAt: m.lastUsedAt === null ? null : new Date(m.lastUsedAt).toISOString(),
-      supersedes: links.filter((l) => l.memoryId === m.id).map((l) => l.targetId),
+      supersedes: supersedes.get(m.id) ?? [],
     })),
   });
 });
 
-/** Body `{ ids }`. Each note is forgotten on its own, so one that changed meanwhile fails alone. */
+/**
+ * Body `{ ids }`. One statement when every note is still current. Otherwise the notes that
+ * changed meanwhile fail and the rest are forgotten in a second statement, so a stale ID costs
+ * a fixed number of queries, never one per note.
+ */
 memoryRoutes.post("/delete", async (c) => {
   const ids = (await c.req.json().catch(() => null))?.ids;
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_BULK || !ids.every(isId)) {
@@ -165,17 +173,17 @@ memoryRoutes.post("/delete", async (c) => {
   }
   const memory = userOf(c).memory;
   const unique = [...new Set<string>(ids)];
-  // One statement when every note is still current; only a miss falls back to one at a time.
   if ((await memory.forget(screen, unique, typed)).status === "deleted") {
     return c.json({ deleted: unique, failed: [] });
   }
-  const deleted: string[] = [];
-  const failed: string[] = [];
-  for (const id of unique) {
-    const outcome = await memory.forget(screen, [id], typed);
-    (outcome.status === "deleted" ? deleted : failed).push(id);
-  }
-  return c.json({ deleted, failed });
+  const current = new Set((await memory.list()).map((m) => m.id));
+  const live = unique.filter((id) => current.has(id));
+  // A note that changed between the two reads fails the whole second statement; the user retries.
+  const ok = live.length > 0 && (await memory.forget(screen, live, typed)).status === "deleted";
+  return c.json({
+    deleted: ok ? live : [],
+    failed: ok ? unique.filter((id) => !current.has(id)) : unique,
+  });
 });
 
 /** Earlier versions of a note, newest first. */

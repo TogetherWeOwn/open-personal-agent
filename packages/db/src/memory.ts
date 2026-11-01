@@ -549,16 +549,19 @@ export function memoryService(db: Db, userId: string) {
      * earlier versions (never proposals, which were never memories) with the supersede links.
      */
     dump: async () => {
-      const rows = await db
-        .select()
-        .from(memories)
-        .where(and(eq(memories.userId, userId), sql`${memories.status} <> 'proposed'`))
-        .orderBy(desc(memories.createdAt), desc(memories.n));
-      const links = await db
-        .select({ memoryId: memoryLinks.memoryId, targetId: memoryLinks.targetId })
-        .from(memoryLinks)
-        .innerJoin(memories, eq(memories.id, memoryLinks.memoryId))
-        .where(and(eq(memoryLinks.userId, userId), sql`${memories.status} <> 'proposed'`));
+      // One batch, so a forget landing between the two reads can't split rows from their links.
+      const [rows, links] = await db.batch([
+        db
+          .select()
+          .from(memories)
+          .where(and(eq(memories.userId, userId), sql`${memories.status} <> 'proposed'`))
+          .orderBy(desc(memories.createdAt), desc(memories.n)),
+        db
+          .select({ memoryId: memoryLinks.memoryId, targetId: memoryLinks.targetId })
+          .from(memoryLinks)
+          .innerJoin(memories, eq(memories.id, memoryLinks.memoryId))
+          .where(and(eq(memoryLinks.userId, userId), sql`${memories.status} <> 'proposed'`)),
+      ]);
       return { rows, links };
     },
     /** The user rejects a proposal: it is deleted, it was never a memory. Only the user can. */
