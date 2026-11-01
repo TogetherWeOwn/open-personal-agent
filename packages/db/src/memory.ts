@@ -508,13 +508,22 @@ export function memoryService(db: Db, userId: string) {
           )
           .returning({ id: memories.id })
       ).length,
-    /** Dates every pending proposal again from when it was made, after the setting changed. */
-    redate: async () => {
-      await db
+    /**
+     * Dates every pending proposal again from when it was made, after the setting changed: a
+     * statement for the settings batch, which runs it after the new setting is written. One
+     * already past its date stays expired, so a longer inbox never revives it.
+     */
+    redate: (now = Date.now()) =>
+      db
         .update(memories)
         .set({ expiresAt: proposalExpiry(sql`${memories.createdAt}`) })
-        .where(and(eq(memories.userId, userId), eq(memories.status, "proposed")));
-    },
+        .where(
+          and(
+            eq(memories.userId, userId),
+            eq(memories.status, "proposed"),
+            gt(memories.expiresAt, now),
+          ),
+        ),
   };
 }
 

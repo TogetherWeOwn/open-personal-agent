@@ -743,20 +743,32 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             return row ? toSettings(row) : { ...RETENTION_DEFAULTS };
           },
           /**
-           * Saves retention with its audit row (old and new values), both or neither. A new
-           * memory-inbox expiry dates the pending suggestions again from when each was made.
+           * Saves retention with its audit row (old and new values) and, for a new memory-inbox
+           * expiry, the pending suggestions dated again from when each was made: all or none.
+           * Only the changed fields are written, so two saves of different fields both stand.
            */
           saveRetention: async (from: RetentionSettings, to: RetentionSettings) => {
-            const set = {
+            const columns = {
               messageRetentionDays: to.messageDays ?? 0,
               toolOutputRetentionDays: to.toolOutputDays ?? 0,
               memoryInboxDays: to.memoryInboxDays,
+            };
+            const set = {
+              ...(from.messageDays !== to.messageDays && {
+                messageRetentionDays: columns.messageRetentionDays,
+              }),
+              ...(from.toolOutputDays !== to.toolOutputDays && {
+                toolOutputRetentionDays: columns.toolOutputRetentionDays,
+              }),
+              ...(from.memoryInboxDays !== to.memoryInboxDays && {
+                memoryInboxDays: columns.memoryInboxDays,
+              }),
               updatedAt: Date.now(),
             };
-            await db.batch([
+            const save = [
               db
                 .insert(userSettings)
-                .values({ ...set, userId })
+                .values({ ...columns, userId, updatedAt: set.updatedAt })
                 .onConflictDoUpdate({ target: userSettings.userId, set }),
               db.insert(auditLog).values({
                 userId,
@@ -765,8 +777,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 result: "ok",
                 detail: JSON.stringify({ from, to }),
               }),
-            ]);
-            if (from.memoryInboxDays !== to.memoryInboxDays) await memory.redate();
+            ] as const;
+            await (from.memoryInboxDays !== to.memoryInboxDays
+              ? db.batch([...save, memory.redate()])
+              : db.batch(save));
           },
         },
         /** The per-tool overrides and standing grants the policy engine reads (M3-02). */

@@ -132,6 +132,26 @@ describe("retention settings", () => {
 
     await browser.req("/api/settings/retention", { method: "PUT", body: { memoryInboxDays: 3 } });
     expect(await days()).toBe(3);
+
+    // One already past its date stays expired when the inbox grows: it is never revived.
+    await db.prepare("UPDATE memories SET expires_at = ? WHERE status = 'proposed'").bind(1).run();
+    await browser.req("/api/settings/retention", { method: "PUT", body: { memoryInboxDays: 30 } });
+    expect(
+      await db.prepare("SELECT expires_at AS e FROM memories WHERE status = 'proposed'").first("e"),
+    ).toBe(1);
+  });
+
+  it("keeps both of two saves made from the same reading when they change different fields", async () => {
+    const { owner } = await claim();
+    const settings = repo.forUser(scopeFromSession({ userId: owner })).settings;
+    const before = await settings.retention();
+    await settings.saveRetention(before, { ...before, messageDays: 30 });
+    await settings.saveRetention(before, { ...before, memoryInboxDays: 3 });
+    expect(await settings.retention()).toEqual({
+      messageDays: 30,
+      toolOutputDays: 30,
+      memoryInboxDays: 3,
+    });
   });
 });
 
