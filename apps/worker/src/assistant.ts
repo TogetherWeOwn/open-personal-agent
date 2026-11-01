@@ -117,7 +117,12 @@ export interface TaskProgress {
   seq: number;
   type: string;
   payload: unknown;
+  /** It continues a promoted turn of the conversation, whose event log it joins. */
+  inTurn?: boolean;
 }
+
+/** The events that end a turn: the log keeps a turn's frames until one of these. */
+const TURN_ENDS = new Set(["turn.completed", "turn.cancelled", "turn.failed", "turn.interrupted"]);
 
 /** A stored message as `listMessages` returns it, with its attachments. */
 type StoredMessage = NonNullable<
@@ -345,10 +350,12 @@ export class Assistant extends Agent<Bindings> {
 
   /**
    * A Workflow task's progress, broadcast to the user's tabs in the v1 envelope. `seq` is the
-   * driver's per-task counter; persisting these into the per-conversation event log is M3-03c's
-   * (AC10), which will dedupe replays by it. Until then a Workflow replay can repeat a live
-   * progress event, never invent one. Like a chat turn, it first closes tabs whose session has
-   * ended; a task streams for longer than a turn, so the check repeats every 30 seconds.
+   * driver's per-task counter. A promoted turn's progress (`inTurn`) joins the conversation's
+   * event log under the conversation's own `seq`, as the turn's events before it did, so a tab
+   * that reconnects replays it (M3-12 AC8, M3-03 AC10); the task's counter dedupes what a
+   * Workflow replay sends again, and the turn's end trims it. Other tasks' progress is live only.
+   * Like a chat turn, it first closes tabs whose session has ended; a task streams for longer
+   * than a turn, so the check repeats every 30 seconds.
    */
   taskProgress(progress: TaskProgress): Promise<void> {
     // Chained, so a call that skips the recheck can't broadcast ahead of one still awaiting it.
@@ -365,6 +372,19 @@ export class Assistant extends Agent<Bindings> {
           this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
         ),
       );
+    }
+    if (progress.inTurn) {
+      if (!this.#events.admit(progress.taskId, progress.seq)) return;
+      const { conversationId, turnId, type } = progress;
+      this.#send(conversationId, turnId, type as HarnessEvent["type"], progress.payload);
+      if (!TURN_ENDS.has(type)) return;
+      // The task settled the turn in D1 before it sent the end: its frames go, as a turn's do.
+      this.#events.endTask(progress.taskId, Date.now());
+      this.#events.trim(conversationId, turnId);
+      if (this.ctx.storage.kv.get(PROMOTED_KEY(conversationId)) === progress.taskId) {
+        this.ctx.storage.kv.delete(PROMOTED_KEY(conversationId));
+      }
+      return;
     }
     this.broadcast(
       JSON.stringify({
