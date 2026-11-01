@@ -30,6 +30,10 @@ export interface Seeded {
   conversation: string;
   message: string;
   memory: string;
+  /** A second note, for the route that forgets one after another has edited the first. */
+  spareMemory: string;
+  /** A memory suggestion waiting for the user. */
+  proposal: string;
   task: string;
   attachment: string;
   artifact: string;
@@ -67,8 +71,9 @@ export async function wipe() {
 }
 
 /**
- * Seeds `name` with a conversation and its messages, a memory, a paused task, an attachment and
- * an artifact in R2, a model provider with an encrypted key, a grant, a usage row and two sessions. The provider
+ * Seeds `name` with a conversation and its messages, two memories and a proposal, a paused
+ * task, an attachment and an artifact in R2, a ready export with its ZIP, a model provider with
+ * an encrypted key, a grant, a usage row and two sessions. The provider
  * and the attachment go through their routes, so the vault and R2 paths are the real ones.
  */
 export async function seed(name: string, role: "owner" | "member"): Promise<Seeded> {
@@ -116,10 +121,18 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   if (uploaded.status !== 201) throw new Error(`attachment: ${uploaded.status}`);
   const attachment = (await uploaded.json<{ id: string }>()).id;
 
-  const [conversation, message, memory, task, grant, usage, exportId] = Array.from(
-    { length: 7 },
-    () => crypto.randomUUID(),
-  ) as [string, string, string, string, string, string, string];
+  const [conversation, message, memory, spareMemory, proposal, task, grant, usage, exportId] =
+    Array.from({ length: 9 }, () => crypto.randomUUID()) as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
   const run = (sql: string, ...values: unknown[]) => db.prepare(sql).bind(...values);
   await db.batch([
     run(
@@ -157,6 +170,21 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       conversation,
     ),
     run(
+      `INSERT INTO memories (id, user_id, kind, text, trust, status, op, source)
+       VALUES (?, ?, 'fact', ?, 'user', 'active', 'create', 'memory_screen')`,
+      spareMemory,
+      id,
+      `spare memory of ${tag}`,
+    ),
+    run(
+      `INSERT INTO memories (id, user_id, kind, text, trust, status, op, source, expires_at)
+       VALUES (?, ?, 'fact', ?, 'inferred', 'proposed', 'create', 'chat', ?)`,
+      proposal,
+      id,
+      `proposal of ${tag}`,
+      Date.now() + 86_400_000,
+    ),
+    run(
       `INSERT INTO tasks (id, user_id, conversation_id, workflow_instance_id, kind, mode, status, title, state)
        VALUES (?, ?, ?, ?, 'chat', 'background', 'budget_limited', ?, '{"paused":{"kind":"daily"}}')`,
       task,
@@ -181,6 +209,15 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       id,
       conversation,
       message,
+    ),
+    // A turn stopped at its call limit, waiting on Continue.
+    run(
+      "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state) VALUES (?, ?, ?, ?, 'openai', 'gpt-4o', 'limit_reached', ?)",
+      `turn-${tag}`,
+      id,
+      conversation,
+      message,
+      JSON.stringify({ tag }),
     ),
     // The task's run journal, keyed by its Workflow instance rather than by user.
     run(
@@ -214,7 +251,16 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   await FILES.put(`u/${id}/exports/${exportId}.zip`, `export of ${tag}`);
 
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
-  const ids = { ...items, spareSession, artifact, grant, usage, export: exportId };
+  const ids = {
+    ...items,
+    spareSession,
+    spareMemory,
+    proposal,
+    artifact,
+    grant,
+    usage,
+    export: exportId,
+  };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }

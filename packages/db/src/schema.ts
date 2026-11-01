@@ -223,6 +223,32 @@ export const messages = sqliteTable(
 );
 
 /**
+ * A stopped turn's resumable state (M3-03 AC5): the loop's `TurnState` as JSON, with the call
+ * and tool counts inside it, so an approval cycle or a new process never resets them (AC7). A
+ * row exists only while a turn waits to resume — the DO holds the running turn, D1 the settled
+ * messages — and is deleted when the turn settles. Pending approvals survive hibernation,
+ * eviction and redeploy because they are inside `state` here, not in the DO.
+ */
+export const turnStates = sqliteTable(
+  "turn_states",
+  {
+    turnId: text("turn_id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    replyId: text("reply_id").notNull(),
+    providerId: text("provider_id").notNull(), // who bills the turn's calls
+    model: text("model").notNull(),
+    status: text("status", { enum: ["awaiting_approval", "limit_reached"] }).notNull(),
+    state: text("state").notNull(),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [index("turn_states_user_conversation_idx").on(t.userId, t.conversationId)],
+);
+
+/**
  * A file the user attached (M3-10). The bytes live in R2 under `u/{userId}/attachments/{id}`
  * (the repository derives the key); this row holds what the server sniffed from its first bytes,
  * never the type or size the client claimed. `message_id` is set when the message carrying it is
@@ -475,6 +501,8 @@ export const userSettings = sqliteTable("user_settings", {
   toolOutputRetentionDays: integer("tool_output_retention_days").notNull().default(30),
   /** Unconfirmed memory suggestions expire to rejected after this many days (M3-15 AC2). */
   memoryInboxDays: integer("memory_inbox_days").notNull().default(14),
+  /** Settings › Memory › "Learn from our chats": the assistant may use `remember` (M3-15 AC5). */
+  learnFromChats: integer("learn_from_chats", { mode: "boolean" }).notNull().default(true),
   updatedAt: integer("updated_at").notNull().default(now),
 });
 
