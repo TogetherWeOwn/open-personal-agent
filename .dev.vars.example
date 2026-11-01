@@ -18,6 +18,7 @@ OPA_SESSION_SECRET=
 OPA_SETUP_TOKEN=
 
 # Not a secret, and optional. Off Cloudflare, the header your reverse proxy sets to the client's
-# address, e.g. `X-Real-IP`. It keys the recovery-code rate limit. The default, `CF-Connecting-IP`,
-# can be sent by any client when no Cloudflare edge sits in front.
+# address, e.g. `X-Real-IP`. It keys the per-address rate limits. Unset, `pnpm start:node` uses the
+# connection's address: right with nothing in front, but behind a proxy every client then shares
+# the proxy's address, and one busy client can hold the others back from signing in.
 # OPA_CLIENT_IP_HEADER=

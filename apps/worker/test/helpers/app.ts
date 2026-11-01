@@ -11,8 +11,11 @@ import { SoftPasskey } from "./softauthn";
 export const ORIGIN = "https://opa.test";
 export const TOKEN = "setup-token-0123456789abcdefghijklmn";
 const base = workerEnv as unknown as Env & { TEST_MIGRATIONS: D1Migration[] };
+/** Every test request comes from one address, so tests other than rate-limit.test.ts skip it. */
+export const unlimited = { limit: async () => ({ success: true }) } as RateLimit;
 export const env: Env = {
   ...base,
+  PUBLIC_LIMIT: unlimited,
   VAULT: null,
   VAULT_STATUS: "ok",
   OPA_SESSION_SECRET: "test-session-secret",

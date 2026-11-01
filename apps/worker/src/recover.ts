@@ -12,6 +12,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { AppEnv } from "./env";
 import { checkHealth } from "./health";
+import { clientIp } from "./security";
 
 /** Denied attempts one address may make in its window. */
 export const ADDRESS_LIMIT = 5;
@@ -32,8 +33,7 @@ async function redeemable(c: Context<AppEnv>): Promise<Response | (Code & { body
     return c.json({ error: "setup_required" }, 503);
   }
   const store = systemStore(c.env);
-  // Behind another proxy (Node self-host) the operator names the header it sets.
-  const ip = c.req.header(c.env.OPA_CLIENT_IP_HEADER || "CF-Connecting-IP") ?? "unknown";
+  const ip = clientIp(c);
   // Keyed, so the audit log never holds an address, nor a hash that can be brute-forced back.
   const address = await auth.sha256(`${c.env.OPA_SESSION_SECRET}\n${ip}`);
   // The attempt counts as denied from before the code is checked, until it matches.

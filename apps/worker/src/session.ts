@@ -9,10 +9,10 @@ import {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
-import { Hono, type MiddlewareHandler } from "hono";
+import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
-import type { AppEnv } from "./env";
+import type { AppEnv, Session } from "./env";
 import { sameOrigin } from "./security";
 
 /** The only routes that answer without a session, as `METHOD /path`. Keep this list exact. */
@@ -42,16 +42,23 @@ export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   // Hono answers HEAD with the GET handler, so the list's GET entries cover HEAD too.
   const method = c.req.method === "HEAD" ? "GET" : c.req.method;
   if (PUBLIC_ROUTES.has(`${method} ${c.req.path}`)) return next();
+  const session = await currentSession(c);
+  if (!session) return c.json({ error: "unauthenticated" }, 401);
+  c.set("session", session);
+  return next();
+};
+
+/** The live session the request's cookie names, or `null`. Public routes may call it themselves. */
+export async function currentSession(c: Context<AppEnv>): Promise<Session | null> {
   const cookie = getCookie(c, auth.SESSION_COOKIE);
-  if (!cookie) return c.json({ error: "unauthenticated" }, 401);
+  if (!cookie) return null;
   const now = Date.now();
   const store = systemStore(c.env);
   const row = await store.sessions.find(await auth.sha256(cookie), now, now - IDLE_MS);
-  if (!row) return c.json({ error: "unauthenticated" }, 401);
+  if (!row) return null;
   if (now - row.last_seen_at > TOUCH_MS) await store.sessions.touch(row.id, now);
-  c.set("session", { id: row.id, userId: row.user_id, scope: row.scope });
-  return next();
-};
+  return { id: row.id, userId: row.user_id, scope: row.scope };
+}
 
 export const authRoutes = new Hono<AppEnv>();
 

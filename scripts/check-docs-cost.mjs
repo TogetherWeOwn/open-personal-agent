@@ -24,8 +24,9 @@ export function bindingNames(config) {
     for (const [key, value] of Object.entries(section)) {
       if (!NOT_BINDINGS.has(key)) walk(value);
     }
-    // Durable Object bindings are keyed by `name`, not `binding`.
+    // Durable Object and rate-limit bindings are keyed by `name`, not `binding`.
     for (const { name } of section.durable_objects?.bindings ?? []) names.add(name);
+    for (const { name } of section.ratelimits ?? []) names.add(name);
     if (section.triggers?.crons?.length) names.add("triggers");
   }
   return [...names].sort();
