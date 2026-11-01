@@ -48,9 +48,12 @@ export interface VaultStore {
   userKeys(userId: string): Promise<WrappedDek[]>;
   userKeysAt(kekVersion: number, limit: number): Promise<WrappedDek[]>;
   countUserKeys(kekVersion: number): Promise<number>;
-  /** Inserts the row unless the user already has one for that epoch. */
+  /**
+   * Atomically inserts the row only if the user has no DEK under any epoch and no row is under a
+   * newer epoch: during a rolling rotation, an old-epoch Worker can't enrol a user.
+   */
   insertUserKey(row: WrappedDek): Promise<void>;
-  /** Atomically inserts `row` (unless present) and deletes the user's `oldKekVersion` row. */
+  /** Atomically moves the user's `oldKekVersion` row to `row`; rejects if `row`'s epoch exists. */
   replaceUserKey(row: WrappedDek, oldKekVersion: number): Promise<void>;
   getSecret(userId: string, secretId: string): Promise<SealedSecret | null>;
   /** Inserts or replaces the user's row with this id; rejects if it writes nothing. */
@@ -182,6 +185,8 @@ export async function rewrap(
 /**
  * Stops this vault using an old KEK epoch once no DEK references it. The operator then deletes
  * `OPA_MASTER_KEY_PREV`; after that, old copies of the data (Time Travel) can't be decrypted.
+ * Retire only after every Worker instance runs the new key: on a deployment with no users yet,
+ * an old-epoch instance could still enrol a first user.
  */
 export async function retireEpoch(
   vault: Vault,
@@ -191,7 +196,6 @@ export async function retireEpoch(
   const state = stateOf(vault);
   if (kekVersion === state.current.version) throw vaultError("epoch_current");
   if ((await state.store.countUserKeys(kekVersion)) > 0) throw vaultError("epoch_in_use");
-  state.keks.delete(kekVersion);
   const detail = `kek_version=${kekVersion}`;
   await record(state, {
     userId: null,
@@ -201,6 +205,7 @@ export async function retireEpoch(
     result: "ok",
     detail,
   });
+  state.keks.delete(kekVersion);
 }
 
 function stateOf(vault: Vault): State {

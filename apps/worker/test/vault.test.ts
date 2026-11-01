@@ -12,6 +12,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import worker from "../src/index";
+import { d1VaultStore } from "../src/vault-store";
 
 const env = workerEnv as unknown as WorkerEnv & { TEST_MIGRATIONS: D1Migration[] };
 const key = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
@@ -90,6 +91,17 @@ describe("V8: fail closed at startup", () => {
     });
   }
 
+  it("reports a bad PREV as degraded, never as a missing master key", async () => {
+    for (const prev of ["not-base64!", KEY]) {
+      const raw = { ...env, ...{ OPA_SESSION_SECRET: "s", OPA_SETUP_TOKEN: "t" } };
+      Object.assign(raw, { OPA_MASTER_KEY: KEY, OPA_MASTER_KEY_PREV: prev });
+      expect((await fetchWorker("/api/secrets/s1", raw, { method: "POST" })).status).toBe(503);
+      const health = await (await app.request("/api/health", {}, await compose(raw))).json();
+      const secrets = { OPA_MASTER_KEY: true, OPA_SESSION_SECRET: true, OPA_SETUP_TOKEN: true };
+      expect(health).toMatchObject({ status: "degraded", checks: { vault: false }, secrets });
+    }
+  });
+
   it("lets secret routes through once the vault starts", async () => {
     const res = await fetchWorker("/api/secrets/s1", { ...env, OPA_MASTER_KEY: KEY });
     expect(res.status).toBe(404);
@@ -154,5 +166,32 @@ describe("the D1 vault store", () => {
     ).rejects.toThrow("encrypt_failed");
     const row = await env.DB.prepare("SELECT user_id FROM secrets WHERE id = 's1'").first();
     expect(row).toEqual({ user_id: "u1" });
+  });
+
+  it("blocks old-epoch enrollment, and a conflicting re-wrap, in D1", async () => {
+    await env.DB.prepare(
+      "INSERT INTO users (id, display_name, role) VALUES ('u3', 'C', 'member')",
+    ).run();
+    const old = (await compose({ ...env, OPA_MASTER_KEY: PREV })).VAULT as Vault;
+    await expect(
+      encrypt(old, { userId: "u3" }, { ...input, plaintext: "sk-old", caller: "test" }),
+    ).rejects.toThrow("encrypt_failed");
+    const u3 = await env.DB.prepare(
+      "SELECT count(*) AS n FROM user_keys WHERE user_id = 'u3'",
+    ).first();
+    expect(u3).toEqual({ n: 0 });
+
+    const junk = new Uint8Array(12);
+    await env.DB.prepare(
+      "INSERT INTO user_keys (user_id, kek_version, wrapped_dek, iv) VALUES ('u1', 1, ?, ?)",
+    )
+      .bind(junk, junk)
+      .run();
+    const row = { userId: "u1", kekVersion: 2, wrappedDek: junk, iv: junk };
+    await expect(d1VaultStore(env.DB).replaceUserKey(row, 1)).rejects.toThrow();
+    const rows = await env.DB.prepare(
+      "SELECT kek_version FROM user_keys WHERE user_id = 'u1' ORDER BY 1",
+    ).all();
+    expect(rows.results).toEqual([{ kek_version: 1 }, { kek_version: 2 }]);
   });
 });

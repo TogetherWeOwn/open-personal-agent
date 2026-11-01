@@ -17,7 +17,8 @@ export interface Bindings {
   OPA_SETUP_TOKEN?: string;
 }
 
-/** What the HTTP app sees. `VAULT` is `null` when the master key is missing or invalid. */
+/** What the HTTP app sees. `VAULT` is `null` unless `VAULT_STATUS` is `ok`. */
 export interface Env extends Bindings {
   VAULT: Vault | null;
+  VAULT_STATUS: "ok" | "key_invalid" | "previous_key_invalid";
 }

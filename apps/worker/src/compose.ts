@@ -24,16 +24,20 @@ const composed = new WeakMap<WorkerEnv, Promise<Env>>();
 export function compose(raw: WorkerEnv): Promise<Env> {
   let env = composed.get(raw);
   if (!env) {
-    const bindings = withoutMasterKeys(raw);
-    env = createVault({
-      masterKey: raw.OPA_MASTER_KEY,
-      previousMasterKey: raw.OPA_MASTER_KEY_PREV,
-      store: d1VaultStore(bindings.DB),
-    }).then(
-      (vault) => ({ ...bindings, VAULT: vault }),
-      () => ({ ...bindings, VAULT: null }),
-    );
+    env = build(raw);
     composed.set(raw, env);
   }
   return env;
+}
+
+async function build(raw: WorkerEnv): Promise<Env> {
+  const bindings = withoutMasterKeys(raw);
+  const store = d1VaultStore(bindings.DB);
+  const { OPA_MASTER_KEY: masterKey, OPA_MASTER_KEY_PREV: previousMasterKey } = raw;
+  const vault = await createVault({ masterKey, previousMasterKey, store }).catch(() => null);
+  if (vault) return { ...bindings, VAULT: vault, VAULT_STATUS: "ok" };
+  // Tell a bad PREV from a bad master key, so health never asks to replace a working key.
+  const keyValid = await createVault({ masterKey, store }).catch(() => null);
+  const status = keyValid ? "previous_key_invalid" : "key_invalid";
+  return { ...bindings, VAULT: null, VAULT_STATUS: status };
 }

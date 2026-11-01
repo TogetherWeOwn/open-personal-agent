@@ -269,4 +269,27 @@ describe("D4.1 key hygiene", () => {
     // And no fresh DEK silently replaces the unreadable one.
     await expect(put(after, { id: "s9" })).rejects.toThrow("encrypt_failed");
   });
+
+  it("an old-epoch vault can't enroll once a newer epoch exists; rewrap never drops a DEK", async () => {
+    const migrating = await rotated();
+    await put(migrating);
+    // A rolling deploy still running epoch 1 can't give u2 a DEK that retirement would strand.
+    await expect(put(vault, { userId: "u2" })).rejects.toThrow("encrypt_failed");
+    expect(store.keys.map((k) => [k.userId, k.kekVersion])).toEqual([["u1", 2]]);
+    // Two DEKs for one user under both epochs: rewrap fails instead of deleting either.
+    const older = new MemoryStore();
+    await put(await createVault({ masterKey: key1, store: older }));
+    store.keys.push(only(older.keys));
+    await expect(rewrap(migrating, { caller })).rejects.toThrow();
+    expect(store.keys).toHaveLength(2);
+  });
+
+  it("keeps the epoch when the retirement audit fails", async () => {
+    const migrating = await rotated();
+    store.failAudit = true;
+    await expect(retireEpoch(migrating, 1, { caller })).rejects.toThrow("audit_failed");
+    store.failAudit = false;
+    await put(vault);
+    expect(await get(migrating)).toBe(CANARY);
+  });
 });

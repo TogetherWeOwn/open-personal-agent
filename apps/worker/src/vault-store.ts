@@ -19,11 +19,6 @@ const keyRow = (r: Row): WrappedDek => ({
 });
 
 export function d1VaultStore(db: D1Database): VaultStore {
-  const insertKey = (row: WrappedDek) =>
-    db
-      .prepare(`INSERT INTO user_keys (${KEY_COLUMNS}) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`)
-      .bind(row.userId, row.kekVersion, row.wrappedDek, row.iv);
-
   return {
     async userKeys(userId) {
       const { results } = await db
@@ -47,15 +42,22 @@ export function d1VaultStore(db: D1Database): VaultStore {
       return row?.n ?? 0;
     },
     async insertUserKey(row) {
-      await insertKey(row).run();
+      await db
+        .prepare(
+          `INSERT INTO user_keys (${KEY_COLUMNS}) SELECT ?, ?, ?, ?
+           WHERE NOT EXISTS (SELECT 1 FROM user_keys WHERE user_id = ? OR kek_version > ?)`,
+        )
+        .bind(row.userId, row.kekVersion, row.wrappedDek, row.iv, row.userId, row.kekVersion)
+        .run();
     },
     async replaceUserKey(row, oldKekVersion) {
-      await db.batch([
-        insertKey(row),
-        db
-          .prepare("DELETE FROM user_keys WHERE user_id = ? AND kek_version = ?")
-          .bind(row.userId, oldKekVersion),
-      ]);
+      // An existing row at the new epoch fails the primary key, so neither DEK is lost.
+      await db
+        .prepare(
+          "UPDATE user_keys SET kek_version = ?, wrapped_dek = ?, iv = ? WHERE user_id = ? AND kek_version = ?",
+        )
+        .bind(row.kekVersion, row.wrappedDek, row.iv, row.userId, oldKekVersion)
+        .run();
     },
     async getSecret(userId, secretId) {
       const r = await db

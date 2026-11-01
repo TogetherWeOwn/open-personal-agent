@@ -105,7 +105,7 @@ describe("after migrations", () => {
   it("reports ok when configured and every binding answers", async () => {
     const ai = { run: async () => ({}) } as unknown as Ai;
     const [status, body] = await health({ ...env, ...SECRETS, AI: ai });
-    expect(Object.values(body.checks)).toEqual([true, true, true, true, true]);
+    expect(Object.values(body.checks)).toEqual([true, true, true, true, true, true]);
     expect(body.status).toBe("ok");
     expect(status).toBe(200);
     // Presence only: no secret value appears in the response.
