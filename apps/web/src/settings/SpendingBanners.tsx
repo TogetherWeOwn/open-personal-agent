@@ -6,14 +6,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-aria-components";
 import { Banner, Button, buttonClass } from "../ui";
-import { dollars, getSpending, type Spending } from "./spending-api";
+import { dollars, getSpending, SPENDING_CHANGED, type Spending } from "./spending-api";
 
 const RECHECK_MS = 5 * 60_000;
 
 /** The dismissal's key: per month and threshold, and per day for the 100% banner. */
-function dismissKey(kind: "80" | "100" | "hard", month: number) {
+function dismissKey(kind: "80" | "100" | "hard", s: Pick<Spending, "userId" | "month">) {
   const day = kind === "100" ? `:${new Date().toISOString().slice(0, 10)}` : "";
-  return `opa.spending-banner:${month}:${kind}${day}`;
+  // Per user, so another account signed in on the same browser never inherits a dismissal.
+  return `opa.spending-banner:${s.userId}:${s.month}:${kind}${day}`;
 }
 
 function dismissed(key: string) {
@@ -35,9 +36,11 @@ export function SpendingBanners() {
     load();
     const timer = setInterval(load, RECHECK_MS);
     window.addEventListener("focus", load);
+    window.addEventListener(SPENDING_CHANGED, load);
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", load);
+      window.removeEventListener(SPENDING_CHANGED, load);
     };
   }, [load]);
 
@@ -59,7 +62,7 @@ export function SpendingBanners() {
       action: false,
     });
   }
-  const shown = banners.filter((b) => !dismissed(dismissKey(b.kind, spending.month)));
+  const shown = banners.filter((b) => !dismissed(dismissKey(b.kind, spending)));
   if (shown.length === 0) return null;
   return (
     <>
@@ -77,7 +80,7 @@ export function SpendingBanners() {
               aria-label="Dismiss"
               onPress={() => {
                 try {
-                  localStorage.setItem(dismissKey(b.kind, spending.month), "1");
+                  localStorage.setItem(dismissKey(b.kind, spending), "1");
                 } catch {}
                 rerender((n) => n + 1);
               }}

@@ -18,10 +18,16 @@ const spending = (over: Record<string, unknown> = {}) => ({
   warning: null,
   hardCapReached: false,
   month: Date.UTC(2026, 10, 1),
+  userId: "u",
   ...over,
 });
 
-async function stub(page: Page, body: unknown, saved: unknown[] = []) {
+async function stub(
+  page: Page,
+  body: unknown,
+  saved: unknown[] = [],
+  after: (() => unknown) | null = null,
+) {
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings", (route) =>
@@ -38,7 +44,9 @@ async function stub(page: Page, body: unknown, saved: unknown[] = []) {
       saved.push(route.request().postDataJSON());
       return route.fulfill({ json: { settings: LIMITS } });
     }
-    return route.fulfill({ json: body });
+    // After a save, `after` decides what the next reads see.
+    const next = saved.length && after ? after() : body;
+    return next === "fail" ? route.fulfill({ status: 503 }) : route.fulfill({ json: next });
   });
 }
 
@@ -128,4 +136,45 @@ test("a reached hard limit says background tasks are paused", async ({ page }) =
     page.getByText("Background tasks are paused: this month's $30 hard limit is reached."),
   ).toBeVisible();
   await expect(page.getByRole("switch", { name: "Hard limit" })).toHaveCount(0);
+});
+
+test("a saved change clears the banner at once, and a failed refresh isn't called a failed save", async ({
+  page,
+}) => {
+  const saved: unknown[] = [];
+  let refresh: unknown = spending();
+  await stub(page, spending({ warning: 80 }), saved, () => refresh);
+  await page.goto("/settings/spending");
+  const banner = page.getByText("You've used 80% of this month's $20 budget.");
+  await expect(banner).toBeVisible();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
+  await expect(banner).toHaveCount(0);
+  refresh = "fail";
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Saved. Reload to see the updated figures.")).toBeVisible();
+});
+
+test("on a phone, the Chats list shows the banners too", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await stub(page, spending({ warning: 80 }));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Chats" })).toBeVisible();
+  await expect(page.getByText("You've used 80% of this month's $20 budget.")).toBeVisible();
+});
+
+test("a dismissal belongs to the account that made it", async ({ page }) => {
+  await stub(page, spending({ warning: 80 }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await page.unrouteAll();
+  await stub(page, spending({ warning: 80, userId: "someone-else" }));
+  await page.reload();
+  await expect(page.getByText("You've used 80% of this month's $20 budget.")).toBeVisible();
+});
+
+test("a body of another shape shows the load error, not a broken page", async ({ page }) => {
+  await stub(page, { settings: { monthlyBudgetMicroUsd: 20_000_000 }, defaults: {} });
+  await page.goto("/settings/spending");
+  await expect(page.getByRole("alert")).toHaveText("Spending couldn't be loaded. Try again.");
 });

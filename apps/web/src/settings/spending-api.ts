@@ -21,17 +21,53 @@ export interface Spending {
   hardCapReached: boolean;
   /** The UTC month the figures are for, as its first instant. */
   month: number;
+  userId: string;
 }
 
 export async function getSpending(): Promise<Spending> {
   const res = await fetch("/api/settings/spending");
   if (!res.ok) throw new Error(`spending ${res.status}`);
-  const body = (await res.json()) as Partial<Spending> | null;
+  const body: unknown = await res.json();
   // The banners render on every screen, so a body of another shape must not take the app down.
-  if (typeof body?.settings?.monthlyBudgetMicroUsd !== "number" || !body.defaults) {
-    throw new Error("spending: unexpected body");
-  }
-  return body as Spending;
+  if (!isSpending(body)) throw new Error("spending: unexpected body");
+  return body;
+}
+
+/** Tells the banners the limits changed, so they don't wait for their next check. */
+export const SPENDING_CHANGED = "opa:spending-changed";
+
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isLimits = (v: unknown): v is SpendingLimits => {
+  const l = v as Partial<SpendingLimits> | null;
+  return (
+    isNum(l?.taskBudgetMicroUsd) &&
+    isNum(l.dailyCapMicroUsd) &&
+    isNum(l.monthlyBudgetMicroUsd) &&
+    l.monthlyBudgetMicroUsd > 0 &&
+    (l.hardCapMicroUsd === null || isNum(l.hardCapMicroUsd))
+  );
+};
+
+/** Every field the Spending page and the banners read, checked. */
+function isSpending(v: unknown): v is Spending {
+  const s = v as Partial<Spending> | null;
+  const x = s?.executionLimits;
+  return (
+    isLimits(s?.settings) &&
+    isLimits(s.defaults) &&
+    isNum(x?.callsPerMessage) &&
+    isNum(x.toolCallsPerMessage) &&
+    isNum(x.stepsPerTask) &&
+    isNum(s.todayMicroUsd) &&
+    isNum(s.monthMicroUsd) &&
+    (s.warning === null || s.warning === 50 || s.warning === 80 || s.warning === 100) &&
+    typeof s.hardCapReached === "boolean" &&
+    isNum(s.month) &&
+    typeof s.userId === "string" &&
+    (s.allowanceWarnings === undefined ||
+      (Array.isArray(s.allowanceWarnings) &&
+        s.allowanceWarnings.every((w) => typeof w?.id === "string" && isNum(w.percent))))
+  );
 }
 
 export async function saveSpending(changes: Partial<SpendingLimits>): Promise<SpendingLimits> {
