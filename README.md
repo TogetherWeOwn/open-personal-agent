@@ -63,6 +63,17 @@ pnpm deploy:cloudflare         # --name <prefix> (or OPA_PREFIX) to deploy under
 A re-run upgrades, or prints "Up to date"; `--dry-run` changes nothing on Cloudflare. A scoped
 token needs the `required` entries in [`deploy/permissions.json`](deploy/permissions.json).
 
+### Deploy button (experimental)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/TogetherWeOwn/open-personal-agent)
+
+The button copies this repo into your GitHub account and deploys it with Workers Builds, which
+runs `pnpm run deploy` again on every push. It is experimental until the checks in
+[`deploy/BUTTON.md`](deploy/BUTTON.md) pass. If you're not asked for the three `OPA_*` secrets,
+`/setup` shows the **Finish setup** page with the commands that set them. Workflow names are
+unique per account, and the button probably keeps `opa-task-workflow` unprefixed, so plan on one
+button deploy per account; to run more than one, use `pnpm deploy:cloudflare --name <prefix>`.
+
 ## Layout
 
 - `wrangler.jsonc`: the single Worker and its bindings (D1, R2, Workers AI, the `Assistant` Durable
