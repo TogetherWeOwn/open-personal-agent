@@ -22,6 +22,8 @@ export const PUBLIC_ROUTES: ReadonlySet<string> = new Set([
   "POST /setup/options",
   "POST /api/auth/login/options",
   "POST /api/auth/login",
+  "POST /api/auth/recover/options",
+  "POST /api/auth/recover",
 ]);
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

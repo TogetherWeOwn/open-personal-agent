@@ -6,6 +6,7 @@ import {
 } from "@simplewebauthn/browser";
 import { useState } from "react";
 import { Button } from "react-aria-components";
+import { Recover } from "./Recover";
 import { Alert, cancelled, type Failure, post, primary, Screen } from "./ui";
 
 async function signIn(retried = false): Promise<void> {
@@ -25,6 +26,7 @@ async function signIn(retried = false): Promise<void> {
 export function SignIn() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Failure | null>(null);
+  const [recovering, setRecovering] = useState(false);
 
   const start = async () => {
     setBusy(true);
@@ -45,6 +47,7 @@ export function SignIn() {
     }
   };
 
+  if (recovering) return <Recover />;
   return (
     <Screen title="Sign in">
       <p>Use the passkey you created when you set up your assistant.</p>
@@ -54,8 +57,14 @@ export function SignIn() {
       </Button>
       <details className="text-sm text-text-muted">
         <summary className="min-h-11 cursor-pointer content-center">Lost your passkey?</summary>
+        <Button
+          onPress={() => setRecovering(true)}
+          className="min-h-11 text-accent underline underline-offset-2"
+        >
+          Use a recovery code
+        </Button>
         <p>
-          Whoever runs your server can set a new setup token. Then open{" "}
+          No codes left? Whoever runs your server can set a new setup token. Then open{" "}
           <a href="/setup" className="text-accent underline underline-offset-2">
             the setup page
           </a>{" "}

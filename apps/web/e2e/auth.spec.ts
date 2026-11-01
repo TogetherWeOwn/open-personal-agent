@@ -227,3 +227,46 @@ test("Sign in with your passkey signs in and opens the app", async ({ page }) =>
   await page.waitForURL("/onboarding");
   await expect(page.getByRole("heading", { name: "Set up your assistant" })).toBeVisible();
 });
+
+test("Lost your passkey? A recovery code creates a new one and lists the others", async ({
+  page,
+}) => {
+  await authenticator(page);
+  await signedOut(page);
+  const bodies: Record<string, unknown>[] = [];
+  const answers = [{ status: 403, json: { error: "invalid_code" } }];
+  await page.route("/api/auth/recover**", (route) => {
+    bodies.push(route.request().postDataJSON());
+    if (route.request().url().endsWith("/options")) {
+      return route.fulfill(answers.shift() ?? { json: { options: creation } });
+    }
+    const day = Date.UTC(2026, 9, 30);
+    const passkeys = [
+      { createdAt: day, lastUsedAt: day + 3_600_000, synced: true, current: false },
+      { createdAt: day + 86_400_000, lastUsedAt: null, synced: false, current: true },
+    ];
+    return route.fulfill({ json: { codesLeft: 9, passkeys } });
+  });
+  await page.goto("/");
+  await page.getByText("Lost your passkey?").click();
+  await page.getByRole("button", { name: "Use a recovery code" }).click();
+  await expect(page.getByRole("heading", { name: "Use a recovery code" })).toBeFocused();
+  const field = page.getByLabel("Recovery code");
+  await expect(field).toHaveAttribute("autocomplete", "off");
+  await field.fill(CODES[0] as string);
+  await checkScreen(page, "recover");
+
+  await page.getByRole("button", { name: "Create a new passkey" }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "That recovery code doesn't work. Each code works once.",
+  );
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("heading", { name: "You're back in" })).toBeFocused();
+  await expect(page.getByText("9 recovery codes are left.")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Passkeys" }).getByRole("listitem")).toHaveCount(2);
+  expect(bodies[0]).toEqual({ code: CODES[0] });
+  expect(bodies[2]).toMatchObject({ code: CODES[0], credential: { type: "public-key" } });
+  await checkScreen(page, "recovered");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.waitForURL("/");
+});

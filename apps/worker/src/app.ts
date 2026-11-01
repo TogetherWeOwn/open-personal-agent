@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { checkHealth, setupRequired } from "./health";
 import { settings } from "./model-settings";
+import { recover } from "./recover";
 import { exactOrigin, securityHeaders } from "./security";
 import { authRoutes, sessionGuard, sessionRoutes } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
@@ -57,6 +58,7 @@ app.get("/setup", async (c) => {
 });
 
 app.route("/setup", setup);
+app.route("/api/auth/recover", recover);
 app.route("/api/auth", authRoutes);
 app.route("/api/sessions", sessionRoutes);
 
