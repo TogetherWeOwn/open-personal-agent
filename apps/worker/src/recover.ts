@@ -17,6 +17,8 @@ const ADDRESS_WINDOW_MS = 15 * 60_000;
 /** Denied attempts from all addresses before code recovery locks for the rest of the window. */
 export const DEPLOYMENT_LIMIT = 20;
 const DEPLOYMENT_WINDOW_MS = 60 * 60_000;
+/** Longer than any typed code, spaces and dashes included; anything longer is hashed as empty. */
+const MAX_CODE_LENGTH = 100;
 
 type Code = { id: string; owner: string; codeHash: string };
 type Body = { code?: unknown; credential?: unknown };
@@ -46,7 +48,9 @@ async function redeemable(c: Context<AppEnv>): Promise<Response | (Code & { body
   }
 
   const body: Body = (await c.req.json().catch(() => null)) ?? {};
-  const codeHash = await auth.hashRecoveryCode(typeof body.code === "string" ? body.code : "");
+  const typed =
+    typeof body.code === "string" && body.code.length <= MAX_CODE_LENGTH ? body.code : "";
+  const codeHash = await auth.hashRecoveryCode(typed);
   let match: Code | null = null;
   // No early exit: the time taken depends on how many codes are left, never on which one matched.
   for (const row of await store.recovery.unused()) {
@@ -110,20 +114,23 @@ recover.post("/", async (c) => {
     return c.json({ error: "invalid_code" }, 403);
   }
 
-  const [left, passkeys] = await Promise.all([
-    store.recovery.unused(),
-    store.recovery.passkeys(code.owner),
-  ]);
+  // The code is spent and the old sessions are gone, so the new session goes out whatever
+  // happens next. The count and the list are best-effort: null if they can't be read.
   const maxAge = auth.SESSION_ABSOLUTE_MS / 1000;
   setCookie(c, auth.SESSION_COOKIE, session.cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
+  const [left, passkeys] = await Promise.all([
+    store.recovery.unused().catch(() => null),
+    store.recovery.passkeys(code.owner).catch(() => null),
+  ]);
   return c.json({
-    codesLeft: left.length,
-    passkeys: passkeys.map((p) => ({
-      createdAt: p.created_at,
-      lastUsedAt: p.last_used_at,
-      synced: p.backed_up === 1,
-      current: p.id === passkey.id,
-    })),
+    codesLeft: left?.length ?? null,
+    passkeys:
+      passkeys?.map((p) => ({
+        createdAt: p.created_at,
+        lastUsedAt: p.last_used_at,
+        synced: p.backed_up === 1,
+        current: p.id === passkey.id,
+      })) ?? null,
   });
 });

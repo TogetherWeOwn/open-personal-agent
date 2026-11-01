@@ -11,13 +11,16 @@ import { Button, Input, Label, TextField } from "react-aria-components";
 import { Alert, cancelled, type Failure, input, post, primary, Screen } from "./ui";
 
 interface Recovered {
-  codesLeft: number;
-  passkeys: { createdAt: number; lastUsedAt: number | null; synced: boolean; current: boolean }[];
+  /** Null when the server signed the owner in but couldn't read these back. */
+  codesLeft: number | null;
+  passkeys:
+    | { createdAt: number; lastUsedAt: number | null; synced: boolean; current: boolean }[]
+    | null;
 }
 
 const FAILURES: Record<string, string> = {
   invalid_code: "That recovery code doesn't work. Each code works once.",
-  rate_limited: "Too many codes were tried. Wait an hour, then try again.",
+  rate_limited: "Too many codes were tried. Wait up to an hour, then try again.",
 };
 
 async function redeem(code: string, retried = false): Promise<Recovered> {
@@ -78,22 +81,31 @@ export function Recover() {
 }
 
 const day = (ms: number) => new Date(ms).toLocaleDateString(undefined, { dateStyle: "medium" });
+// With the time, so two passkeys made on one day can be told apart.
+const moment = (ms: number) =>
+  new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 function BackIn({ codesLeft, passkeys }: Recovered) {
   return (
     <Screen title="You're back in">
       <p>
         You're signed in with a new passkey, and every other session was signed out.{" "}
-        <strong>
-          {codesLeft === 1 ? "1 recovery code is" : `${codesLeft} recovery codes are`} left.
-        </strong>
+        {codesLeft !== null && (
+          <strong>
+            {codesLeft === 1 ? "1 recovery code is" : `${codesLeft} recovery codes are`} left.
+          </strong>
+        )}
       </p>
-      <p>These passkeys can sign in to your assistant. Check that you know each one.</p>
+      {passkeys ? (
+        <p>These passkeys can sign in to your assistant. Check that you know each one.</p>
+      ) : (
+        <p>The list of your passkeys couldn't be loaded.</p>
+      )}
       <ul aria-label="Passkeys" className="flex flex-col gap-2">
-        {passkeys.map((p, i) => (
+        {passkeys?.map((p, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: the list never changes once shown
           <li key={i} className="rounded-lg bg-surface-sunken p-3">
-            {p.current ? "This device, new" : `Created ${day(p.createdAt)}`}
+            {p.current ? "This device, new" : `Created ${moment(p.createdAt)}`}
             <span className="block text-sm text-text-muted">
               {p.lastUsedAt ? `Last used ${day(p.lastUsedAt)}` : "Never used to sign in"}
               {p.synced && " · synced between devices"}

@@ -8,7 +8,7 @@ import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helper
 freshDatabase();
 
 type Options = { options: { challenge: string } };
-type Recovered = { codesLeft: number; passkeys: { current: boolean }[] };
+type Recovered = { codesLeft: number | null; passkeys: { current: boolean }[] | null };
 
 /** Runs both steps with `code` and a new passkey; `second` is the code step 2 sends. */
 async function recover(br: Browser, code: unknown, second: unknown = code) {
@@ -44,7 +44,7 @@ describe("a recovery code", () => {
     const res = await recover(br, codes[0]);
     expect([res.status, res.headers.get("Cache-Control")]).toEqual([200, "no-store"]);
     const body = await res.json<Recovered>();
-    expect([body.codesLeft, body.passkeys.map((p) => p.current)]).toEqual([9, [false, true]]);
+    expect([body.codesLeft, body.passkeys?.map((p) => p.current)]).toEqual([9, [false, true]]);
     expect((await br.req("/api/me")).status).toBe(200);
     expect((await old.req("/api/me")).status).toBe(401);
     expect(await count("passkeys")).toBe(2);
@@ -56,6 +56,32 @@ describe("a recovery code", () => {
 
     expect((await recover(new Browser(), codes[0])).status).toBe(403);
     expect(await count("passkeys")).toBe(2);
+  });
+
+  it("still signs in if the count and the list can't be read after the code is spent", async () => {
+    const { codes } = await claim();
+    // `spent` turns true once the batch that burns the code has committed.
+    let burning = false;
+    let spent = false;
+    const down = { bind: () => down, all: () => Promise.reject(new Error("D1 down")) };
+    const reads = /^SELECT [\s\S]* FROM (passkeys WHERE user_id|recovery_codes r)/;
+    const DB = {
+      prepare: (q: string) => {
+        if (q.startsWith("UPDATE recovery_codes SET used_at")) burning = true;
+        return spent && reads.test(q) ? down : db.prepare(q);
+      },
+      batch: async (st: D1PreparedStatement[]) => {
+        const out = await db.batch(st);
+        spent ||= burning;
+        return out;
+      },
+    } as unknown as D1Database;
+    const br = new Browser({ ...env, DB });
+    const res = await recover(br, codes[0]);
+    expect([res.status, await res.json()]).toEqual([200, { codesLeft: null, passkeys: null }]);
+    const after = new Browser();
+    after.cookies = br.cookies;
+    expect((await after.req("/api/me")).status).toBe(200);
   });
 
   it("ignores case, spaces and dashes", async () => {
