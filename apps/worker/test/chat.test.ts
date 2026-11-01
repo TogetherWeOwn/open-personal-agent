@@ -5,6 +5,8 @@ import { runInDurableObject } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
+import type { LoopTool } from "@opa/harness-builtin";
+import { type RiskClass, ToolRegistry } from "@opa/policy";
 import { STARTER_MODEL } from "@opa/providers";
 import { resolveChatModel } from "@opa/server/chat-model";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -46,6 +48,77 @@ function useModel(userId: string, provider: ModelProvider) {
     instance.resolveModel = async () => ({ provider, model: "test-model", apiKey: null });
   });
 }
+
+type Reply = { text?: string; calls?: [name: string, args: unknown][] };
+
+/** A model that answers each call with the next reply (the last one repeats), for loop tests. */
+function replying(replies: (Reply | (() => Reply))[]): ModelProvider {
+  let ids = 0;
+  let at = 0;
+  return {
+    id: "scripted",
+    listModels: async () => [],
+    capabilities: () => ({ tools: true, usageInStream: true }),
+    async *stream(): AsyncGenerator<ModelEvent> {
+      const next = replies[Math.min(at++, replies.length - 1)] ?? { text: "done" };
+      const reply = typeof next === "function" ? next() : next;
+      for (const word of (reply.text ?? "").split(/(?<= )/).filter(Boolean)) {
+        yield { type: "text.delta", text: word };
+      }
+      for (const [name, args] of reply.calls ?? []) {
+        yield {
+          type: "tool_call",
+          toolCall: { id: `call_${++ids}`, name, arguments: JSON.stringify(args) },
+        };
+      }
+      yield { type: "usage", usage: USAGE };
+      yield { type: "done", finishReason: reply.calls ? "tool_calls" : "stop" };
+    },
+  };
+}
+
+/** A loop tool of the given risk class, recording the inputs it ran with. */
+function loopTool(name: string, riskClass: RiskClass) {
+  const inputs: Record<string, unknown>[] = [];
+  const tool: LoopTool = {
+    manifest: {
+      name,
+      description: `The ${name} tool.`,
+      inputSchema: {
+        type: "object",
+        properties: { q: { type: "string", minLength: 1 } },
+        required: ["q"],
+        additionalProperties: false,
+      },
+      riskClass,
+      destinations: [],
+      scopes: [],
+    },
+    execute: async (input) => {
+      inputs.push(input);
+      return { ok: true, content: `${name} ok`, context: { kind: "system" } };
+    },
+  };
+  return { tool, inputs };
+}
+
+function useTools(userId: string, tools: LoopTool[]) {
+  return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
+    instance.resolveTools = () => {
+      const registry = new ToolRegistry<LoopTool>();
+      for (const t of tools) registry.register(t);
+      return { tools: registry, policy: () => ({}) };
+    };
+  });
+}
+
+/** The conversation's stored messages' contents and statuses, oldest first. */
+const stored = async (br: Browser, id: string) =>
+  (
+    await (
+      await br.req(`/api/conversations/${id}/messages`)
+    ).json<{ messages: { content: string; status: string }[] }>()
+  ).messages;
 
 /**
  * The real resolver, with the vault and AI binding the test runtime lacks: the DO's own env has no
@@ -100,11 +173,11 @@ describe("chat transport", () => {
     a.send?.("conv-1", "Hi!");
     await a.until?.("turn.completed");
     await b.until?.("turn.completed");
-    const types = ["turn.started", "message.delta", "message.delta", "usage.updated"];
-    types.push("message.completed", "turn.completed");
+    const types = ["turn.started", "step.started", "message.delta", "message.delta"];
+    types.push("usage.updated", "message.completed", "step.completed", "turn.completed");
     expect(a.events.map((e) => e.type)).toEqual(types);
     expect(b.events).toEqual(a.events);
-    expect(a.events.map((e) => [e.v, e.seq])).toEqual([1, 2, 3, 4, 5, 6].map((n) => [1, n]));
+    expect(a.events.map((e) => [e.v, e.seq])).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map((n) => [1, n]));
     expect(seen).toEqual([[{ role: "user", content: "Hi!" }]]);
 
     const res = await browser.req("/api/conversations/conv-1/messages");
@@ -279,7 +352,11 @@ describe("chat transport", () => {
   it("settles a turn evicted before its first write: no messages, no ledger row", async () => {
     const { owner } = await claim();
     const turn = { conversationId: "c5", turnId: "t", replyId: "r", providerId: "p", model: "m" };
-    const ctx = { name: "chat-turn", snapshot: { ...turn, reply: "", usage: null, called: false } };
+    const checkpoint = { reply: "", wrote: false, holds: ["t"], callStarted: false };
+    const ctx = {
+      name: "chat-turn",
+      snapshot: { ...turn, ...checkpoint, callRecorded: false, callUsage: null },
+    };
     const day = Date.now() - (Date.now() % 86_400_000);
     const spend = await runInDurableObject(assistantOf(owner), async (i: Assistant, state) => {
       state.storage.kv.put("spend", {
@@ -321,7 +398,7 @@ describe("chat transport", () => {
     live.send?.("conv-4", "Still there?");
     await live.until?.("message.delta");
     live.ws?.send(JSON.stringify({ type: "turn.cancel" }));
-    await live.until?.("turn.interrupted");
+    await live.until?.("turn.cancelled");
   });
 
   it("sends a turn to no tab whose session has ended", async () => {
@@ -440,6 +517,144 @@ describe("chat transport", () => {
       { seq: 0, type: "turn.failed", payload: { code: "vault_reset_required" } },
     ]);
     expect(await count("conversations", "id = 'locked'")).toBe(0);
+  });
+});
+
+describe("the DO host for the builtin loop (M3-03c)", () => {
+  it("runs a tool turn: the read runs, both calls reach the ledger, segments join", async () => {
+    const { browser, owner } = await claim();
+    const lookup = loopTool("lookup", "read");
+    await useModel(
+      owner,
+      replying([{ text: "Checking.", calls: [["lookup", { q: "x" }]] }, { text: "All done" }]),
+    );
+    await useTools(owner, [lookup.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-tool", "Look it up");
+    await tab.until?.("turn.completed");
+    const types = tab.events.map((e) => e.type);
+    expect(types.indexOf("tool.called")).toBeLessThan(types.indexOf("tool.result"));
+    expect(types.indexOf("tool.result")).toBeLessThan(types.indexOf("turn.completed"));
+    expect(lookup.inputs).toEqual([{ q: "x" }]);
+    expect(await count("usage", "conversation_id = 'conv-tool'")).toBe(2); // one row per call
+    expect(await stored(browser, "conv-tool")).toMatchObject([
+      { content: "Look it up", status: "complete" },
+      { content: "Checking.\n\nAll done", status: "complete" },
+    ]);
+  });
+
+  it("stops at an approval in D1, survives an eviction, and resumes on the decision", async () => {
+    const { browser, owner } = await claim();
+    const send = loopTool("send", "consequential");
+    const provider = replying([{ calls: [["send", { q: "hi" }]] }, { text: "Sent" }]);
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-appr", "Send it");
+    await tab.until?.("approval.requested");
+    const asked = tab.events.find(
+      (e): e is Extract<HarnessEvent, { type: "approval.requested" }> =>
+        e.type === "approval.requested",
+    );
+    if (!asked) throw new Error("no approval.requested");
+    const { batchId, items } = asked.payload;
+    const approvalId = items[0]?.approvalId;
+    if (!approvalId) throw new Error("no approval item");
+    const { turnId } = asked;
+    expect(send.inputs).toEqual([]); // gated: it has not run
+    const saved = "SELECT status FROM turn_states WHERE turn_id = ?";
+    expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
+
+    // The DO's memory goes away; the stopped turn is in D1, not in it (AC5).
+    await runInDurableObject(assistantOf(owner), (_, state) => state.abort()).catch(() => {});
+    expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
+    const back = await openTab(browser); // wakes the DO
+    await useModel(owner, provider);
+    await useTools(owner, [send.tool]);
+
+    // An unknown approval changes nothing and runs nothing.
+    const decide = (id: string) =>
+      runInDurableObject(assistantOf(owner), async (i: Assistant) => {
+        try {
+          const decisions = [
+            { approvalId: id, decision: "approve" as const, scope: "once" as const },
+          ];
+          return String(await i.resumeWithDecisions({ turnId, batchId, decisions }));
+        } catch (e) {
+          return (e as { code?: string }).code ?? String(e);
+        }
+      });
+    expect(await decide("appr_nope")).toBe("unknown");
+    expect(await db.prepare(saved).bind(turnId).first("status")).toBe("awaiting_approval");
+    expect(send.inputs).toEqual([]);
+
+    expect(await decide(approvalId)).toBe("true");
+    await back.until?.("turn.completed");
+    expect(back.events.map((e) => e.type)).toContain("approval.resolved");
+    expect(send.inputs).toEqual([{ q: "hi" }]);
+    expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(0); // settling removed it
+    expect(await stored(browser, "conv-appr")).toMatchObject([
+      { content: "Send it", status: "complete" },
+      { content: "Sent", status: "complete" },
+    ]);
+  });
+
+  it("stops at the call limit in D1 and a Continue runs it to the end", async () => {
+    const { browser, owner } = await claim();
+    const lookup = loopTool("lookup", "read");
+    let done = false;
+    const next = (): Reply => (done ? { text: "Finished" } : { calls: [["lookup", { q: "x" }]] });
+    await useModel(owner, replying([next]));
+    await useTools(owner, [lookup.tool]);
+    const tab = await openTab(browser);
+    tab.send?.("conv-limit", "Keep looking");
+    await tab.until?.("limit.reached");
+    const reached = tab.events.find((e) => e.type === "limit.reached");
+    expect(reached).toMatchObject({ payload: { kind: "calls" } });
+    const turnId = reached?.turnId;
+    const status = "SELECT status FROM turn_states WHERE turn_id = ?";
+    expect(await db.prepare(status).bind(turnId).first("status")).toBe("limit_reached");
+    // The counts stopped it, so a resume without a fresh allowance would be wrong here:
+    // resumeAfterLimit is the Continue that grants one (the same turn, counts reset).
+    done = true;
+    const resumed = await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.resumeAfterLimit(turnId as string),
+    );
+    expect(resumed).toBe(true);
+    await tab.until?.("turn.completed");
+    expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(0);
+    expect(await stored(browser, "conv-limit")).toMatchObject([
+      { content: "Keep looking", status: "complete" },
+      { content: "Finished", status: "complete" },
+    ]);
+  });
+
+  it("cancels as turn.cancelled, keeping the partial reply and no saved state", async () => {
+    const { browser, owner } = await claim();
+    // One delta, then nothing until the abort: `scripted` yields a second delta after its gate
+    // releases, which races the cancel, so this turn's model ends its stream on the abort.
+    const provider: ModelProvider = {
+      id: "scripted",
+      listModels: async () => [],
+      capabilities: () => ({ tools: false, usageInStream: true }),
+      async *stream(request): AsyncGenerator<ModelEvent> {
+        yield { type: "text.delta", text: "Hello" };
+        await new Promise<void>((r) => request.signal?.addEventListener("abort", () => r()));
+        yield { type: "usage", usage: USAGE };
+        yield { type: "done", finishReason: "stop" };
+      },
+    };
+    await useModel(owner, provider);
+    const tab = await openTab(browser);
+    tab.send?.("conv-cancel", "Tell me a story");
+    await tab.until?.("message.delta");
+    tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
+    await tab.until?.("turn.cancelled");
+    expect(await stored(browser, "conv-cancel")).toMatchObject([
+      { content: "Tell me a story", status: "complete" },
+      { content: "Hello", status: "interrupted" },
+    ]);
+    expect(await count("turn_states", "1")).toBe(0);
   });
 });
 

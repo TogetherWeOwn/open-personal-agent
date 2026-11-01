@@ -1,17 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
-// WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
-// tab, so two tabs show the same stream. D1 holds the messages; the DO holds the running turn
-// and the event log a reconnected tab replays from (M3-03 AC10).
-import type { HarnessEvent, ModelAttachment, TurnFailure, TurnLimit } from "@opa/core";
+// WebSockets of all the user's tabs, hosts the builtin loop for one chat turn at a time
+// (M3-03c) and sends every event to every tab, so two tabs show the same stream. D1 holds the
+// messages and a stopped turn's resumable state (AC5); the DO holds the running turn and the
+// event log a reconnected tab replays from (AC10).
+import type {
+  HarnessEvent,
+  ModelAttachment,
+  ModelMessage,
+  ModelProvider,
+  ModelUsage,
+  TurnFailure,
+  TurnLimit,
+} from "@opa/core";
 import {
   type AttachmentRow,
   createRepository,
   isId,
+  type SavedTurn,
   scopeForAssistant,
-  type TurnRecord,
+  type TurnStatus,
 } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
+import {
+  type ApprovalDecision,
+  type Budget,
+  continueTurn,
+  type LoopEvent,
+  type LoopHost,
+  type LoopTool,
+  newTurn,
+  resolveApprovals,
+  runTurn,
+  type TurnState,
+} from "@opa/harness-builtin";
+import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import {
   Agent,
@@ -59,11 +82,46 @@ export interface TaskProgress {
   payload: unknown;
 }
 
+type CallUsage = { inputTokens: number; outputTokens: number; cachedInputTokens: number };
+
+/**
+ * A running turn's eviction checkpoint (the fiber snapshot): plain JSON. The loop's own
+ * `TurnState` is not in here — a turn evicted mid-run settles interrupted from this alone, and
+ * only a turn that stopped cleanly (approval, limit) has its `TurnState` in D1 to resume from.
+ */
+interface TurnCheckpoint {
+  conversationId: string;
+  turnId: string;
+  replyId: string;
+  /** Who bills the turn's calls (`billingProviderId`). */
+  providerId: string;
+  model: string;
+  /** The reply's text so far: its message segments joined with a blank line. */
+  reply: string;
+  /** The user's message and the streaming reply are in D1. */
+  wrote: boolean;
+  /** Budget holds of calls still running, `<turnId>:<n>`, unsettled. */
+  holds: string[];
+  /** A model call has started, so it belongs in the ledger. */
+  callStarted: boolean;
+  /** This call's ledger row is written. */
+  callRecorded: boolean;
+  callUsage: CallUsage | null;
+}
+
 export class Assistant extends Agent<Bindings> {
   // Tabs learn nothing about the instance, and get none of the SDK's own protocol frames.
   static override options = { sendIdentityOnConnect: false };
   /** Picks each turn's model. Tests replace it with a scripted provider. */
   resolveModel = resolveChatModel;
+  /**
+   * The tools a turn may offer the model, with the policy inputs for them. Tests replace it;
+   * the builtin tools (M3-04 and later) register here. Until then a turn offers none.
+   */
+  resolveTools: () => { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] } = () => ({
+    tools: new ToolRegistry<LoopTool>(),
+    policy: () => ({}),
+  });
   #running: AbortController | null = null;
   /** Turn rate and daily spend, in this DO's storage (M2-22). */
   readonly limits = new Limits(this.ctx.storage.kv);
@@ -162,12 +220,12 @@ export class Assistant extends Agent<Bindings> {
     return scopeForAssistant(this.name);
   }
 
-  get #user() {
+  get #repo() {
     return createRepository(this.env).forUser(this.#scope);
   }
 
   get #chat() {
-    return this.#user.chat;
+    return this.#repo.chat;
   }
 
   override shouldSendProtocolMessages(): boolean {
@@ -246,7 +304,7 @@ export class Assistant extends Agent<Bindings> {
     own: { provider: string; model: string } | undefined,
     attachmentIds: readonly string[],
     signal: AbortSignal,
-    stash: (data: TurnRecord) => void,
+    stash: (data: TurnCheckpoint) => void,
   ) {
     if (!(await this.#sessionLive(connection))) return;
     const chat = this.#chat;
@@ -267,7 +325,7 @@ export class Assistant extends Agent<Bindings> {
     const { provider, model } = picked;
     // The send's files, scoped: an ID that isn't this user's upload reads as missing, and the
     // whole send is refused rather than quietly dropping a file the user attached.
-    const user = this.#user;
+    const user = this.#repo;
     const attached = await user.attachments.getMany(attachmentIds);
     if (attached.length !== new Set(attachmentIds).size) {
       return reject(connection, conversationId, "One of those files isn't available anymore.");
@@ -289,15 +347,18 @@ export class Assistant extends Agent<Bindings> {
         "Those files are too large to send in one message. Try fewer, or smaller, files.";
       return reject(connection, conversationId, message);
     }
-    const turn: TurnRecord = {
+    const cp: TurnCheckpoint = {
       conversationId,
       turnId: crypto.randomUUID(),
       replyId: crypto.randomUUID(),
       providerId: picked.billingId ?? provider.id,
       model,
       reply: "",
-      usage: null,
-      called: false,
+      wrote: false,
+      holds: [],
+      callStarted: false,
+      callRecorded: false,
+      callUsage: null,
     };
     const past = history ?? [];
     const replayed = new Set<string>();
@@ -309,11 +370,7 @@ export class Assistant extends Agent<Bindings> {
         replayed.add(row.id);
       }
     }
-    const messages: {
-      role: "user" | "assistant";
-      content: string;
-      attachments?: ModelAttachment[];
-    }[] = [];
+    const messages: ModelMessage[] = [];
     let fileTokens = 0;
     const read = async (rows: readonly AttachmentRow[]) => {
       const files: ModelAttachment[] = [];
@@ -344,97 +401,412 @@ export class Assistant extends Agent<Bindings> {
     }
     const { files: sent, ids: sentIds } = await read(sending);
     messages.push({ role: "user", content: text, ...(sent.length ? { attachments: sent } : {}) });
-    // Checkpoint before the reservation and the first write, so a recovery can always name the
-    // turn and release what it holds.
-    stash(turn);
     // Reserved before anything is written, so a refused send leaves no trace, not even a
     // conversation.
     const chars = messages.reduce(
       (sum, m) =>
         sum +
         m.content.length +
-        (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0),
+        (m.role === "user"
+          ? (m.attachments ?? []).reduce((n, f) => n + (f.text?.length ?? 0), 0)
+          : 0),
       0,
     );
-    const reservation = this.limits.reserve(turn.turnId, turn.providerId, model, chars, fileTokens);
+    // Checkpoint before the reservation and the first write, so a recovery can always name the
+    // turn and release what it holds.
+    stash(cp);
+    // The first call is reserved before anything is written, so a refused send leaves no trace,
+    // not even a conversation. The loop's budget spends this reservation on its first call and
+    // reserves later calls itself.
+    const firstHold = `${cp.turnId}:0`;
+    const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars, fileTokens);
     if (!reservation) {
       const message = "You've reached today's spending limit. It resets at midnight UTC.";
       return reject(connection, conversationId, message, "limit_reached");
     }
-    const emit = this.#emitter(conversationId, turn.turnId);
+    cp.holds = [firstHold];
+    stash(cp);
+    const emit = this.#emitter(conversationId, cp.turnId);
     const title = (text.split("\n", 1)[0] || attached[0]?.name || "").slice(0, 40);
     try {
       if (!(await chat.open(conversationId, title, fresh))) {
-        this.limits.release(turn.turnId);
+        this.limits.release(firstHold);
         return reject(connection, conversationId, "That conversation doesn't exist.");
       }
       await picked.used?.();
       await chat.startTurn(
         conversationId,
         text,
-        turn.replyId,
+        cp.replyId,
         attached.map((row) => ({ id: row.id, sentToModel: sentIds.has(row.id) })),
       );
     } catch (err) {
-      this.limits.release(turn.turnId); // no call was made
+      this.limits.release(firstHold); // no call was made
       throw err;
     }
-    // Every tab gets the reply, so first close those whose session has ended since they opened.
-    // A check that fails closes its tab too, but retryably (1011, not 4401): the tab reconnects
-    // and the upgrade rechecks its session. The turn itself goes on.
+    cp.wrote = true;
+    stash(cp);
+    await this.#sweepTabs();
+    // The host names the turn; the loop never emits `turn.started` itself.
+    emit("turn.started", { messageId: cp.replyId });
+    // Plainly, per m3-ux §3.2: the file stays with the message, but this model won't read it.
+    for (const kind of skipped) emit("status", { text: UNREAD[kind] });
+    await this.#drive({
+      checkpoint: cp,
+      stash,
+      provider,
+      model,
+      firstHold: { id: firstHold, maxOutputTokens: reservation.maxOutputTokens },
+      history: messages,
+      state: newTurn(),
+      signal,
+    });
+  }
+
+  /**
+   * Resumes a turn stopped at an approval with the user's decisions (M3-03 AC5). Server routes
+   * (M3-07a) reach this through the scoped repository's `assistant()`: this DO is named from
+   * the caller's session and `turns.load` is scope-filtered, so a turn ID can only ever
+   * address this user's saved turns. Tabs can't call it — `onMessage` routes only `chat.send`,
+   * `turn.cancel` and `resume`.
+   *
+   * `false` when a turn is already running, the saved turn is missing or not awaiting
+   * approval, or no model is available (the saved turn stays for a retry). A decision against
+   * an unknown, stale or decided approval throws `ApprovalError` before anything changes.
+   */
+  async resumeWithDecisions(input: {
+    turnId: string;
+    batchId: string;
+    decisions: ApprovalDecision[];
+  }): Promise<boolean> {
+    if (this.#running) return false;
+    const saved = await this.#repo.turns.load(input.turnId);
+    if (saved?.status !== "awaiting_approval") return false;
+    const state = parseTurnState(saved.state);
+    if (!state) {
+      await this.#dropCorrupt(saved);
+      return false;
+    }
+    resolveApprovals(state, input.batchId, input.decisions, Date.now());
+    return this.#resume(saved, state);
+  }
+
+  /** Resumes a turn stopped at its call or tool limit, with a fresh allowance (its Continue). */
+  async resumeAfterLimit(turnId: string): Promise<boolean> {
+    if (this.#running) return false;
+    const saved = await this.#repo.turns.load(turnId);
+    if (saved?.status !== "limit_reached") return false;
+    const state = parseTurnState(saved.state);
+    if (!state) {
+      await this.#dropCorrupt(saved);
+      return false;
+    }
+    continueTurn(state);
+    return this.#resume(saved, state);
+  }
+
+  /** Runs a saved turn again from its D1 state: a fresh model pick, history and first hold. */
+  async #resume(saved: SavedTurn, state: TurnState): Promise<boolean> {
+    const picked = await this.resolveModel(await this.#composed, this.#scope, "chat");
+    if ("error" in picked) return false; // the saved turn stays for a retry once a model is set
+    const { provider, model } = picked;
+    const repo = this.#repo;
+    const cp: TurnCheckpoint = {
+      conversationId: saved.conversationId,
+      turnId: saved.turnId,
+      replyId: saved.replyId,
+      providerId: picked.billingId ?? provider.id,
+      model,
+      reply: "",
+      wrote: true,
+      holds: [],
+      callStarted: false,
+      callRecorded: false,
+      callUsage: null,
+    };
+    // History is D1's, as at the turn's start, minus the still-streaming reply: its text so
+    // far is inside `state`, where the loop left it.
+    const history: ModelMessage[] = ((await repo.chat.listMessages(saved.conversationId)) ?? [])
+      .filter((m) => m.id !== saved.replyId && m.content !== "")
+      .map(({ role, content }) => ({ role, content }));
+    const firstHold = `${saved.turnId}:0`;
+    const chars = [...history, ...state.messages].reduce((sum, m) => sum + m.content.length, 0);
+    const reservation = this.limits.reserve(firstHold, cp.providerId, model, chars);
+    if (!reservation) {
+      // Stops again at today's limit. Decisions recorded on the state stay recorded.
+      await repo.turns.save({
+        ...saved,
+        providerId: cp.providerId,
+        model,
+        status: "limit_reached",
+        state: JSON.stringify(state),
+      });
+      this.#emitter(saved.conversationId, saved.turnId)("limit.reached", {
+        kind: "daily",
+        detail: "Today's spending limit",
+      });
+      return true;
+    }
+    cp.holds = [firstHold];
+    const running = new AbortController();
+    this.#running = running;
+    void this.runFiber("chat-turn", async (fiber) => {
+      fiber.stash(cp);
+      await this.#sweepTabs();
+      await this.#drive({
+        checkpoint: cp,
+        stash: fiber.stash,
+        provider,
+        model,
+        firstHold: { id: firstHold, maxOutputTokens: reservation.maxOutputTokens },
+        history,
+        state,
+        signal: running.signal,
+      });
+    })
+      .catch(() => {}) // a D1 failure surfaces as the interrupted recovery, never silently
+      .finally(() => {
+        if (this.#running === running) this.#running = null;
+      });
+    return true;
+  }
+
+  /** A saved state that no longer parses is dropped fail-closed: settle interrupted, tell tabs. */
+  async #dropCorrupt(saved: SavedTurn): Promise<void> {
+    const repo = this.#repo;
+    const stored = (await repo.chat.listMessages(saved.conversationId).catch(() => null)) ?? [];
+    const reply = stored.find((m) => m.id === saved.replyId)?.content ?? "";
+    await repo.chat.settle({ replyId: saved.replyId, reply }, "interrupted").catch(() => {});
+    await repo.turns.remove(saved.turnId).catch(() => {});
+    this.#emitter(saved.conversationId, saved.turnId)("turn.interrupted", { message: "Retry?" });
+    this.#events.trim(saved.conversationId, saved.turnId);
+  }
+
+  /**
+   * Drives the loop over `state` and owns everything around it: forwarding its events, the
+   * reply's text, one ledger row per model call, the budget's holds, and the turn's end —
+   * settled to D1 before its terminal event is sent, or, at an approval or limit, saved to D1
+   * to resume later (its event log stays, so a reconnect still replays the whole turn).
+   */
+  async #drive(run: {
+    checkpoint: TurnCheckpoint;
+    stash: (data: TurnCheckpoint) => void;
+    provider: ModelProvider;
+    model: string;
+    firstHold: { id: string; maxOutputTokens: number };
+    history: ModelMessage[];
+    state: TurnState;
+    signal: AbortSignal;
+  }): Promise<void> {
+    const { checkpoint: cp, stash, state, signal } = run;
+    const { conversationId, turnId, replyId } = cp;
+    const repo = this.#repo;
+    const chat = repo.chat;
+    const emit = (event: LoopEvent) =>
+      this.#send(conversationId, turnId, event.type, event.payload);
+
+    // One hold per model call. The first spends the caller's pre-reservation; a later call the
+    // day's budget can't cover stops the turn at its daily limit instead.
+    let calls = 0;
+    let pendingHold: string | null = run.firstHold.id;
+    let first = true;
+    const budget: Budget = {
+      reserve: (messages) => {
+        if (first) {
+          first = false;
+          return { maxOutputTokens: run.firstHold.maxOutputTokens };
+        }
+        const hold = `${turnId}:${++calls}`;
+        const chars = messages.reduce((sum, m) => sum + m.content.length, 0);
+        const reserved = this.limits.reserve(
+          hold,
+          cp.providerId,
+          cp.model,
+          chars,
+          messageFileTokens(messages),
+        );
+        if (!reserved) return { limit: "daily", detail: "Today's spending limit" };
+        pendingHold = hold;
+        cp.holds = [hold];
+        stash(cp);
+        return { maxOutputTokens: reserved.maxOutputTokens };
+      },
+      settle: (usage) => {
+        if (!pendingHold) return;
+        this.limits.settle(pendingHold, cp.providerId, cp.model, usage ? pickUsage(usage) : null);
+        pendingHold = null;
+        cp.holds = [];
+      },
+    };
+
+    const { tools, policy } = this.resolveTools();
+    const host: LoopHost = {
+      provider: run.provider,
+      model: run.model,
+      tools,
+      policy,
+      budget,
+      now: Date.now,
+      newId: () => crypto.randomUUID(),
+    };
+
+    // The reply's text: one segment per model call that spoke, joined as paragraphs. A resumed
+    // turn's earlier segments come back from its saved state.
+    const segments = state.messages.flatMap((m) =>
+      m.role === "assistant" && m.content ? [m.content] : [],
+    );
+    let current = "";
+    const syncReply = () => {
+      cp.reply = [...segments, current].filter((s) => s !== "").join("\n\n");
+    };
+    syncReply();
+
+    const recordCall = async () => {
+      await repo.usage.record({
+        providerId: cp.providerId,
+        model: cp.model,
+        usage: cp.callUsage,
+        conversationId,
+        messageId: replyId,
+      });
+      cp.callRecorded = true;
+      stash(cp);
+    };
+    // Mid-turn a failed row is retried at the call's end and again before settling; only a
+    // failure there fails the turn, as D1 failing did before the loop.
+    const tryRecord = async () => {
+      if (cp.callStarted && !cp.callRecorded) await recordCall().catch(() => {});
+    };
+
+    let persisted = false;
+    const persistStop = async (status: TurnStatus) => {
+      const saved = await repo.turns.save({
+        turnId,
+        conversationId,
+        replyId,
+        providerId: cp.providerId,
+        model: cp.model,
+        status,
+        state: JSON.stringify(state),
+      });
+      if (!saved) throw new Error("the turn's conversation is gone");
+      await chat.checkpointReply(replyId, cp.reply);
+      persisted = true;
+    };
+    const failSave = async () => {
+      await chat.settle({ replyId, reply: cp.reply }, "error").catch(() => {});
+      this.#send(conversationId, turnId, "turn.failed", {
+        message: "The reply couldn't be saved.",
+      });
+      this.#events.trim(conversationId, turnId);
+    };
+
+    const gen = runTurn(host, run.history, state, signal);
+    let thinking = "";
+    let stashedAt = 0;
+    for (;;) {
+      const next = await gen.next();
+      if (next.done) {
+        // A resume still waiting on undecided approvals names no stop event; save it anyway,
+        // with the decisions recorded so far.
+        if (!persisted && (next.value === "awaiting_approval" || next.value === "limit_reached")) {
+          await persistStop(next.value).catch(failSave);
+        }
+        return;
+      }
+      const event = next.value;
+      if (
+        event.type === "turn.completed" ||
+        event.type === "turn.cancelled" ||
+        event.type === "turn.failed"
+      ) {
+        const status =
+          event.type === "turn.completed"
+            ? "complete"
+            : event.type === "turn.cancelled"
+              ? "interrupted" // D1 has no "cancelled": a stopped reply is an interrupted one
+              : "error";
+        try {
+          if (cp.callStarted && !cp.callRecorded) await recordCall();
+          await chat.settle({ replyId, reply: cp.reply }, status);
+          await repo.turns.remove(turnId);
+        } catch {
+          await failSave();
+          await gen.return("failed");
+          return;
+        }
+        emit(event);
+        // The turn is in D1 now, so its events leave the log; a later tab reloads from D1.
+        this.#events.trim(conversationId, turnId);
+        continue;
+      }
+      if (event.type === "approval.requested" || event.type === "limit.reached") {
+        // The state is complete at these events; save it before any tab can act on them.
+        try {
+          await persistStop(
+            event.type === "approval.requested" ? "awaiting_approval" : "limit_reached",
+          );
+        } catch {
+          await failSave();
+          await gen.return("failed");
+          return;
+        }
+        emit(event);
+        continue;
+      }
+      switch (event.type) {
+        case "step.started":
+          if (!event.payload.toolCallId) {
+            thinking = event.payload.stepId;
+            cp.callStarted = true;
+            cp.callRecorded = false;
+            cp.callUsage = null;
+            stash(cp);
+          }
+          break;
+        case "message.delta":
+          current += event.payload.text;
+          syncReply();
+          if (Date.now() - stashedAt > STASH_MS) {
+            stash(cp);
+            stashedAt = Date.now();
+          }
+          break;
+        case "message.completed":
+          if (event.payload.text) segments.push(event.payload.text);
+          current = "";
+          syncReply();
+          stash(cp);
+          break;
+        case "usage.updated":
+          cp.callUsage = pickUsage(event.payload.usage);
+          await tryRecord();
+          stash(cp);
+          break;
+        case "step.completed":
+          if (event.payload.stepId === thinking) {
+            await tryRecord(); // a call that reported no usage still gets its row
+            stash(cp);
+          }
+          break;
+        default:
+          break;
+      }
+      emit(event);
+    }
+  }
+
+  /**
+   * Every tab gets the reply, so first close those whose session has ended since they opened.
+   * A check that fails closes its tab too, but retryably (1011, not 4401): the tab reconnects
+   * and the upgrade rechecks its session. The turn itself goes on.
+   */
+  async #sweepTabs(): Promise<void> {
     await Promise.all(
       [...this.getConnections()].map((tab) =>
         this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
       ),
     );
-    emit("turn.started", { messageId: turn.replyId });
-    // Plainly, per m3-ux §3.2: the file stays with the message, but this model won't read it.
-    for (const kind of skipped) emit("status", { text: UNREAD[kind] });
-    turn.called = true;
-    stash(turn);
-
-    let failure: string | null = null;
-    let stashedAt = 0;
-    const { maxOutputTokens } = reservation;
-    try {
-      // A chat turn makes one call; the tool loop (M3) makes more under the same cap.
-      if (!this.limits.call(turn.turnId)) throw new RangeError("too many calls in one turn");
-      for await (const event of provider.stream({ model, messages, maxOutputTokens, signal })) {
-        if (event.type === "text.delta") {
-          turn.reply += event.text;
-          emit("message.delta", { text: event.text });
-          if (Date.now() - stashedAt > STASH_MS) {
-            stash(turn);
-            stashedAt = Date.now();
-          }
-        } else if (event.type === "usage") {
-          turn.usage = event.usage;
-          stash(turn);
-          emit("usage.updated", { usage: event.usage, providerId: provider.id, model });
-        } else if (event.type === "error" && event.code !== "aborted") {
-          failure = `The model call failed (${event.code}).`;
-        }
-      }
-    } catch {
-      failure = "The model call failed.";
-    }
-    this.limits.settle(turn.turnId, turn.providerId, model, turn.usage);
-    try {
-      await chat.settle(turn, signal.aborted ? "interrupted" : failure ? "error" : "complete");
-    } catch {
-      emit("turn.failed", { message: "The reply couldn't be saved." });
-      return this.#events.trim(conversationId, turn.turnId);
-    }
-    if (signal.aborted) {
-      emit("turn.interrupted", { message: "Stopped." });
-    } else if (failure) {
-      emit("turn.failed", { message: failure });
-    } else {
-      emit("message.completed", { text: turn.reply });
-      emit("turn.completed", {});
-    }
-    // The turn is in D1 now, so its events leave the log; a later tab reloads from D1 instead.
-    this.#events.trim(conversationId, turn.turnId);
   }
 
   /**
@@ -443,7 +815,7 @@ export class Assistant extends Agent<Bindings> {
    * which the model APIs take, and the caller has already fitted it to the turn's byte budget.
    */
   async #modelFile(row: AttachmentRow): Promise<ModelAttachment | null> {
-    const object = await this.#user.attachments.getObject(row.id);
+    const object = await this.#repo.attachments.getObject(row.id);
     if (!object?.body) return null;
     if (row.kind === "text") {
       const { bytes, more } = await readPrefix(object.body, TEXT_READ_BYTES);
@@ -475,23 +847,86 @@ export class Assistant extends Agent<Bindings> {
    */
   override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void> {
     if (ctx.name !== "chat-turn") return;
-    const turn = ctx.snapshot as TurnRecord | null;
-    if (!turn) return;
+    const cp = ctx.snapshot as TurnCheckpoint | null;
+    if (!cp) return;
+    const repo = this.#repo;
+    // A turn that stopped cleanly saved its state to D1 before its fiber ended; if the process
+    // died between that save and the fiber's end, the turn is waiting, not interrupted.
+    if (await repo.turns.load(cp.turnId)) {
+      for (const hold of cp.holds) this.limits.release(hold);
+      return;
+    }
+    if (!cp.wrote) {
+      // Evicted before its first write: no messages exist, and no call was made.
+      for (const hold of cp.holds) this.limits.release(hold);
+      return;
+    }
     // Settling twice charges once, so a recovery after the turn settled costs nothing more.
-    if (turn.called) this.limits.settle(turn.turnId, turn.providerId, turn.model, turn.usage);
-    else this.limits.release(turn.turnId);
-    await this.#chat.settle(turn, "interrupted"); // the ledger keeps any usage already reported
-    this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
-    this.#events.trim(turn.conversationId, turn.turnId);
+    for (const hold of cp.holds) this.limits.settle(hold, cp.providerId, cp.model, cp.callUsage);
+    if (cp.callStarted && !cp.callRecorded) {
+      await repo.usage.record({
+        providerId: cp.providerId,
+        model: cp.model,
+        usage: cp.callUsage,
+        conversationId: cp.conversationId,
+        messageId: cp.replyId,
+      });
+    }
+    await repo.chat.settle({ replyId: cp.replyId, reply: cp.reply }, "interrupted");
+    await repo.turns.remove(cp.turnId);
+    this.#emitter(cp.conversationId, cp.turnId)("turn.interrupted", { message: "Retry?" });
+    this.#events.trim(cp.conversationId, cp.turnId);
+  }
+
+  #send(sessionId: string, turnId: string, type: HarnessEvent["type"], payload: unknown): void {
+    const frame = this.#events.append(sessionId, turnId, (seq) =>
+      JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
+    );
+    this.broadcast(frame);
   }
 
   #emitter(sessionId: string, turnId: string): Emit {
-    return (type, payload) => {
-      const frame = this.#events.append(sessionId, turnId, (seq) =>
-        JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
-      );
-      this.broadcast(frame);
-    };
+    return (type, payload) => this.#send(sessionId, turnId, type, payload);
+  }
+}
+
+const pickUsage = (usage: ModelUsage): CallUsage => ({
+  inputTokens: usage.inputTokens,
+  outputTokens: usage.outputTokens,
+  cachedInputTokens: usage.cachedInputTokens,
+});
+
+/**
+ * A saved `TurnState` back from D1, or `null` if it isn't one. The row is only ever written by
+ * this host, so this is defense in depth: anything unexpected closes the turn instead of
+ * running the loop over it (`#dropCorrupt`).
+ */
+function parseTurnState(json: string): TurnState | null {
+  try {
+    const s = JSON.parse(json) as Partial<TurnState> | null;
+    if (!s || typeof s !== "object") return null;
+    const counts = s.counts;
+    const taint = s.taint;
+    const usage = s.usage;
+    if (!counts || typeof counts.calls !== "number" || typeof counts.tools !== "number")
+      return null;
+    if (!taint || (taint.taint !== "trusted" && taint.taint !== "untrusted")) return null;
+    if (!Array.isArray(taint.sources)) return null;
+    if (!usage || typeof usage.inputTokens !== "number") return null;
+    if (!Array.isArray(s.messages)) return null;
+    for (const m of s.messages) {
+      if (!m || typeof m !== "object" || typeof m.content !== "string") return null;
+      if (m.role !== "user" && m.role !== "assistant" && m.role !== "tool" && m.role !== "system")
+        return null;
+    }
+    const pending = s.pending;
+    if (pending !== null) {
+      if (!pending || typeof pending.batchId !== "string" || !Array.isArray(pending.items))
+        return null;
+    }
+    return s as TurnState;
+  } catch {
+    return null;
   }
 }
 
@@ -579,6 +1014,29 @@ const fileTokenEstimate = (row: AttachmentRow) =>
     : row.kind === "pdf"
       ? Math.min(PDF_MAX_TOKENS, Math.ceil(row.sizeBytes / 4))
       : 0;
+
+/**
+ * A history's files for a later call's spend reservation. Text rides in `chars`, as in the first
+ * call; a PDF is measured from its base64, which decodes to about three quarters of its length.
+ */
+const messageFileTokens = (messages: readonly ModelMessage[]) =>
+  messages.reduce(
+    (sum, m) =>
+      sum +
+      (m.role === "user"
+        ? (m.attachments ?? []).reduce(
+            (n, f) =>
+              n +
+              (f.kind === "image"
+                ? IMAGE_TOKENS
+                : f.kind === "pdf"
+                  ? Math.min(PDF_MAX_TOKENS, Math.ceil(((f.data?.length ?? 0) * 3) / 16))
+                  : 0),
+            0,
+          )
+        : 0),
+    0,
+  );
 
 const MODEL_ERRORS: Partial<Record<ChatModelError, string>> = {
   no_model: "Pick a model in Settings first.",
