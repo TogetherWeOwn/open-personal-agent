@@ -58,6 +58,7 @@ import {
   SPENDING_DEFAULTS,
   type SpendingSettings,
 } from "./limits";
+import type { TaskTurnState } from "./task-workflow";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
@@ -90,6 +91,15 @@ const STASH_MS = 1_000; // how often a streaming reply is checkpointed, so evict
 const QUEUE_KEY = "approvals:queue";
 /** How much of the original request a late approval's label quotes. */
 const LABEL_CHARS = 80;
+/** A turn still running after this long moves to a Workflow at its next step boundary (AC2). */
+export const PROMOTE_AFTER_MS = 2 * 60_000;
+/**
+ * A promoted turn's state must fit its task row: D1 holds up to 2 MB a value. A turn whose state
+ * (files left out) is larger than this stays here.
+ */
+const MAX_PROMOTED_BYTES = 1_500_000;
+/** The task running a conversation's promoted turn, while it may still run (`#promotedRunning`). */
+const PROMOTED_KEY = (conversationId: string) => `promoted:${conversationId}`;
 
 /** What `resumeBatch` did with a decided batch. */
 export type ResumeResult = "resumed" | "waiting" | "queued" | "gone";
@@ -152,6 +162,11 @@ interface TurnCheckpoint {
    * resumed turn's older row is the stop it resumed from.
    */
   stopping?: number;
+  /**
+   * The task it is being promoted to, from before the row is written: a recovery that finds the
+   * row starts its Workflow (again) instead of interrupting a turn a task owns (M3-12 AC2).
+   */
+  promoting?: { taskId: string; instanceId: string };
 }
 
 /** A turn's reply text in its saved state: one segment per model call that spoke. */
@@ -186,6 +201,10 @@ export class Assistant extends Agent<Bindings> {
     tools: new ToolRegistry<LoopTool>(),
     policy: () => ({}),
   });
+  /** Where promoted turns run (M3-12 AC2). Tests replace it to drive the run themselves. */
+  taskWorkflows: () => Pick<Workflow, "create" | "get"> = () => this.env.TASK_WORKFLOW;
+  /** How long a run goes before it moves to a task at its next step boundary. */
+  promoteAfterMs = PROMOTE_AFTER_MS;
   #running: AbortController | null = null;
   /** Whether a `#drain` owns the resume queue: there is only ever one, so batches keep order. */
   #draining = false;
@@ -493,6 +512,10 @@ export class Assistant extends Agent<Bindings> {
     stash: (data: TurnCheckpoint) => void,
   ) {
     if (!(await this.#sessionLive(connection))) return;
+    // A task still writing this conversation's promoted turn holds it, as a turn here would.
+    if (await this.#promotedRunning(conversationId)) {
+      return reject(connection, conversationId, "Another reply is still being written.");
+    }
     const chat = this.#chat;
     // The model context comes from D1, never from memory, so it survives an eviction. A new
     // conversation has none yet.
@@ -892,6 +915,108 @@ export class Assistant extends Agent<Bindings> {
     return true;
   }
 
+  /**
+   * Moves a running turn to a `TaskWorkflow` at a step boundary (M3-12 AC2): a task row holding
+   * the turn's state and naming its reply, then the instance that runs it on. The reply stays
+   * `streaming` in D1 and the turn's events stay in the log; the task writes and settles both
+   * under the same turn. `false` when it can't, and the turn goes on here instead.
+   */
+  async #promote(
+    cp: TurnCheckpoint,
+    stash: (data: TurnCheckpoint) => void,
+    history: readonly ModelMessage[],
+    state: TurnState,
+  ): Promise<boolean> {
+    const { promotion, ...turn } = state;
+    const task: TaskTurnState = {
+      history: taskHistory(history),
+      turn,
+      turnId: cp.turnId,
+      replyId: cp.replyId,
+    };
+    const body = JSON.stringify(task);
+    if (new TextEncoder().encode(body).length > MAX_PROMOTED_BYTES) return false;
+    const taskId = crypto.randomUUID();
+    const promoting = { taskId, instanceId: `task-${taskId}` };
+    const repo = this.#repo;
+    try {
+      await repo.chat.checkpointReply(cp.replyId, cp.reply);
+      cp.promoting = promoting;
+      stash(cp);
+      const created = await repo.tasks.create({
+        id: taskId,
+        conversationId: cp.conversationId,
+        workflowInstanceId: promoting.instanceId,
+        kind: "turn",
+        mode: promotion?.mode ?? "interactive",
+        title: promotion?.title ?? null,
+        state: body,
+      });
+      if (!created) throw new Error("the conversation is gone");
+      await this.taskWorkflows().create({ id: promoting.instanceId, params: { taskId } });
+    } catch {
+      // A row no run will pick up ends here; a run that did start finds it ended and stops.
+      await repo.tasks.finish(taskId, "failed", "The task couldn't start.").catch(() => {});
+      delete cp.promoting;
+      stash(cp);
+      return false;
+    }
+    this.#promoted(cp, taskId);
+    return true;
+  }
+
+  /**
+   * The rest of a promotion an eviction cut short: `true` once the task owns the turn, its
+   * instance started (again, if need be: the instance ID makes that idempotent). `false` when no
+   * live row was written, and the turn is interrupted like any other.
+   */
+  async #finishPromotion(cp: TurnCheckpoint): Promise<boolean> {
+    const { taskId, instanceId } = cp.promoting ?? { taskId: "", instanceId: "" };
+    const repo = this.#repo;
+    const status = (await repo.tasks.get(taskId))?.status;
+    if (status === undefined || TASK_ENDED.has(status)) return false;
+    if (status === "queued") {
+      const workflows = this.taskWorkflows();
+      const started = await workflows.create({ id: instanceId, params: { taskId } }).then(
+        () => true,
+        // Already created before the eviction, or not at all.
+        () =>
+          workflows.get(instanceId).then(
+            () => true,
+            () => false,
+          ),
+      );
+      if (!started) {
+        await repo.tasks.finish(taskId, "failed", "The task couldn't start.");
+        return false;
+      }
+    }
+    this.#promoted(cp, taskId);
+    return true;
+  }
+
+  /** The task holds the conversation's turn now; the tabs are told so under the same turn. */
+  #promoted(cp: TurnCheckpoint, taskId: string): void {
+    this.ctx.storage.kv.put(PROMOTED_KEY(cp.conversationId), taskId);
+    this.#send(cp.conversationId, cp.turnId, "task.promoted", { taskId });
+  }
+
+  /**
+   * Whether a task is still writing the conversation's promoted turn, so a send there is refused
+   * as it would be behind a turn running here. Once the task has ended the marker goes; while it
+   * waits on an approval or a limit the chat is free.
+   */
+  async #promotedRunning(conversationId: string): Promise<boolean> {
+    const taskId = this.ctx.storage.kv.get<string>(PROMOTED_KEY(conversationId));
+    if (!taskId) return false;
+    const status = (await this.#repo.tasks.get(taskId))?.status;
+    if (status === "queued" || status === "running") return true;
+    if (status === undefined || TASK_ENDED.has(status)) {
+      this.ctx.storage.kv.delete(PROMOTED_KEY(conversationId));
+    }
+    return false;
+  }
+
   /** A saved state that no longer parses is dropped fail-closed: settle interrupted, tell tabs. */
   async #dropCorrupt(saved: SavedTurn): Promise<void> {
     const repo = this.#repo;
@@ -975,6 +1100,11 @@ export class Assistant extends Agent<Bindings> {
       newId: () => crypto.randomUUID(),
       ...(run.approvals ? { approvals: this.#approvalHooks(run.approvals) } : {}),
     };
+    // A run past about 2 minutes, or one a tool asked to, goes on as a task (M3-12 AC2).
+    const began = Date.now();
+    let promotable = true;
+    host.promote = (s) =>
+      promotable && (s.promotion !== undefined || Date.now() - began >= this.promoteAfterMs);
 
     // The reply's text: one segment per model call that spoke, joined as paragraphs. A resumed
     // turn's earlier segments come back from its saved state.
@@ -1033,13 +1163,21 @@ export class Assistant extends Agent<Bindings> {
       if (settled) this.#events.trim(conversationId, turnId);
     };
 
-    const gen = runTurn(host, run.history, state, signal);
+    let gen = runTurn(host, run.history, state, signal);
     let thinking = "";
     let stashedAt = 0;
     try {
       for (;;) {
         const next = await gen.next();
         if (next.done) {
+          if (next.value === "promoted") {
+            if (await this.#promote(cp, stash, run.history, state)) return;
+            // It couldn't move (too large, D1, the Workflow binding): it goes on here, for good.
+            promotable = false;
+            delete state.promotion;
+            gen = runTurn(host, run.history, state, signal);
+            continue;
+          }
           // A resume still waiting on undecided approvals names no stop event; save it anyway,
           // with the decisions recorded so far.
           if (
@@ -1296,6 +1434,11 @@ export class Assistant extends Agent<Bindings> {
     const cp = ctx.snapshot as TurnCheckpoint | null;
     if (!cp) return;
     const repo = this.#repo;
+    // Evicted while it moved to a task: once the task row exists, the task owns the turn.
+    if (cp.promoting && (await this.#finishPromotion(cp))) {
+      for (const hold of cp.holds) this.limits.release(hold);
+      return;
+    }
     // A turn that stopped cleanly saved its state to D1 before its fiber ended; if the process
     // died between that save and the fiber's end, the turn is waiting, not interrupted. A resumed
     // turn's row is the stop it resumed from until a new stop saves over it (the save stamps
@@ -1384,6 +1527,24 @@ const pickUsage = (usage: ModelUsage): CallUsage => ({
   outputTokens: usage.outputTokens,
   cachedInputTokens: usage.cachedInputTokens,
 });
+
+/** Task statuses after which nothing runs again. */
+const TASK_ENDED = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
+
+/**
+ * The context a promoted turn's task starts from, small enough for its row: images and PDFs are
+ * left out, named in their message instead (the model has read them in this turn already).
+ */
+function taskHistory(history: readonly ModelMessage[]): ModelMessage[] {
+  return history.map((m) => {
+    if (m.role !== "user" || !m.attachments?.length) return m;
+    const { attachments, ...rest } = m;
+    const kept = attachments.filter((f) => f.kind === "text");
+    const left = attachments.filter((f) => f.kind !== "text").map((f) => f.name);
+    const content = left.length ? `${m.content}\n[Attached: ${left.join(", ")}]` : m.content;
+    return { ...rest, content, ...(kept.length ? { attachments: kept } : {}) };
+  });
+}
 
 /**
  * A saved `TurnState` back from D1, or `null` if it isn't one. The row is only ever written by
