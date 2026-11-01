@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The per-user assistant (ADR 0002), named `u:<userId>` by the server. It owns the hibernating
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
-// tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
+// tab, so two tabs show the same stream. D1 holds the messages; the DO holds the running turn
+// and the event log a reconnected tab replays from (M3-03 AC10).
 import type { HarnessEvent, ModelAttachment, TurnFailure, TurnLimit } from "@opa/core";
 import {
   type AttachmentRow,
@@ -21,6 +22,7 @@ import {
 } from "agents";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
+import { EventLog } from "./event-log";
 import { Limits, type Reservation } from "./limits";
 
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
@@ -65,6 +67,8 @@ export class Assistant extends Agent<Bindings> {
   #running: AbortController | null = null;
   /** Turn rate and daily spend, in this DO's storage (M2-22). */
   readonly limits = new Limits(this.ctx.storage.kv);
+  /** Every broadcast event, per conversation, until its turn settles to D1 (M3-03 AC10). */
+  readonly #events = new EventLog(this.ctx.storage.sql);
   /** The env with the vault: `compose` stays the only reader of the master keys. */
   readonly #composed: Promise<Env>;
 
@@ -184,6 +188,21 @@ export class Assistant extends Agent<Bindings> {
     // A tab whose session is still live may stop the running turn.
     if (msg?.type === "turn.cancel")
       void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
+    // A reconnected tab replays what it missed (M3-03 AC11): to this tab only, after the same
+    // session recheck, and only from this user's own log — the DO is named from the session, so
+    // a conversation ID from the client can't reach another user's events.
+    if (msg?.type === "resume") {
+      void this.#sessionLive(connection).then((ok) => {
+        if (!ok) return;
+        try {
+          for (const frame of this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq)) {
+            connection.send(frame);
+          }
+        } catch {
+          // The tab went away mid-replay; it will resume again on its next connect.
+        }
+      });
+    }
     if (msg?.type !== "chat.send") return;
     const text = msg.text.trim();
     // One turn at a time is the concurrency limit: a second send waits for the first.
@@ -403,7 +422,8 @@ export class Assistant extends Agent<Bindings> {
     try {
       await chat.settle(turn, signal.aborted ? "interrupted" : failure ? "error" : "complete");
     } catch {
-      return emit("turn.failed", { message: "The reply couldn't be saved." });
+      emit("turn.failed", { message: "The reply couldn't be saved." });
+      return this.#events.trim(conversationId, turn.turnId);
     }
     if (signal.aborted) {
       emit("turn.interrupted", { message: "Stopped." });
@@ -413,6 +433,8 @@ export class Assistant extends Agent<Bindings> {
       emit("message.completed", { text: turn.reply });
       emit("turn.completed", {});
     }
+    // The turn is in D1 now, so its events leave the log; a later tab reloads from D1 instead.
+    this.#events.trim(conversationId, turn.turnId);
   }
 
   /**
@@ -460,24 +482,35 @@ export class Assistant extends Agent<Bindings> {
     else this.limits.release(turn.turnId);
     await this.#chat.settle(turn, "interrupted"); // the ledger keeps any usage already reported
     this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
+    this.#events.trim(turn.conversationId, turn.turnId);
   }
 
   #emitter(sessionId: string, turnId: string): Emit {
-    let seq = 0;
-    return (type, payload) =>
-      this.broadcast(JSON.stringify({ v: 1, seq: ++seq, sessionId, turnId, type, payload }));
+    return (type, payload) => {
+      const frame = this.#events.append(sessionId, turnId, (seq) =>
+        JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
+      );
+      this.broadcast(frame);
+    };
   }
 }
 
 /**
  * What a tab may send: `chat.send`, with the chat's own model if it names one and any uploaded
- * files by ID, or `turn.cancel`. Anything else is ignored.
+ * files by ID, `turn.cancel`, or `resume`. Anything else is ignored.
  */
 function parse(message: WSMessage) {
   if (typeof message !== "string") return null;
   try {
     const msg = JSON.parse(message) as Partial<Record<string, unknown>>;
     if (msg.type === "turn.cancel") return { type: "turn.cancel" } as const;
+    if (msg.type === "resume") {
+      const { conversationId, turnId, afterSeq } = msg;
+      const at = typeof afterSeq === "number" && Number.isSafeInteger(afterSeq) && afterSeq >= 0;
+      return isId(conversationId) && isId(turnId) && at
+        ? ({ type: "resume", conversationId, turnId, afterSeq } as const)
+        : null;
+    }
     const conversationId = String(msg.conversationId);
     if (msg.type === "chat.send" && typeof msg.text === "string") {
       const { provider, model } = (msg.model ?? {}) as Partial<Record<string, unknown>>;
