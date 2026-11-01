@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { findViolations } from "../check-scoped-access.mjs";
+import { findVaultDependencies, findViolations } from "../check-scoped-access.mjs";
 import { findBundleViolations } from "../check-worker-bundle.mjs";
 
 const lint = (path: string, text: string) => findViolations([{ path, text }]).length;
@@ -14,6 +14,10 @@ describe("scoped-access lint", () => {
       "env?.FILES.get(k)",
       'env["ASSISTANT"]',
       "const { DB } = env;",
+      "function f({ DB }: Env) {}",
+      "const f = ({ FILES }) => FILES;",
+      "function f({ ASSISTANT }) {}",
+      "const f = ({ DB, ...rest }: Env): void => {};",
       "ns.idFromName(id)",
     ]) {
       expect([
@@ -22,7 +26,13 @@ describe("scoped-access lint", () => {
         lint("apps/worker/test/a.ts", text),
       ]).toEqual([1, 0, 0]);
     }
-    expect(lint("apps/worker/src/env.ts", "interface B {\n  DB: D1Database;\n}")).toBe(0);
+    for (const text of [
+      "interface B {\n  DB: D1Database;\n}",
+      'type T = Pick<Bindings, "DB">;',
+      "const f = ({ env }: Ctx) => repo(env);",
+    ]) {
+      expect(lint("apps/worker/src/env.ts", text), text).toBe(0);
+    }
     expect(findViolations([{ path: "apps/worker/src/a.ts", text: "\nenv.DB" }])).toEqual([
       "apps/worker/src/a.ts:2: raw-binding: use the scoped repository in @opa/db (ADR 0010 D3)",
     ]);
@@ -34,14 +44,28 @@ describe("scoped-access lint", () => {
       ["apps/worker/src/auth/session.ts", "scopeFromSession(s)", 0],
       ["apps/worker/src/health.ts", `env.${KEY}`, 1],
       ["packages/core/src/a.ts", `"${KEY}_PREV"`, 1],
-      ["apps/worker/src/index.ts", `env.${KEY}`, 0],
+      ["apps/worker/src/compose.ts", `env.${KEY}`, 0],
+      ["apps/worker/src/index.ts", `env.${KEY}`, 1],
       ["packages/vault/src/kek.ts", `env.${KEY}`, 0],
       ["apps/worker/src/app.ts", ENV_IMPORT, 1],
       ["apps/worker/src/app.ts", 'import * as cf from "cloudflare:workers";', 1],
       ["apps/worker/src/app.ts", 'import { DurableObject } from "cloudflare:workers";', 0],
-      ["apps/worker/src/index.ts", ENV_IMPORT, 0],
+      ["apps/worker/src/compose.ts", ENV_IMPORT, 0],
+      ["apps/worker/src/index.ts", ENV_IMPORT, 1],
     ];
     for (const [path, text, n] of cases) expect(lint(path, text), `${path}: ${text}`).toBe(n);
+  });
+});
+
+describe("vault dependency check", () => {
+  it("fails if packages/vault lists any runtime dependency", () => {
+    const pkg = (fields: object) => JSON.stringify({ name: "@opa/vault", ...fields });
+    expect(findVaultDependencies(pkg({ devDependencies: { vitest: "5" } }))).toEqual([]);
+    expect(findVaultDependencies(pkg({ dependencies: { "left-pad": "1" } }))).toEqual([
+      "packages/vault/package.json: dependencies: left-pad: the vault has none (ADR 0010 D4.1 #4)",
+    ]);
+    expect(findVaultDependencies(pkg({ peerDependencies: { hono: "4" } }))).toHaveLength(1);
+    expect(findVaultDependencies(pkg({ optionalDependencies: { x: "1" } }))).toHaveLength(1);
   });
 });
 
@@ -61,7 +85,7 @@ describe("worker bundle check", () => {
 
   it("allows the composition root and reviewed allowlist entries", () => {
     expect(
-      findBundleViolations(bundle("apps/worker/src/index.ts", `${ENV_IMPORT} env.${KEY}`)),
+      findBundleViolations(bundle("apps/worker/src/compose.ts", `${ENV_IMPORT} env.${KEY}`)),
     ).toEqual([]);
     const entry = { module: dep, rule: "master-key", reason: "reviewed" };
     expect(findBundleViolations(bundle(dep, KEY), [entry])).toEqual([]);

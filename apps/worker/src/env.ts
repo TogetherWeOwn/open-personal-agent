@@ -12,7 +12,7 @@ export interface Bindings {
 }
 
 /**
- * What the HTTP app sees. The composition root (`index.ts`) builds it without the master key
+ * What the HTTP app sees. The composition root (`compose.ts`) builds it without the master key
  * (ADR 0010 D4.1); only `packages/vault` and the composition root may name that key.
  */
 export interface Env extends Bindings {
