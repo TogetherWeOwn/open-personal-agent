@@ -11,11 +11,12 @@ import {
   Settings,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { useState } from "react";
 import { Link } from "react-aria-components";
 import { post } from "./auth/ui";
 import type { Destination } from "./routes";
 import { isDark, setDark } from "./theme";
-import { Menu, MenuItem } from "./ui";
+import { Banner, Button, Menu, MenuItem } from "./ui";
 
 const DESTINATIONS: [Destination, string, string, LucideIcon][] = [
   ["chat", "Chat", "/", MessageSquare],
@@ -25,20 +26,24 @@ const DESTINATIONS: [Destination, string, string, LucideIcon][] = [
   ["settings", "Settings", "/settings", Settings],
 ];
 
-const signOut = () =>
-  post("/api/auth/logout")
-    .catch(() => {})
-    .then(() => window.location.assign("/"));
-
-/** Theme and sign out; on phones Memory and Settings join them. */
-function AccountItems() {
+/**
+ * Theme and sign out; on phones Memory and Settings join them. Sign out redirects only after
+ * the server clears the session — on failure the user stays put and the shell shows why.
+ */
+function AccountItems({ onSignOutError }: { onSignOutError: () => void }) {
   const dark = isDark();
   return (
     <>
       <MenuItem onAction={() => setDark(!dark)}>
         {dark ? "Switch to light theme" : "Switch to dark theme"}
       </MenuItem>
-      <MenuItem onAction={signOut}>Sign out</MenuItem>
+      <MenuItem
+        onAction={() =>
+          post("/api/auth/logout").then(() => window.location.assign("/"), onSignOutError)
+        }
+      >
+        Sign out
+      </MenuItem>
     </>
   );
 }
@@ -64,6 +69,8 @@ export function NavShell({
   children: ReactNode;
 }) {
   const here = (d: Destination) => (d === current ? "page" : false);
+  const [signOutFailed, setSignOutFailed] = useState(false);
+  const account = <AccountItems onSignOutError={() => setSignOutFailed(true)} />;
   return (
     <div className={`${fit ? "h-dvh" : "min-h-dvh"} flex flex-col sm:flex-row`}>
       <div className="top-0 hidden h-dvh w-16 shrink-0 flex-col gap-2 border-r border-border bg-surface-sunken p-2 sm:sticky sm:flex lg:w-72 lg:p-3">
@@ -94,11 +101,22 @@ export function NavShell({
               </>
             }
           >
-            <AccountItems />
+            {account}
           </Menu>
         </section>
       </div>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {signOutFailed && (
+          <Banner tone="danger" alert>
+            Couldn't sign out — your session may still be active. Check your connection and try
+            again.{" "}
+            <Button variant="quiet" onPress={() => setSignOutFailed(false)}>
+              Dismiss
+            </Button>
+          </Banner>
+        )}
+        {children}
+      </div>
       <nav
         aria-label="Main"
         className={`${hideTabs ? "hidden" : "grid"} sticky bottom-0 grid-cols-4 border-t border-border bg-surface-sunken sm:hidden`}
@@ -126,9 +144,15 @@ export function NavShell({
             </span>
           }
         >
-          <MenuItem href="/memory">Memory</MenuItem>
-          <MenuItem href="/settings">Settings</MenuItem>
-          <AccountItems />
+          <MenuItem href="/memory">
+            Memory
+            {current === "memory" && <span className="sr-only"> (current page)</span>}
+          </MenuItem>
+          <MenuItem href="/settings">
+            Settings
+            {current === "settings" && <span className="sr-only"> (current page)</span>}
+          </MenuItem>
+          {account}
         </Menu>
       </nav>
     </div>

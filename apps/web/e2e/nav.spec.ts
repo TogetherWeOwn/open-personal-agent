@@ -134,6 +134,29 @@ test("the account menu switches the theme, and back", async ({ page }) => {
   await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
 });
 
+test("a sign out the server refuses stays put and says so", async ({ page }) => {
+  await page.route("/api/auth/logout", (route) =>
+    route.fulfill({ status: 500, json: { error: "boom" } }),
+  );
+  await page.goto("/inbox");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page.getByRole("alert")).toContainText("Couldn't sign out");
+  await expect(page).toHaveURL(/\/inbox$/);
+});
+
+test("on a phone the You menu marks the active destination", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await page.goto("/usage");
+  const tabs = page.getByRole("navigation", { name: "Main" });
+  await tabs.getByRole("button", { name: "You" }).click();
+  // RAC's MenuItem doesn't forward aria-current to the DOM, so the active destination is
+  // announced with visually-hidden text instead (as with "opens in a new tab" links).
+  await expect(page.getByRole("menuitem", { name: "Settings (current page)" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Memory" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Memory (current page)" })).toHaveCount(0);
+});
+
 test("in the sidebar, picking a chat from another screen lands on Chat and Back returns", async ({
   page,
 }) => {
