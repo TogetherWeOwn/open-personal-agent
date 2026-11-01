@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useLayoutEffect, useRef } from "react";
+import { Markdown } from "./Markdown";
 import type { Conversation, Message } from "./state";
 
 /**
@@ -58,9 +59,9 @@ function MessageView({ message: m }: { message: Message }) {
   return (
     <div>
       <p className="mb-1 text-sm font-semibold text-text-muted">Assistant</p>
-      <p className={`whitespace-pre-wrap break-words ${m.status === "streaming" ? "caret" : ""}`}>
-        {m.text}
-      </p>
+      <div className={`break-words ${m.status === "streaming" ? "caret" : ""}`}>
+        <Markdown text={m.text} streaming={m.status === "streaming"} />
+      </div>
       {m.status === "interrupted" && (
         <p className="mt-1 text-sm text-text-muted">Stopped before it finished.</p>
       )}
