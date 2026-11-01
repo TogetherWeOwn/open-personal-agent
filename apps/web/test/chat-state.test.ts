@@ -350,20 +350,25 @@ describe("chatReducer", () => {
     ]);
   });
 
-  it("leaves the thread alone for the M3 events it doesn't render yet (M3-03 AC8)", () => {
+  it("records M3 timeline events on the turn without touching the reply (M3-09b)", () => {
     const state = run(send, started(), delta("Hel"));
-    const m3: ChatAction[] = [
+    const next = run(
+      send,
+      started(),
+      delta("Hel"),
       ev("step.started", { stepId: "s1", label: "Thinking" }),
       ev("tool.called", { toolCallId: "call-1", tool: "web_fetch", args: "{}", risk: "read" }),
       ev("context.tainted", { stepId: "s1", source: { kind: "web", label: "x.test" } }),
-    ];
-    for (const action of m3) {
-      const next = chatReducer(state, action);
-      // Only the applied-`seq` marker moves; nothing on screen does.
-      expect(next.conversations).toBe(state.conversations);
-      expect(next.announcement).toBe(state.announcement);
-      expect(next.pending?.turnId).toBe("t1");
-    }
+    );
+    // The timeline grows; the reply and the announcement don't move for it.
+    expect(next.conversations[0]?.turns[0]).toMatchObject({
+      steps: [{ stepId: "s1", label: "Thinking", status: "running" }],
+      tools: [{ toolCallId: "call-1", tool: "web_fetch", status: "running" }],
+      taint: [{ stepId: "s1", kind: "web", label: "x.test" }],
+    });
+    expect(reply(next)).toMatchObject({ text: "Hel", status: "streaming" });
+    expect(next.announcement).toBe(state.announcement);
+    expect(next.pending?.turnId).toBe("t1");
   });
 
   it("stops streaming at an approval or a limit, and a cancel ends the reply (M3-03c)", () => {
@@ -427,5 +432,258 @@ describe("chatReducer", () => {
     expect(chatReducer(state, at(7, "turn.started", { messageId: "r-t1" }))).toBe(state);
     expect(chatReducer(state, at(8, "message.delta", { text: "Hel" }))).toBe(state);
     expect(reply(chatReducer(state, at(9, "message.delta", { text: "lo" })))?.text).toBe("Hello");
+  });
+});
+
+describe("turn timeline (M3-09)", () => {
+  const step = (stepId = "s1", label = "Reading example.com", toolCallId?: string) =>
+    ev("step.started", { stepId, label, ...(toolCallId ? { toolCallId } : {}) });
+  const called = (toolCallId = "c1", tool = "web_fetch", args = '{"url":"https://x.example"}') =>
+    ev("tool.called", { toolCallId, tool, args, risk: "read_only" });
+  const turnOf = (state: ChatState, turnId = "t1") =>
+    state.conversations[0]?.turns.find((t) => t.turnId === turnId);
+
+  it("builds the timeline as steps and tools stream in, then marks the turn succeeded", () => {
+    const state = run(
+      send,
+      started(),
+      step("s1", "Reading example.com", "c1"),
+      called(),
+      ev("tool.result", { toolCallId: "c1", ok: true, preview: "ok", bytes: 2 }),
+      ev("step.completed", { stepId: "s1", status: "ok", durationMs: 120 }),
+      ev("message.completed", { text: "Done." }),
+      ev("turn.completed"),
+    );
+    const turn = turnOf(state);
+    expect(turn).toMatchObject({
+      messageId: "r-t1",
+      outcome: "succeeded",
+      steps: [{ stepId: "s1", label: "Reading example.com", status: "ok", durationMs: 120 }],
+      tools: [
+        {
+          toolCallId: "c1",
+          stepId: "s1",
+          tool: "web_fetch",
+          status: "ok",
+          preview: "ok",
+          bytes: 2,
+        },
+      ],
+    });
+    expect(turn?.updatedAt).toBeGreaterThan(0);
+    expect(reply(state)).toMatchObject({ text: "Done.", status: "complete" });
+  });
+
+  it("links a tool to its step whichever event arrives first", () => {
+    const late = run(send, started(), called(), step("s1", "Reading", "c1"));
+    expect(turnOf(late)?.tools[0]).toMatchObject({ toolCallId: "c1", stepId: "s1" });
+    const early = run(send, started(), step("s1", "Reading", "c1"), called());
+    expect(early.conversations[0]?.turns[0]?.steps[0]).toMatchObject({
+      stepId: "s1",
+      toolCallId: "c1",
+    });
+    expect(turnOf(early)?.tools[0]).toMatchObject({ stepId: "s1" });
+  });
+
+  it("ignores a completion for a step it never saw, and replays only once", () => {
+    const state = run(
+      send,
+      started(),
+      ev("step.completed", { stepId: "s9", status: "ok", durationMs: 1 }),
+    );
+    expect(turnOf(state)?.steps).toHaveLength(0);
+    const at = (seq: number): ChatAction =>
+      ({
+        type: "event",
+        event: {
+          v: 1,
+          seq,
+          sessionId: "c1",
+          turnId: "t1",
+          type: "step.started",
+          payload: { stepId: "s1", label: "L" },
+        },
+      }) as ChatAction;
+    const once = chatReducer(run(send, started()), at(1000000));
+    expect(turnOf(once)?.steps).toHaveLength(1);
+    expect(chatReducer(once, at(1000000))).toBe(once);
+  });
+
+  it("records taint, usage, steers and the queue on the turn", () => {
+    const state = run(
+      send,
+      started(),
+      ev("context.tainted", { stepId: "s1", source: { kind: "web", label: "example.com" } }),
+      ev("usage.updated", {
+        usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, reasoningTokens: 0 },
+        providerId: "openai",
+        model: "gpt-4.1-mini",
+      }),
+      ev("turn.steered", { messageId: "u2", text: "actually tomorrow" }),
+      ev("turn.queued", { messageId: "u3", text: "and Friday", position: 1 }),
+    );
+    expect(turnOf(state)).toMatchObject({
+      taint: [{ stepId: "s1", kind: "web", label: "example.com" }],
+      usage: [{ providerId: "openai", model: "gpt-4.1-mini" }],
+      steered: [{ messageId: "u2", text: "actually tomorrow" }],
+      queued: [{ messageId: "u3", text: "and Friday", position: 1 }],
+    });
+  });
+
+  it("clears a queued send when it is taken back, or when its turn starts", () => {
+    const queued = run(
+      send,
+      started(),
+      ev("turn.queued", { messageId: "u3", text: "later", position: 1 }),
+    );
+    const back = run(
+      send,
+      started(),
+      ev("turn.queued", { messageId: "u3", text: "later", position: 1 }),
+      ev("turn.dequeued", { messageId: "u3" }),
+    );
+    expect(turnOf(back)?.queued).toHaveLength(0);
+    // The queued send's turn starts under a new turn ID; the bubble clears (M3-09 AC4).
+    const settled = chatReducer(queued, ev("turn.completed"));
+    const next = (
+      seq: number,
+      type: HarnessEvent["type"],
+      payload = {},
+      turnId = "t2",
+    ): ChatAction =>
+      ({
+        type: "event",
+        event: { v: 1, seq, sessionId: "c1", turnId, type, payload },
+      }) as ChatAction;
+    const started2 = chatReducer(settled, next(1000001, "turn.started", { messageId: "r-t2" }));
+    expect(started2.conversations[0]?.turns.find((t) => t.turnId === "t1")?.queued).toHaveLength(0);
+    expect(started2.conversations[0]?.turns.find((t) => t.turnId === "t2")).toMatchObject({
+      messageId: "r-t2",
+      outcome: "running",
+    });
+  });
+
+  it("tracks waiting, limited and settled outcomes without touching the streaming reply", () => {
+    const waiting = run(send, started(), ev("approval.requested", { batchId: "b1", items: [] }));
+    expect(turnOf(waiting)?.outcome).toBe("waiting");
+    expect(waiting.pending).toBe(null);
+    expect(reply(waiting)?.status).toBe("streaming");
+
+    const resumed = chatReducer(waiting, ev("approval.resolved", { batchId: "b1", decisions: [] }));
+    expect(turnOf(resumed, "t1")?.outcome).toBe("running");
+
+    const limited = run(send, started(), ev("limit.reached", { kind: "tools", detail: "20" }));
+    expect(turnOf(limited)?.outcome).toBe("limited");
+
+    const promoted = run(send, started(), ev("task.promoted", { taskId: "task1" }));
+    expect(turnOf(promoted)?.promotedTaskId).toBe("task1");
+    expect(turnOf(promoted)?.outcome).toBe("running");
+
+    expect(turnOf(run(send, started(), ev("turn.cancelled")))?.outcome).toBe("cancelled");
+    expect(turnOf(run(send, started(), ev("turn.interrupted", { message: "gone" })))?.outcome).toBe(
+      "interrupted",
+    );
+    expect(turnOf(run(send, started(), ev("turn.failed", { message: "bad" })))?.outcome).toBe(
+      "failed",
+    );
+  });
+
+  it("adopts a running turn's timeline events when this tab meets it mid-reply (AC6)", () => {
+    // Tab B loads the streaming reply, then hears the turn's steps live.
+    const loaded = load("c1", msg("u1", "Hi"), msg("r-t1", "", "streaming"));
+    const state = run(
+      loaded,
+      ev("step.started", { stepId: "s1", label: "Thinking" }, "t9", "c1"),
+      ev(
+        "tool.called",
+        { toolCallId: "c1", tool: "web_fetch", args: "{}", risk: "read_only" },
+        "t9",
+        "c1",
+      ),
+    );
+    // Adoption keys the shell to the loaded reply, and the other tab's next load agrees.
+    const turn = state.conversations[0]?.turns.find((t) => t.turnId === "t9");
+    expect(turn).toMatchObject({
+      messageId: "r-t1",
+      outcome: "running",
+      steps: [{ stepId: "s1", label: "Thinking", status: "running" }],
+      tools: [{ toolCallId: "c1", tool: "web_fetch" }],
+    });
+  });
+
+  it("another tab's turn.started opens the same timeline shell", () => {
+    const other = run(list("c1"), ev("turn.started", { messageId: "r-t2" }, "t2", "c1"));
+    expect(other.conversations[0]?.turns).toMatchObject([{ turnId: "t2", messageId: "r-t2" }]);
+    expect(other.pending).toMatchObject({ turnId: "t2" });
+  });
+
+  it("takes a dequeued send off every turn of its conversation", () => {
+    const queued = run(
+      send,
+      started("t1"),
+      ev("turn.queued", { messageId: "u2", text: "two", position: 1 }, "t1"),
+      ev("turn.queued", { messageId: "u3", text: "three", position: 2 }, "t1"),
+      ev("turn.completed", {}, "t1"),
+    );
+    // U2's turn starts and clears the head; U3 stays parked on the finished turn.
+    const running = chatReducer(queued, ev("turn.started", { messageId: "r-t2" }, "t2"));
+    expect(turnOf(running, "t1")?.queued).toHaveLength(1);
+    // The dequeue logs under the running turn but clears the earlier turn's entry.
+    const back = chatReducer(running, ev("turn.dequeued", { messageId: "u3" }, "t2"));
+    expect(turnOf(back, "t1")?.queued).toHaveLength(0);
+    expect(turnOf(back, "t2")?.queued).toHaveLength(0);
+  });
+
+  it("runs a paused turn again on its first progressing event", () => {
+    const limited = run(send, started(), ev("limit.reached", { kind: "tools", detail: "20" }));
+    // A late usage flush while paused never resumes the turn on its own.
+    const flushed = chatReducer(
+      limited,
+      ev("usage.updated", {
+        usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, reasoningTokens: 0 },
+        providerId: "openai",
+        model: "gpt-4.1-mini",
+      }),
+    );
+    expect(turnOf(flushed)?.outcome).toBe("limited");
+    // A queued send behind the paused turn leaves the outcome alone too.
+    const parked = chatReducer(
+      limited,
+      ev("turn.queued", { messageId: "u3", text: "later", position: 1 }),
+    );
+    expect(turnOf(parked)?.outcome).toBe("limited");
+    // The Continue's first step runs the turn again without an outcome event.
+    const resumed = chatReducer(limited, ev("step.started", { stepId: "s1", label: "L" }));
+    expect(turnOf(resumed)?.outcome).toBe("running");
+
+    const waiting = run(send, started(), ev("approval.requested", { batchId: "b1", items: [] }));
+    const delta = chatReducer(waiting, ev("message.delta", { text: "back" }));
+    expect(turnOf(delta)?.outcome).toBe("running");
+  });
+
+  it("settles a tracked turn with its loaded reply after a disconnect", () => {
+    const running = run(send, started(), ev("step.started", { stepId: "s1", label: "L" }));
+    expect(turnOf(running)?.outcome).toBe("running");
+    // The terminal event trimmed with the settled turn; the load is the only word.
+    const settled = chatReducer(running, load("c1", msg("u1", "Hi"), msg("r-t1", "Done.")));
+    expect(settled.pending).toBe(null);
+    expect(turnOf(settled)?.outcome).toBe("succeeded");
+
+    const failed = chatReducer(running, load("c1", msg("u1", "Hi"), msg("r-t1", "Bad.", "error")));
+    expect(turnOf(failed)?.outcome).toBe("failed");
+
+    const cut = chatReducer(
+      running,
+      load("c1", msg("u1", "Hi"), msg("r-t1", "Half.", "interrupted")),
+    );
+    expect(turnOf(cut)?.outcome).toBe("interrupted");
+
+    // A still-streaming reply leaves the running turn alone.
+    const live = chatReducer(
+      running,
+      load("c1", msg("u1", "Hi"), msg("r-t1", "Half", "streaming")),
+    );
+    expect(turnOf(live)?.outcome).toBe("running");
+    expect(live.pending).toMatchObject({ turnId: "t1" });
   });
 });
