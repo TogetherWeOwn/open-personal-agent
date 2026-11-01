@@ -8,6 +8,7 @@ import {
   blobStoreContract,
   databaseContract,
   memoryContract,
+  memoryGateContract,
   usageLedgerContract,
 } from "../../../test/contract/storage";
 import { localBlobStore } from "../src/blobs";
@@ -29,6 +30,10 @@ usageLedgerContract("SQLite", async () => {
   return sqliteD1(sqlite);
 });
 memoryContract("SQLite", async () => {
+  migrate(sqlite, join(import.meta.dirname, "../../../migrations"));
+  return sqliteD1(sqlite);
+});
+memoryGateContract("SQLite", async () => {
   migrate(sqlite, join(import.meta.dirname, "../../../migrations"));
   return sqliteD1(sqlite);
 });
