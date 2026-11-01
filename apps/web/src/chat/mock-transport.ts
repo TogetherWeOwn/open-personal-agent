@@ -45,6 +45,12 @@ const TIMELINE_REPLY = "Here's what I found in the docs.";
 const TIMELINE_FAILED_REPLY = "The docs lookup failed, so this is from memory.";
 /** A beat between scripted events: the running header is watchable, the run still ends fast. */
 const SCRIPT_MS = 300;
+/** Sending exactly this cuts the reply short as an eviction would (M3-12 AC5). */
+export const MOCK_INTERRUPTED = "/mock interrupted";
+/** Sending exactly this moves the turn to a background task partway (M3-12 AC2). */
+export const MOCK_PROMOTED = "/mock promoted";
+/** How many words stream before either of those happens. */
+const MOCK_AFTER_WORDS = 5;
 const LIMIT_MESSAGES: Record<TurnLimit, string> = {
   slow_down: "You're sending messages quickly. Wait a minute, then try again.",
   limit_reached: "You've reached today's spending limit. It resets at midnight UTC.",
@@ -169,14 +175,22 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       const reply = text === MOCK_HOSTILE ? HOSTILE_REPLY : REPLY;
       const words = reply.split(/(?<= )/);
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let sent = 0;
       const tick = () => {
-        const text = words.shift();
-        if (text === undefined) {
+        if (sent++ === MOCK_AFTER_WORDS) {
+          if (text === MOCK_INTERRUPTED) {
+            stop = null;
+            return emit("turn.interrupted", { message: "Retry?" });
+          }
+          if (text === MOCK_PROMOTED) emit("task.promoted", { taskId: `${turnId}-task` });
+        }
+        const word = words.shift();
+        if (word === undefined) {
           stop = null;
           emit("message.completed", { text: reply });
           return settle("turn.completed");
         }
-        emit("message.delta", { text });
+        emit("message.delta", { text: word });
         timer = setTimeout(tick, delayMs);
       };
       let started = false;

@@ -21,6 +21,13 @@ export type Message = {
   status: Status;
   /** Why a failed reply failed, when the fix is elsewhere (a vault reset in Settings). */
   failure?: TurnFailure;
+  /**
+   * How an `interrupted` reply ended, when this tab saw it: the user's Stop, or the server going
+   * away (m3-ux §6). D1 stores both as `interrupted`, so a reloaded reply has neither.
+   */
+  ended?: "stopped" | "interrupted";
+  /** The turn moved to a background task (M3-12 AC2): it keeps going if the tab closes. */
+  promoted?: true;
   attachments?: StoredAttachment[];
 };
 /** `stale` counts reasons to reload the server's messages since the last load; each loads again. */
@@ -481,15 +488,15 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
     case "turn.completed":
       return finish(seen, "complete", seen.announcement, {}, "succeeded");
     // `turn.cancelled` is the user's Stop; `turn.interrupted` is the server going away
-    // mid-reply (M3-03 AC6). On screen both are the same cut-short reply.
+    // mid-reply (M3-03 AC6), which never fails silently: it says so and offers Retry (AC5).
     case "turn.cancelled":
-      return finish(seen, "interrupted", "The reply stopped before it finished.", {}, "cancelled");
+      return finish(seen, "interrupted", "Stopped.", { ended: "stopped" }, "cancelled");
     case "turn.interrupted":
       return finish(
         seen,
         "interrupted",
-        "The reply stopped before it finished.",
-        {},
+        "I was interrupted before I finished.",
+        { ended: "interrupted" },
         "interrupted",
       );
     case "turn.failed": {
@@ -563,10 +570,16 @@ function onEvent(state: ChatState, event: HarnessEvent): ChatState {
         steered: [...t.steered, { ...event.payload }],
       }));
     case "task.promoted":
-      return updateTurn(seen, event, (t) => ({
-        ...t,
-        promotedTaskId: event.payload.taskId,
-      }));
+      // The turn goes on as a task; its events keep streaming into the same reply, which says
+      // so while it does (M3-12 AC2).
+      return updateMessage(
+        updateTurn(seen, event, (t) => ({
+          ...t,
+          promotedTaskId: event.payload.taskId,
+        })),
+        pending,
+        () => ({ promoted: true }),
+      );
     case "approval.resolved":
       // The turn continues after the decision; a late approval appends at the end, never
       // re-planning the old turn (M3-07 AC14), so the timeline just resumes running.
