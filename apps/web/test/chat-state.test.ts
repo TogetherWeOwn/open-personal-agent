@@ -111,6 +111,8 @@ describe("chatReducer", () => {
     const streaming = run(
       list("c1"),
       load("c1", msg("u1", "Hi"), msg("r1", "", "streaming")),
+      // The tab streams the segment's whole text; `message.completed` names the same segment.
+      delta("Hel"),
       delta("lo"),
       ev("message.completed", { text: "Hello" }),
       ev("turn.completed"),
@@ -354,7 +356,6 @@ describe("chatReducer", () => {
       ev("step.started", { stepId: "s1", label: "Thinking" }),
       ev("tool.called", { toolCallId: "call-1", tool: "web_fetch", args: "{}", risk: "read" }),
       ev("context.tainted", { stepId: "s1", source: { kind: "web", label: "x.test" } }),
-      ev("limit.reached", { kind: "tools", detail: "20 tool calls" }),
     ];
     for (const action of m3) {
       const next = chatReducer(state, action);
@@ -363,6 +364,36 @@ describe("chatReducer", () => {
       expect(next.announcement).toBe(state.announcement);
       expect(next.pending?.turnId).toBe("t1");
     }
+  });
+
+  it("stops streaming at an approval or a limit, and a cancel ends the reply (M3-03c)", () => {
+    const state = run(send, started(), delta("Hel"));
+    const waiting = chatReducer(state, ev("approval.requested", { batchId: "b1", items: [] }));
+    expect(waiting.pending).toBe(null);
+    // The reply stays streaming: the resumed turn's deltas land in the same message.
+    expect(reply(waiting)).toMatchObject({ text: "Hel", status: "streaming" });
+    const limited = chatReducer(
+      state,
+      ev("limit.reached", { kind: "calls", detail: "8 model calls" }),
+    );
+    expect(limited.pending).toBe(null);
+    expect(reply(limited)?.status).toBe("streaming");
+    const cancelled = chatReducer(state, ev("turn.cancelled"));
+    expect(cancelled.pending).toBe(null);
+    expect(reply(cancelled)).toMatchObject({ text: "Hel", status: "interrupted" });
+  });
+
+  it("joins a turn's message segments as paragraphs (M3-03c)", () => {
+    const state = run(
+      send,
+      started(),
+      delta("One"),
+      ev("message.completed", { text: "One" }),
+      delta("Two"),
+      ev("message.completed", { text: "Two" }),
+      ev("turn.completed"),
+    );
+    expect(reply(state)?.text).toBe("One\n\nTwo");
   });
 
   it("applies a resumed turn's replayed events only once (M3-03 AC11)", () => {

@@ -78,6 +78,48 @@ describe("scoped repository", () => {
     expect(alice?.assistant().id.toString()).toBe(id);
     expect(bob?.assistant().id.toString()).not.toBe(id);
   });
+
+  it("keeps stopped turn state scoped to its user (AC5)", async () => {
+    await alice?.createConversation("turns-c1", "Turns");
+    const saved = {
+      turnId: "turn-1",
+      conversationId: "turns-c1",
+      replyId: "reply-1",
+      providerId: "test",
+      model: "test-model",
+      status: "awaiting_approval" as const,
+      state: '{"counts":{"calls":1,"tools":0}}',
+    };
+    expect(await alice?.turns.save(saved)).toBe(true);
+    expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    // Another user cannot see, refresh or delete it.
+    expect(await bob?.turns.load("turn-1")).toBeUndefined();
+    expect(await bob?.turns.save({ ...saved, turnId: "turn-bob" })).toBe(false);
+    await bob?.turns.remove("turn-1");
+    expect(await alice?.turns.load("turn-1")).toEqual(saved);
+    // A turn_id Bob already owns is never overwritten by Alice's save: the scoped conflict
+    // update touches nothing, reports `false`, and both rows read back as before.
+    await bob?.createConversation("turns-c2", "Bob's turns");
+    await env.DB.prepare(
+      "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state, updated_at) VALUES ('turn-2', 'bob', 'turns-c2', 'reply-2', 'test', 'test-model', 'awaiting_approval', '{}', 0)",
+    ).run();
+    expect(await alice?.turns.save({ ...saved, turnId: "turn-2" })).toBe(false);
+    expect(await alice?.turns.load("turn-2")).toBeUndefined();
+    expect(await bob?.turns.load("turn-2")).toMatchObject({ conversationId: "turns-c2" });
+    // A second stop replaces the first in place.
+    expect(await alice?.turns.save({ ...saved, status: "limit_reached", state: "{}" })).toBe(true);
+    expect((await alice?.turns.load("turn-1"))?.status).toBe("limit_reached");
+    const rows = await env.DB.prepare(
+      "SELECT count(*) AS n FROM turn_states WHERE turn_id = 'turn-1'",
+    ).first("n");
+    expect(rows).toBe(1);
+    await alice?.turns.remove("turn-1");
+    expect(await alice?.turns.load("turn-1")).toBeUndefined();
+    // Deleting the conversation takes its saved turns with it (cascade).
+    expect(await alice?.turns.save(saved)).toBe(true);
+    await env.DB.prepare("DELETE FROM conversations WHERE id = 'turns-c1'").run();
+    expect(await alice?.turns.load("turn-1")).toBeUndefined();
+  });
 });
 
 describe("attachment upload with no declared length", () => {

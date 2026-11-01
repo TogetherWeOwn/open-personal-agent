@@ -92,9 +92,9 @@ export function createMockTransport(delayMs = 30): ChatTransport {
       stop = () => {
         clearTimeout(timer);
         stop = null;
-        // A turn stopped before its start still starts, so the tab can match the interruption.
+        // A turn stopped before its start still starts, so the tab can match the cancellation.
         if (!started) begin();
-        emit("turn.interrupted", { message: "Stopped." });
+        emit("turn.cancelled");
       };
       const start = () => {
         begin();
