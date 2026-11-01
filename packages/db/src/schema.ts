@@ -11,6 +11,7 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 const now = sql`(unixepoch('subsec') * 1000)`;
@@ -259,7 +260,11 @@ export const modelProviders = sqliteTable(
     createdAt: createdAt(),
     updatedAt: integer("updated_at").notNull().default(now),
   },
-  (t) => [index("model_providers_user_idx").on(t.userId, t.createdAt)],
+  (t) => [
+    index("model_providers_user_idx").on(t.userId, t.createdAt),
+    // Each key belongs to one provider, so removing a provider can remove its key.
+    uniqueIndex("model_providers_key_idx").on(t.keySecretId),
+  ],
 );
 
 const providerRef = (name: string) =>
