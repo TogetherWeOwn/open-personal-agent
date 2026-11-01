@@ -164,7 +164,9 @@ describe("the D1 vault store", () => {
     const rotated = (
       await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}`, OPA_MASTER_KEY_PREV: PREV })
     ).VAULT as Vault;
-    const sealed = "SELECT ciphertext, iv FROM secrets WHERE id = 's1'";
+    const sealed = "SELECT ciphertext, iv, last4 FROM secrets WHERE id = 's1'";
+    // Re-key writes last4 again from the plaintext (L-1), not the stored value.
+    await env.DB.prepare("UPDATE secrets SET last4 = 'XXXX' WHERE id = 's1'").run();
     const before = await env.DB.prepare(sealed).first();
     expect(await rewrap(rotated, { caller: "test" })).toEqual({ rewrapped: 1 });
     const versions = await env.DB.prepare("SELECT kek_version FROM user_keys").all();
@@ -173,6 +175,7 @@ describe("the D1 vault store", () => {
     const after = await env.DB.prepare(sealed).first();
     expect(after?.iv).not.toEqual(before?.iv);
     expect(after?.ciphertext).not.toEqual(before?.ciphertext);
+    expect(after?.last4).toBe("trip");
     const current = (await compose({ ...env, OPA_MASTER_KEY: `2:${KEY}` })).VAULT as Vault;
     expect(await decrypt(current, scope, { ...input, caller: "test" })).toBe(
       "sk-canary-d1-round-trip",

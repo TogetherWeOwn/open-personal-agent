@@ -197,8 +197,14 @@ async function keyedValues(
     // key is gone; both are entered again rather than accepted here and refused at chat.
     if (!c.env.VAULT) return { status: 503, error: "vault_unavailable" } as const;
     const ref = { secretId, purpose: PURPOSE, binding, caller: CALLER };
-    const opened = await decrypt(c.env.VAULT, vaultScope(c), ref).catch(() => null);
-    if (opened === null) return { status: 400, error: "key_required" } as const;
+    // Only a key that doesn't open is entered again; a vault fault, such as an audit row that
+    // can't be written, says nothing about the key and must not ask the user to replace it.
+    const opened = await decrypt(c.env.VAULT, vaultScope(c), ref).then(
+      () => "ok" as const,
+      (error) => ((error as { code?: unknown }).code === "decrypt_failed" ? "closed" : "fault"),
+    );
+    if (opened === "closed") return { status: 400, error: "key_required" } as const;
+    if (opened === "fault") return { status: 503, error: "vault_unavailable" } as const;
   }
   return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
 }

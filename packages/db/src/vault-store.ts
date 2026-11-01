@@ -119,9 +119,10 @@ export function d1VaultStore({ DB: db }: { DB: SqlDatabase }): VaultStore {
       const secrets = after.map((s, i) =>
         db
           .prepare(
-            `UPDATE secrets SET ciphertext = ?, iv = ? WHERE id = ? AND user_id = ? AND iv = ? AND ${DEK_HELD}`,
+            `UPDATE secrets SET ciphertext = ?, iv = ?, last4 = ?
+             WHERE id = ? AND user_id = ? AND iv = ? AND ${DEK_HELD}`,
           )
-          .bind(s.ciphertext, s.iv, s.id, s.userId, before[i]?.iv ?? null, ...dekHeld(to)),
+          .bind(s.ciphertext, s.iv, s.last4, s.id, s.userId, before[i]?.iv ?? null, ...dekHeld(to)),
       );
       const [result] = await db.batch([key, ...secrets]);
       return result?.meta.changes === 1;

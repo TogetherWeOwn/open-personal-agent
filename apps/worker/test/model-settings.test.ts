@@ -308,6 +308,19 @@ describe("model settings", () => {
     expect(await put(`/providers/${provider.id}`, update)).toEqual(required);
   });
 
+  it("reports a vault fault on a keyless save as unavailable, not as a key to replace", async () => {
+    expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
+    // The key opens, but its decrypt can't be audited, so the vault refuses it (fails closed).
+    await env.DB.prepare("ALTER TABLE audit_log RENAME TO audit_log_held").run();
+    try {
+      const unavailable = { status: 503, text: '{"error":"vault_unavailable"}' };
+      expect(await put("/model", { ...OPENAI, model: "gpt-new" })).toEqual(unavailable);
+    } finally {
+      await env.DB.prepare("ALTER TABLE audit_log_held RENAME TO audit_log").run();
+    }
+    expect((await put("/model", { ...OPENAI, model: "gpt-new" })).status).toBe(200);
+  });
+
   it("does not open a saved key when the stored path changes", async () => {
     expect((await put("/model", { ...OPENAI, model: "m", apiKey: CANARY })).status).toBe(200);
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {

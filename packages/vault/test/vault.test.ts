@@ -511,4 +511,14 @@ describe("re-key on rotation (crypto review C-2)", () => {
     await seal(vault, `${"a".repeat(16)}wxyz`);
     expect(only(store.secrets).last4).toBe("wxyz");
   });
+
+  it("L-1: re-key drops a last4 stored for a short secret before the threshold", async () => {
+    await seal(vault, "sk-short-1234");
+    await seal(vault, `${"a".repeat(16)}wxyz`, "s2");
+    // As a row written before L-1 kept last4 for secrets of 8 characters or more.
+    store.secrets = store.secrets.map((s) => (s.id === "s1" ? { ...s, last4: "1234" } : s));
+    await migrate();
+    expect(store.secrets.find((s) => s.id === "s1")?.last4).toBeNull();
+    expect(store.secrets.find((s) => s.id === "s2")?.last4).toBe("wxyz");
+  });
 });

@@ -140,9 +140,7 @@ export async function encrypt(
     const iv = randomIv();
     const aad = secretAad(format, { userId, id, purpose, binding, version });
     const ciphertext = await gcm("encrypt", key, iv, aad, encoder.encode(plaintext));
-    // Only for long secrets: four characters of a short one are too much of it (crypto review L-1).
-    const last4 = plaintext.length >= 20 ? plaintext.slice(-4) : null;
-    const row = { id, userId, purpose, binding, version, ciphertext, iv, last4 };
+    const row = { id, userId, purpose, binding, version, ciphertext, iv, last4: last4(plaintext) };
     // The audit row commits with the secret, or neither does (L-2). The write also fails if a
     // rotation re-keyed the user since `userDek`, so nothing is sealed under a replaced DEK.
     await state.store.putSecret(row, dekRow, audit);
@@ -335,10 +333,17 @@ async function rekeyUser(state: State, old: Kek, from: WrappedDek): Promise<bool
     });
     const iv = randomIv();
     const ciphertext = await gcm("encrypt", key, iv, secretAad(2, secret), plaintext);
+    // Recomputed, so a last4 kept before L-1 for a short secret goes with its old ciphertext.
+    const shown = last4(new TextDecoder().decode(plaintext));
     plaintext.fill(0);
-    after.push({ ...secret, ciphertext, iv });
+    after.push({ ...secret, ciphertext, iv, last4: shown });
   }
   return state.store.rekeyUser({ from, to, before, after });
+}
+
+/** Only for long secrets: four characters of a short one are too much of it (crypto review L-1). */
+function last4(plaintext: string): string | null {
+  return plaintext.length >= 20 ? plaintext.slice(-4) : null;
 }
 
 /**
