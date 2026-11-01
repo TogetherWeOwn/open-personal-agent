@@ -43,6 +43,19 @@ The schema lives in `packages/db/src/schema.ts` (Drizzle, SQLite dialect). After
 `SCHEMA_VERSION` in `packages/db/src/index.ts` to match. Migrations are forward-only, and an
 applied migration is never edited.
 
+## Deploy to Cloudflare
+
+Requirements: a Cloudflare account on Workers Paid, with R2 enabled once in the dashboard.
+
+```sh
+pnpm install
+pnpm wrangler login            # or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID
+pnpm deploy:cloudflare         # --name <prefix> (or OPA_PREFIX) to deploy under another name
+```
+
+A re-run upgrades, or prints "Up to date"; `--dry-run` changes nothing on Cloudflare. A scoped
+token needs the `required` entries in [`deploy/permissions.json`](deploy/permissions.json).
+
 ## Layout
 
 - `wrangler.jsonc`: the single Worker and its bindings (D1, R2, Workers AI, the `Assistant` Durable
