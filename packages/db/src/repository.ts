@@ -11,8 +11,10 @@ import {
   gt,
   gte,
   inArray,
+  isNotNull,
   isNull,
   lt,
+  lte,
   notInArray,
   or,
   type SQL,
@@ -302,6 +304,61 @@ const TASK_CANCELLABLE_STATUSES = [
   "waiting_for_approval",
   "budget_limited",
 ] as const satisfies readonly TaskStatus[];
+/**
+ * Which limit stopped a `budget_limited` task (M3-13 AC1). Money limits read "Paused: budget",
+ * execution limits read "Paused: limit". `steps`/`duration` are the per-task limits (M3-12 AC6);
+ * the rest are the `limit.reached` kinds (M3-03 AC8).
+ */
+export const TASK_LIMIT_KINDS = [
+  "task_budget",
+  "daily",
+  "monthly_hard",
+  "calls",
+  "tools",
+  "tool_rate",
+  "steps",
+  "duration",
+] as const satisfies readonly NonNullable<TaskRow["limitKind"]>[];
+export type TaskLimitKind = (typeof TASK_LIMIT_KINDS)[number];
+/** A `budget_limited` stop by one of these reads "Paused: limit", never "budget" (M3-13 AC1). */
+export const isExecutionLimit = (kind: TaskLimitKind): boolean =>
+  kind === "calls" ||
+  kind === "tools" ||
+  kind === "tool_rate" ||
+  kind === "steps" ||
+  kind === "duration";
+/** Every status a task row can hold, for validating the Tasks list filter (M3-13 AC1). */
+const TASK_STATUSES: readonly TaskStatus[] = [
+  "queued",
+  "running",
+  "waiting_for_approval",
+  "budget_limited",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+];
+/** One Tasks list row (M3-13 AC1–2): the run, its conversation and its spend so far. */
+export interface TaskListItem {
+  id: string;
+  title: string | null;
+  conversationId: string;
+  conversationTitle: string | null;
+  kind: string;
+  mode: TaskRow["mode"];
+  status: TaskStatus;
+  limitKind: TaskLimitKind | null;
+  error: string | null;
+  costMicroUsd: number | null;
+  /** Calls with no price on file; their cost is missing from `costMicroUsd` (as Usage does). */
+  unpricedCalls: number;
+  calls: number;
+  createdAt: number;
+  /** A paused task's last write is its pause, so the view can freeze its elapsed clock there. */
+  updatedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
 
 /** A running chat turn: also its eviction checkpoint, so it is plain JSON. */
 export interface TurnRecord {
@@ -1402,14 +1459,18 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /**
            * One model call's ledger row (one row per call, PRD §17), written when the call
            * ends. Calls of a chat turn name their conversation and reply; one outside a turn,
-           * such as the settings Test button, names neither.
-           */
-          /**
-           * Writes a call's ledger row. With `id`, writing the same call again (a recovery that
-           * can't tell whether the first write landed) changes nothing.
+           * such as the settings Test button, names neither. With `id`, writing the same call
+           * again (a recovery that can't tell whether the first write landed) changes
+           * nothing. A task run passes its `taskId`, so the Tasks view can show its spend so
+           * far (M3-13 AC2).
            */
           record: async (
-            call: LedgerCall & { id?: string; conversationId?: string; messageId?: string },
+            call: LedgerCall & {
+              id?: string;
+              conversationId?: string;
+              messageId?: string;
+              taskId?: string;
+            },
           ) => {
             await db
               .insert(usage)
@@ -1419,6 +1480,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 userId,
                 conversationId: call.conversationId ?? null,
                 messageId: call.messageId ?? null,
+                taskId: call.taskId === undefined ? null : checkId(call.taskId),
               })
               .onConflictDoNothing({ target: usage.id });
           },
@@ -1861,11 +1923,124 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .limit(1)
             )[0],
           /** Every task row, oldest first, for the data export (M3-20 AC1). */
-          list: () =>
+          listForExport: () =>
             db.select().from(tasks).where(eq(tasks.userId, userId)).orderBy(tasks.createdAt),
           /**
-           * Moves a task to `running`, stamping `started_at` the first time. Returns the row as
-           * updated, or `undefined` when it was already terminal (a cancelled task never runs).
+           * The Tasks list (M3-13 AC1–2): newest first, with each run's conversation title and
+           * spend so far. Filters are all optional; unknown statuses are ignored, and the limit
+           * is clamped (1–200, default 50).
+           */
+          list: async (
+            filter: {
+              status?: readonly string[] | undefined;
+              since?: number | undefined;
+              until?: number | undefined;
+              limit?: number | undefined;
+            } = {},
+          ): Promise<TaskListItem[]> => {
+            const cost = db
+              .select({
+                taskId: usage.taskId,
+                costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                unpriced: sql<
+                  number | null
+                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
+                calls: count().as("calls"),
+              })
+              .from(usage)
+              .where(and(eq(usage.userId, userId), isNotNull(usage.taskId)))
+              .groupBy(usage.taskId)
+              .as("cost");
+            const statuses = (filter.status ?? []).filter((s): s is TaskStatus =>
+              (TASK_STATUSES as readonly string[]).includes(s),
+            );
+            const limit = Math.min(
+              200,
+              Math.max(1, Number.isSafeInteger(filter.limit) ? (filter.limit as number) : 50),
+            );
+            const rows = await db
+              .select({
+                id: tasks.id,
+                title: tasks.title,
+                conversationId: tasks.conversationId,
+                conversationTitle: conversations.title,
+                kind: tasks.kind,
+                mode: tasks.mode,
+                status: tasks.status,
+                limitKind: tasks.limitKind,
+                error: tasks.error,
+                costMicroUsd: cost.costMicroUsd,
+                unpriced: cost.unpriced,
+                calls: cost.calls,
+                createdAt: tasks.createdAt,
+                updatedAt: tasks.updatedAt,
+                startedAt: tasks.startedAt,
+                finishedAt: tasks.finishedAt,
+              })
+              .from(tasks)
+              .innerJoin(conversations, eq(conversations.id, tasks.conversationId))
+              .leftJoin(cost, eq(cost.taskId, tasks.id))
+              .where(
+                and(
+                  eq(tasks.userId, userId),
+                  ...(statuses.length ? [inArray(tasks.status, statuses)] : []),
+                  ...(Number.isSafeInteger(filter.since)
+                    ? [gte(tasks.createdAt, filter.since as number)]
+                    : []),
+                  ...(Number.isSafeInteger(filter.until)
+                    ? [lte(tasks.createdAt, filter.until as number)]
+                    : []),
+                ),
+              )
+              .orderBy(desc(tasks.createdAt))
+              .limit(limit);
+            // No calls yet reads as zero calls and unknown cost, never as nulls.
+            return rows.map(({ unpriced, ...row }) => ({
+              ...row,
+              calls: row.calls ?? 0,
+              unpricedCalls: unpriced ?? 0,
+            }));
+          },
+          /** One Tasks row with its conversation and spend; `undefined` when missing or foreign. */
+          details: async (id: string): Promise<TaskListItem | undefined> => {
+            if (!isId(id)) return undefined;
+            const [row] = await db
+              .select({
+                id: tasks.id,
+                title: tasks.title,
+                conversationId: tasks.conversationId,
+                conversationTitle: conversations.title,
+                kind: tasks.kind,
+                mode: tasks.mode,
+                status: tasks.status,
+                limitKind: tasks.limitKind,
+                error: tasks.error,
+                costMicroUsd: sql<number | null>`sum(${usage.costMicroUsd})`.as("cost_micro_usd"),
+                unpriced: sql<
+                  number | null
+                >`sum(case when ${usage.costMicroUsd} is null then 1 else 0 end)`.as("unpriced"),
+                calls: count(usage.id).as("calls"),
+                createdAt: tasks.createdAt,
+                updatedAt: tasks.updatedAt,
+                startedAt: tasks.startedAt,
+                finishedAt: tasks.finishedAt,
+              })
+              .from(tasks)
+              .innerJoin(conversations, eq(conversations.id, tasks.conversationId))
+              .leftJoin(usage, and(eq(usage.taskId, tasks.id), eq(usage.userId, userId)))
+              .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+              .groupBy(tasks.id)
+              .limit(1);
+            // A task with no calls still counts zero, never null; the cost stays null then.
+            if (!row) return row;
+            const { unpriced, ...rest } = row;
+            return { ...rest, calls: Number(rest.calls), unpricedCalls: Number(unpriced ?? 0) };
+          },
+          /**
+           * Moves a task to `running`, stamping `started_at` the first time. Resuming clears a
+           * previous limit kind, which only ever describes a `budget_limited` pause. Returns
+           * the row as updated, or `undefined` when it was already terminal (a cancelled task
+           * never runs).
            */
           markRunning: async (id: string, now: number) =>
             (
@@ -1873,6 +2048,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .update(tasks)
                 .set({
                   status: "running",
+                  limitKind: null,
                   startedAt: sql`coalesce(${tasks.startedAt}, ${now})`,
                   updatedAt: now,
                 })
@@ -1912,13 +2088,39 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 )
                 .returning({ id: tasks.id })
             ).length > 0,
-          /** Ends a task that is still active. `false` when it had already ended or was cancelled. */
+          /**
+           * Ends a task that is still active. `false` when it had already ended or was
+           * cancelled. A `budget_limited` ending records which limit stopped it, so the Tasks
+           * view reads "Paused: limit" for an execution limit and "Paused: budget" for money
+           * (M3-13 AC1); other endings clear it.
+           */
           finish: async (
             id: string,
             status: "succeeded" | "failed" | "budget_limited" | "interrupted",
             error?: string,
+            limitKind?: TaskLimitKind | null,
           ) => {
             const now = Date.now();
+            const nextKind = status === "budget_limited" ? (limitKind ?? null) : null;
+            // A pause writes `budget_limited` when it starts waiting, and the run's end writes
+            // the same pause again when the 7-day wait times out with no Continue. Re-stamping
+            // `updatedAt` there would move the pause timestamp, and the Tasks view freezes its
+            // elapsed clock at `updatedAt` — so the wait would read as run time. Only the
+            // pause repeats: a repeated terminal ending still falls through to the update,
+            // which matches no row and reports `false` ("already ended").
+            const current = (
+              await db
+                .select({ status: tasks.status, limitKind: tasks.limitKind })
+                .from(tasks)
+                .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+                .limit(1)
+            )[0];
+            if (
+              current?.status === "budget_limited" &&
+              status === "budget_limited" &&
+              (current.limitKind ?? null) === nextKind
+            )
+              return true;
             return (
               (
                 await db
@@ -1926,6 +2128,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .set({
                     status,
                     error: error ?? null,
+                    limitKind: nextKind,
                     // A budget-limited task is paused, not finished: it may be continued.
                     ...(status === "budget_limited" ? {} : { finishedAt: now }),
                     updatedAt: now,
@@ -1943,13 +2146,14 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * Continue on a task paused by a limit (M3-17 AC1): `budget_limited` back to `running`.
-           * `false` when it isn't paused. Waking its Workflow is the caller's job.
+           * Continuing clears the limit kind, which only ever describes a `budget_limited`
+           * pause. `false` when it isn't paused. Waking its Workflow is the caller's job.
            */
           resume: async (id: string) =>
             (
               await db
                 .update(tasks)
-                .set({ status: "running", updatedAt: Date.now() })
+                .set({ status: "running", limitKind: null, updatedAt: Date.now() })
                 .where(
                   and(
                     eq(tasks.id, id),
@@ -1959,14 +2163,18 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 )
                 .returning({ id: tasks.id })
             ).length > 0,
-          /** Sets `cancelled` on an active task. Terminating its Workflow is the caller's job. */
+          /**
+           * Sets `cancelled` on an active task. Cancelling clears the limit kind, which only
+           * ever describes a `budget_limited` pause. Terminating its Workflow is the
+           * caller's job.
+           */
           cancel: async (id: string) => {
             const now = Date.now();
             return (
               (
                 await db
                   .update(tasks)
-                  .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+                  .set({ status: "cancelled", limitKind: null, finishedAt: now, updatedAt: now })
                   .where(
                     and(
                       eq(tasks.id, id),
