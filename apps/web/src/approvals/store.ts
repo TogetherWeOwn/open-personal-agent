@@ -21,9 +21,17 @@ export type ApprovalsState = {
   receipts: Receipt[];
   /** For the polite live region: a new request, or one resolved in another tab. */
   announcement: string;
+  /** The batch a deep link opened (`/approvals/:approvalId`): its card takes focus once shown. */
+  focus: string | null;
 };
 
-let state: ApprovalsState = { status: "loading", batches: [], receipts: [], announcement: "" };
+let state: ApprovalsState = {
+  status: "loading",
+  batches: [],
+  receipts: [],
+  announcement: "",
+  focus: null,
+};
 const listeners = new Set<() => void>();
 const set = (next: Partial<ApprovalsState>) => {
   state = { ...state, ...next };
@@ -214,4 +222,12 @@ export function approvalEvent(event: HarnessEvent): void {
     });
   }
   void refreshApprovals();
+}
+
+export const wantFocus = (batchId: string) => set({ focus: batchId });
+/** True once, for the card the deep link asked for. */
+export function claimFocus(batchId: string): boolean {
+  if (state.focus !== batchId) return false;
+  state = { ...state, focus: null };
+  return true;
 }
