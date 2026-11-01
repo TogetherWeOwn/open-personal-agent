@@ -409,6 +409,36 @@ describe("task workflow", () => {
     expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
+  it("a task offering a third party's tool is tainted by its description (R7 §5.9)", async () => {
+    const { taskId, instanceId } = await makeTask();
+    // Never called: only its description, which a third party wrote, reaches the model.
+    const lookup = tool("lookup", "read", async () => ({ ok: true, content: "x" }));
+    const offered: LoopTool = { ...lookup, author: "third_party" };
+    const fetch = tool("fetch", "read", async () => ({ ok: true, content: "fetched" }));
+    const egress = [{ id: "web", kind: "third_party" as const, dataEgress: true }];
+    const fetchTool = { ...fetch, manifest: { ...fetch.manifest, destinations: egress } };
+    fetchTool.execute = fetch.execute.bind(fetch);
+    let batchId = "";
+    const approve = async () => {
+      // The egress read asks (floor_tainted_egress) instead of running silently.
+      expect(fetch.calls).toBe(0);
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      expect(JSON.stringify(state.turn.taint)).toContain("lookup description");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    const stepper = new FakeStepper([approve]);
+    const replies: Reply[] = [{ calls: [["fetch", { q: "y" }]] }, { text: "done" }];
+    const { promise } = await run(replies, instanceId, stepper, [offered, fetchTool]);
+    await promise;
+    expect(stepper.waits).toBe(1);
+    expect(fetch.calls).toBe(1);
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
+  });
+
   it("bookkeeping that fails after the hold never repeats the model call", async () => {
     const { taskId, instanceId } = await makeTask();
     const { promise, streams } = await run([{ text: "hi" }], instanceId, new FakeStepper(), [], {
@@ -465,6 +495,61 @@ describe("task workflow", () => {
     expect(row?.status).toBe("budget_limited");
     // The run has ended, so Continue must not be offered for it.
     expect(JSON.parse(row?.state ?? "{}").paused).toMatchObject({ kind: "duration", final: true });
+  });
+
+  it("records the duration kind when time runs out, for the Tasks view's Paused label", async () => {
+    const { taskId, instanceId } = await makeTask();
+    let skew = 0;
+    const slow = tool("fetch", "read", async () => {
+      skew = 7 * 3_600_000; // the background limit is 6 h
+      return { ok: true, content: "page" };
+    });
+    const { promise } = await run(
+      [{ calls: [["fetch", { q: "x" }]] }, { text: "more" }],
+      instanceId,
+      new FakeStepper(),
+      [slow],
+      { now: () => Date.now() + skew },
+    );
+    await promise;
+    const row = await alice.tasks.get(taskId);
+    expect(row?.status).toBe("budget_limited");
+    expect(row?.limitKind).toBe("duration");
+  });
+
+  it("records the limit kind while the pause waits, for the Tasks view's Paused label", async () => {
+    // The pause step writes the kind to the row (the same kind the loop's end writes again),
+    // so the Tasks view reads "Paused: limit" for the whole wait, not just after it.
+    const { taskId, instanceId } = await makeTask();
+    const fetch = tool("fetch", "read", async () => ({ ok: true, content: "page" }));
+    const calls = [["fetch", { q: "x" }]] as [string, unknown][];
+    const replies: Reply[] = Array.from({ length: 9 }, () => ({ calls }));
+    let pausedKind: unknown;
+    const stepper = new FakeStepper([
+      async () => {
+        pausedKind = (await alice.tasks.get(taskId))?.limitKind;
+        return null;
+      },
+    ]);
+    const { promise } = await run(replies, instanceId, stepper, [fetch]);
+    await promise;
+    expect(pausedKind).toBe("calls");
+    const row = await alice.tasks.get(taskId);
+    expect(row?.status).toBe("budget_limited");
+    expect(row?.limitKind).toBe("calls");
+  });
+
+  it("records the loop's kind when the turn exhausts its model calls", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const fetch = tool("fetch", "read", async () => ({ ok: true, content: "page" }));
+    const calls = [["fetch", { q: "x" }]] as [string, unknown][];
+    const replies: Reply[] = Array.from({ length: 9 }, () => ({ calls }));
+    const { promise, streams } = await run(replies, instanceId, new FakeStepper(), [fetch]);
+    await promise;
+    expect(streams()).toBe(8); // the ninth call never started
+    const row = await alice.tasks.get(taskId);
+    expect(row?.status).toBe("budget_limited");
+    expect(row?.limitKind).toBe("calls");
   });
 
   it("runs through the real Workflow binding", async () => {

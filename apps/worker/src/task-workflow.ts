@@ -20,7 +20,7 @@ import {
   TaskLimitError,
   type TaskStepper,
 } from "@opa/core";
-import { createRepository } from "@opa/db/repository";
+import { createRepository, type TaskLimitKind } from "@opa/db/repository";
 import {
   applyStoredDecisions,
   bindBatch,
@@ -180,7 +180,7 @@ export async function executeTask(
       paused,
     );
     await stepper.do("task:finish", {}, async () => {
-      await user.tasks.finish(task.id, outcome.status, outcome.error);
+      await user.tasks.finish(task.id, outcome.status, outcome.error, outcome.limit?.kind ?? null);
       return null;
     });
     await endBudget();
@@ -197,7 +197,14 @@ export async function executeTask(
           const paused = { kind: limit.kind, detail: limit.detail, final: true };
           if (state) await user.tasks.saveState(task.id, JSON.stringify({ ...state, paused }));
         }
-        await user.tasks.finish(task.id, limit ? "budget_limited" : "failed", message);
+        // The row keeps the precise execution-limit kind (`steps`/`duration`) for the Tasks
+        // view's "Paused: limit" label (M3-13 AC1).
+        await user.tasks.finish(
+          task.id,
+          limit ? "budget_limited" : "failed",
+          message,
+          limit?.kind ?? null,
+        );
         return null;
       })
       .catch(() => {}); // a failed finish must not mask the task's own end
@@ -229,7 +236,12 @@ async function driveLoop(
   taskTools: readonly LoopTool[],
   now: () => number,
   paused: { ms: number },
-): Promise<{ status: "succeeded" | "failed" | "budget_limited"; error?: string }> {
+): Promise<{
+  status: "succeeded" | "failed" | "budget_limited";
+  error?: string;
+  /** The loop-yielded limit the run paused on, for the row's "Paused: limit" label (AC1). */
+  limit?: { kind: TaskLimitKind; detail: string };
+}> {
   const { taskId } = task;
   const billingId = picked.billingId ?? picked.provider.id;
   let llmSeq = 0;
@@ -272,7 +284,7 @@ async function driveLoop(
             await ctx.budget.settle(key, billingId, req.model, usage).catch(() => {});
           }
           await user.usage
-            .record({ providerId: billingId, model: req.model, usage })
+            .record({ providerId: billingId, model: req.model, usage, taskId })
             .catch(() => {});
           return { refused: null, events: events as unknown as JsonValue };
         });
@@ -290,6 +302,8 @@ async function driveLoop(
     registry.register({
       manifest: tool.manifest,
       ...(tool.target ? { target: tool.target } : {}),
+      // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
+      ...(tool.author ? { author: tool.author } : {}),
       execute: async (input, _signal, call) => {
         toolSeq += 1;
         const under = call?.approved && batch ? { batchId: batch, id: call.toolCallId } : null;
@@ -401,6 +415,8 @@ async function driveLoop(
     }
     // Continued after an execution limit: a fresh allowance of calls and tools for the turn.
     if (state.paused?.kind === "calls" || state.paused?.kind === "tools") continueTurn(turn);
+    // The `limit.reached` kind the loop stopped on: saved to the turn state for Continue,
+    // and returned for the row's "Paused: limit" label (M3-13 AC1).
     let limit: { kind: LimitKind; detail: string } | undefined;
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
@@ -430,10 +446,14 @@ async function driveLoop(
     if (!saved) throw new TaskCancelledError(taskId); // cancelled while the segment ran
     if (outcome === "limit_reached" && limit) {
       if (await pause(ctx, user, taskId, cycle, limit.kind, now, paused)) continue;
-      return { status: "budget_limited" };
+      return { status: "budget_limited", limit };
     }
     if (outcome !== "awaiting_approval") {
       if (outcome === "completed") return { status: "succeeded" };
+      // The loop always yields its `limit.reached` before it returns, so `limit` is set
+      // whenever the outcome is `limit_reached`; without it the row still reads paused.
+      if (outcome === "limit_reached")
+        return limit ? { status: "budget_limited", limit } : { status: "budget_limited" };
       if (outcome === "cancelled") throw new TaskCancelledError(taskId);
       return { status: "failed", error: "the model call failed" };
     }
@@ -503,7 +523,10 @@ async function pause(
   // When the cap lifts is fixed in the pause step and whether to run on in the wake step, so a
   // replay on a later day takes the same path the run took (only steps replay; `now` doesn't).
   const { at, resets } = await ctx.step(`task:pause:${cycle}`, async () => {
-    await user.tasks.finish(taskId, "budget_limited");
+    // The kind lands on the row now, so the Tasks view reads "Paused: limit" for an
+    // execution limit while the pause waits (M3-13 AC1); the same kind is saved again when
+    // the loop ends, after the wait.
+    await user.tasks.finish(taskId, "budget_limited", undefined, kind);
     const at = now();
     return {
       at,

@@ -57,9 +57,14 @@ const CASES: Record<string, Case> = {
     own: 200,
   },
   "DELETE /api/settings/grants/:id": { params: (v) => ({ id: v.grant }), own: 204 },
+  "GET /api/tasks/:id": { params: (v) => ({ id: v.task }), own: 200 },
+  // Cancelling the owner's own task ends it; the attacker never reaches the write (404).
+  "POST /api/tasks/:id/cancel": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
   // The task is resumed, then put back: no Workflow instance runs in the test to wake ("ended").
   "POST /api/tasks/:id/continue": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
-  "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
+  // The owner's loop cancels first (routes run sorted), so by Stop the task has ended: 409
+  // still proves the row was found, since a foreign id answers 404 before the write.
+  "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
   // The approval needs a step-up: the owner gets a challenge, and a decision without its assertion.
   "POST /api/approvals/:batchId/options": {
     params: (v) => ({ batchId: v.batch }),
