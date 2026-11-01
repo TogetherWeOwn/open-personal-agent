@@ -197,9 +197,9 @@ describe("export item listings", () => {
       kind: "turn",
       mode: "background" as const,
     });
-    expect((await alice.tasks.list()).map((r) => r.id)).toContain("xt1");
-    expect((await alice.tasks.list()).map((r) => r.id)).not.toContain("xt2");
-    expect((await bob.tasks.list()).map((r) => r.id)).toEqual(["xt2"]);
+    expect((await alice.tasks.listForExport()).map((r) => r.id)).toContain("xt1");
+    expect((await alice.tasks.listForExport()).map((r) => r.id)).not.toContain("xt2");
+    expect((await bob.tasks.listForExport()).map((r) => r.id)).toEqual(["xt2"]);
   });
 
   it("lists every attachment row with its message, only the user's own", async () => {

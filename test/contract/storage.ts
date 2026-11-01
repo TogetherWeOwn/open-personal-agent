@@ -108,8 +108,8 @@ export function blobStoreContract(name: string, bucket: () => R2Bucket) {
 
 /**
  * The usage ledger's statements through the repository (M2-21), against a migrated database:
- * `chat.settle` and `usage.record` write priced rows; `usage.totals` and
- * `deployment.workersAiNeurons` read them back.
+ * `usage.record` writes priced rows, one per model call; `chat.settle` only closes the
+ * message (M3-03 AC5). `usage.totals` and `deployment.workersAiNeurons` read them back.
  */
 export function usageLedgerContract(name: string, migrated: () => Promise<D1Database>) {
   describe(`${name}: usage ledger contract`, () => {
@@ -123,16 +123,6 @@ export function usageLedgerContract(name: string, migrated: () => Promise<D1Data
       const repo = createRepository({ DB, FILES: stub, ASSISTANT: stub });
       const { chat, usage } = repo.forUser(scopeFromSession({ userId }));
       const counts = { inputTokens: 1000, outputTokens: 500, cachedInputTokens: 0 };
-      const turn = (model: string, replyId: string) => ({
-        conversationId: `c-${userId}`,
-        turnId: "t",
-        replyId,
-        providerId: "workers-ai",
-        model,
-        reply: "Hi",
-        usage: counts,
-        called: true,
-      });
       const before = Date.now() - 1;
       expect(await chat.open(`c-${userId}`, "Ledger")).toBe(true);
       for (const [model, replyId] of [
@@ -141,7 +131,16 @@ export function usageLedgerContract(name: string, migrated: () => Promise<D1Data
         ["@cf/unlisted", `r3-${userId}`],
       ] as const) {
         await chat.startTurn(`c-${userId}`, "Hello", replyId);
-        await chat.settle(turn(model, replyId), "complete");
+        // The loop host writes one ledger row per model call as calls end; settling only
+        // closes the message (M3-03 AC5).
+        await usage.record({
+          providerId: "workers-ai",
+          model,
+          usage: counts,
+          conversationId: `c-${userId}`,
+          messageId: replyId,
+        });
+        await chat.settle({ replyId, reply: "Hi" }, "complete");
       }
       expect(await usage.totals(before)).toEqual([
         {

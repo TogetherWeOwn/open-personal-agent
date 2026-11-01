@@ -4,6 +4,7 @@
 // `pnpm --filter @opa/db generate`; never edit an applied migration.
 import { sql } from "drizzle-orm";
 import {
+  type AnySQLiteColumn,
   blob,
   check,
   foreignKey,
@@ -223,6 +224,32 @@ export const messages = sqliteTable(
 );
 
 /**
+ * A stopped turn's resumable state (M3-03 AC5): the loop's `TurnState` as JSON, with the call
+ * and tool counts inside it, so an approval cycle or a new process never resets them (AC7). A
+ * row exists only while a turn waits to resume — the DO holds the running turn, D1 the settled
+ * messages — and is deleted when the turn settles. Pending approvals survive hibernation,
+ * eviction and redeploy because they are inside `state` here, not in the DO.
+ */
+export const turnStates = sqliteTable(
+  "turn_states",
+  {
+    turnId: text("turn_id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    replyId: text("reply_id").notNull(),
+    providerId: text("provider_id").notNull(), // who bills the turn's calls
+    model: text("model").notNull(),
+    status: text("status", { enum: ["awaiting_approval", "limit_reached"] }).notNull(),
+    state: text("state").notNull(),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [index("turn_states_user_conversation_idx").on(t.userId, t.conversationId)],
+);
+
+/**
  * A file the user attached (M3-10). The bytes live in R2 under `u/{userId}/attachments/{id}`
  * (the repository derives the key); this row holds what the server sniffed from its first bytes,
  * never the type or size the client claimed. `message_id` is set when the message carrying it is
@@ -257,7 +284,9 @@ export const attachments = sqliteTable(
 /**
  * One row per model call (PRD §17). Cost is in millionths of a US dollar, and null when the price
  * table had no price for the model; `cost_source` says whether it was estimated or reported.
- * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls.
+ * `price_verified_at` dates the price used, and `neurons` counts Workers AI calls. `task_id`
+ * attributes a background task's calls to it (M3-13 AC2, "cost so far"); chat turns keep using
+ * `conversation_id`/`message_id`.
  */
 export const usage = sqliteTable(
   "usage",
@@ -268,6 +297,9 @@ export const usage = sqliteTable(
       onDelete: "set null",
     }),
     messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    taskId: text("task_id").references((): AnySQLiteColumn => tasks.id, {
+      onDelete: "set null",
+    }),
     providerId: text("provider_id").notNull(),
     model: text("model").notNull(),
     inputTokens: integer("input_tokens").notNull().default(0),
@@ -279,7 +311,10 @@ export const usage = sqliteTable(
     neurons: integer("neurons"),
     createdAt: createdAt(),
   },
-  (t) => [index("usage_user_idx").on(t.userId, t.createdAt)],
+  (t) => [
+    index("usage_user_idx").on(t.userId, t.createdAt),
+    index("usage_task_idx").on(t.userId, t.taskId),
+  ],
 );
 
 /**
@@ -348,6 +383,24 @@ export const tasks = sqliteTable(
     title: text("title"),
     state: text("state"),
     error: text("error"),
+    /**
+     * Which limit stopped a `budget_limited` task (M3-13 AC1): a money limit (`task_budget`,
+     * `daily`, `monthly_hard`) reads "Paused: budget", an execution limit (`calls`, `tools`,
+     * `tool_rate`, `steps`, `duration`) reads "Paused: limit". Null for every other status.
+     * The enum is type-level only, as with the sibling status column.
+     */
+    limitKind: text("limit_kind", {
+      enum: [
+        "task_budget",
+        "daily",
+        "monthly_hard",
+        "calls",
+        "tools",
+        "tool_rate",
+        "steps",
+        "duration",
+      ],
+    }),
     createdAt: createdAt(),
     updatedAt: integer("updated_at").notNull().default(now),
     startedAt: integer("started_at"),
