@@ -33,6 +33,7 @@ export interface Seeded {
   task: string;
   attachment: string;
   artifact: string;
+  export: string;
   provider: string;
   secret: string;
   grant: string;
@@ -115,9 +116,10 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
   if (uploaded.status !== 201) throw new Error(`attachment: ${uploaded.status}`);
   const attachment = (await uploaded.json<{ id: string }>()).id;
 
-  const [conversation, message, memory, task, grant, usage] = Array.from({ length: 6 }, () =>
-    crypto.randomUUID(),
-  ) as [string, string, string, string, string, string];
+  const [conversation, message, memory, task, grant, usage, exportId] = Array.from(
+    { length: 7 },
+    () => crypto.randomUUID(),
+  ) as [string, string, string, string, string, string, string];
   const run = (sql: string, ...values: unknown[]) => db.prepare(sql).bind(...values);
   await db.batch([
     run(
@@ -203,8 +205,16 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       source: { conversationId: conversation, taskId: task },
     });
 
+  await db
+    .prepare(
+      "INSERT INTO exports (id, user_id, workflow_instance_id, status, size_bytes, ready_at, expires_at) VALUES (?, ?, ?, 'ready', ?, ?, ?)",
+    )
+    .bind(exportId, id, `wf-${exportId}`, 3, Date.now(), Date.now() + 3_600_000)
+    .run();
+  await FILES.put(`u/${id}/exports/${exportId}.zip`, `export of ${tag}`);
+
   const items = { session, conversation, message, memory, task, attachment, provider, secret };
-  const ids = { ...items, spareSession, artifact, grant, usage };
+  const ids = { ...items, spareSession, artifact, grant, usage, export: exportId };
   const markers = [id, ...Object.values(ids), apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }
