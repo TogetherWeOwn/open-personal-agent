@@ -115,9 +115,16 @@ export function Waiting({
       const p = discardedRef.current;
       if (!p) return;
       discardedRef.current = null;
-      fetch(`/api/memory/proposals/${p.id}/reject`, { method: "POST", keepalive: true }).catch(
-        () => {},
-      );
+      // Tried once more if it fails. If both fail, the suggestion waits again: nothing is
+      // remembered, and it expires to rejected on its own.
+      const reject = () =>
+        fetch(`/api/memory/proposals/${p.id}/reject`, { method: "POST", keepalive: true });
+      void (async () => {
+        for (let tries = 0; tries < 2; tries++) {
+          const res = await reject().catch(() => null);
+          if (res && (res.ok || res.status === 404)) return;
+        }
+      })();
       setDiscarded(null);
     };
     window.addEventListener("pagehide", flush);

@@ -177,6 +177,25 @@ test("leaving the page sends a discard waiting behind Undo", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Notifications" })).toBeHidden();
 });
 
+test("a discard sent as the page goes away is tried again if it fails", async ({ page }) => {
+  const state = await stub(page);
+  let refused = false;
+  await page.route("/api/memory/proposals/p2/reject", async (route) => {
+    if (!refused) {
+      refused = true;
+      return route.fulfill({ status: 503, json: { error: "unavailable" } });
+    }
+    state.decisions.push("p2:reject");
+    return route.fulfill({ status: 204 });
+  });
+  await page.goto("/memory/waiting");
+  await page.getByRole("button", { name: "Don't remember" }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+  );
+  await expect.poll(() => state.decisions).toEqual(["p2:reject"]);
+});
+
 for (const width of [375, 1280]) {
   test(`waiting for you fits ${width} px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
