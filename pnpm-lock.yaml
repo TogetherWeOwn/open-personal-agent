@@ -112,9 +112,15 @@ importers:
       '@opa/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@opa/harness-builtin':
+        specifier: workspace:*
+        version: link:../../packages/harness-builtin
       '@opa/log':
         specifier: workspace:*
         version: link:../../packages/log
+      '@opa/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
       '@opa/pricing':
         specifier: workspace:*
         version: link:../../packages/pricing
