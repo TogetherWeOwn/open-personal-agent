@@ -618,6 +618,69 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       expect(await memory.list()).toEqual([]);
       expect(await memory.search("old")).toEqual([]);
     });
+
+    it("expires unconfirmed proposals to rejected and leaves current ones (M3-15 AC2)", async () => {
+      const { memory, DB, indexed } = await user();
+      const old = await memory.create(tainted, "Expired suggestion zebra", "fact", web);
+      const fresh = await memory.create(tainted, "Fresh suggestion", "fact", web);
+      if (old.status !== "proposed" || fresh.status !== "proposed") throw new Error("gate");
+      await DB.prepare("UPDATE memories SET expires_at = 1 WHERE id = ?")
+        .bind(old.proposal.memoryId)
+        .run();
+      expect(await memory.expire()).toBe(1);
+      expect(await memory.expire()).toBe(0);
+      expect(await indexed("zebra")).toBe(0);
+      expect((await memory.proposals()).map((p) => p.id)).toEqual([fresh.proposal.memoryId]);
+    });
+
+    it("keeps both on a conflict: the old note stays current and the new one stands alone", async () => {
+      const { memory } = await user();
+      const leeds = saved(await memory.create(screen, "Sam lives in Leeds", "fact", said));
+      const paris = await memory.update(tainted, leeds, "Sam lives in Paris", web);
+      if (paris.status !== "proposed") throw new Error("gate");
+      const id = paris.proposal.memoryId;
+      expect(await memory.keepBoth(chat, id)).toEqual({ status: "forbidden" });
+      expect(await memory.keepBoth(screen, id)).toMatchObject({
+        status: "saved",
+        memory: { id, trust: "external", status: "active", expiresAt: null },
+      });
+      expect(await memory.keepBoth(screen, id)).toEqual({ status: "not_found" });
+      expect((await memory.list()).map((m) => m.text).sort()).toEqual([
+        "Sam lives in Leeds",
+        "Sam lives in Paris",
+      ]);
+      expect(await memory.versions(id)).toEqual([]);
+      // Forgetting the new note never sweeps up the one it was proposed to replace.
+      expect((await memory.forget(screen, [id], said)).status).toBe("deleted");
+      expect((await memory.list()).map((m) => m.id)).toEqual([leeds]);
+      const removal = await memory.forget(tainted, [leeds], web);
+      if (removal.status !== "proposed") throw new Error("gate");
+      expect(await memory.keepBoth(screen, removal.proposal.memoryId)).toEqual({
+        status: "not_found",
+      });
+    });
+
+    it("lists a note's earlier versions newest first, only the user's own", async () => {
+      const { memory } = await user();
+      const other = await user();
+      const v1 = saved(await memory.create(screen, "Likes tea", "fact", said));
+      const v2 = saved(await memory.update(screen, v1, "Likes green tea", said));
+      const side = saved(await memory.create(screen, "Likes coffee", "fact", said));
+      const v3 = saved(await memory.merge(screen, [v2, side], "Likes green tea and coffee", said));
+      expect((await memory.versions(v3)).map((m) => m.id).sort()).toEqual([v1, v2, side].sort());
+      expect((await memory.versions(v3)).at(-1)).toMatchObject({ id: v1, text: "Likes tea" });
+      expect(await memory.versions(v1)).toEqual([]);
+      expect(await other.memory.versions(v3)).toEqual([]);
+      const dump = await memory.dump();
+      expect(dump.rows).toHaveLength(4);
+      expect(
+        dump.links
+          .filter((l) => l.memoryId === v3)
+          .map((l) => l.targetId)
+          .sort(),
+      ).toEqual([v2, side].sort());
+      expect((await other.memory.dump()).rows).toEqual([]);
+    });
   });
 }
 

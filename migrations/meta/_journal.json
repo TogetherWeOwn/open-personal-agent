@@ -113,6 +113,13 @@
       "when": 1793538083116,
       "tag": "0015_user_bound_references",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1793538492678,
+      "tag": "0016_memory_settings",
+      "breakpoints": true
     }
   ]
 }
