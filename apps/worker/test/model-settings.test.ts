@@ -175,6 +175,11 @@ describe("model settings", () => {
     expect(MODEL_FETCH.mock.calls[0]?.[0]).toBe("https://api.example.com/v1/chat/completions");
     expect(global).not.toHaveBeenCalled();
     expect(await ledger()).toBe(before); // a rejected test ran no model, so it isn't a call
+    // A stream cut off after output did run the model: it is a call, unpriced.
+    const cut = async () =>
+      new Response(sse(JSON.stringify({ choices: [{ delta: { content: "re" } }] }), "{"));
+    await call("/model/test", { method: "POST" }, { MODEL_FETCH: vi.fn(cut) });
+    expect(await ledger()).toBe(before + 1);
   });
 
   it("never returns a provider error that echoes part of the key", async () => {
