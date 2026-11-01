@@ -46,7 +46,7 @@ export interface NodeApp {
 
 /**
  * Opens the database, applies pending migrations and wires the bindings. Workers AI and
- * Workflows have no Node adapter yet, so `/api/health` reports them as unavailable.
+ * Workflows have no Node adapter yet, so they are declared `UNAVAILABLE` for `/api/health`.
  */
 export function createNodeApp(options: NodeOptions): NodeApp {
   const { dataDir, migrationsDir, assetsDir, vars, publicOrigin } = options;
@@ -64,6 +64,7 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     // The per-user assistant, in process. It has no state until the chat transport lands.
     ASSISTANT: { idFromName: (name: string) => name, get: () => ({ ping: async () => "pong" }) },
     MODEL_FETCH: modelFetch({ allowPrivate: vars.OPA_ALLOW_PRIVATE_MODEL_HOSTS === "1" }),
+    UNAVAILABLE: ["workflow", "ai"],
     OPA_MASTER_KEY: vars.OPA_MASTER_KEY,
     OPA_MASTER_KEY_PREV: vars.OPA_MASTER_KEY_PREV,
     OPA_SESSION_SECRET: vars.OPA_SESSION_SECRET,

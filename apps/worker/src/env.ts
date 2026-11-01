@@ -22,6 +22,11 @@ export interface Bindings {
    * network, is used.
    */
   MODEL_FETCH?: typeof fetch;
+  /**
+   * Set by a composition root whose runtime lacks these (the Node root, for now). Health reports
+   * them as false without degrading.
+   */
+  UNAVAILABLE?: readonly ("workflow" | "ai")[];
 }
 
 /** What the HTTP app sees. `VAULT` is `null` unless `VAULT_STATUS` is `ok`. */
