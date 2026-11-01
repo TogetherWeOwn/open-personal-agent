@@ -5,6 +5,7 @@
 import type { ComponentType, ReactNode } from "react";
 import { Link } from "react-aria-components";
 import { Memory } from "./memory/Memory";
+import { Waiting } from "./memory/Waiting";
 import { Redirect } from "./router";
 import { Settings, type SettingsPage as ShippedSettingsPage } from "./settings/Settings";
 import { EmptyState, Page } from "./ui";
@@ -103,10 +104,11 @@ export function NotFound() {
 }
 
 // m3-ux §1.2 names this screen "Waiting for you", so the two Memory addresses don't look alike.
-const waiting = placeholder(
-  "Waiting for you",
-  "I'll remember things you tell me, like your preferences and ongoing projects.",
-  "You can always see and change them here.",
+const waiting = () => (
+  <Page title="Waiting for you">
+    {go("/memory", "All of Memory")}
+    <Waiting heading={false} />
+  </Page>
 );
 
 export const routes: Route[] = [

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Memory screen's calls (M3-15) and the shapes the server sends. A note is what the
-// assistant remembers.
+// assistant remembers; a proposal is a note waiting for the user, never applied on its own.
 import type { Trust } from "../ui";
 
 export interface Note {
@@ -17,6 +17,11 @@ export interface Note {
   createdAt: number;
   lastUsedAt: number | null;
   expiresAt: number | null;
+}
+
+export interface Proposal extends Note {
+  /** The current notes it would replace or delete; empty for a new fact. */
+  targets: Note[];
 }
 
 export async function memoryApi<T>(path = "", method = "GET", body?: unknown): Promise<T> {
@@ -42,6 +47,20 @@ export const editNote = (id: string, text: string) =>
 
 export const noteVersions = (id: string) =>
   memoryApi<{ versions: Note[] }>(`/${id}/versions`).then((r) => r.versions);
+
+export const listProposals = () =>
+  memoryApi<{ expired: number; proposals: Proposal[] }>("/proposals");
+
+export type Decision = "accept" | "keep-both" | "reject";
+
+export const decide = (id: string, decision: Decision) =>
+  memoryApi<{ memory: Note } | undefined>(`/proposals/${id}/${decision}`, "POST");
+
+/** "Expires in 9 days"; "Expires today" in the last 24 hours. */
+export function expiresIn(ts: number | null, now = Date.now()) {
+  const days = Math.floor(((ts ?? now) - now) / 86_400_000);
+  return days < 1 ? "Expires today" : `Expires in ${days} ${days === 1 ? "day" : "days"}`;
+}
 
 /** The line every delete carries (M3-15 AC3): D1 Time Travel keeps deleted data 30 days. */
 export const BACKUP_LINE = "A backup copy is kept for 30 days, then it's gone.";
