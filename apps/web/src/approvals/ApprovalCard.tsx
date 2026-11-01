@@ -8,7 +8,7 @@ import { Label, Radio, RadioGroup } from "react-aria-components";
 import { Button, Card, CardHeader } from "../ui";
 import type { PendingBatch } from "./api";
 import { actionOf, expiresIn, needsPasskey, STANDING_NOTE, scopeLabel } from "./copy";
-import { ItemBody, Visible } from "./ItemBody";
+import { ItemBody, TargetLine, Visible } from "./ItemBody";
 import { refreshApprovals, submitDecision } from "./store";
 
 type Scope = ApprovalItem["scopes"][number];
@@ -193,11 +193,7 @@ export function ApprovalCard({
                 <ItemBody item={item} />
               ) : (
                 <>
-                  {item.target && (
-                    <p className="break-all">
-                      To: <Visible text={item.target} />
-                    </p>
-                  )}
+                  {item.target && <TargetLine target={item.target} />}
                   <Button
                     variant="quiet"
                     className="self-start"

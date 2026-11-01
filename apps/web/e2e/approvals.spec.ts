@@ -346,6 +346,18 @@ test.describe("the multi-action card (AC11)", () => {
     await expect(page.getByText(/^You declined all 3/)).toBeVisible();
   });
 
+  test("a collapsed item still warns about a look-alike host", async ({ page }) => {
+    const s = await stub(page);
+    await page.setViewportSize({ width: 375, height: 800 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "New chat" }).click();
+    await ask(page, s, [email(), email({ approvalId: "appr_2", target: "xn--exmple-cua.com" })]);
+    const c = card(page);
+    await expect(c.getByRole("button", { name: "Show: Send email" })).toBeVisible();
+    await expect(c).toContainText("To: xn--exmple-cua.com");
+    await expect(c.getByText("Looks like another address. Check it carefully.")).toBeVisible();
+  });
+
   test("fits 375 px, opens only the first item there, and passes axe", async ({ page }) => {
     const s = await stub(page);
     await page.setViewportSize({ width: 375, height: 800 });
