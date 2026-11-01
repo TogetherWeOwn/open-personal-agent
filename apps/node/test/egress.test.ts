@@ -26,11 +26,16 @@ describe("isPrivateAddress", () => {
   );
 });
 
+const METADATA = "http://169.254.169.254/latest/meta-data/";
+
 describe("modelFetch", () => {
   let server: Server;
   let port = 0;
   beforeAll(async () => {
-    server = createServer((_req, res) => res.end("ok"));
+    server = createServer((req, res) => {
+      if (req.url === "/redirect") return res.writeHead(302, { location: METADATA }).end();
+      req.pipe(res);
+    });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     port = (server.address() as AddressInfo).port;
   });
@@ -50,8 +55,22 @@ describe("modelFetch", () => {
     }
   });
 
+  it("checks every connection, so a redirect to a private literal is refused", async () => {
+    // Block only link-local here, so the loopback test server stands in for a public host.
+    const linkLocal = (address: string) => address.startsWith("169.254.");
+    const guarded = modelFetch({ allowPrivate: false, isBlocked: linkLocal });
+    const error = await guarded(`http://127.0.0.1:${port}/redirect`).catch((e: unknown) => e);
+    expect((error as TypeError).cause).toMatchObject({ code: "EBLOCKED" });
+  });
+
+  it("takes a native Request, as fetch does", async () => {
+    const guarded = modelFetch({ allowPrivate: false, isBlocked: () => false });
+    const request = new Request(`http://127.0.0.1:${port}/echo`, { method: "POST", body: "hi" });
+    expect(await (await guarded(request)).text()).toBe("hi");
+  });
+
   it("reaches a local model server when the operator allows private hosts", async () => {
     const res = await modelFetch({ allowPrivate: true })(`http://localhost:${port}/v1/models`);
-    expect(await res.text()).toBe("ok");
+    expect(res.status).toBe(200);
   });
 });

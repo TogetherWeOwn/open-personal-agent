@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // The SSRF guard for model-provider calls on Node (ADR 0010 D8). A Worker's fetch can't reach a
 // private network; a Node process can, so a user-supplied base URL could read the cloud metadata
-// service, the LAN or a localhost admin port. The check runs on the address the socket actually
-// connects to, so a DNS answer that changes between check and connect can't slip past it.
+// service, the LAN or a localhost admin port. The check runs on every connection, redirects
+// included, and on the address the socket actually connects to, so a DNS answer that changes
+// between check and connect can't slip past it.
 import { type LookupAddress, type LookupOptions, lookup } from "node:dns";
 import { BlockList, isIP } from "node:net";
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent, buildConnector, type RequestInit, fetch as undiciFetch } from "undici";
 
 const blocked = new BlockList();
 for (const [net, prefix] of [
@@ -47,19 +48,20 @@ type LookupCallback = (
   address: string | LookupAddress[],
   family?: number,
 ) => void;
+type IsBlocked = (address: string) => boolean;
 
-/** `dns.lookup` that fails when any address for the host is private. */
-function publicLookup(hostname: string, options: LookupOptions, callback: LookupCallback) {
-  lookup(hostname, { ...options, all: true }, (err, addresses) => {
-    if (err) return callback(err, []);
-    if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address))) {
-      return callback(blockedHost(hostname), []);
-    }
-    if (options.all) return callback(null, addresses);
-    const [first] = addresses as [LookupAddress];
-    callback(null, first.address, first.family);
-  });
-}
+/** `dns.lookup` that fails when any address for the host is blocked. */
+const publicLookup =
+  (isBlocked: IsBlocked) => (hostname: string, options: LookupOptions, callback: LookupCallback) =>
+    lookup(hostname, { ...options, all: true }, (err, addresses) => {
+      if (err) return callback(err, []);
+      if (addresses.length === 0 || addresses.some((a) => isBlocked(a.address))) {
+        return callback(blockedHost(hostname), []);
+      }
+      if (options.all) return callback(null, addresses);
+      const [first] = addresses as [LookupAddress];
+      callback(null, first.address, first.family);
+    });
 
 const blockedHost = (host: string) =>
   Object.assign(new Error(`Model host ${host} is on a private network`), { code: "EBLOCKED" });
@@ -67,20 +69,34 @@ const blockedHost = (host: string) =>
 /**
  * The fetch model providers use on Node. Unless `allowPrivate` (the operator's
  * `OPA_ALLOW_PRIVATE_MODEL_HOSTS=1`, for a model server on the same machine or LAN), it refuses
- * hosts that resolve to a private, loopback, link-local or metadata address.
+ * hosts that resolve to a private, loopback, link-local or metadata address. `isBlocked` is for
+ * tests.
  */
-export function modelFetch({ allowPrivate }: { allowPrivate: boolean }): typeof fetch {
+export function modelFetch({
+  allowPrivate,
+  isBlocked = isPrivateAddress,
+}: {
+  allowPrivate: boolean;
+  isBlocked?: IsBlocked;
+}): typeof fetch {
   if (allowPrivate) return fetch;
-  const dispatcher = new Agent({ connect: { lookup: publicLookup } });
+  const connectTo = buildConnector({ lookup: publicLookup(isBlocked) });
+  const dispatcher = new Agent({
+    // Every connection, including each redirect hop. A literal IP connects without a lookup.
+    connect(options, callback) {
+      const host = options.hostname.replace(/^\[(.*)\]$/, "$1");
+      if (isIP(host) && isBlocked(host)) return callback(blockedHost(host), null);
+      return connectTo(options, callback);
+    },
+  });
   return async (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    // A literal IP connects without a lookup, so check it here.
-    const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
-    if (isIP(host) && isPrivateAddress(host))
-      throw new TypeError("fetch failed", {
-        cause: blockedHost(host),
-      });
-    const response = await undiciFetch(input as string, { ...(init as object), dispatcher });
-    return response as unknown as Response;
+    // undici's fetch can't read Node's built-in Request, so pass its parts.
+    const request = new Request(input, init);
+    const { method, headers, body, redirect, signal } = request;
+    const options = { method, headers, body, redirect, signal, duplex: "half", dispatcher };
+    return (await undiciFetch(
+      request.url,
+      options as unknown as RequestInit,
+    )) as unknown as Response;
   };
 }
