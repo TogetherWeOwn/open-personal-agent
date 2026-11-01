@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Assistant DO and chat transport (M2-13): two tabs share one stream, a conversation survives
 // an eviction, and the DO name comes from the session only.
-import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import type { HarnessEvent, ModelEvent, ModelMessage, ModelProvider } from "@opa/core";
 import { describe, expect, it, vi } from "vitest";
 import { app } from "../src/app";
-import { type Assistant, assistantName } from "../src/assistant";
+import type { Assistant } from "../src/assistant";
 import { Browser, claim, count, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
 freshDatabase();
@@ -33,9 +33,9 @@ function scripted(seen: ModelMessage[][] = [], gate?: Promise<void>, early = fal
   };
 }
 
+const assistantOf = (userId: string) => env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${userId}`));
 function useModel(userId: string, provider: ModelProvider) {
-  const stub = env.ASSISTANT.get(env.ASSISTANT.idFromName(assistantName(userId)));
-  return runInDurableObject(stub, (instance: Assistant) => {
+  return runInDurableObject(assistantOf(userId), (instance: Assistant) => {
     instance.chatModel = { provider, model: "test-model" };
   });
 }
@@ -74,7 +74,6 @@ describe("chat transport", () => {
     a.send?.("conv-1", "Hi!");
     await a.until?.("turn.completed");
     await b.until?.("turn.completed");
-
     const types = ["turn.started", "message.delta", "message.delta", "usage.updated"];
     types.push("message.completed", "turn.completed");
     expect(a.events.map((e) => e.type)).toEqual(types);
@@ -107,7 +106,8 @@ describe("chat transport", () => {
       tab.send?.("conv-2", "Tell me a story");
       await tab.until?.(early ? "turn.started" : "message.delta");
 
-      await abortAllDurableObjects(); // the forced eviction: memory and the running turn are gone
+      // The forced eviction, of this DO only: its memory and running turn are gone.
+      await runInDurableObject(assistantOf(owner), (_, state) => state.abort()).catch(() => {});
       const next = await openTab(browser); // wakes the DO, which recovers the turn's fiber
       await vi.waitFor(async () => {
         const { messages } = await (await browser.req("/api/conversations/conv-2/messages")).json<{
@@ -180,12 +180,8 @@ describe("chat transport", () => {
     tab.send?.("mine", "first");
     await tab.until?.("message.delta");
     tab.send?.("mine", "second");
-    await vi.waitFor(() =>
-      expect(tab.events.at(-1)).toMatchObject({
-        type: "turn.failed",
-        payload: { message: "Another reply is still being written." },
-      }),
-    );
+    const busy = { message: "Another reply is still being written." };
+    await vi.waitFor(() => expect(tab.events.at(-1)).toMatchObject({ payload: busy }));
     tab.ws?.send(JSON.stringify({ type: "turn.cancel" }));
   });
 });

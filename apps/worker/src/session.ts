@@ -2,13 +2,14 @@
 // Passkey login, sessions and the route-auth guard (ADR 0010 D2). The guard denies by default:
 // a route is reachable without a session only if it is on `PUBLIC_ROUTES`, so a new route that
 // forgets to declare itself stays closed. test/routes.test.ts enumerates the route table.
+import { systemStore } from "@opa/db/system";
 import {
   type AuthenticationResponseJSON,
   type AuthenticatorTransport,
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
-import { type Context, Hono, type MiddlewareHandler } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
 import type { AppEnv } from "./env";
@@ -42,27 +43,13 @@ export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   const cookie = getCookie(c, auth.SESSION_COOKIE);
   if (!cookie) return c.json({ error: "unauthenticated" }, 401);
   const now = Date.now();
-  const row = await c.env.DB.prepare(
-    `SELECT id, user_id, last_seen_at FROM sessions
-     WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?`,
-  )
-    .bind(await auth.sha256(cookie), now, now - IDLE_MS)
-    .first<{ id: string; user_id: string; last_seen_at: number }>();
+  const store = systemStore(c.env);
+  const row = await store.sessions.find(await auth.sha256(cookie), now, now - IDLE_MS);
   if (!row) return c.json({ error: "unauthenticated" }, 401);
-  if (now - row.last_seen_at > TOUCH_MS) {
-    await c.env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
-      .bind(now, row.id)
-      .run();
-  }
-  c.set("session", { id: row.id, userId: row.user_id });
+  if (now - row.last_seen_at > TOUCH_MS) await store.sessions.touch(row.id, now);
+  c.set("session", { id: row.id, userId: row.user_id, scope: row.scope });
   return next();
 };
-
-function audit(c: Context<AppEnv>, userId: string | null, action: string, result: string) {
-  return c.env.DB.prepare(
-    "INSERT INTO audit_log (user_id, action, module, result) VALUES (?, ?, 'auth', ?)",
-  ).bind(userId, action, result);
-}
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -72,7 +59,7 @@ authRoutes.post("/login/options", async (c) => {
     rpID: new URL(c.req.url).hostname,
     userVerification: "required",
   });
-  const cookie = await auth.putChallenge(c.env.DB, "login", options.challenge, null);
+  const cookie = await auth.putChallenge(systemStore(c.env), "login", options.challenge, null);
   const maxAge = auth.CHALLENGE_TTL_MS / 1000;
   setCookie(c, auth.CHALLENGE_COOKIE, cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
@@ -81,26 +68,17 @@ authRoutes.post("/login/options", async (c) => {
 
 /** Step 2: verify the assertion, then issue a new session and revoke any the browser held. */
 authRoutes.post("/login", async (c) => {
-  const db = c.env.DB;
-  const challenge = await auth.takeChallenge(db, getCookie(c, auth.CHALLENGE_COOKIE), "login");
+  const store = systemStore(c.env);
+  const challenge = await auth.takeChallenge(store, getCookie(c, auth.CHALLENGE_COOKIE), "login");
   deleteCookie(c, auth.CHALLENGE_COOKIE, auth.COOKIE_OPTIONS);
   if (!challenge) {
-    await audit(c, null, "auth.login", "denied").run();
+    await store.audit(null, "auth.login", "auth", "denied");
     return c.json({ error: "no_challenge" }, 400);
   }
 
   const body = await c.req.json().catch(() => null);
   const response = body?.credential as AuthenticationResponseJSON | undefined;
-  const passkey = await db
-    .prepare("SELECT id, user_id, public_key, counter, transports FROM passkeys WHERE id = ?")
-    .bind(typeof response?.id === "string" ? response.id : "")
-    .first<{
-      id: string;
-      user_id: string;
-      public_key: ArrayBuffer | number[];
-      counter: number;
-      transports: string | null;
-    }>();
+  const passkey = await store.passkeys.get(typeof response?.id === "string" ? response.id : "");
   const url = new URL(c.req.url);
   const verification =
     passkey &&
@@ -119,24 +97,20 @@ authRoutes.post("/login", async (c) => {
       },
     }).catch(() => null));
   if (!passkey || !verification?.verified) {
-    await audit(c, passkey?.user_id ?? null, "auth.login", "denied").run();
+    await store.audit(passkey?.user_id ?? null, "auth.login", "auth", "denied");
     return c.json({ error: "not_verified" }, 401);
   }
 
   // Rotation: a login never keeps a session ID the browser already had (no fixation).
   const previous = getCookie(c, auth.SESSION_COOKIE);
-  const session = await auth.newSession(db, passkey.user_id);
-  const now = Date.now();
-  await db.batch([
-    db
-      .prepare("UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?")
-      .bind(verification.authenticationInfo.newCounter, now, passkey.id),
-    db
-      .prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
-      .bind(now, await auth.sha256(previous ?? "")),
-    session.insert,
-    audit(c, passkey.user_id, "auth.login", "ok"),
-  ]);
+  const session = await auth.newSession(passkey.user_id);
+  await store.sessions.login({
+    passkeyId: passkey.id,
+    counter: verification.authenticationInfo.newCounter,
+    previousTokenHash: await auth.sha256(previous ?? ""),
+    session: session.row,
+    now: Date.now(),
+  });
   const maxAge = auth.SESSION_ABSOLUTE_MS / 1000;
   setCookie(c, auth.SESSION_COOKIE, session.cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
@@ -145,10 +119,7 @@ authRoutes.post("/login", async (c) => {
 
 authRoutes.post("/logout", async (c) => {
   const { id, userId } = c.var.session;
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ?").bind(Date.now(), id),
-    audit(c, userId, "auth.logout", "ok"),
-  ]);
+  await systemStore(c.env).sessions.logout(id, userId, Date.now());
   deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   return c.json({ ok: true });
 });
@@ -159,13 +130,7 @@ export const sessionRoutes = new Hono<AppEnv>();
 sessionRoutes.get("/", async (c) => {
   const { id, userId } = c.var.session;
   const now = Date.now();
-  const { results } = await c.env.DB.prepare(
-    `SELECT id, created_at, last_seen_at, expires_at FROM sessions
-     WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at > ?
-     ORDER BY created_at DESC`,
-  )
-    .bind(userId, now, now - IDLE_MS)
-    .all<{ id: string; created_at: number; last_seen_at: number; expires_at: number }>();
+  const results = await systemStore(c.env).sessions.list(userId, now, now - IDLE_MS);
   c.header("Cache-Control", "no-store");
   return c.json({
     sessions: results.map((s) => ({
@@ -182,18 +147,9 @@ sessionRoutes.get("/", async (c) => {
 sessionRoutes.delete("/:id", async (c) => {
   const { id, userId } = c.var.session;
   const target = c.req.param("id");
-  // One transaction: if the audit fails, the revocation rolls back and the client can retry.
-  // `changes()` is the update's row count, so the audit records what the update did.
-  const [update] = await c.env.DB.batch([
-    c.env.DB.prepare(
-      "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
-    ).bind(Date.now(), target, userId),
-    c.env.DB.prepare(
-      "INSERT INTO audit_log (user_id, action, module, result) VALUES (?, 'auth.session_revoke', 'auth', CASE WHEN changes() > 0 THEN 'ok' ELSE 'denied' END)",
-    ).bind(userId),
-  ]);
-  const revoked = (update?.meta.changes ?? 0) > 0;
-  if (!revoked) return c.json({ error: "not_found" }, 404);
+  // If the audit fails, the revocation rolls back with it and the client can retry.
+  if (!(await systemStore(c.env).sessions.revoke(target, userId, Date.now())))
+    return c.json({ error: "not_found" }, 404);
   if (target === id) deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   return c.json({ ok: true });
 });
@@ -201,12 +157,7 @@ sessionRoutes.delete("/:id", async (c) => {
 /** Sign out everywhere: every session of this user, this one included. */
 sessionRoutes.post("/revoke-all", async (c) => {
   const { userId } = c.var.session;
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
-    ).bind(Date.now(), userId),
-    audit(c, userId, "auth.sign_out_everywhere", "ok"),
-  ]);
+  await systemStore(c.env).sessions.revokeAll(userId, Date.now());
   deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   return c.json({ ok: true });
 });

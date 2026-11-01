@@ -5,13 +5,18 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./chat": "./src/chat.ts",
+    "./repository": "./src/repository.ts",
+    "./system": "./src/system.ts",
+    "./vault-store": "./src/vault-store.ts"
   },
   "scripts": {
     "generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@opa/vault": "workspace:*",
     "drizzle-orm": "0.45.4"
   },
   "devDependencies": {

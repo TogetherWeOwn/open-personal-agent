@@ -4,8 +4,7 @@
 import type { ModelUsage } from "./model-provider";
 
 type Envelope<T extends string, P> = {
-  /** Increases by one per event within a turn. */
-  seq: number;
+  seq: number; // increases by one per event within a turn
   /** The conversation the turn belongs to. */
   sessionId: string;
   turnId: string;
@@ -16,7 +15,6 @@ type Envelope<T extends string, P> = {
 export type HarnessEvent =
   | Envelope<"turn.started", { messageId: string }>
   | Envelope<"turn.completed", Record<string, never>>
-  /** The turn was cut short: an eviction or a restart. The partial reply is kept. */
   | Envelope<"turn.interrupted", { message: string }>
   | Envelope<"turn.failed", { message: string }>
   | Envelope<"message.delta", { text: string }>

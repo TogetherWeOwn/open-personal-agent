@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// The chat transport (ADR 0002): a WebSocket to the user's own assistant, plus reads of the
-// conversations D1 keeps. The assistant is named from the session only. No route takes a name,
-// and the SDK's `/agents/:class/:name` router is not mounted.
-import { getAgentByName } from "agents";
+// The chat transport (ADR 0002): a WebSocket to the user's assistant, named from the session only
+// (no route takes a name; the SDK's `/agents/*` router isn't mounted), and reads of D1's messages.
+import { chatStore, isConversationId } from "@opa/db/chat";
+import { createRepository } from "@opa/db/repository";
 import { Hono } from "hono";
-import { assistantName, SESSION_HEADER } from "./assistant";
-import { chatStore, isConversationId } from "./chat-store";
+import { SESSION_HEADER } from "./assistant";
 import type { AppEnv } from "./env";
 
 export const chatRoutes = new Hono<AppEnv>();
@@ -19,7 +18,7 @@ chatRoutes.get("/chat", async (c) => {
   if (c.req.header("Origin") !== new URL(c.req.url).origin) {
     return c.json({ error: "bad_origin" }, 403);
   }
-  const assistant = await getAgentByName(c.env.ASSISTANT, assistantName(c.var.session.userId));
+  const assistant = createRepository(c.env).forUser(c.var.session.scope).assistant();
   const upgrade = new Request(c.req.raw);
   upgrade.headers.set(SESSION_HEADER, c.var.session.id);
   return assistant.fetch(upgrade);
@@ -28,7 +27,7 @@ chatRoutes.get("/chat", async (c) => {
 chatRoutes.get("/conversations/:id/messages", async (c) => {
   const id = c.req.param("id");
   const messages = isConversationId(id)
-    ? await chatStore(c.env.DB, c.var.session.userId).listMessages(id)
+    ? await chatStore(c.env, c.var.session.scope).listMessages(id)
     : null;
   if (!messages) return c.json({ error: "not_found" }, 404);
   c.header("Cache-Control", "no-store");

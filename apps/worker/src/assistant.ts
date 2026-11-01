@@ -3,6 +3,8 @@
 // WebSockets of all the user's tabs, runs one chat turn at a time and sends every event to every
 // tab, so two tabs show the same stream. D1 holds the messages; the DO only the running turn.
 import type { HarnessEvent, ModelProvider } from "@opa/core";
+import { chatStore, isConversationId, type TurnRecord } from "@opa/db/chat";
+import { scopeFromAssistantName } from "@opa/db/repository";
 import { createWorkersAIProvider } from "@opa/providers";
 import {
   Agent,
@@ -11,12 +13,10 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
-import { chatStore, isConversationId, type TurnRecord } from "./chat-store";
 import { withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
+import { IDLE_MS } from "./session";
 
-/** The Durable Object name for a user. Only server code calls this, with the session's user. */
-export const assistantName = (userId: string) => `u:${userId}`;
 /** Set by the Worker on the upgrade (a client's own value is overwritten): the session's row ID. */
 export const SESSION_HEADER = "x-opa-session-id";
 
@@ -55,10 +55,9 @@ export class Assistant extends Agent<Bindings> {
     return "pong";
   }
 
-  /** The user this assistant belongs to, from its own name, which only the server sets. */
-  get userId(): string {
-    if (!this.name.startsWith("u:")) throw new Error("not a user's assistant");
-    return this.name.slice(2);
+  /** The user's chat rows, scoped by this DO's own name, which only the server sets. */
+  get #store() {
+    return chatStore(this.env, scopeFromAssistantName(this.name));
   }
 
   override shouldSendProtocolMessages(): boolean {
@@ -78,17 +77,16 @@ export class Assistant extends Agent<Bindings> {
     const msg = parse(message);
     if (msg?.type === "turn.cancel") void this.#cancel(connection);
     if (msg?.type !== "chat.send") return;
+    const text = msg.text.trim();
     if (this.#running) {
       reject(connection, msg.conversationId, "Another reply is still being written.");
-    } else if (!isConversationId(msg.conversationId) || !msg.text.trim()) {
+    } else if (!isConversationId(msg.conversationId) || !text || text.length > MAX_TEXT) {
       reject(connection, "", "That message can't be sent.");
-    } else if (msg.text.length > MAX_TEXT) {
-      reject(connection, msg.conversationId, "That message is too long.");
     } else {
       const running = new AbortController();
       this.#running = running;
       void this.runFiber("chat-turn", (fiber) =>
-        this.#turn(connection, msg.conversationId, msg.text.trim(), running.signal, fiber.stash),
+        this.#turn(connection, msg.conversationId, text, running.signal, fiber.stash),
       )
         // The model's failures are reported in the turn; this is D1 failing.
         .catch(() => reject(connection, msg.conversationId, "The reply couldn't be saved."))
@@ -106,7 +104,7 @@ export class Assistant extends Agent<Bindings> {
     stash: (data: TurnRecord) => void,
   ) {
     if (!(await this.#sessionLive(connection))) return;
-    const store = chatStore(this.env.DB, this.userId);
+    const store = this.#store;
     const title = text.split("\n", 1)[0]?.slice(0, 40) ?? "";
     if (!(await store.openConversation(conversationId, title))) {
       return reject(connection, conversationId, "That conversation doesn't exist.");
@@ -179,8 +177,8 @@ export class Assistant extends Agent<Bindings> {
   /** A socket outlives logout and revocation, so each action rechecks the session it opened with. */
   async #sessionLive(connection: Connection): Promise<boolean> {
     const { sessionId } = (connection.state ?? {}) as { sessionId?: string | null };
-    if (sessionId && (await chatStore(this.env.DB, this.userId).sessionLive(sessionId)))
-      return true;
+    const now = Date.now();
+    if (sessionId && (await this.#store.sessionLive(sessionId, now, now - IDLE_MS))) return true;
     connection.close(4401, "unauthenticated");
     return false;
   }
@@ -191,14 +189,10 @@ export class Assistant extends Agent<Bindings> {
    */
   override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void> {
     if (ctx.name !== "chat-turn") return;
-    const store = chatStore(this.env.DB, this.userId);
     const turn = ctx.snapshot as TurnRecord | null;
-    if (turn) {
-      await store.settle(turn, "interrupted"); // the ledger keeps any usage already reported
-      this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", {
-        message: "Interrupted. Retry?",
-      });
-    }
+    if (!turn) return;
+    await this.#store.settle(turn, "interrupted"); // the ledger keeps any usage already reported
+    this.#emitter(turn.conversationId, turn.turnId)("turn.interrupted", { message: "Retry?" });
   }
 
   #emitter(sessionId: string, turnId: string): Emit {

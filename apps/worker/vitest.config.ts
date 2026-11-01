@@ -21,12 +21,17 @@ export default defineProject({
       wrangler: { configPath: "../../wrangler.jsonc" },
       // Tests apply these themselves, so they can also check the unmigrated state.
       miniflare: {
-        bindings: { TEST_MIGRATIONS: await readD1Migrations(migrationsDir) },
+        bindings: {
+          TEST_MIGRATIONS: await readD1Migrations(migrationsDir),
+          // The canary-scan CI job sets a fresh value per run and scans the output for it.
+          OPA_CANARY: process.env.OPA_CANARY ?? "opa-canary-local-0000000000000000",
+        },
       },
     })),
   ],
   test: {
     name: "worker",
     include: ["test/**/*.test.ts"],
+    testTimeout: 15_000, // a file's first test also loads the Worker bundle, Agents SDK included
   },
 });
