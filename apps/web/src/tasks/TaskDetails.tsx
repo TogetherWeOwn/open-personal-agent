@@ -36,11 +36,16 @@ export function TaskDetails({ params }: { params: Record<string, string> }) {
   const [stopFailed, setStopFailed] = useState(false);
 
   const load = useCallback(() => {
+    // The effect's cleanup flips this, so a load for one id can't overwrite another: without
+    // it a slow response for task A lands after the move to task B and the screen shows A
+    // while Stop would POST B's id.
+    let live = true;
     setTask(null);
     setMissing(false);
     setFailed(false);
     fetch(`/api/tasks/${encodeURIComponent(id)}`)
       .then((res) => {
+        if (!live) return null;
         if (res.status === 404) {
           setMissing(true);
           return null;
@@ -48,14 +53,19 @@ export function TaskDetails({ params }: { params: Record<string, string> }) {
         return res.ok ? res.json() : Promise.reject(new Error(String(res.status)));
       })
       .then(
-        (body) => body && setTask(body.task as TaskItem),
-        () => setFailed(true),
+        (body) => {
+          if (live && body) setTask(body.task as TaskItem);
+        },
+        () => {
+          if (live) setFailed(true);
+        },
       );
+    return () => {
+      live = false;
+    };
   }, [id]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => load(), [load]);
 
   const stop = () => {
     setStopping(true);

@@ -45,14 +45,24 @@ export function Tasks() {
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    // A late response for one tab must not overwrite the other: without this a slow Now
+    // fetch lands after the move to History and swaps its rows out from under the toggle.
+    let live = true;
     setTasks(null);
     setFailed(false);
     fetch(`/api/tasks?${listQuery(tab === "now" ? NOW_STATUSES : HISTORY_STATUSES)}`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
       .then(
-        (body) => setTasks(body.tasks as TaskItem[]),
-        () => setFailed(true),
+        (body) => {
+          if (live) setTasks(body.tasks as TaskItem[]);
+        },
+        () => {
+          if (live) setFailed(true);
+        },
       );
+    return () => {
+      live = false;
+    };
   }, [tab]);
 
   return (
