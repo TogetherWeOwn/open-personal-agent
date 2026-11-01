@@ -23,6 +23,7 @@ import {
 import { Composer } from "./chat/Composer";
 import { ConversationList } from "./chat/ConversationList";
 import { ModelChip } from "./chat/ModelChip";
+import { SHOW_WORK_DEFAULT, type ShowWork } from "./chat/show-work";
 import {
   type ChatAction,
   type ChatState,
@@ -32,6 +33,7 @@ import {
 } from "./chat/state";
 import { Thread } from "./chat/Thread";
 import type { ChatTransport, StoredAttachment } from "./chat/transport";
+import { buildPriceTable, type PriceTable } from "./chat/turn-summary";
 import {
   describePick,
   type ModelSettings,
@@ -107,6 +109,11 @@ export function App({ transport }: AppProps) {
   // The saved providers and roles behind the context chip; null until they load, and after a
   // failed load the composer simply has no chip.
   const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null);
+  // How much of a turn's timeline the thread shows (M3-09 AC3); Settings › Assistant owns the
+  // saved value from the next part, until then every thread starts collapsed.
+  const [showWork] = useState<ShowWork>(SHOW_WORK_DEFAULT);
+  // The turn summary prices each call under its own pair, like the usage page does.
+  const prices: PriceTable = buildPriceTable(modelSettings?.providers ?? []);
   // The chat stays mounted while another screen shows; becoming visible again reloads the
   // model settings, so a model picked in Settings › Models is live on return (#88).
   useEffect(() => {
@@ -566,6 +573,8 @@ export function App({ transport }: AppProps) {
           <Thread
             key={active.id}
             conversation={active}
+            showWork={showWork}
+            prices={prices}
             afterCount={waiting.length + receipts.length}
             after={
               <>
