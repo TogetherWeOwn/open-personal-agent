@@ -111,6 +111,10 @@ describe("activity log", () => {
       "approval.approve",
     ]);
     expect((await read(browser, "?kind=exports")).entries).toEqual([]);
+    // `other` is what the API calls an action it has no kind for, so it filters by it too.
+    expect((await read(browser, "?kind=other")).entries.map((e) => e.action)).toEqual([
+      "something.new",
+    ]);
     expect((await browser.req("/api/activity/log?kind=nope")).status).toBe(400);
   });
 
@@ -131,6 +135,25 @@ describe("activity log", () => {
     ]);
     expect(await actions("u2-secret-marker")).toEqual([]);
     expect((await browser.req(`/api/activity/log?q=${"x".repeat(101)}`)).status).toBe(400);
+  });
+
+  it("titles a failed run apart from the last check, and finds a title only where it shows", async () => {
+    const { browser, owner } = await seeded();
+    await db.batch([
+      row(owner, "approval.execute", { result: "error", target: "b1/a2" }),
+      row(owner, "auth.login", { result: "denied" }),
+    ]);
+    const titles = async (q: string) =>
+      (await read(browser, `?q=${encodeURIComponent(q)}`)).entries.map((e) => [e.result, e.title]);
+    expect(await titles("ran and failed")).toEqual([
+      ["error", "An approved action ran and failed"],
+    ]);
+    expect(await titles("last check")).toEqual([
+      ["denied", "Stopped an approved action at the last check"],
+    ]);
+    // "refused" is in a refused sign-in's title, not a successful one's.
+    expect(await titles("refused")).toEqual([["denied", "A sign-in was refused"]]);
+    expect(await titles("signed in")).toEqual([["ok", "Signed in"]]);
   });
 
   it("pages by row ID until the end", async () => {

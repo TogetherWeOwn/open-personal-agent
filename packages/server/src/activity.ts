@@ -5,7 +5,7 @@
 // Three kinds of row are bookkeeping, not something the user did, and stay out of the view
 // (they are still in the data export): each successful key decrypt behind a model call, an
 // approved call's claim before it runs, and the passkey options an approval asked for.
-import { createRepository } from "@opa/db/repository";
+import { type ActivityMatch, createRepository } from "@opa/db/repository";
 import { AUDIT_DAYS, DAY_MS } from "@opa/db/retention";
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
@@ -23,8 +23,17 @@ export const ACTIVITY_KINDS = [
 ] as const;
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number] | "other";
 
-/** Each audited action's kind and title; a `denied` (or other refused) row has its own title. */
-const ACTIONS: Record<string, { kind: ActivityKind; title: string; refused?: string }> = {
+interface Action {
+  kind: ActivityKind;
+  title: string;
+  /** A refused row's title: every result but a success, or but `error` where `failed` is set. */
+  refused?: string;
+  /** An `error` row's title, where it isn't a refusal. */
+  failed?: string;
+}
+
+/** Each audited action's kind and title; a refused or failed row can have its own title. */
+const ACTIONS: Record<string, Action> = {
   "auth.login": { kind: "sign_in", title: "Signed in", refused: "A sign-in was refused" },
   "auth.logout": { kind: "sign_in", title: "Signed out" },
   "auth.step_up": {
@@ -54,12 +63,16 @@ const ACTIONS: Record<string, { kind: ActivityKind; title: string; refused?: str
   "settings.key_add": { kind: "secrets", title: "Added a model key" },
   "settings.key_replace": { kind: "secrets", title: "Replaced a model key" },
   "settings.key_remove": { kind: "secrets", title: "Removed a model key" },
+  "settings.provider": { kind: "settings", title: "Changed a model provider" },
+  "settings.provider_remove": { kind: "settings", title: "Removed a model provider" },
   "approval.approve": { kind: "approvals", title: "Approved an action" },
   "approval.deny": { kind: "approvals", title: "Denied an action" },
   "approval.execute": {
     kind: "approvals",
     title: "Ran an approved action",
+    // `denied` is the policy re-check refusing it; `error`, a run that failed.
     refused: "Stopped an approved action at the last check",
+    failed: "An approved action ran and failed",
   },
   "approval.expire": { kind: "approvals", title: "An approval expired" },
   "approval.expire_all": { kind: "approvals", title: "Expired every waiting approval" },
@@ -106,6 +119,37 @@ const MAX_QUERY = 100;
 const actionsOf = (kind: ActivityKind) =>
   Object.keys(ACTIONS).filter((a) => ACTIONS[a]?.kind === kind);
 
+const SUCCESS = ["ok", "redeemed"];
+type ResultClass = Exclude<ActivityMatch["result"], "any">;
+
+/**
+ * The column's type says ok, denied or error, but raw SQL writes others: a redeemed recovery
+ * code is its success, and every other result but `ok` is a refusal.
+ */
+const classOf = (result: string): ResultClass =>
+  SUCCESS.includes(result) ? "success" : result === "error" ? "error" : "refused";
+
+/** The title a row with a result of this class shows. */
+function titleOf(action: Action, result: ResultClass): string {
+  if (result === "success") return action.title;
+  if (result === "error" && action.failed) return action.failed;
+  return action.refused ?? action.title;
+}
+
+/**
+ * The actions and result classes whose shown title contains `needle`, so a search for "signed
+ * in" finds the logins, and one for "refused" only the rows that read so.
+ */
+function titleMatches(needle: string): ActivityMatch[] {
+  return Object.entries(ACTIONS).flatMap(([action, a]): ActivityMatch[] => {
+    const classes = (["success", "error", "refused"] as const).filter((r) =>
+      titleOf(a, r).toLowerCase().includes(needle),
+    );
+    if (classes.length === 3) return [{ action, result: "any" as const }];
+    return classes.map((result) => ({ action, result }));
+  });
+}
+
 /** A row's detail as stored: JSON where it was written as JSON, otherwise the plain string. */
 function parsed(detail: string | null): unknown {
   if (detail === null) return null;
@@ -119,13 +163,13 @@ function parsed(detail: string | null): unknown {
 export const activityRoutes = new Hono<AppEnv>();
 
 /**
- * `?kind=` one of `ACTIVITY_KINDS`, `?q=` text, `?before=` the last row ID of the previous page,
- * `?limit=` up to 100. `next` is the ID to pass as `before`, or null at the end.
+ * `?kind=` one of `ACTIVITY_KINDS` or `other`, `?q=` text, `?before=` the last row ID of the
+ * previous page, `?limit=` up to 100. `next` is the ID to pass as `before`, or null at the end.
  */
 activityRoutes.get("/", async (c) => {
   c.header("Cache-Control", "no-store");
   const kind = c.req.query("kind");
-  if (kind !== undefined && !(ACTIVITY_KINDS as readonly string[]).includes(kind))
+  if (kind !== undefined && ![...ACTIVITY_KINDS, "other"].includes(kind))
     return c.json({ error: "invalid_kind" }, 400);
   const q = c.req.query("q")?.trim() || undefined;
   if (q !== undefined && q.length > MAX_QUERY) return c.json({ error: "invalid_query" }, 400);
@@ -145,28 +189,22 @@ activityRoutes.get("/", async (c) => {
       before,
       // One more than asked, to know whether there is a next page.
       limit: limit + 1,
-      actions: kind === undefined ? undefined : actionsOf(kind as ActivityKind),
+      actions: kind === undefined || kind === "other" ? undefined : actionsOf(kind as ActivityKind),
+      // `other` is every action without a kind of its own.
+      otherThan: kind === "other" ? Object.keys(ACTIONS) : undefined,
       text: q,
-      // A search for "signed in" finds the logins, not only rows whose raw text says so.
-      textActions: needle
-        ? Object.entries(ACTIONS)
-            .filter(([, a]) => `${a.title} ${a.refused ?? ""}`.toLowerCase().includes(needle))
-            .map(([action]) => action)
-        : undefined,
+      textActions: needle ? titleMatches(needle) : undefined,
       hide: HIDDEN,
     });
   const page = rows.slice(0, limit);
   return c.json({
     entries: page.map((r) => {
       const known = ACTIONS[r.action];
-      // The column's type says ok, denied or error, but raw SQL writes others: a redeemed
-      // recovery code is its success, and every other result but `ok` is a refusal.
-      const refused = !["ok", "redeemed"].includes(r.result) && known?.refused;
       return {
         id: r.id,
         at: r.createdAt,
         kind: known?.kind ?? "other",
-        title: (refused || known?.title) ?? r.action,
+        title: known ? titleOf(known, classOf(r.result)) : r.action,
         action: r.action,
         result: r.result,
         target: r.targetId,

@@ -165,6 +165,12 @@ export type SettingsUpdate = Partial<
   Omit<typeof userSettings.$inferInsert, "userId" | "updatedAt">
 >;
 
+/** An action whose title a search matched, for rows with a result in `result`'s class. */
+export interface ActivityMatch {
+  action: string;
+  result: "any" | "success" | "error" | "refused";
+}
+
 /** An override change as the audit log records it (M3-02 AC7): the tool, both values, its risk. */
 export interface OverrideChange {
   tool: string;
@@ -2016,17 +2022,20 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             db.select().from(auditLog).where(eq(auditLog.userId, userId)).orderBy(auditLog.id),
           /**
            * One page of the activity log (M3-19 AC3), newest first, from `since` on and before
-           * row `before`. `actions` narrows to those actions; `text` matches the action, target
-           * or detail literally (LIKE's wildcards escaped), or any of `textActions`; `hide` drops
-           * an action with a given result.
+           * row `before`. `actions` narrows to those actions and `otherThan` to every action but
+           * those; `text` matches the action, target or detail literally (LIKE's wildcards
+           * escaped), or a row of one of `textActions` whose result is in that entry's class: a
+           * success (`ok`, `redeemed`), an `error`, another refusal, or `any`. `hide` drops an
+           * action with a given result.
            */
           page: (o: {
             since: number;
             before?: number | undefined;
             limit: number;
             actions?: readonly string[] | undefined;
+            otherThan?: readonly string[] | undefined;
             text?: string | undefined;
-            textActions?: readonly string[] | undefined;
+            textActions?: readonly ActivityMatch[] | undefined;
             hide?: readonly { action: string; result?: string }[];
           }) => {
             const like = o.text && `%${o.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -2040,13 +2049,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   gte(auditLog.createdAt, o.since),
                   o.before === undefined ? undefined : lt(auditLog.id, o.before),
                   o.actions ? inArray(auditLog.action, [...o.actions]) : undefined,
+                  // One bound JSON array: D1 allows only 100 bound parameters a query.
+                  o.otherThan
+                    ? sql`${auditLog.action} NOT IN (SELECT value FROM json_each(${JSON.stringify(o.otherThan)}))`
+                    : undefined,
                   like
                     ? or(
                         matches(auditLog.action),
                         matches(auditLog.targetId),
                         matches(auditLog.detail),
                         o.textActions?.length
-                          ? inArray(auditLog.action, [...o.textActions])
+                          ? sql`EXISTS (SELECT 1 FROM json_each(${JSON.stringify(o.textActions)}) m
+                              WHERE json_extract(m.value, '$.action') = ${auditLog.action}
+                              AND CASE json_extract(m.value, '$.result')
+                                WHEN 'any' THEN 1
+                                WHEN 'success' THEN ${auditLog.result} IN ('ok', 'redeemed')
+                                WHEN 'error' THEN ${auditLog.result} = 'error'
+                                ELSE ${auditLog.result} NOT IN ('ok', 'redeemed', 'error') END)`
                           : undefined,
                       )
                     : undefined,
