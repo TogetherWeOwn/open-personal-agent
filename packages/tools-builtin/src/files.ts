@@ -87,9 +87,10 @@ export function createArtifactTool(ports: FilePorts): LoopTool {
       if (name === "" || name === "." || name === ".." || /[/\\]/.test(name) || hasControl(name)) {
         return failed("The artifact needs a plain file name, without slashes.");
       }
-      // Like search_history and web_fetch: a cancelled turn saves nothing and announces nothing.
-      // putFile itself isn't abort-aware, so check on both sides of the await; the loop only
-      // emits artifact.created for a call that actually ran.
+      // Like search_history and web_fetch: a cancelled turn starts nothing. putFile itself
+      // isn't abort-aware, so check before the await; a write that committed before the abort
+      // landed is announced with its id rather than orphaned — the turn still ends cancelled,
+      // and the loop only emits artifact.created for a call that actually ran.
       if (signal.aborted) return failed("The save was cancelled.");
       const content = String(input.content ?? "");
       const extension = name.toLowerCase().split(".").pop() ?? "";
@@ -103,7 +104,6 @@ export function createArtifactTool(ports: FilePorts): LoopTool {
       } catch {
         return failed("The file couldn't be saved.");
       }
-      if (signal.aborted) return failed("The save was cancelled.");
       const bytes = new TextEncoder().encode(content).length;
       return {
         ok: true,

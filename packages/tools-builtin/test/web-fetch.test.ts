@@ -280,6 +280,29 @@ describe("htmlToText", () => {
     expect(text).toContain("<title");
   });
 
+  it("finishes fast on thousands of malformed script closers", () => {
+    const soup = `<script>${"</script'".repeat(40000)}>`;
+    const started = Date.now();
+    const { text } = htmlToText(soup);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(text).not.toContain("script");
+  });
+
+  it("keeps stripping tags after an unterminated comment", () => {
+    const { text } = htmlToText("<p>Hello</p><!--unfinished<script>hidden()</script><p>World</p>");
+    expect(text).toContain("Hello");
+    expect(text).toContain("World");
+    expect(text).not.toContain("script");
+    expect(text).not.toContain("hidden()");
+  });
+
+  it("does not let a stray bracket plus apostrophe leak markup", () => {
+    const { text } = htmlToText("<p>I <3 it's fine</p><script>evil()</script><div>rest</div>");
+    expect(text).toContain("rest");
+    expect(text).not.toContain("evil()");
+    expect(text).not.toContain("<script>");
+  });
+
   it("keeps readable content when a span never closes", () => {
     const { text } = htmlToText("<p>kept</p><script>var x = 1;");
     expect(text).toContain("kept");

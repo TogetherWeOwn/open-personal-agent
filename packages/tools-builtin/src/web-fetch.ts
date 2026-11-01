@@ -261,21 +261,57 @@ const NEWLINE_CLOSE_TAGS = new Set([
 /**
  * Just past the tag opening at `at` (`<name ...>` or `</name ...>`), with quoted `>` honored —
  * or -1 when the tag never closes. One linear scan; a page the model chose is hostile input, so
- * no backtracking patterns (CodeQL js/polynomial-redos) may touch it.
+ * no backtracking patterns (CodeQL js/polynomial-redos) may touch it. A quote only opens inside
+ * a value (after an `=`), so prose with a stray `<` and an apostrophe (`I <3 it's`) still ends
+ * at the first `>`, as the matchers this replaced did.
  */
 function tagEnd(html: string, at: number): number {
   let quote: string | null = null;
+  let value = false;
   for (let i = at + 1; i < html.length; i++) {
     const c = html[i] ?? "";
     if (quote !== null) {
-      if (c === quote) quote = null;
-    } else if (c === '"' || c === "'") {
+      if (c === quote) {
+        quote = null;
+        value = false;
+      }
+    } else if (c === "=") {
+      value = true;
+    } else if ((c === '"' || c === "'") && value) {
       quote = c;
     } else if (c === ">") {
       return i + 1;
     }
   }
   return -1;
+}
+
+/**
+ * Just past the close matching the `name` span opened before `from` (`</name` then blanks then
+ * `>`), or -1 when none follows. Closing tags carry no attributes, so quotes need no honoring:
+ * one forward pass, each character visited once, however many malformed lookalikes (`</script'`)
+ * a hostile page holds.
+ */
+function spanEnd(html: string, lower: string, from: number, name: string): number {
+  let i = from;
+  for (;;) {
+    const lt = html.indexOf("<", i);
+    if (lt === -1) return -1;
+    if (
+      lt + 2 + name.length <= html.length &&
+      html[lt + 1] === "/" &&
+      lower.startsWith(name, lt + 2)
+    ) {
+      let j = lt + 2 + name.length;
+      while (j < html.length) {
+        const c = html[j] ?? ">";
+        if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r" && c !== "\f") break;
+        j++;
+      }
+      if (html[j] === ">") return j + 1;
+    }
+    i = lt + 1;
+  }
 }
 
 /** The tag name at `at` (`<` or `</` then the name), lowercased, or null when none follows. */
@@ -314,7 +350,8 @@ function isNameEnd(html: string, at: number): boolean {
 /**
  * The page's readable text with markup replaced: spans (first `head`, every script-like block)
  * and comments become one space, `<br>` and block closers a newline, every other tag one space.
- * Unterminated tags and comments stay literally, as the matchers they replace left them.
+ * An unterminated tag leaves the tail literally, as the matchers left it; an unterminated
+ * comment drops only its opener, so the readable page behind it is still stripped and kept.
  */
 function stripMarkup(html: string, lower: string): string {
   let out = "";
@@ -330,8 +367,10 @@ function stripMarkup(html: string, lower: string): string {
     if (html.startsWith("<!--", lt)) {
       const end = html.indexOf("-->", lt + 4);
       if (end === -1) {
-        out += html.slice(lt);
-        break;
+        // No end to this comment: drop the opener and keep stripping what follows.
+        out += " ";
+        i = lt + 4;
+        continue;
       }
       out += " ";
       i = end + 3;
@@ -340,7 +379,8 @@ function stripMarkup(html: string, lower: string): string {
     const tag = tagName(html, lt);
     const end = tagEnd(html, lt);
     if (end === -1) {
-      // Never closed: the matchers left this text alone too.
+      // Never closed: no `>` follows at all, so nothing after this can be a tag either. The
+      // tail stays literally, as the matchers left it.
       out += html.slice(lt);
       break;
     }
@@ -351,20 +391,9 @@ function stripMarkup(html: string, lower: string): string {
       continue;
     }
     if (!tag.isClose && SPAN_TAGS.has(tag.name) && !(tag.name === "head" && headGone)) {
-      // Skip to the matching close (`</name` then blanks then `>`); without one, only the open
-      // tag goes, and the content stays readable — as the matchers left it.
-      let from = end;
-      let skipped = -1;
-      for (;;) {
-        const close = lower.indexOf(`</${tag.name}`, from);
-        if (close === -1) break;
-        const closeEnd = tagEnd(html, close);
-        if (closeEnd !== -1 && isBlank(html, close + 2 + tag.name.length, closeEnd - 1)) {
-          skipped = closeEnd;
-          break;
-        }
-        from = close + 1;
-      }
+      // Skip to the matching close; without one, only the open tag goes, and the content stays
+      // readable — as the matchers left it.
+      const skipped = spanEnd(html, lower, end, tag.name);
       if (tag.name === "head" && skipped !== -1) headGone = true;
       out += " ";
       i = skipped === -1 ? end : skipped;
