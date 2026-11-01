@@ -8,9 +8,9 @@ import {
 } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { d1VaultStore } from "@opa/db/vault-store";
+import { newSession, SESSION_COOKIE } from "@opa/server/auth";
 import { decrypt, encrypt, rewrap, type UserScope, type Vault } from "@opa/vault";
 import { beforeAll, describe, expect, it } from "vitest";
-import { newSession, SESSION_COOKIE } from "../src/auth";
 import { compose, type WorkerEnv } from "../src/compose";
 import worker from "../src/index";
 import { workerApp as app } from "../src/worker-app";

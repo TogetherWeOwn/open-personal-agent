@@ -2,8 +2,8 @@
 // Passkey login, session cookies, rotation, timeouts, logout, the session list and sign out
 // everywhere (ADR 0010 D2).
 import { systemStore } from "@opa/db/system";
+import { CHALLENGE_COOKIE, SESSION_COOKIE, sha256 } from "@opa/server/auth";
 import { describe, expect, it } from "vitest";
-import { CHALLENGE_COOKIE, SESSION_COOKIE, sha256 } from "../src/auth";
 import { Browser, claim, count, db, env, freshDatabase, passkey } from "./helpers/app";
 
 freshDatabase();

@@ -22,6 +22,14 @@ export function brief(e: ModelEvent): string {
   }
   if (e.type === "done") return `done ${e.finishReason}`;
   if (e.type === "error") return `error ${e.code}: ${e.message}`;
+  if (e.type === "tool_call") {
+    const c = e.toolCall;
+    return `tool_call ${c.id} ${c.name} ${c.arguments}`;
+  }
+  if (e.type === "reasoning") {
+    const r = e.reasoning;
+    return `reasoning ${r.providerId}/${r.api}/${r.model} ${r.items.length}`;
+  }
   return `${e.type} ${e.text}`;
 }
 

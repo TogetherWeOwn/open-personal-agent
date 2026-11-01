@@ -1,0 +1,20 @@
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_wx1","type":"function","function":{"name":"get_weather","arguments":""}}],"refusal":null},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"ci"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ty\":\"Lis"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"bon\"}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_tm2","type":"function","function":{"name":"get_time","arguments":""}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"zone\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"Europe/Lisbon\"}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1761955200,"model":"gpt-4.1-mini","choices":[],"usage":{"prompt_tokens":96,"completion_tokens":41,"total_tokens":137,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0}}}
+
+data: [DONE]
+
