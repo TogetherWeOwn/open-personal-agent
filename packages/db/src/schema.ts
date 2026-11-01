@@ -283,7 +283,16 @@ export const approvals = sqliteTable(
     canonical: text("canonical").notNull(),
     bindingHash: text("binding_hash").notNull(),
     status: text("status", {
-      enum: ["pending", "approved", "denied", "expired", "executing", "executed", "failed"],
+      enum: [
+        "pending",
+        "approved",
+        "denied",
+        "expired",
+        "executing",
+        "dispatched",
+        "executed",
+        "failed",
+      ],
     })
       .notNull()
       .default("pending"),

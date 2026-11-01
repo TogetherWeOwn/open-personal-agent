@@ -8,7 +8,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { JsonValue, ModelEvent, ModelProvider, ModelRequest, TaskStepper } from "@opa/core";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import { type LoopTool, resolveApprovals } from "@opa/harness-builtin";
+import type { LoopTool } from "@opa/harness-builtin";
 import { beforeAll, describe, expect, it } from "vitest";
 import { canaryForms } from "../../../scripts/canary-forms.mjs";
 import type { Assistant } from "../src/assistant";
@@ -119,6 +119,40 @@ class FakeStepper implements TaskStepper {
   }
   persistedText(): string {
     return JSON.stringify([...this.persisted.values()]);
+  }
+}
+
+/** A stepper whose engine dies right after the named step's body ran, before it is recorded. */
+class CrashingStepper extends FakeStepper {
+  #dead = false;
+  constructor(
+    private readonly crashAt: string,
+    onWait: ((n: number) => Promise<JsonValue>)[] = [],
+  ) {
+    super(onWait);
+  }
+  override async do<T extends JsonValue>(
+    name: string,
+    config: unknown,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (this.#dead) throw new Error("the engine is down");
+    if (name !== this.crashAt) return super.do(name, config, fn);
+    await fn();
+    this.#dead = true;
+    throw new Error("the engine crashed mid-step");
+  }
+}
+
+/** A stepper that retries a failed step body once, unless its config allows no retries. */
+class RetryingStepper extends FakeStepper {
+  override async do<T extends JsonValue>(
+    name: string,
+    config: unknown,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const once = (config as { retries?: { limit: number } } | undefined)?.retries?.limit === 0;
+    return super.do(name, config, once ? fn : () => fn().catch(() => fn()));
   }
 }
 
@@ -271,22 +305,23 @@ describe("task workflow", () => {
     const stepper = new FakeStepper([
       // A payload that claims approval while D1 still says pending: nothing may run from it.
       async () => ({ decision: "approve", scope: "once" }) as JsonValue,
-      // The second wake: the decision has been written to D1 (what M3-07's route will do).
+      // The second wake: the decision is in the batch's D1 rows (what the approvals route
+      // writes), bound to this task.
       async () => {
         const row = await alice.tasks.get(taskId);
+        // The early wake left it waiting, where a compromise signal looks for it (AC13).
+        expect(row?.status).toBe("waiting_for_approval");
         const state = JSON.parse(row?.state ?? "{}");
-        const batchId = state.turn.pending.batchId as string;
+        batchId = state.turn.pending.batchId as string;
         const approvalId = state.turn.pending.items[0].approvalId as string;
-        resolveApprovals(
-          state.turn,
-          batchId,
-          [{ approvalId, decision: "approve", scope: "once" }],
-          Date.now(),
-        );
-        await alice.tasks.saveState(taskId, JSON.stringify(state));
+        const [stored] = await alice.approvals.batch(batchId);
+        expect(stored).toMatchObject({ taskId, turnId: null, status: "pending" });
+        const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+        await alice.approvals.decide(batchId, [decision], Date.now());
         return null;
       },
     ]);
+    let batchId = "";
     const { promise, streams } = await run(
       [{ calls: [["send", { q: "x" }]] }, { text: "done" }],
       instanceId,
@@ -302,6 +337,76 @@ describe("task workflow", () => {
     expect(toolStep?.[1]).toMatchObject({ retries: { limit: 0 } });
     expect(streams()).toBe(2);
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    // The claim and the call's end are on the row (M3-07 AC12).
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
+  });
+
+  it("never runs an approved call twice when a crash reruns its step (crypto review W3)", async () => {
+    const { taskId, instanceId } = await makeTask();
+    const send = tool("send", "consequential", async () => ({ ok: true, content: "sent" }));
+    let batchId = "";
+    const approve = async () => {
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    // The first run claims the approval, sends, and the engine dies before the step is recorded.
+    const crashed = new CrashingStepper("tool:1", [approve]);
+    const first = await run([{ calls: [["send", { q: "x" }]] }], instanceId, crashed, [send]);
+    await first.promise.catch(() => {});
+    expect(send.calls).toBe(1);
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("dispatched");
+    // The engine replays the instance: every recorded step returns its record, and the tool
+    // step's body runs a second time.
+    const replay = new FakeStepper();
+    for (const [name, value] of crashed.persisted) replay.persisted.set(name, value);
+    const second = await run([{ text: "done" }], instanceId, replay, [send]);
+    await second.promise;
+    expect(send.calls).toBe(1); // not sent again
+    const toolResult = JSON.stringify(JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}"));
+    expect(toolResult).toContain("its outcome is unknown");
+    const [row] = await alice.approvals.batch(batchId);
+    expect(row).toMatchObject({ status: "failed", reason: "outcome_unknown" });
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+  });
+
+  it("retries an approved read whose first attempt failed", async () => {
+    const { taskId, instanceId } = await makeTask();
+    // An untrusted result first, so the egress read after it asks (floor_tainted_egress).
+    const peek = tool("peek", "read", async () => ({ ok: true, content: "page" }));
+    const untrusted = { ...peek, execute: async () => ({ ok: true, content: "page" }) };
+    const fetch = tool("fetch", "read", async () => {
+      if (fetch.calls === 1) throw new Error("connection reset");
+      return { ok: true, content: "fetched" };
+    });
+    const egress = [{ id: "web", kind: "third_party" as const, dataEgress: true }];
+    const fetchTool = { ...fetch, manifest: { ...fetch.manifest, destinations: egress } };
+    fetchTool.execute = fetch.execute.bind(fetch);
+    let batchId = "";
+    const approve = async () => {
+      const state = JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}");
+      batchId = state.turn.pending.batchId as string;
+      const approvalId = state.turn.pending.items[0].approvalId as string;
+      const decision = { approvalId, decision: "approve", scope: "once", detail: {} } as const;
+      await alice.approvals.decide(batchId, [decision], Date.now());
+      return null;
+    };
+    const stepper = new RetryingStepper([approve]);
+    const replies: Reply[] = [
+      { calls: [["peek", { q: "x" }]] },
+      { calls: [["fetch", { q: "y" }]] },
+      { text: "done" },
+    ];
+    const { promise } = await run(replies, instanceId, stepper, [untrusted, fetchTool]);
+    await promise;
+    expect(fetch.calls).toBe(2);
+    const state = JSON.stringify(JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}"));
+    expect(state).toContain("fetched");
+    expect(state).not.toContain("its outcome is unknown");
+    expect((await alice.approvals.batch(batchId))[0]?.status).toBe("executed");
   });
 
   it("bookkeeping that fails after the hold never repeats the model call", async () => {

@@ -65,7 +65,7 @@ export async function currentSession(c: Context<AppEnv>): Promise<Session | null
  * Whether the session confirmed a passkey within the account step-up window. A future stamp
  * fails closed: without the lower bound it would stay valid until stamp + the window.
  */
-export const hasStepUp = (session: Session, now = Date.now()) => {
+export const hasAccountStepUp = (session: Session, now = Date.now()) => {
   if (session.stepUpAt === null) return false;
   const age = now - session.stepUpAt;
   return age >= 0 && age < auth.STEP_UP_MS;
