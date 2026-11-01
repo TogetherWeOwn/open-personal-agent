@@ -104,3 +104,47 @@ test("a late task response doesn't replace the opened task", async ({ page }) =>
   await page.waitForTimeout(200);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fast task B");
 });
+
+test("a Stop reload doesn't overwrite the next task", async ({ page }) => {
+  await stubShell(page);
+  let loadsA = 0;
+  let releaseReload!: () => void;
+  const gatedReload = new Promise<void>((r) => {
+    releaseReload = r;
+  });
+  await page.route(
+    (url) => url.pathname.startsWith("/api/tasks/"),
+    async (route) => {
+      if (route.request().method() === "POST") {
+        return route.fulfill({
+          json: {
+            task: task({ id: "a", title: "Slow task A", status: "cancelled", finishedAt: NOW }),
+          },
+        });
+      }
+      const id = new URL(route.request().url()).pathname.split("/").at(-1);
+      if (id === "a") {
+        loadsA += 1;
+        // The first load is fast; the post-Stop reload hangs while the user moves on.
+        if (loadsA > 1) await gatedReload;
+        return route.fulfill({ json: { task: task({ id: "a", title: "Slow task A" }) } });
+      }
+      return route.fulfill({ json: { task: task({ id: "b", title: "Fast task B" }) } });
+    },
+  );
+
+  await page.goto("/activity/tasks/a");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Slow task A");
+  await page.getByRole("button", { name: "Stop task" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Stop task" }).click();
+  // Leave for B the way an in-app link does before the reload answers; when it finally
+  // does it must not call setTask(A) on B's screen.
+  await page.evaluate(() => {
+    window.history.pushState(null, "", "/activity/tasks/b");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fast task B");
+  releaseReload();
+  await page.waitForTimeout(200);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fast task B");
+});
