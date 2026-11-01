@@ -148,6 +148,7 @@ export async function executeTask(
     instanceId,
     conversationId: task.conversationId,
     turnId: initial?.turnId ?? task.id,
+    inTurn: replyId !== undefined,
     startedAt: started.startedAt,
     pausedMs: () => paused.ms,
     mode: task.mode,

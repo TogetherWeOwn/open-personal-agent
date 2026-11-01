@@ -46,6 +46,7 @@ export interface AssistantTaskRpc {
     seq: number;
     type: string;
     payload: unknown;
+    inTurn?: boolean;
   }): Promise<void>;
 }
 
@@ -56,6 +57,8 @@ export interface WorkflowTaskContextDeps {
   /** Where progress goes: the conversation and turn the task belongs to. */
   conversationId: string;
   turnId: string;
+  /** The task runs on a promoted turn: its progress joins the conversation's event log. */
+  inTurn?: boolean;
   /** When the task's clock started (its row's `started_at`, else `created_at`). */
   startedAt: number;
   /** Time spent paused at a limit (M3-17), which the duration limit doesn't count. */
@@ -218,6 +221,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
           seq: progressSeq,
           type: event.type,
           payload: clean,
+          ...(deps.inTurn ? { inTurn: true } : {}),
         })
         .catch(() => {}); // progress is best-effort; the task's state lives in D1
     },
