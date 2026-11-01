@@ -63,6 +63,10 @@ describe("scoped repository", () => {
     expect((await alice?.chat.searchHistory("100% sure", 10))?.map((h) => h.messageId)).toEqual([
       "m1",
     ]);
+    // SQLite LIKE folds A–Z only: other scripts match exactly as typed (documented contract).
+    await insert("m3", "alice", "cs", "CAFÉ on the corner");
+    expect((await alice?.chat.searchHistory("CAFÉ", 10))?.map((h) => h.messageId)).toEqual(["m3"]);
+    expect(await alice?.chat.searchHistory("café", 10)).toEqual([]);
   });
 
   it("keeps files under the user's prefix and names the assistant from the scope", async () => {

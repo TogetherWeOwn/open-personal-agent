@@ -37,7 +37,9 @@ export function searchHistoryTool(ports: SearchHistoryPorts): LoopTool {
             type: "string",
             minLength: 1,
             maxLength: 200,
-            description: "The exact text to look for (case-insensitive).",
+            // SQLite LIKE folds A–Z only: other scripts match exactly as typed.
+            description:
+              "The exact text to look for (case-insensitive for A–Z; other letters match as typed).",
           },
           limit: {
             type: "integer",

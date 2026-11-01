@@ -185,6 +185,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * The caller's own messages containing `query` (M3-08 AC2), newest first. The query is
            * matched literally (LIKE's wildcards are escaped), and the conversation join is bound
            * to the same `user_id`, so a row can never surface through someone else's conversation.
+           * Case-insensitively for A–Z only: SQLite LIKE has no Unicode folding, so other scripts
+           * match exactly as typed (the tool description says so).
            */
           searchHistory: (query: string, limit: number): Promise<HistoryHit[]> => {
             const like = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;

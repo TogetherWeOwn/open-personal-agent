@@ -52,6 +52,12 @@ describe("URL policy (M3-08 AC1)", () => {
     expect(checkFetchUrl("https://other.example.com/", own).ok).toBe(true);
   });
 
+  it("matches the deployment's own hostname however the host's entry is written", () => {
+    // The host's entry may carry capitals, a port or unicode; the request arrives punycoded.
+    expect(checkFetchUrl("https://xn--mnchen-3ya.de/", ["münchen.de"]).ok).toBe(false);
+    expect(checkFetchUrl("https://opa.example.com/", ["OPA.EXAMPLE.COM:8787"]).ok).toBe(false);
+  });
+
   it("isPrivateIpLiteral leaves names and public addresses alone", () => {
     expect(isPrivateIpLiteral("example.com")).toBe(false);
     expect(isPrivateIpLiteral("172.32.0.1")).toBe(false);
@@ -158,6 +164,48 @@ describe("web_fetch", () => {
     expect(shown.content).toContain("abcdefghij");
     expect(shown.content).toContain("[Truncated at 10 characters.]");
     expect(shown.content).not.toContain("klmnop");
+  });
+
+  it("bounds the title inside the model text cap", async () => {
+    const { fetch } = fakeFetch(() =>
+      page(
+        `<html><head><title>${"T".repeat(120_000)}</title></head><body><p>short body</p></body></html>`,
+      ),
+    );
+    const out = await webFetchTool({ fetch }).execute(
+      { url: "https://example.com/long" },
+      signal(),
+    );
+    expect(out.ok).toBe(true);
+    expect(out.content).toContain("short body");
+    expect(out.content.length).toBeLessThan(WEB_FETCH_CAPS.maxChars + 3000);
+  });
+
+  it("stops at a cross-host redirect so the new host gets its own approval", async () => {
+    const { fetch, asked } = fakeFetch(() => redirect("https://other.example/landing"));
+    const out = await webFetchTool({ fetch }).execute(
+      { url: "https://news.example/story" },
+      signal(),
+    );
+    expect(out.ok).toBe(false);
+    expect(out.content).toContain("https://other.example/landing");
+    expect(out.content).toContain("another host");
+    expect(asked).toEqual(["https://news.example/story"]); // the other host is never fetched
+  });
+
+  it("still follows a redirect that stays on the same host", async () => {
+    const ok = fakeFetch((url) =>
+      url === "http://example.com/old"
+        ? redirect("https://example.com/new")
+        : page("<p>landed</p>"),
+    );
+    const out = await webFetchTool({ fetch: ok.fetch }).execute(
+      { url: "http://example.com/old" },
+      signal(),
+    );
+    expect(out.ok).toBe(true);
+    expect(out.content).toContain("landed");
+    expect(ok.asked).toEqual(["http://example.com/old", "https://example.com/new"]);
   });
 
   it("times out instead of waiting on a silent server", async () => {
