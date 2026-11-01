@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Memory screen's calls (M3-15) and the shapes the server sends. A note is what the
 // assistant remembers; a proposal is a note waiting for the user, never applied on its own.
+import {
+  type PublicKeyCredentialRequestOptionsJSON,
+  startAuthentication,
+} from "@simplewebauthn/browser";
 import type { Trust } from "../ui";
 
 export interface Note {
@@ -56,8 +60,50 @@ export type Decision = "accept" | "keep-both" | "reject";
 export const decide = (id: string, decision: Decision) =>
   memoryApi<{ memory: Note } | undefined>(`/proposals/${id}/${decision}`, "POST");
 
-/** The `opa-memory-export/v1` download: a plain link, so the session cookie authorises it. */
-export const EXPORT_URL = "/api/memory/export";
+/** The account step-up: one passkey prompt that covers this session for 5 minutes. */
+async function stepUp(): Promise<void> {
+  const post = (path: string, body: unknown) =>
+    fetch(`/api/auth/step-up/session${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const res = await post("/options", {});
+  const { options } = (await res.json().catch(() => ({}))) as {
+    options?: PublicKeyCredentialRequestOptionsJSON;
+  };
+  if (!res.ok || !options) throw new Error("step_up_failed");
+  const credential = await startAuthentication({ optionsJSON: options });
+  if (!(await post("", { credential })).ok) throw new Error("step_up_failed");
+}
+
+/**
+ * Saves the `opa-memory-export/v1` file. Export is an account action, so the server asks for a
+ * passkey step-up first; the prompt shows once, then the download runs.
+ */
+export async function downloadExport(stepped = false): Promise<void> {
+  const res = await fetch("/api/memory/export");
+  if (res.status === 403 && !stepped) {
+    await stepUp();
+    return downloadExport(true);
+  }
+  if (!res.ok) throw new Error("export_failed");
+  const name =
+    /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ??
+    "memory.opa-memory.json";
+  const url = URL.createObjectURL(await res.blob());
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Why the download didn't start, in words; a dismissed passkey prompt is the usual reason. */
+export const exportError = (e: unknown) =>
+  (e as Error).name === "NotAllowedError" || (e as Error).message === "step_up_failed"
+    ? "Your passkey wasn't confirmed, so nothing was downloaded. Try again."
+    : "I couldn't download your notes. Check your connection and try again.";
 
 /** Settings › Memory's "Learn from our chats" (M3-15 AC5). */
 export async function learnSetting(value?: boolean): Promise<boolean> {

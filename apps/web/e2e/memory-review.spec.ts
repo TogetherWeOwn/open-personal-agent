@@ -48,10 +48,43 @@ const fresh = {
 interface Stub {
   learn: boolean;
   decisions: string[];
+  /** Whether the session has stepped up; export answers `step_up_required` until it has. */
+  steppedUp: boolean;
+}
+
+const b64 = (s: string) => btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+
+/** A platform authenticator holding one passkey for this site, as the claim left it. */
+async function passkey(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+  await page.evaluate(async () => {
+    const bytes = (s: string) => new TextEncoder().encode(s);
+    await navigator.credentials.create({
+      publicKey: {
+        rp: { name: "Open Personal Agent", id: "localhost" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: { residentKey: "required", userVerification: "required" },
+        attestation: "none",
+        challenge: bytes("c"),
+        user: { id: bytes("owner-id"), name: "owner", displayName: "owner" },
+      },
+    });
+  });
 }
 
 async function stub(page: Page): Promise<Stub> {
-  const state: Stub = { learn: true, decisions: [] };
+  const state: Stub = { learn: true, decisions: [], steppedUp: false };
   await page.route("/api/health", (route) => route.fulfill({ json: { status: "ok" } }));
   await page.route("/api/me", (route) => route.fulfill({ json: { id: "u", role: "owner" } }));
   await page.route("/api/settings", (route) =>
@@ -64,6 +97,21 @@ async function stub(page: Page): Promise<Stub> {
       state.learn = (route.request().postDataJSON() as { learnFromChats: boolean }).learnFromChats;
     }
     await route.fulfill({ json: { learnFromChats: state.learn } });
+  });
+  await page.route("/api/auth/step-up/session**", async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith("/options")) {
+      return route.fulfill({
+        json: {
+          options: {
+            challenge: b64("step-up-challenge"),
+            rpId: "localhost",
+            userVerification: "required",
+          },
+        },
+      });
+    }
+    state.steppedUp = true;
+    await route.fulfill({ json: { ok: true, expiresAt: Date.now() + 300_000 } });
   });
   await page.route("/api/memory**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -81,6 +129,9 @@ async function stub(page: Page): Promise<Stub> {
         : route.fulfill({ json: { memory: { ...conflict, op: "update" } } });
     }
     if (path === "/api/memory/export") {
+      if (!state.steppedUp) {
+        return route.fulfill({ status: 403, json: { error: "step_up_required" } });
+      }
       return route.fulfill({
         headers: { "content-disposition": 'attachment; filename="memory.opa-memory.json"' },
         json: { format: "opa-memory-export/v1", memories: [] },
@@ -142,9 +193,12 @@ test("keeps both, or discards with Undo before anything is sent", async ({ page 
   await axe(page);
 });
 
-test("exports as Markdown in a sheet and as an opa-memory-export/v1 download", async ({ page }) => {
-  await stub(page);
+test("exports as Markdown in a sheet and, after a passkey step-up, as an opa-memory-export/v1 download", async ({
+  page,
+}) => {
+  const state = await stub(page);
   await page.goto("/memory");
+  await passkey(page);
   await page.getByRole("button", { name: "Export" }).click();
   await page.getByRole("menuitem", { name: "View what my assistant knows about me" }).click();
   const sheet = page.getByRole("dialog", { name: "What my assistant knows about me" });
@@ -156,6 +210,7 @@ test("exports as Markdown in a sheet and as an opa-memory-export/v1 download", a
   const download = page.waitForEvent("download");
   await page.getByRole("menuitem", { name: "Download JSON" }).click();
   expect((await download).suggestedFilename()).toBe("memory.opa-memory.json");
+  expect(state.steppedUp).toBe(true);
 });
 
 test("turns Learn from our chats off, and Memory says so", async ({ page }) => {

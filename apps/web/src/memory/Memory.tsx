@@ -30,7 +30,8 @@ import {
 import {
   addNote,
   BACKUP_LINE,
-  EXPORT_URL,
+  downloadExport,
+  exportError,
   learnSetting,
   listNotes,
   memoryError,
@@ -194,7 +195,14 @@ export function Memory() {
       <div className="-mt-4 flex justify-end">
         <Menu label="Export" variant="secondary">
           <MenuItem onAction={() => setKnows(true)}>View what my assistant knows about me</MenuItem>
-          <MenuItem onAction={() => window.location.assign(EXPORT_URL)}>Download JSON</MenuItem>
+          <MenuItem
+            onAction={() => {
+              setProblem(null);
+              downloadExport().catch((e) => setProblem(exportError(e)));
+            }}
+          >
+            Download JSON
+          </MenuItem>
         </Menu>
       </div>
       {!learning && (
