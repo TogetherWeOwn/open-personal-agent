@@ -142,9 +142,28 @@ export function rewriteSchemaVersionConst(source, newVersion) {
   return source.replace(SCHEMA_VERSION_RE, `export const SCHEMA_VERSION = ${newVersion};`);
 }
 
+/** Tables whose snapshot entry differs between two snapshots (added, removed or changed). */
+export function changedTables(a, b) {
+  const names = new Set([...Object.keys(a.tables ?? {}), ...Object.keys(b.tables ?? {})]);
+  return new Set([...names].filter((t) => !deepEqual(a.tables?.[t], b.tables?.[t])));
+}
+
+/** Tables a migration rebuilds in place, by drizzle-kit's `__new_<table>` idiom. */
+export const rebuiltTables = (sql) =>
+  [...sql.matchAll(/CREATE TABLE `?__new_([A-Za-z0-9_]+)`?/g)].map((m) => m[1]);
+
 const defaultGit = (root) => ({
   fetch(remote, branch) {
     execFileSync("git", ["fetch", "--quiet", remote, branch], { cwd: root, stdio: "inherit" });
+  },
+  remotes() {
+    try {
+      return execFileSync("git", ["remote"], { cwd: root, encoding: "utf8" })
+        .split("\n")
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
   },
   show(spec) {
     try {
@@ -188,8 +207,10 @@ export function renumberMigrations({
     throw new Error(`no ${MIGRATIONS_DIR}/ directory under ${root}; run from the repo root.`);
   }
   if (fetch && baseRef.includes("/")) {
+    // Only fetch when the first segment is a configured remote; a local stacked base such as
+    // `feat/foo` must not become `git fetch feat foo`.
     const [remote, ...rest] = baseRef.split("/");
-    git.fetch(remote, rest.join("/"));
+    if ((git.remotes?.() ?? []).includes(remote)) git.fetch(remote, rest.join("/"));
   }
   const showBase = (path) => git.show(`${baseRef}:${path}`);
   const baseJournal = tryParseJson(showBase(JOURNAL_PATH));
@@ -229,9 +250,46 @@ export function renumberMigrations({
   const localEntryByTag = new Map((localJournal?.entries ?? []).map((e) => [e.tag, e]));
 
   const own = localSql.filter((f) => !baseTags.has(f.tag));
+  // A shared tag proves nothing by itself: two branches can generate the same number and name
+  // for different SQL. Verify shared-tag files really are the base versions before trusting the
+  // split — otherwise a branch migration would be silently treated as main's and lost.
+  for (const f of localSql.filter((x) => baseTags.has(x.tag))) {
+    const sqlDiffers = readLocal(`migrations/${f.file}`) !== showBase(`migrations/${f.file}`);
+    const slotShared = own.some((o) => o.number === f.number);
+    const snapDiffers =
+      !slotShared &&
+      localSnapshots.get(f.number)?.json?.id !== tryParseJson(showBase(snapshotPath(f.number)))?.id;
+    if (sqlDiffers || snapDiffers) {
+      throw new Error(
+        `${f.tag} exists on ${baseRef} with different content. If this is your migration that ` +
+          "picked the same number and name as one on main, rename yours (the SQL file, its " +
+          "snapshot and the journal tag) so the script can tell them apart, then re-run. " +
+          "If it is main's, restore it untouched: applied migrations are never edited.",
+      );
+    }
+  }
   if (own.length === 0) {
-    log(`migrations:renumber: no branch migrations vs ${baseRef}; nothing to do.`);
-    return { changed: false, actions: [], own: [] };
+    // Nothing to renumber — but a merge resolution may have dropped a base file the local
+    // journal still lists. Repair those only: entries the local journal does not list belong
+    // to an unmerged base, and `git merge` will bring them.
+    const repaired = [];
+    for (const entry of baseJournal.entries) {
+      if (!localEntryByTag.has(entry.tag)) continue;
+      for (const path of [`migrations/${entry.tag}.sql`, snapshotPath(entry.idx)]) {
+        if (readLocal(path) !== null) continue;
+        const baseText = showBase(path);
+        if (baseText === null) throw new Error(`could not read ${path} from ${baseRef}.`);
+        repaired.push(`restored ${path} from ${baseRef}`);
+        if (!dryRun) writeFileSync(join(root, path), baseText);
+      }
+    }
+    log(
+      repaired.length
+        ? `migrations:renumber${dryRun ? " (dry run)" : ""}: no branch migrations; repaired vs ${baseRef}`
+        : `migrations:renumber: no branch migrations vs ${baseRef}; nothing to do.`,
+    );
+    for (const action of repaired) log(`  ${action}`);
+    return { changed: repaired.length > 0, actions: repaired, own: [] };
   }
   if (new Set(own.map((f) => f.number)).size !== own.length) {
     throw new Error("branch migrations share a number; give each its own number first.");
@@ -257,10 +315,16 @@ export function renumberMigrations({
   const deletes = new Set();
   const actions = [];
   const writeIfChanged = (path, text, action) => {
-    if (readLocal(path) !== text) {
-      writes.set(path, text);
-      if (action) actions.push(action);
+    const current = readLocal(path);
+    if (current === text) return;
+    // Snapshots on disk are Biome-formatted (short arrays on one line), which differs in text
+    // from JSON.stringify output; compare JSON by content so --check stays stable after format.
+    if (path.endsWith(".json") && current !== null) {
+      const [a, b] = [tryParseJson(current), tryParseJson(text)];
+      if (a && b && deepEqual(a, b)) return;
     }
+    writes.set(path, text);
+    if (action) actions.push(action);
   };
 
   let newPrev = baseSnapshot(baseMax);
@@ -306,6 +370,17 @@ export function renumberMigrations({
           `${migration.tag}: cannot find the snapshot its prevId points to, locally or on ${baseRef}.`,
         );
       }
+    }
+    // A table rebuild (`__new_x` + copy + drop) enumerates columns in SQL; rebased onto a main
+    // that changed that table, it would drop main's columns while the merged snapshot still
+    // lists them. Refuse rather than rewrite SQL.
+    const rebuilt = rebuiltTables(sql).filter((t) => changedTables(branchBase, newPrev).has(t));
+    if (rebuilt.length > 0) {
+      throw new Error(
+        `${migration.tag}: rebuilds table(s) ${rebuilt.join(", ")} that ${baseRef} changed since ` +
+          "the fork; its SQL would drop main's columns. Regenerate it with " +
+          "`pnpm --filter @opa/db generate` against merged main instead.",
+      );
     }
     const merged = mergeSnapshot(branchBase, snapshot, newPrev);
     writeIfChanged(
@@ -375,6 +450,18 @@ export function renumberMigrations({
   if (changed && !dryRun) {
     for (const [path, text] of writes) writeFileSync(join(root, path), text);
     for (const path of deletes) if (!writes.has(path)) rmSync(join(root, path), { force: true });
+    // Match the repo's Biome formatting so the renumbered tree passes `pnpm lint` as written.
+    const jsonPaths = [...writes.keys()].filter((p) => p.endsWith(".json"));
+    if (jsonPaths.length > 0) {
+      try {
+        execFileSync(join(root, "node_modules/.bin/biome"), ["format", "--write", ...jsonPaths], {
+          cwd: root,
+          stdio: "pipe",
+        });
+      } catch {
+        log("Could not run Biome; run `pnpm format` before committing.");
+      }
+    }
   }
   log(
     changed
@@ -382,7 +469,18 @@ export function renumberMigrations({
       : `migrations:renumber: already renumbered onto ${baseRef}; nothing to do.`,
   );
   for (const action of actions) log(`  ${action}`);
-  if (changed && !dryRun) log("Review the diff, run the tests, then commit.");
+  if (changed && !dryRun) {
+    log(
+      `Commit this before merging ${baseRef} (restored files are untracked until committed, ` +
+        "and git merge refuses to overwrite them), then re-run.",
+    );
+    if ([...deletes].some((p) => p.endsWith(".sql"))) {
+      log(
+        "Local databases that already applied the old filename will see the renumbered migration " +
+          "as new: reset local dev data (.wrangler, .opa-data) before the next `pnpm dev`.",
+      );
+    }
+  }
   return { changed, actions, own: own.map((f) => f.tag) };
 }
 

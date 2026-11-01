@@ -105,7 +105,7 @@ function setup({ own = [{ number: 2, name: "foo", snap: S2_FOO, when: 200 }], ex
   write("migrations/meta/0001_snapshot.json", BASE_FILES["migrations/meta/0001_snapshot.json"]);
   const entries = [entry(0, "base"), entry(1, "users")];
   for (const o of own) {
-    write(`migrations/${pad(o.number)}_${o.name}.sql`, sqlFor(o.number));
+    write(`migrations/${pad(o.number)}_${o.name}.sql`, sqlFor(o.number, o.body));
     write(`migrations/meta/${pad(o.number)}_snapshot.json`, `${JSON.stringify(o.snap, null, 2)}\n`);
     entries.push(entry(o.number, o.name, o.when));
   }
@@ -161,6 +161,18 @@ describe("renumberMigrations", () => {
     const t = setup({ own: [] });
     expect(t.run()).toEqual({ changed: false, actions: [], own: [] });
     expect(t.read("packages/db/src/index.ts")).toBe("export const SCHEMA_VERSION = 1;\n");
+  });
+
+  it("repairs a dropped base file even with no branch migrations", () => {
+    const t = setup({ own: [] });
+    fs.rmSync(path.join(t.root, "migrations/0001_users.sql"));
+    const result = t.run();
+    expect(result.changed).toBe(true);
+    expect(t.read("migrations/0001_users.sql")).toContain("VALUES (1);");
+    // The unmerged base entries stay unclaimed: journal and SCHEMA_VERSION are untouched.
+    expect(JSON.parse(t.read("migrations/meta/_journal.json")).entries).toHaveLength(2);
+    expect(t.read("packages/db/src/index.ts")).toBe("export const SCHEMA_VERSION = 1;\n");
+    expect(t.exists("migrations/0002_bar.sql")).toBe(false);
   });
 
   it("renumbers several branch migrations consecutively, preserving their chain", () => {
@@ -237,7 +249,48 @@ describe("renumberMigrations", () => {
 
   it("refuses to touch an applied migration that differs from the base", () => {
     const t = setup({ extra: { "migrations/0001_users.sql": "SELECT edited;\n" } });
-    expect(() => t.run()).toThrow(/0001_users\.sql differs/);
+    expect(() => t.run()).toThrow(/0001_users/);
+  });
+
+  it("aborts when a branch migration rebuilds a table main changed", () => {
+    const body =
+      "CREATE TABLE `__new_users` (`id` text, `name` text, `about` text);--> statement-breakpoint\n" +
+      "INSERT INTO `__new_users` SELECT `id`, `name`, `about` FROM `users`;--> statement-breakpoint\n" +
+      "DROP TABLE `users`;--> statement-breakpoint\n" +
+      "ALTER TABLE `__new_users` RENAME TO `users`;";
+    const t = setup({ own: [{ number: 2, name: "foo", snap: S2_FOO, when: 200, body }] });
+    expect(() => t.run()).toThrow(/rebuilds table\(s\) users/);
+    expect(t.exists("migrations/0004_foo.sql")).toBe(false);
+  });
+
+  it("aborts when a local file shares main's tag but not its content", () => {
+    const t = setup({
+      own: [],
+      extra: { "migrations/0002_bar.sql": sqlFor(2, "ALTER TABLE `other` ADD `x` text;") },
+    });
+    expect(() => t.run()).toThrow(/0002_bar exists on origin\/main with different content/);
+  });
+
+  it("compares snapshots by content, so reformatting does not loop --check", () => {
+    const t = setup();
+    t.run();
+    const snapPath = path.join(t.root, "migrations/meta/0004_snapshot.json");
+    // Same JSON, different text (as after `pnpm format`).
+    fs.writeFileSync(snapPath, JSON.stringify(JSON.parse(fs.readFileSync(snapPath, "utf8"))));
+    expect(t.run().changed).toBe(false);
+  });
+
+  it("does not try to fetch a local stacked base", () => {
+    const t = setup();
+    const fetches = [];
+    const git = {
+      fetch: (...args) => fetches.push(args),
+      remotes: () => ["origin"],
+      show: (spec) => BASE_FILES[spec.slice("feat/base:".length)] ?? null,
+    };
+    renumberMigrations({ root: t.root, baseRef: "feat/base", git, log: () => {} });
+    expect(fetches).toEqual([]);
+    expect(t.read("migrations/0004_foo.sql")).toContain("VALUES (4);");
   });
 });
 
