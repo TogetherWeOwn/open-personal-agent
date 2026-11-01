@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { ModelMessage } from "@opa/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOpenAIChatProvider } from "../../packages/providers/src";
 import { MOCK_MODEL, startMockOpenAI } from "../mock-openai.mjs";
@@ -68,6 +69,47 @@ describe("mock OpenAI-compatible server", () => {
     expect(second.some((e) => e.type === "tool_call")).toBe(false);
     const text = second.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
     expect(text).toBe("You said: hi there");
+  });
+
+  it("calls the tool again on a later user turn, then echoes each follow-up", async () => {
+    const provider = createOpenAIChatProvider({ providerId: "mock", baseUrl: server.url });
+    const tools = [
+      {
+        name: "lookup",
+        description: "The smoke's tool.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      },
+    ];
+    const history: ModelMessage[] = [];
+    async function turn(text: string) {
+      history.push({ role: "user", content: text });
+      const events = [];
+      for await (const event of provider.stream({ model: MOCK_MODEL, messages: history, tools })) {
+        events.push(event);
+      }
+      return events;
+    }
+    for (const [i, text] of ["first", "second"].entries()) {
+      const callEvents = await turn(text);
+      const calls = callEvents.filter((e) => e.type === "tool_call");
+      expect(calls).toHaveLength(1);
+      expect(callEvents.at(-1)).toEqual({ type: "done", finishReason: "tool_calls" });
+      history.push({
+        role: "assistant",
+        toolCalls: [{ id: `call_${i + 1}`, name: "lookup", arguments: "{}" }],
+        content: "",
+      });
+      history.push({ role: "tool", toolCallId: `call_${i + 1}`, content: "found it" });
+
+      // The follow-up carrying the tool result echoes instead of calling again.
+      const echoEvents = [];
+      for await (const event of provider.stream({ model: MOCK_MODEL, messages: history, tools })) {
+        echoEvents.push(event);
+      }
+      expect(echoEvents.some((e) => e.type === "tool_call")).toBe(false);
+      const echo = echoEvents.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+      expect(echo).toBe(`You said: ${text}`);
+    }
   });
 
   it("answers a malformed request with 400 and keeps serving", async () => {
