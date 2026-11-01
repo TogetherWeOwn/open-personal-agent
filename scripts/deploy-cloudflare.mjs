@@ -232,12 +232,11 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
   const bundle = path.join(config.dir, "bundle");
   fs.rmSync(bundle, { recursive: true, force: true });
   await wrangler(["deploy", "--dry-run", "--outdir", bundle, "-c", config.file], { step: "build" });
-  const tag = fingerprint(deps.root, [
-    config.file,
-    bundle,
-    path.join(deps.root, "apps", "web", "dist"),
-    path.join(deps.root, "migrations"),
-  ]);
+  const inputs = [config.file, bundle, "apps/web/dist", "migrations"];
+  const tag = fingerprint(
+    deps.root,
+    inputs.map((p) => path.resolve(deps.root, p)),
+  );
 
   // Steps 1 and 5: provision and deploy, unless the active version already carries this tag.
   const changed = [];
@@ -322,7 +321,8 @@ export async function deployCloudflare(argv, deps = defaultDeps()) {
 }
 
 // The newest version tag, if the active version is that one or was reached from it only through
-// deployed secret changes (step 7). Undeployed drafts don't count; anything else is drift.
+// deployed secret changes (step 7). Undeployed drafts don't count. History is newest first, so a
+// page that doesn't reach the tagged version can't rule out drift.
 async function deployedTag(api, accountId, name) {
   const base = `/accounts/${accountId}/workers/scripts/${name}`;
   const deployments = await api(`${base}/deployments`);
@@ -334,12 +334,11 @@ async function deployedTag(api, accountId, name) {
   versions.sort((a, b) => b.number - a.number);
   const tagged = versions.find((v) => v.annotations?.["workers/tag"]);
   const running = versions.filter((v) => active.some((a) => a.version_id === v.id));
-  if (!tagged || running.length !== 1 || running[0].number < tagged.number) return null;
-  const between = versions.filter(
-    (v) => deployed.has(v.id) && v.number > tagged.number && v.number <= running[0].number,
-  );
-  if (between.some((v) => v.annotations?.["workers/triggered_by"] !== "secret")) return null;
-  return tagged.annotations["workers/tag"];
+  if (!tagged || running.length !== 1 || !deployed.has(tagged.id)) return null;
+  const [lo, hi] = [tagged.number, running[0].number];
+  const since = versions.filter((v) => deployed.has(v.id) && v.number > lo && v.number <= hi);
+  const drift = hi < lo || since.some((v) => v.annotations?.["workers/triggered_by"] !== "secret");
+  return drift ? null : tagged.annotations["workers/tag"];
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

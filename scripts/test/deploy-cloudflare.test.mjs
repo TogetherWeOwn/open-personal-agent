@@ -48,7 +48,7 @@ function setup({ deployedTag = null, existingSecrets = [], forbidden = [], ...op
       if (p.endsWith("/deployments")) {
         if (!deployedTag) return reply(404, { success: false });
         const deployment = (id) => ({ versions: [{ version_id: id, percentage: 100 }] });
-        return ok({ deployments: [deployment("v3"), deployment("v1")] });
+        return ok({ deployments: (opts.history ?? ["v3", "v1"]).map(deployment) });
       }
       if (p.endsWith("/versions")) {
         const later = { "workers/triggered_by": opts.laterTrigger ?? "secret" };
@@ -154,10 +154,12 @@ describe("deploy:cloudflare", () => {
     await expect(deployCloudflare(["--name", "Bad_Name"], t.deps)).rejects.toThrow(/invalid name/);
   });
 
-  it("redeploys when a newer version that is not a secret change is active", async () => {
+  it("redeploys on drift, or when the history page does not reach the tagged version", async () => {
     const { tag } = await deployCloudflare(["--dry-run"], setup().deps);
     const t = setup({ deployedTag: tag, existingSecrets: ALL_SECRETS, laterTrigger: "upload" });
     expect((await deployCloudflare([], t.deps)).changed).toEqual(["worker"]);
+    const short = setup({ deployedTag: tag, existingSecrets: ALL_SECRETS, history: ["v3"] });
+    expect((await deployCloudflare([], short.deps)).changed).toEqual(["worker"]);
   });
 
   it("shows the setup link before waiting for health", async () => {
