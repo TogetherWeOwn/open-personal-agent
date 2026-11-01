@@ -198,7 +198,8 @@ describe("passkeys", () => {
       passkeys.map((p) => browser.req(`/api/passkeys/${p.id}`, { method: "DELETE" })),
     );
     // One wins; the other is refused as the last passkey, whichever order they ran in.
-    expect([first.status, second.status].sort()).toEqual([200, 400]);
+    // Two passkeys went in, so two results come out.
+    expect([first?.status, second?.status].sort()).toEqual([200, 400]);
     expect((await list(browser)).passkeys).toHaveLength(1);
   });
 
