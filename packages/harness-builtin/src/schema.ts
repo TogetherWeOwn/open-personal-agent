@@ -1,31 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Tool input validation (M3-03 AC2): the model's arguments are checked against the manifest's
 // JSON Schema before policy and execution. A small subset of JSON Schema, with no dependency
-// (M2-16 note). It fails closed: a keyword it doesn't know makes every input invalid, so a schema
-// can't look stricter than it is checked.
+// (M2-16 note). It fails closed: a keyword it doesn't know, or a keyword value it can't check (a
+// tuple `items`, a string `maxLength`), makes every input invalid, so a schema can't look stricter
+// than it is checked.
 
 type Schema = Record<string, unknown>;
 
 /** Keywords that describe a value but assert nothing about it. */
 const ANNOTATIONS = new Set(["$schema", "$id", "title", "description", "default", "examples"]);
-const ASSERTIONS = new Set([
-  "type",
-  "properties",
-  "required",
-  "additionalProperties",
-  "enum",
-  "const",
-  "items",
-  "minItems",
-  "maxItems",
-  "minLength",
-  "maxLength",
-  "minimum",
-  "maximum",
-]);
-
+const TYPES = new Set(["object", "array", "string", "number", "integer", "boolean", "null"]);
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
+const isCount = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
+const isType = (v: unknown) => typeof v === "string" && TYPES.has(v);
+
+/** The keywords it checks, each with the shape of value it can check. */
+const ASSERTIONS: Record<string, (v: unknown) => boolean> = {
+  type: (v) => isType(v) || (Array.isArray(v) && v.length > 0 && v.every(isType)),
+  properties: (v) => isRecord(v) && Object.values(v).every(isRecord),
+  required: (v) => Array.isArray(v) && v.every((r) => typeof r === "string"),
+  additionalProperties: (v) => typeof v === "boolean" || isRecord(v),
+  enum: Array.isArray,
+  const: () => true,
+  items: isRecord, // one schema for every item; tuples and `items: false` aren't supported
+  minItems: isCount,
+  maxItems: isCount,
+  minLength: isCount,
+  maxLength: isCount,
+  minimum: Number.isFinite,
+  maximum: Number.isFinite,
+};
 
 function typeOf(value: unknown): string {
   if (value === null) return "null";
@@ -52,10 +57,12 @@ function same(a: unknown, b: unknown): boolean {
 
 /** What is wrong with `value` under `schema`, as messages the model can act on; empty if valid. */
 export function validate(schema: Schema, value: unknown, path = "input"): string[] {
-  for (const key of Object.keys(schema)) {
-    if (!ANNOTATIONS.has(key) && !ASSERTIONS.has(key)) {
-      return [`${path}: the schema keyword "${key}" is not supported`];
-    }
+  for (const [key, v] of Object.entries(schema)) {
+    if (ANNOTATIONS.has(key)) continue;
+    const check = Object.hasOwn(ASSERTIONS, key) ? ASSERTIONS[key] : undefined;
+    if (!check) return [`${path}: the schema keyword "${key}" is not supported`];
+    if (!check(v))
+      return [`${path}: the schema keyword "${key}" has a value that can't be checked`];
   }
   const actual = typeOf(value);
   const { type } = schema;
