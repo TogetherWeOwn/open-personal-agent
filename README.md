@@ -126,8 +126,9 @@ prices for each and, for the owner, the Workers AI free allowance used today. Yo
 and the Cloudflare dashboard under **Billing** are the final word.
 
 Each user can start up to 30 chat turns a minute and spend up to $5 a day (UTC) at published
-prices. Every model call reserves its worst case before it starts, so replies running at once can't
-pass the limit. Models without a price on file are not counted; the Usage page lists their calls
+prices. Every model call reserves its worst case before it starts, with the input estimated from
+the message length, so replies running at once can pass the limit only by what that estimate
+missed. Models without a price on file are not counted; the Usage page lists their calls
 as unpriced. A priced call whose provider reports no token counts uses up its whole reservation,
 though Usage lists it as unpriced. Changing the limit in Settings and spending warnings are planned, not in this release.
 

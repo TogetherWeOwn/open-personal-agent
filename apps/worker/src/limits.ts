@@ -68,11 +68,17 @@ export class Limits {
     return true;
   }
 
+  /**
+   * Today's spend. A new UTC day starts from zero but keeps the reservations of calls still
+   * running, so a call that started before midnight is charged when it settles: to the new day,
+   * since nothing is left to limit on the old one.
+   */
   #spend(): Spend {
     const now = this.now();
     const day = now - (now % DAY);
     const spend = this.kv.get<Spend>("spend");
-    return spend?.day === day ? spend : { day, spentMicroUsd: 0, held: {} };
+    if (spend?.day === day) return spend;
+    return { day, spentMicroUsd: 0, held: spend?.held ?? {} };
   }
 
   /**
@@ -99,7 +105,7 @@ export class Limits {
    * Releases a turn's reservation and counts what the call cost. With no usage reported, the
    * whole reservation counts, so a provider that reports none can't spend past the cap. Only a
    * held reservation is charged, so settling twice (a recovery after the turn settled) charges
-   * once, and a call that started before midnight UTC is charged to its own day, not the next.
+   * once.
    */
   settle(
     turnId: string,

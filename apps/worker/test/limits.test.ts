@@ -121,11 +121,12 @@ describe("daily spend", () => {
     l.settle("t1", PROVIDER, MODEL, USAGE);
     l.reserve("late", PROVIDER, MODEL, 2000);
     clock.now += DAY;
-    // A call that started yesterday counts there, not against today's budget.
+    // A call still running at midnight keeps its hold and is charged to the new day.
     l.settle("late", PROVIDER, MODEL, USAGE);
+    expect(spent(store)).toBe(1000 * 2 + 500 * 8);
     l.reserve("t2", PROVIDER, MODEL, 2000);
     l.settle("t2", PROVIDER, MODEL, { ...USAGE, outputTokens: 0 });
-    expect(spent(store)).toBe(1000 * 2);
+    expect(spent(store)).toBe(1000 * 2 + 500 * 8 + 1000 * 2);
     const free = { maxOutputTokens: MAX_OUTPUT_TOKENS, reservedMicroUsd: 0 };
     expect(l.reserve("t3", "local", "llama", 2000)).toEqual(free);
   });

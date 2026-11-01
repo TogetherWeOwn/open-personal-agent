@@ -295,7 +295,8 @@ export function Onboarding() {
         </li>
         <li>
           To keep a runaway bill from happening, chat pauses for the day once you've spent $5 at
-          published prices. It starts again at midnight UTC.
+          published prices. It starts again at midnight UTC. Models without a published price, such
+          as local models, aren't counted toward this limit.
         </li>
         <li>Providers also set their own rate limits; a busy model may ask you to wait.</li>
       </ul>
