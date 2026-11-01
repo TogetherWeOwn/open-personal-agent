@@ -222,7 +222,8 @@ export function approvalRoutes(forward: ApprovalForward) {
       return c.json({ error: "expired" }, 409);
     }
 
-    if (needsStepUp(matched.items)) {
+    const stepUp = needsStepUp(matched.items);
+    if (stepUp) {
       const refused = await stepUpProblem(c, batchId, matched.items, body?.credential, now);
       if (refused) {
         await user.approvals.audit(batchId, "approval.step_up", "denied", { reason: refused });
@@ -241,7 +242,14 @@ export function approvalRoutes(forward: ApprovalForward) {
         now,
       );
     } catch {
-      return c.json({ error: "stale" }, 409); // decided, expired or cancelled meanwhile
+      // Decided, expired or cancelled meanwhile. The log already holds a verified step-up, so
+      // it says that step-up decided nothing (crypto review S4).
+      if (stepUp) {
+        await user.approvals
+          .audit(batchId, "approval.step_up", "denied", { reason: "stale", decided: false })
+          .catch(() => {});
+      }
+      return c.json({ error: "stale" }, 409);
     }
     // Standing grants come only from an untainted context (M3-02 AC2); the card offered only
     // "once" otherwise, and the store refuses a tainted one again.
