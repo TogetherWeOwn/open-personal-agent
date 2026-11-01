@@ -34,11 +34,11 @@ import {
   setConversationModel,
   settingsApi,
 } from "./models/settings-api";
+import { NavShell } from "./NavShell";
 import { hasNavigated, match, navigate, usePath } from "./router";
 import { NotFound, routes } from "./routes";
 import { SpendingBanners } from "./settings/SpendingBanners";
-import { ThemeToggle } from "./ThemeToggle";
-import { APP_NAME, Banner, Button, buttonClass, pageTitle } from "./ui";
+import { APP_NAME, Banner, Button, pageTitle, Sheet } from "./ui";
 
 const newId = () => crypto.randomUUID();
 
@@ -74,6 +74,8 @@ export function App({ transport }: AppProps) {
   const matched = match(routes, path);
   const Screen = matched ? matched.route.screen : NotFound;
   const chat = !Screen;
+  const [sheet, setSheet] = useState(false);
+  const [composing, setComposing] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (!chat) return;
@@ -353,6 +355,13 @@ export function App({ transport }: AppProps) {
   const open = (action: ChatAction) => {
     dispatch(action);
     setThreadOpen(true);
+    setSheet(false);
+    // Decide from the address bar, not this render's `chat`: RAC caches a ListBoxItem's
+    // `onPress` from an earlier render, so the closure can still say "chat" on /inbox.
+    // Reading the live path also makes a second call (selection change, then press) a no-op
+    // once the first has navigated, so Back isn't given a duplicate `/` entry.
+    const here = match(routes, window.location.pathname);
+    if (!here || here.route.screen) navigate("/");
   };
 
   // The route table serves /settings/models in-app, so stay client-side.
@@ -407,98 +416,96 @@ export function App({ transport }: AppProps) {
 
   const noModel = modelSettings !== null && !modelSettings.roles.chat && !pinned;
 
-  return (
+  const chats = (
     <>
+      <Button className="mb-2" onPress={() => open({ type: "new", id: newId() })}>
+        New chat
+      </Button>
+      <ConversationList
+        conversations={state.conversations}
+        activeId={active.id}
+        onOpen={(id) => open({ type: "select", id })}
+      />
+    </>
+  );
+
+  return (
+    <NavShell current={matched?.route.nav} sidebar={chats} hideTabs={composing} fit={chat}>
+      {/* Above every screen, and on a phone above both the Chats list and a thread. */}
+      <SpendingBanners />
       {/* The chat stays mounted while another screen shows, so drafts and streams survive. */}
-      <div hidden={!chat} className="flex h-dvh flex-col">
-        {/* Above both panes, so a phone's Chats list shows them as well as a thread. */}
-        {chat && <SpendingBanners />}
-        <div className="flex min-h-0 flex-1">
-          <header className="sr-only">
-            <h1 ref={heading} tabIndex={-1}>
-              {APP_NAME}
-            </h1>
-          </header>
-          <aside
-            aria-label="Conversations"
-            className={`${threadOpen ? "hidden" : "flex"} w-full flex-col border-border bg-surface-sunken sm:flex sm:w-72 sm:border-r`}
-          >
-            <div className="flex items-center justify-between gap-2 p-3">
-              <Heading level={2} className="px-1 text-lg font-semibold">
-                Chats
-              </Heading>
-              <ThemeToggle className={buttonClass("quiet")} />
-            </div>
-            <Button className="mx-3 mb-2" onPress={() => open({ type: "new", id: newId() })}>
-              New chat
+      <div hidden={!chat} className="flex min-h-0 flex-1">
+        <header className="sr-only">
+          <h1 ref={heading} tabIndex={-1}>
+            {APP_NAME}
+          </h1>
+        </header>
+        <aside
+          aria-label="Conversations"
+          className={`${threadOpen ? "hidden" : "flex"} w-full flex-col bg-surface-sunken px-3 sm:hidden`}
+        >
+          <Heading level={2} className="px-1 py-3 text-lg font-semibold">
+            Chats
+          </Heading>
+          {chats}
+        </aside>
+        <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
+          <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
+            <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
+              <span aria-hidden="true">← </span>Chats
             </Button>
-            <Link href="/usage" className={buttonClass("quiet", "mx-3 mb-2")}>
-              Usage
-            </Link>
-            <Link
-              href="/settings/models"
-              className={buttonClass("quiet", "mx-3 mb-2 flex items-center")}
+            <Button
+              variant="quiet"
+              className="max-sm:hidden lg:hidden"
+              onPress={() => setSheet(true)}
             >
-              Settings
-            </Link>
-            <ConversationList
-              conversations={state.conversations}
-              activeId={active.id}
-              onOpen={(id) => open({ type: "select", id })}
-            />
-          </aside>
-          <main className={`${threadOpen ? "flex" : "hidden"} min-w-0 flex-1 flex-col sm:flex`}>
-            <header className="flex min-h-14 items-center gap-2 border-b border-border px-3">
-              <Button variant="quiet" className="sm:hidden" onPress={() => setThreadOpen(false)}>
-                <span aria-hidden="true">← </span>Chats
-              </Button>
-              <Heading level={2} className="truncate px-1 font-semibold">
-                {active.title}
-              </Heading>
-            </header>
-            {!healthy && (
-              <Banner tone="danger" alert>
-                Your assistant's server isn't responding properly, so replies may fail.
-              </Banner>
-            )}
-            <Thread key={active.id} conversation={active} />
-            {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
-            <Composer
-              text={drafts[active.id] ?? ""}
-              setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
-              busy={state.pending !== null}
-              onSend={send}
-              onStop={() => transport.cancel()}
-              onNoModel={noModel ? goModels : undefined}
-              chip={
-                modelSettings && (
-                  <ModelChip
-                    settings={modelSettings}
-                    pinned={pinned}
-                    onSwitch={switchModel}
-                    starting={starting}
-                  />
-                )
-              }
-              config={config}
-              files={pendingFiles[active.id] ?? []}
-              onPick={pick}
-              onRemove={removeFile}
-              onRetry={retryFile}
-            />
-          </main>
-        </div>
+              Chats
+            </Button>
+            <Heading level={2} className="truncate px-1 font-semibold">
+              {active.title}
+            </Heading>
+          </header>
+          {!healthy && (
+            <Banner tone="danger" alert>
+              Your assistant's server isn't responding properly, so replies may fail.
+            </Banner>
+          )}
+          <Thread key={active.id} conversation={active} />
+          {limit?.conversationId === active.id && <LimitNotice limit={limit} />}
+          <Composer
+            onFocusChange={setComposing}
+            text={drafts[active.id] ?? ""}
+            setText={(text) => setDrafts((d) => ({ ...d, [active.id]: text }))}
+            busy={state.pending !== null}
+            onSend={send}
+            onStop={() => transport.cancel()}
+            onNoModel={noModel ? goModels : undefined}
+            chip={
+              modelSettings && (
+                <ModelChip
+                  settings={modelSettings}
+                  pinned={pinned}
+                  onSwitch={switchModel}
+                  starting={starting}
+                />
+              )
+            }
+            config={config}
+            files={pendingFiles[active.id] ?? []}
+            onPick={pick}
+            onRemove={removeFile}
+            onRetry={retryFile}
+          />
+        </main>
+        <Sheet title="Chats" isOpen={sheet} onOpenChange={setSheet}>
+          <div className="flex min-h-0 flex-col">{chats}</div>
+        </Sheet>
       </div>
-      {!chat && (
-        <>
-          <SpendingBanners />
-          <Screen params={matched?.params ?? {}} />
-        </>
-      )}
+      {!chat && <Screen params={matched?.params ?? {}} />}
       <div role="status" className="sr-only" hidden={!chat}>
         {state.announcement}
       </div>
-    </>
+    </NavShell>
   );
 }
 

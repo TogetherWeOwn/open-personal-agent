@@ -2,7 +2,7 @@
 // The trust gate's pure parts. The gate itself runs against D1 and SQLite in the memory contract
 // (test/contract/storage.ts).
 import { describe, expect, it } from "vitest";
-import { ftsQuery, redactSecrets, trustOf } from "../src/memory";
+import { estimateTokens, ftsQuery, fuseRanks, redactSecrets, trustOf } from "../src/memory";
 
 describe("trustOf", () => {
   it("takes trust from who is writing, and a tainted context from nobody", () => {
@@ -59,5 +59,20 @@ describe("ftsQuery", () => {
     expect(ftsQuery("re\u0301sume\u0301")).toBe('"résumé"*');
     expect(ftsQuery(" - ")).toBeNull();
     expect(ftsQuery("a ".repeat(40))?.split(" ")).toHaveLength(16);
+  });
+});
+
+describe("recall math", () => {
+  it("weights four characters to the token, at least one", () => {
+    expect([estimateTokens(""), estimateTokens("abcd"), estimateTokens("abcde")]).toEqual([
+      1, 1, 2,
+    ]);
+  });
+
+  it("fuses both orders with 1/(k + rank), ranks 1-based", () => {
+    const scores = fuseRanks(["a", "b"], ["b", "a"], 60);
+    expect(scores.get("a")).toBeCloseTo(1 / 61 + 1 / 62, 10);
+    expect(scores.get("b")).toBeCloseTo(1 / 62 + 1 / 61, 10);
+    expect(fuseRanks(["a"], [], 60).get("a")).toBeCloseTo(1 / 61, 10);
   });
 });
