@@ -169,9 +169,12 @@ describe("model settings", () => {
     const MODEL_FETCH = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       Response.json({ error: { message: "refused" } }, { status: 403 }),
     );
+    const ledger = async () => (await dump("usage")).split("api.example.com").length;
+    const before = await ledger();
     await call("/model/test", { method: "POST" }, { MODEL_FETCH });
     expect(MODEL_FETCH.mock.calls[0]?.[0]).toBe("https://api.example.com/v1/chat/completions");
     expect(global).not.toHaveBeenCalled();
+    expect(await ledger()).toBe(before); // a rejected test ran no model, so it isn't a call
   });
 
   it("never returns a provider error that echoes part of the key", async () => {
