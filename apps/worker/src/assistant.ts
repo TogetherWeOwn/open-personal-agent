@@ -5,6 +5,7 @@
 import type { HarnessEvent, TurnLimit } from "@opa/core";
 import { createRepository, isId, scopeForAssistant, type TurnRecord } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
+import { type ChatModelError, resolveChatModel } from "@opa/server/chat-model";
 import {
   Agent,
   type Connection,
@@ -12,7 +13,6 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
-import { type ChatModelError, resolveChatModel } from "./chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import { Limits } from "./limits";

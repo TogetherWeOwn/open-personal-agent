@@ -4,8 +4,8 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import { STARTER_MODEL } from "@opa/providers";
+import { app } from "@opa/server/app";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { app } from "../src/app";
 import { compose, type WorkerEnv } from "../src/compose";
 import type { Env } from "../src/env";
 import { ORIGIN, sessionHeaders } from "./helpers/app";

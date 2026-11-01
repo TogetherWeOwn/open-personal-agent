@@ -4,7 +4,7 @@ import { systemStore } from "@opa/db/system";
 import { log } from "@opa/log";
 import { Hono } from "hono";
 import { chatRoutes } from "./chat";
-import type { AppEnv } from "./env";
+import type { AppEnv, AppPorts } from "./env";
 import { checkHealth, setupRequired } from "./health";
 import { settings } from "./model-settings";
 import { publicRateLimit } from "./rate-limit";
@@ -73,10 +73,12 @@ shared.get("/api/me", async (c) => {
 });
 
 /**
- * The app, with `extra` mounted at `/api` behind the same guards. The Worker passes the routes
- * that need its Durable Objects (worker-app.ts); apps/node, which can't load them, passes none.
+ * The app over a root's ports `P`, with `extra` mounted at `/api` behind the same guards. The
+ * Worker passes the routes that need its Durable Objects (apps/worker/src/worker-app.ts);
+ * apps/node, which has none, passes nothing. The ports arrive with each request, as Workers pass
+ * the env to `fetch`.
  */
-export function createApp(extra?: Hono<AppEnv>) {
+export function createApp<P extends AppPorts = AppPorts>(extra?: Hono<AppEnv<P>>) {
   const app = new Hono<AppEnv>();
   // Workers invocation logs are off (wrangler.jsonc), so this is the request log. It records the
   // route pattern, never the URL: a query string can carry a secret (ADR 0010 D11).
