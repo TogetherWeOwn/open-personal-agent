@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useLayoutEffect, useRef } from "react";
+import { Link } from "react-aria-components";
 import type { Conversation, Message } from "./state";
 
 /**
@@ -64,9 +65,18 @@ function MessageView({ message: m }: { message: Message }) {
       {m.status === "interrupted" && (
         <p className="mt-1 text-sm text-text-muted">Stopped before it finished.</p>
       )}
-      {m.status === "error" && (
-        <p className="mt-1 text-sm text-danger">This reply failed. Try sending it again.</p>
-      )}
+      {m.status === "error" &&
+        (m.failure === "vault_reset_required" ? (
+          <p className="mt-1 text-sm text-danger">
+            Your saved keys can't be opened.{" "}
+            <Link href="/settings/models" className="font-medium underline underline-offset-2">
+              Reset them in Settings
+            </Link>
+            , then enter your key again.
+          </p>
+        ) : (
+          <p className="mt-1 text-sm text-danger">This reply failed. Try sending it again.</p>
+        ))}
     </div>
   );
 }
