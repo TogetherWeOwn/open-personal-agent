@@ -46,12 +46,16 @@ export async function putChallenge(
   userId: string | null,
 ): Promise<string> {
   const id = randomId();
-  await db
-    .prepare(
-      "INSERT INTO webauthn_challenges (id_hash, kind, challenge, user_id, expires_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(await sha256(id), kind, challenge, userId, Date.now() + CHALLENGE_TTL_MS)
-    .run();
+  const now = Date.now();
+  // Abandoned ceremonies are purged here, so the table holds at most five minutes of them.
+  await db.batch([
+    db.prepare("DELETE FROM webauthn_challenges WHERE expires_at <= ?").bind(now),
+    db
+      .prepare(
+        "INSERT INTO webauthn_challenges (id_hash, kind, challenge, user_id, expires_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(await sha256(id), kind, challenge, userId, now + CHALLENGE_TTL_MS),
+  ]);
   return id;
 }
 
