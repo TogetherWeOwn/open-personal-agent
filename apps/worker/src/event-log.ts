@@ -10,6 +10,8 @@ export type Sql = Pick<SqlStorage, "exec">;
 
 /** Far beyond any turn the limits allow (≤8 model calls of ≤4096 output tokens, soon M3-03c ④). */
 const REPLAY_LIMIT = 100_000;
+/** How long an ended task's progress counter is kept, to refuse what a late replay sends. */
+const ENDED_KEEP_MS = 7 * 86_400_000;
 
 export class EventLog {
   constructor(private readonly sql: Sql) {
@@ -24,6 +26,39 @@ export class EventLog {
       conversation_id TEXT PRIMARY KEY,
       last_seq INTEGER NOT NULL
     )`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS task_progress (
+      task_id TEXT PRIMARY KEY,
+      last_seq INTEGER NOT NULL,
+      ended_at INTEGER
+    )`);
+  }
+
+  /**
+   * Whether a promoted turn's task event is new, recording it if so (M3-12 AC8). A Workflow
+   * replay sends its events again under the same per-task counter; a task whose turn has ended
+   * gets nothing more into the log.
+   */
+  admit(taskId: string, seq: number): boolean {
+    const [row] = this.sql
+      .exec<{ last_seq: number; ended_at: number | null }>(
+        "SELECT last_seq, ended_at FROM task_progress WHERE task_id = ?1",
+        taskId,
+      )
+      .toArray();
+    if (row && (row.ended_at !== null || seq <= row.last_seq)) return false;
+    this.sql.exec(
+      `INSERT INTO task_progress (task_id, last_seq) VALUES (?1, ?2)
+       ON CONFLICT(task_id) DO UPDATE SET last_seq = ?2`,
+      taskId,
+      seq,
+    );
+    return true;
+  }
+
+  /** Closes a task's events at its turn's end; ended tasks' counters go after a week. */
+  endTask(taskId: string, now: number): void {
+    this.sql.exec("UPDATE task_progress SET ended_at = ?2 WHERE task_id = ?1", taskId, now);
+    this.sql.exec("DELETE FROM task_progress WHERE ended_at < ?1", now - ENDED_KEEP_MS);
   }
 
   /**

@@ -374,13 +374,12 @@ export class Assistant extends Agent<Bindings> {
       );
     }
     if (progress.inTurn) {
-      const key = `progress:${progress.taskId}`;
-      if (progress.seq <= (this.ctx.storage.kv.get<number>(key) ?? 0)) return;
+      if (!this.#events.admit(progress.taskId, progress.seq)) return;
       const { conversationId, turnId, type } = progress;
       this.#send(conversationId, turnId, type as HarnessEvent["type"], progress.payload);
-      if (!TURN_ENDS.has(type)) return void this.ctx.storage.kv.put(key, progress.seq);
+      if (!TURN_ENDS.has(type)) return;
       // The task settled the turn in D1 before it sent the end: its frames go, as a turn's do.
-      this.ctx.storage.kv.delete(key);
+      this.#events.endTask(progress.taskId, Date.now());
       this.#events.trim(conversationId, turnId);
       if (this.ctx.storage.kv.get(PROMOTED_KEY(conversationId)) === progress.taskId) {
         this.ctx.storage.kv.delete(PROMOTED_KEY(conversationId));
