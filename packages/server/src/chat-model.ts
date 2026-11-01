@@ -5,10 +5,12 @@ import type { ModelProvider } from "@opa/core";
 import { createRepository, type UserScope } from "@opa/db/repository";
 import { billingProviderId, estimate, findPrice } from "@opa/pricing";
 import {
+  createAnthropicMessagesProvider,
   createOpenAIChatProvider,
   createOpenAIResponsesProvider,
   createWorkersAIProvider,
   credentialBinding,
+  usesAnthropicMessages,
   usesOpenAIResponses,
   WORKERS_AI_PROVIDER_ID,
 } from "@opa/providers";
@@ -126,10 +128,13 @@ export async function resolveChatModel(
   let provider: ModelProvider;
   try {
     const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(env), ...fetch };
-    // The OpenAI preset talks Responses with the same key and binding (M3-04 AC3).
+    // The OpenAI and Anthropic presets have their own APIs, with the same key and binding
+    // (M3-04 AC3, M3-05 AC3).
     provider = usesOpenAIResponses(providerId, baseUrl)
       ? createOpenAIResponsesProvider(options)
-      : createOpenAIChatProvider(options);
+      : usesAnthropicMessages(providerId, baseUrl)
+        ? createAnthropicMessagesProvider(options)
+        : createOpenAIChatProvider(options);
   } catch {
     // Saved as plain HTTP while private hosts were allowed, and they no longer are.
     return { error: "invalid_base_url" };
