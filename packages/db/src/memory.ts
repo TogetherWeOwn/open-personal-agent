@@ -327,14 +327,16 @@ export function memoryService(db: Db, userId: string) {
           .where(and(mine(id), eq(memories.status, "active")))
           .limit(1)
       )[0],
-    /** Current memories matching every word of `text`, best match first (BM25). */
+    /** Current memories matching every word of `text`, best match first (BM25), at most 100. */
     search: async (text: string, limit = 20): Promise<Memory[]> => {
       const query = ftsQuery(text);
       if (!query) return [];
+      // SQLite reads a negative LIMIT as none.
+      const cap = Math.min(Math.max(Math.trunc(limit) || 1, 1), 100);
       const ids = await db.all<{ id: string }>(sql`
         SELECT m.id FROM memories_fts JOIN memories m ON m.n = memories_fts.rowid
         WHERE memories_fts MATCH ${query} AND m.user_id = ${userId} AND m.status = 'active'
-        ORDER BY bm25(memories_fts), m.n DESC LIMIT ${limit}`);
+        ORDER BY bm25(memories_fts), m.n DESC LIMIT ${cap}`);
       const rows = new Map((await active(ids.map((r) => r.id))).map((r) => [r.id, r]));
       return ids.flatMap(({ id }) => rows.get(id) ?? []);
     },
