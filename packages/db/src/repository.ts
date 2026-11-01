@@ -541,6 +541,23 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(meters)
             .where(and(eq(meters.meter, meter), gte(meters.day, since - (since % 86_400_000))))
         )[0]?.n ?? 0,
+      /** Sets a gauge meter's UTC day to the latest reading (M3-18 AC2): one upsert, no read. */
+      setMeter: async (meter: "d1_bytes", amount: number, at: number) => {
+        await db
+          .insert(meters)
+          .values({ meter, day: at - (at % 86_400_000), amount })
+          .onConflictDoUpdate({ target: [meters.meter, meters.day], set: { amount } });
+      },
+      /** A gauge meter's latest recorded reading, or null before the first. */
+      latestMeter: async (meter: "d1_bytes") =>
+        (
+          await db
+            .select({ amount: meters.amount })
+            .from(meters)
+            .where(eq(meters.meter, meter))
+            .orderBy(desc(meters.day))
+            .limit(1)
+        )[0]?.amount ?? null,
       /**
        * The database's size in bytes (M3-16 AC3): D1 reports it with every result as
        * `meta.size_after`; Node's SQLite doesn't, so there it is pages × page size.
