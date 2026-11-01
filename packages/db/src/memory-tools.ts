@@ -181,17 +181,20 @@ function recallTool(service: MemoryToolService, _context: () => MemoryToolContex
           // Only our own sentence joins the context.
           context: { kind: "system" },
         };
+      // The id travels with each row so the model can forget what recall returned.
       const lines = result.memories.map(
-        (m, i) => `${i + 1}. ${m.text.replace(/\s+/g, " ").trim()}`,
+        (m, i) => `${i + 1}. [id: ${m.id}] ${m.text.replace(/\s+/g, " ").trim()}`,
       );
       // A retrieved row below user trust taints the turn (M3-02 AC3); the host reads `trust`.
+      // Retrieved rows always join as memory provenance, never as system text, so a stored
+      // row can never gain system-level authority in the model's next turn.
       const trust = result.memories
         .map((m) => m.trust)
         .reduce((a, b) => (TRUST_ORDER.indexOf(a) <= TRUST_ORDER.indexOf(b) ? a : b));
       return {
         ok: true,
         content: `What I remember about "${query}":\n\n${lines.join("\n")}`,
-        context: result.tainted ? { kind: "memory", trust, label: "memory" } : { kind: "system" },
+        context: { kind: "memory", trust, label: "memory" },
       };
     },
   };
@@ -234,14 +237,17 @@ function forgetTool(service: MemoryToolService, context: () => MemoryToolContext
       ];
       if (ids.length === 0) return failed("Tell me which memory to forget, by its id.");
       const ctx = context();
-      const outcome = await service.forget(actorOf(ctx), ids.slice(0, 25), ctx.source);
+      // The service reports every removed row (anchors plus earlier versions and linked
+      // proposals); the message counts what was asked for, not what the delete swept up.
+      const requested = ids.slice(0, 25);
+      const outcome = await service.forget(actorOf(ctx), requested, ctx.source);
       if (outcome.status === "deleted")
         return {
           ok: true,
           content:
-            outcome.ids.length === 1
+            requested.length === 1
               ? "Forgotten — that memory and its earlier versions are gone."
-              : `Forgotten — ${outcome.ids.length} rows and their earlier versions are gone.`,
+              : `Forgotten — ${requested.length} rows and their earlier versions are gone.`,
           context: { kind: "system" },
         };
       if (outcome.status === "proposed") return proposed(ctx.tainted);

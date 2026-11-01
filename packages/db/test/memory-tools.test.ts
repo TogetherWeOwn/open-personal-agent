@@ -156,18 +156,21 @@ describe("recall (M3-14 AC4)", () => {
     });
     const out = await byName(service, untainted).get("recall")?.execute({ query: "eat" }, signal());
     expect(out?.ok).toBe(true);
-    expect(out?.content).toContain("1. I'm vegetarian");
-    expect(out?.content).toContain("2. a page claims I eat fish");
+    expect(out?.content).toContain("1. [id: m1] I'm vegetarian");
+    expect(out?.content).toContain("2. [id: m2] a page claims I eat fish");
     expect(out?.context).toEqual({ kind: "memory", trust: "inferred", label: "memory" });
   });
 
-  it("leaves the turn alone for user-trusted rows and empty results", async () => {
+  it("labels user-trusted rows as memory provenance and leaves empty results alone", async () => {
     const mine = stubService({
       recall: async () => ({ memories: [row()], tainted: false, tokens: 4 }),
     });
-    expect(
-      (await byName(mine, untainted).get("recall")?.execute({ query: "veg" }, signal()))?.context,
-    ).toEqual({ kind: "system" });
+    const recalled = await byName(mine, untainted)
+      .get("recall")
+      ?.execute({ query: "veg" }, signal());
+    // User-trusted rows stay untainted but never join the context as system text.
+    expect(recalled?.context).toEqual({ kind: "memory", trust: "user", label: "memory" });
+    expect(recalled?.content).toContain("[id: m1]");
     const none = stubService();
     const out = await byName(none, untainted).get("recall")?.execute({ query: "veg" }, signal());
     expect(out).toMatchObject({ ok: true, context: { kind: "system" } });
@@ -188,7 +191,9 @@ describe("forget (M3-14 AC5)", () => {
     const out = await tools.get("forget")?.execute({ ids: ["m1", "m1"] }, signal());
     expect(ids).toEqual([["m1"]]);
     expect(out).toMatchObject({ ok: true, context: { kind: "system" } });
-    expect(out?.content).toContain("Forgotten");
+    // The service reports every removed row (m1 plus its earlier version m0); the message
+    // counts what the user asked to forget: one memory.
+    expect(out?.content).toContain("that memory and its earlier versions are gone");
 
     const proposed = stubService({
       forget: (async () => ({
