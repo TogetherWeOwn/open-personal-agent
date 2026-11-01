@@ -465,6 +465,62 @@ describe("chat transport", () => {
     expect(b.events.length).toBe(before);
   });
 
+  it("holds live frames from a resuming tab until its replay is sent, so they stay in order", async () => {
+    const { browser, owner } = await claim();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted([], gate));
+    const a = await openTab(browser);
+    // A tab that reconnects with `?resume` and hasn't sent its resume yet: a live frame now
+    // would reach it ahead of the ones it missed.
+    const b = await openTab(browser, "/api/chat?resume=1");
+    a.send?.("conv-9", "Tell me a story");
+    await a.until?.("message.delta");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(b.events).toEqual([]);
+    const turnId = a.events[0]?.turnId;
+    b.ws?.send(JSON.stringify({ type: "resume", conversationId: "conv-9", turnId, afterSeq: 0 }));
+    await vi.waitFor(() => expect(b.events).toEqual(a.events), SOCKET_WAIT);
+    // Its replay sent, it is live again.
+    release();
+    await b.until?.("turn.completed");
+    expect(b.events).toEqual(a.events);
+    const seqs = b.events.map((e) => e.seq);
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+  });
+
+  it("sends live frames again to a tab that said resume but sent something else", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    const b = await openTab(browser, "/api/chat?resume=1");
+    b.send?.("conv-10", "Hi!");
+    await b.until?.("turn.completed");
+  });
+
+  it("keeps a turn's frames for replay when D1 can't settle it", async () => {
+    const { browser, owner } = await claim();
+    await useModel(owner, scripted());
+    // D1 refuses the reply's final status, both at the turn's end and in the fallback.
+    await db.exec(
+      "CREATE TRIGGER no_settle BEFORE UPDATE OF status ON messages WHEN NEW.status IN ('complete', 'error') BEGIN SELECT RAISE(ABORT, 'D1 is down'); END;",
+    );
+    try {
+      const a = await openTab(browser);
+      a.send?.("conv-11", "Hi!");
+      await a.until?.("turn.failed");
+      const turnId = a.events[0]?.turnId;
+      // A tab that missed it all still learns how the turn ended, from the log.
+      const b = await openTab(browser, "/api/chat?resume=1");
+      b.ws?.send(
+        JSON.stringify({ type: "resume", conversationId: "conv-11", turnId, afterSeq: 0 }),
+      );
+      await b.until?.("turn.failed");
+      expect(b.events.map((e) => e.seq)).toEqual(a.events.map((e) => e.seq));
+    } finally {
+      await db.exec("DROP TRIGGER no_settle;");
+    }
+  });
+
   it("answers no resume from a session that has ended", async () => {
     const { browser, owner, key } = await claim();
     const other = new Browser();

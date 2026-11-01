@@ -346,11 +346,22 @@ export class Assistant extends Agent<Bindings> {
   }
 
   override onConnect(connection: Connection, ctx: ConnectionContext): void {
-    connection.setState({ sessionId: ctx.request.headers.get(SESSION_HEADER) });
+    // A reconnecting tab (`?resume`) gets no live frames until its `resume` has replayed the log:
+    // a live frame arriving first would raise its applied seq past the frames it missed, which
+    // its dedupe would then drop. The log holds every frame sent meanwhile, so none is lost.
+    const replaying = new URL(ctx.request.url).searchParams.has("resume");
+    connection.setState({ sessionId: ctx.request.headers.get(SESSION_HEADER), replaying });
+  }
+
+  /** Lets live frames reach a tab again once its replay is sent, or it isn't resuming after all. */
+  #endReplay(connection: Connection): void {
+    const state = (connection.state ?? {}) as { sessionId?: string | null; replaying?: boolean };
+    if (state.replaying) connection.setState({ ...state, replaying: false });
   }
 
   override onMessage(connection: Connection, message: WSMessage): void {
     const msg = parse(message);
+    if (msg?.type !== "resume") this.#endReplay(connection);
     // A tab whose session is still live may stop the running turn.
     if (msg?.type === "turn.cancel")
       void this.#sessionLive(connection).then((ok) => ok && this.#running?.abort());
@@ -358,16 +369,20 @@ export class Assistant extends Agent<Bindings> {
     // session recheck, and only from this user's own log — the DO is named from the session, so
     // a conversation ID from the client can't reach another user's events.
     if (msg?.type === "resume") {
-      void this.#sessionLive(connection).then((ok) => {
-        if (!ok) return;
-        try {
-          for (const frame of this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq)) {
-            connection.send(frame);
+      void this.#sessionLive(connection)
+        .then((ok) => {
+          if (!ok) return;
+          try {
+            for (const frame of this.#events.replay(msg.conversationId, msg.turnId, msg.afterSeq)) {
+              connection.send(frame);
+            }
+          } catch {
+            // The tab went away mid-replay; it will resume again on its next connect.
           }
-        } catch {
-          // The tab went away mid-replay; it will resume again on its next connect.
-        }
-      });
+          // Synchronous since the replay read the log, so no live frame can fall in between.
+          this.#endReplay(connection);
+        })
+        .catch(() => connection.close(1011, "session check failed"));
     }
     if (msg?.type !== "chat.send") return;
     const text = msg.text.trim();
@@ -845,10 +860,13 @@ export class Assistant extends Agent<Bindings> {
     const repo = this.#repo;
     const stored = (await repo.chat.listMessages(saved.conversationId).catch(() => null)) ?? [];
     const reply = stored.find((m) => m.id === saved.replyId)?.content ?? "";
-    await repo.chat.settle({ replyId: saved.replyId, reply }, "interrupted").catch(() => {});
+    const settled = await repo.chat.settle({ replyId: saved.replyId, reply }, "interrupted").then(
+      () => true,
+      () => false,
+    );
     await repo.turns.remove(saved.turnId).catch(() => {});
     this.#emitter(saved.conversationId, saved.turnId)("turn.interrupted", { message: "Retry?" });
-    this.#events.trim(saved.conversationId, saved.turnId);
+    if (settled) this.#events.trim(saved.conversationId, saved.turnId);
   }
 
   /**
@@ -965,11 +983,16 @@ export class Assistant extends Agent<Bindings> {
       persisted = true;
     };
     const failSave = async () => {
-      await chat.settle({ replyId, reply: cp.reply }, "error").catch(() => {});
+      const settled = await chat.settle({ replyId, reply: cp.reply }, "error").then(
+        () => true,
+        () => false,
+      );
       this.#send(conversationId, turnId, "turn.failed", {
         message: "The reply couldn't be saved.",
       });
-      this.#events.trim(conversationId, turnId);
+      // Only a turn D1 holds leaves the log; otherwise its frames, this failure included, are
+      // all a reconnecting tab can learn it from.
+      if (settled) this.#events.trim(conversationId, turnId);
     };
 
     const gen = runTurn(host, run.history, state, signal);
@@ -1196,7 +1219,10 @@ export class Assistant extends Agent<Bindings> {
     const frame = this.#events.append(sessionId, turnId, (seq) =>
       JSON.stringify({ v: 1, seq, sessionId, turnId, type, payload }),
     );
-    this.broadcast(frame);
+    const replaying = [...this.getConnections()].flatMap((tab) =>
+      (tab.state as { replaying?: boolean } | null)?.replaying ? [tab.id] : [],
+    );
+    this.broadcast(frame, replaying);
   }
 
   #emitter(sessionId: string, turnId: string): Emit {
