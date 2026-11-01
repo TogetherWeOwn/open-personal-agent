@@ -14,6 +14,7 @@ import {
   type ModelMessage,
   type ModelProvider,
   type ModelUsage,
+  redactSecrets,
   TaskCancelledError,
   type TaskContext,
   TaskLimitError,
@@ -32,7 +33,7 @@ import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
-import { type AssistantTaskRpc, createWorkflowTaskContext, redactSecrets } from "./task-context";
+import { type AssistantTaskRpc, createWorkflowTaskContext } from "./task-context";
 
 /** Advisory only: identity comes from the instance's task row, never from these params (AC9). */
 export interface TaskParams {
