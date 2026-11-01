@@ -17,6 +17,7 @@
     "build": "pnpm --filter @opa/web build",
     "dev": "pnpm build && node scripts/dev.mjs",
     "dev:web": "pnpm --filter @opa/web dev",
+    "start:node": "pnpm --filter @opa/node start",
     "deploy": "pnpm build && wrangler deploy && wrangler d1 migrations apply DB --remote",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "teardown:cloudflare": "node scripts/teardown-cloudflare.mjs",
@@ -30,6 +31,7 @@
     "test:unit": "vitest run --project unit",
     "test:worker": "vitest run --project worker",
     "test:harness": "vitest run --project harness",
+    "test:node": "vitest run --project node",
     "check": "node scripts/check-boundaries.mjs && node scripts/check-builder-independence.mjs && node scripts/check-supply-chain.mjs && node scripts/generate-verify-guide.mjs --check",
     "notices": "node scripts/generate-notices.mjs",
     "dev:mock-model": "node scripts/mock-openai.mjs"
