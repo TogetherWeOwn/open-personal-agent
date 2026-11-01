@@ -243,7 +243,9 @@ test("adds a standing instruction to About you", async ({ page }) => {
   await page.goto("/memory");
   await page.getByLabel("Add a note").fill("Keep replies short");
   await page.getByText("Make it a standing instruction").click();
-  await expect(page.getByRole("checkbox", { name: "Make it a standing instruction" })).toBeChecked();
+  await expect(
+    page.getByRole("checkbox", { name: "Make it a standing instruction" }),
+  ).toBeChecked();
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await expect(page.getByRole("region", { name: "About you" })).toContainText("Keep replies short");
 });
