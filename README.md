@@ -18,15 +18,16 @@ pnpm dev                         # http://localhost:8787
 and `GET /api/health` without a Cloudflare account. It serves the web app as built, so for live
 reload of web changes run `pnpm dev:web` alongside it (Vite on port 5173, proxying `/api`).
 
-| Command               | What it does                                                       |
-| --------------------- | ------------------------------------------------------------------ |
-| `pnpm test`           | Vitest: unit tests in Node and Worker tests in the Workers runtime |
-| `pnpm lint`           | Biome lint and format check                                        |
-| `pnpm typecheck`      | `tsc --noEmit` in every package                                    |
-| `pnpm deploy:dry-run` | Builds and bundles the Worker without deploying it                 |
-| `pnpm test:harness`   | Boots the dry-run bundle with `createTestHarness` (run it after)   |
-| `pnpm check`          | Ports rule, dependency guard, builder independence, supply chain   |
-| `pnpm notices`        | Writes `dist/THIRD_PARTY_NOTICES.md` for production dependencies   |
+| Command                           | What it does                                                              |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| `pnpm test`                       | Vitest: unit tests in Node and Worker tests in the Workers runtime        |
+| `pnpm lint`                       | Biome lint and format check                                               |
+| `pnpm typecheck`                  | `tsc --noEmit` in every package                                           |
+| `pnpm deploy:dry-run`             | Builds and bundles the Worker without deploying it                        |
+| `pnpm test:harness`               | Boots the dry-run bundle with `createTestHarness` (run it after)          |
+| `pnpm check`                      | Ports rule, dependency guard, builder independence, supply chain          |
+| `pnpm notices`                    | Writes `dist/THIRD_PARTY_NOTICES.md` for production dependencies          |
+| `pnpm --filter @opa/web test:e2e` | Playwright: axe, keyboard send and screenshot baselines (`visual` CI job) |
 
 `GET /api/health` reports the schema version, each binding (D1, R2, the Durable Object, the
 Workflow, Workers AI) and whether each secret is set, as booleans. While the database is
