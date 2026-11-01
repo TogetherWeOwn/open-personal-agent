@@ -5,9 +5,14 @@
 import { createRepository } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import { allowanceMeters } from "@opa/server/allowances";
-import { expireApprovals, reconcile, reconcilerParts } from "@opa/server/reconciler";
+import {
+  expireApprovals,
+  reconcile,
+  reconcilerParts,
+  recordDatabase,
+} from "@opa/server/reconciler";
 import { describe, expect, it } from "vitest";
-import { count, db, env, freshDatabase } from "./helpers/app";
+import { claim, count, db, env, freshDatabase } from "./helpers/app";
 
 freshDatabase();
 
@@ -164,6 +169,13 @@ describe("the D1 size reading", () => {
       .prepare("SELECT day, amount FROM meters WHERE meter = 'd1_bytes' ORDER BY day")
       .all<{ day: number; amount: number }>()
       .then((r) => r.results);
+  /** The test database, with the size probe's statement (`SELECT 1`) replaced. */
+  const probe = (replace: (statement: D1PreparedStatement) => object): D1Database =>
+    Object.assign(Object.create(env.DB), {
+      prepare: (sql: string) =>
+        sql === "SELECT 1" ? replace(env.DB.prepare(sql)) : env.DB.prepare(sql),
+      batch: env.DB.batch.bind(env.DB),
+    });
   const d1Meters = async (now: number) =>
     (await allowanceMeters(env, now))
       .filter((m) => m.id.startsWith("d1_"))
@@ -177,7 +189,7 @@ describe("the D1 size reading", () => {
       ["d1_storage", live],
     ]);
 
-    await Promise.all(reconcile(env, NOW, { database: reconcilerParts.database }));
+    await Promise.all(reconcile(env, NOW, { database: recordDatabase }));
     const today = NOW - (NOW % DAY);
     expect(await readings()).toEqual([{ day: today, amount: live }]);
 
@@ -194,6 +206,43 @@ describe("the D1 size reading", () => {
     expect(await d1Meters(NOW)).toEqual([
       ["d1_cap", 5_678],
       ["d1_storage", 5_678],
+    ]);
+  });
+
+  it("warns on the reading taken in the same tick, not the last one", async () => {
+    const { browser } = await claim();
+    // The last tick read past 70% of both D1 meters; this one reads the real, small database.
+    await createRepository(env).deployment.setMeter("d1_bytes", 7_500_000_000, NOW);
+    // A slow probe: were the warning not to wait for it, it would read the last tick's size.
+    const DB = probe((statement) => ({
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return statement.run();
+      },
+    }));
+    await Promise.all(reconcile({ ...env, DB }, NOW));
+    const live = await createRepository(env).deployment.databaseBytes();
+    expect(await readings()).toEqual([{ day: NOW - (NOW % DAY), amount: live }]);
+    const { allowanceWarnings } = await (await browser.req("/api/settings/spending")).json<{
+      allowanceWarnings: { id: string }[];
+    }>();
+    expect(allowanceWarnings.filter((w) => w.id.startsWith("d1_"))).toEqual([]);
+  });
+
+  it("still warns, on the last recorded size, when the reading fails", async () => {
+    const { browser } = await claim();
+    await createRepository(env).deployment.setMeter("d1_bytes", 7_500_000_000, NOW);
+    const DB = probe(() => {
+      throw new Error("probe down");
+    });
+    await Promise.all(reconcile({ ...env, DB }, NOW, { allowances: reconcilerParts.allowances }));
+    expect(await readings()).toEqual([{ day: NOW - (NOW % DAY), amount: 7_500_000_000 }]);
+    const { allowanceWarnings } = await (await browser.req("/api/settings/spending")).json<{
+      allowanceWarnings: { id: string }[];
+    }>();
+    expect(allowanceWarnings.filter((w) => w.id.startsWith("d1_"))).toEqual([
+      { id: "d1_cap", percent: 75 },
+      { id: "d1_storage", percent: 150 },
     ]);
   });
 });
@@ -217,11 +266,10 @@ describe("one reconciler tick", () => {
     database: await count("meters", "meter = 'd1_bytes'"),
   });
 
-  it("runs rotation, the D1 size reading, the allowance warning, the export sweep, retention and approval expiry", async () => {
+  it("runs rotation, the D1 size reading and allowance warning, the export sweep, retention and approval expiry", async () => {
     expect(Object.keys(reconcilerParts).sort()).toEqual([
       "allowances",
       "approvals",
-      "database",
       "exports",
       "retention",
       "rotation",
@@ -244,7 +292,7 @@ describe("one reconciler tick", () => {
         rotation: async () => {
           throw new Error("vault down");
         },
-        allowances: () => Promise.reject(new TypeError("no owner")),
+        retention: () => Promise.reject(new TypeError("no bucket")),
       }),
     );
     // Each part logs its own failure: none rejects the tick's `waitUntil`.
@@ -252,13 +300,13 @@ describe("one reconciler tick", () => {
     expect(await ran()).toEqual({
       approvals: "expired",
       exports: "expired",
-      retention: 1,
+      retention: 0,
       database: 1,
     });
   });
 
   it("logs every part's failure when the environment can't be composed", async () => {
     const settled = await Promise.allSettled(reconcile(Promise.reject(new Error("no keys")), NOW));
-    expect(settled.map((s) => s.status)).toEqual(Array(6).fill("fulfilled"));
+    expect(settled.map((s) => s.status)).toEqual(Array(5).fill("fulfilled"));
   });
 });
