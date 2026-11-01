@@ -16,7 +16,7 @@ export interface SqlDatabase {
   batch(statements: SqlStatement[]): Promise<{ meta: { changes: number } }[]>;
 }
 
-export type ChallengeKind = "claim" | "recovery" | "login";
+export type ChallengeKind = "claim" | "recovery" | "recovery_code" | "login";
 
 /** A session row to insert. The cookie value never reaches the store, only its hash. */
 export interface NewSession {
@@ -51,13 +51,20 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
     db
       .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
       .bind(s.id, s.userId, s.tokenHash, s.expiresAt);
-  const audit = (userId: string | null, action: string, module: string, result: string) =>
+  const audit = (
+    userId: string | null,
+    action: string,
+    module: string,
+    result: string,
+    detail: string | null = null,
+  ) =>
     db
-      .prepare("INSERT INTO audit_log (user_id, action, module, result) VALUES (?, ?, ?, ?)")
-      .bind(userId, action, module, result);
+      .prepare(
+        "INSERT INTO audit_log (user_id, action, module, result, detail) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(userId, action, module, result, detail);
 
-  /** The rows a claim and a recovery both write, after their `setup_state` change. */
-  const credentials = (o: OwnerCredentials, mode: "claim" | "recovery") => [
+  const insertPasskey = (o: { userId: string; passkey: NewPasskey }) =>
     db
       .prepare(
         "INSERT INTO passkeys (id, user_id, webauthn_user_id, public_key, counter, transports, device_type, backed_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -71,7 +78,14 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         o.passkey.transports,
         o.passkey.deviceType,
         o.passkey.backedUp ? 1 : 0,
-      ),
+      );
+  /** Breaks the single-row CHECK when the statement before it changed nothing: rolls back a batch. */
+  const requireChange = () =>
+    db.prepare("INSERT INTO setup_state (id) SELECT 0 WHERE changes() = 0");
+
+  /** The rows a claim and a recovery both write, after their `setup_state` change. */
+  const credentials = (o: OwnerCredentials, mode: "claim" | "recovery") => [
+    insertPasskey(o),
     ...o.recoveryCodes.map((code) =>
       db
         .prepare("INSERT INTO recovery_codes (id, user_id, code_hash) VALUES (?, ?, ?)")
@@ -84,8 +98,7 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
   ];
 
   return {
-    audit: (userId: string | null, action: string, module: string, result: string) =>
-      audit(userId, action, module, result).run(),
+    audit: (...row: Parameters<typeof audit>) => audit(...row).run(),
 
     setup: {
       /** Throws if the database is unmigrated or unreachable; the caller fails closed. */
@@ -129,13 +142,82 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
             .bind(o.tokenHash, o.now, o.tokenHash),
           // If a concurrent recovery already stored this hash, the update changed nothing: break
           // the single-row CHECK so the whole batch rolls back.
-          db.prepare("INSERT INTO setup_state (id) SELECT 0 WHERE changes() = 0"),
+          requireChange(),
           db.prepare("DELETE FROM passkeys WHERE user_id = ?").bind(o.userId),
           db.prepare("DELETE FROM recovery_codes WHERE user_id = ?").bind(o.userId),
           db.prepare("UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL").bind(o.now),
           ...credentials(o, "recovery"),
         ]);
       },
+    },
+
+    /** Redeeming a recovery code (M2-10b). Only the owner has codes. */
+    recovery: {
+      /**
+       * Denied attempts in the deployment's window, and those from `address` in its own window.
+       * Denied rows have no user, so the `(user_id, created_at)` index serves this.
+       */
+      failures: (address: string, deploymentSince: number, addressSince: number) =>
+        db
+          .prepare(
+            `SELECT count(*) AS deployment, count(CASE WHEN detail = ?1 AND created_at > ?3 THEN 1 END) AS address
+             FROM audit_log WHERE user_id IS NULL AND created_at > ?2
+             AND action = 'recovery.code' AND result = 'denied'`,
+          )
+          .bind(address, deploymentSince, addressSince)
+          .first<{ deployment: number; address: number }>(),
+      /** The owner's unused codes. */
+      unused: async () =>
+        (
+          await db
+            .prepare(
+              `SELECT r.id, r.user_id, r.code_hash FROM recovery_codes r
+               JOIN setup_state s ON s.id = 1 AND r.user_id = s.claimed_by_user_id
+               WHERE r.used_at IS NULL`,
+            )
+            .all<{ id: string; user_id: string; code_hash: string }>()
+        ).results,
+      /**
+       * Burns the code, adds the passkey, ends every other session and starts this one, in one
+       * batch. Throws if the code was already used, which rolls the whole batch back.
+       */
+      redeem: async (r: {
+        codeId: string;
+        passkey: NewPasskey;
+        session: NewSession;
+        now: number;
+      }) => {
+        const userId = r.session.userId;
+        await db.batch([
+          db
+            .prepare(
+              "UPDATE recovery_codes SET used_at = ? WHERE id = ? AND user_id = ? AND used_at IS NULL",
+            )
+            .bind(r.now, r.codeId, userId),
+          requireChange(),
+          insertPasskey({ userId, passkey: r.passkey }),
+          db
+            .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+            .bind(r.now, userId),
+          insertSession(r.session),
+          audit(userId, "recovery.code", "auth", "redeemed"),
+        ]);
+      },
+      /** Every passkey that can sign in as `userId`, oldest first. */
+      passkeys: async (userId: string) =>
+        (
+          await db
+            .prepare(
+              "SELECT id, created_at, last_used_at, backed_up FROM passkeys WHERE user_id = ? ORDER BY created_at",
+            )
+            .bind(userId)
+            .all<{
+              id: string;
+              created_at: number;
+              last_used_at: number | null;
+              backed_up: number;
+            }>()
+        ).results,
     },
 
     challenges: {
