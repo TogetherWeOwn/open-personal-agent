@@ -49,6 +49,7 @@ export function PrivacySecurity() {
   const [passkeys, setPasskeys] = useState<PasskeyRow[] | null>(null);
   const [sessions, setSessions] = useState<SessionRow[] | null>(null);
   const [grants, setGrants] = useState<GrantRow[] | null>(null);
+  const [grantsError, setGrantsError] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
@@ -60,23 +61,33 @@ export function PrivacySecurity() {
   const [confirmRegen, setConfirmRegen] = useState(false);
   const [freshCodes, setFreshCodes] = useState<string[] | null>(null);
 
+  /** Standing approvals load on their own, with their own retry: a grants failure must not blank the page. */
+  const loadGrants = async () => {
+    setGrantsError(false);
+    try {
+      const standing = await settingsApi<{ grants: GrantRow[] }>("/grants");
+      setGrants(standing.grants);
+    } catch {
+      setGrantsError(true);
+    }
+  };
+
   const load = async () => {
     setLoadError(false);
     setError(null);
     try {
-      const [keys, sess, standing, codes] = await Promise.all([
+      const [keys, sess, codes] = await Promise.all([
         api<{ passkeys: PasskeyRow[] }>("/passkeys"),
         api<{ sessions: SessionRow[] }>("/sessions"),
-        settingsApi<{ grants: GrantRow[] }>("/grants"),
         api<{ remaining: number }>("/recovery-codes"),
       ]);
       setPasskeys(keys.passkeys);
       setSessions(sess.sessions);
-      setGrants(standing.grants);
       setRemaining(codes.remaining);
     } catch {
       setLoadError(true);
     }
+    await loadGrants();
   };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: loads once, like AppsTools.
@@ -92,10 +103,12 @@ export function PrivacySecurity() {
     Promise.all([
       api<{ passkeys: PasskeyRow[] }>("/passkeys"),
       api<{ sessions: SessionRow[] }>("/sessions"),
-    ]).then(([keys, sess]) => {
-      setPasskeys(keys.passkeys);
-      setSessions(sess.sessions);
-    });
+    ])
+      .then(([keys, sess]) => {
+        setPasskeys(keys.passkeys);
+        setSessions(sess.sessions);
+      })
+      .catch(() => {});
 
   const run = async (key: string, fn: () => Promise<void>) => {
     if (pending) return;
@@ -106,7 +119,8 @@ export function PrivacySecurity() {
     } catch (e) {
       if ((e as Error).message === "not_found") {
         // The copy says the list was refreshed: make it true before reporting it.
-        await reloadLists().catch(() => {});
+        await reloadLists();
+        await loadGrants();
         setError(privacyError(e));
       } else if (cancelled(e)) {
         // A dismissed passkey prompt rejects here. Only adding promises a passkey; every
@@ -123,7 +137,7 @@ export function PrivacySecurity() {
   const reloadKeys = () =>
     api<{ passkeys: PasskeyRow[] }>("/passkeys").then(({ passkeys }) => setPasskeys(passkeys));
 
-  if (loadError || passkeys === null || sessions === null || grants === null || remaining === null)
+  if (loadError || passkeys === null || sessions === null || remaining === null)
     return (
       <section aria-labelledby="privacy-heading" className="flex flex-col gap-4">
         <Heading level={2} id="privacy-heading" className="text-xl font-semibold">
@@ -465,7 +479,20 @@ export function PrivacySecurity() {
             .
           </p>
         </div>
-        {grants.length === 0 ? (
+        {grantsError ? (
+          <div className={card}>
+            <p role="alert" className={errorText}>
+              I couldn’t load your standing approvals.
+            </p>
+            <div className={rowButtons}>
+              <Button onPress={() => void loadGrants()} variant="secondary">
+                Try again
+              </Button>
+            </div>
+          </div>
+        ) : grants === null ? (
+          <p className={hint}>Loading…</p>
+        ) : grants.length === 0 ? (
           <p className={hint}>No standing approvals. Every consequential action will ask you.</p>
         ) : (
           <ul className="flex flex-col gap-3">
