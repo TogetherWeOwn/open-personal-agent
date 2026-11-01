@@ -34,6 +34,7 @@ describe("modelFetch", () => {
   beforeAll(async () => {
     server = createServer((req, res) => {
       if (req.url === "/redirect") return res.writeHead(302, { location: METADATA }).end();
+      if (req.url === "/moved") return res.writeHead(307, { location: "/echo" }).end();
       req.pipe(res);
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -61,6 +62,12 @@ describe("modelFetch", () => {
     const guarded = modelFetch({ allowPrivate: false, isBlocked: linkLocal });
     const error = await guarded(`http://127.0.0.1:${port}/redirect`).catch((e: unknown) => e);
     expect((error as TypeError).cause).toMatchObject({ code: "EBLOCKED" });
+  });
+
+  it("resends the body on a 307 redirect, as fetch does", async () => {
+    const guarded = modelFetch({ allowPrivate: false, isBlocked: () => false });
+    const res = await guarded(`http://127.0.0.1:${port}/moved`, { method: "POST", body: "hi" });
+    expect(await res.text()).toBe("hi");
   });
 
   it("takes a native Request, as fetch does", async () => {

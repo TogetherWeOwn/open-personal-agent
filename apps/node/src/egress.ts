@@ -90,10 +90,12 @@ export function modelFetch({
     },
   });
   return async (input, init) => {
-    // undici's fetch can't read Node's built-in Request, so pass its parts.
+    // undici's fetch can't read Node's built-in Request, so pass its parts. The body is read into
+    // memory (model requests are small JSON) so a 307 or 308 redirect can resend it.
     const request = new Request(input, init);
-    const { method, headers, body, redirect, signal } = request;
-    const options = { method, headers, body, redirect, signal, duplex: "half", dispatcher };
+    const { method, headers, redirect, signal } = request;
+    const body = request.body && (await request.arrayBuffer());
+    const options = { method, headers, body, redirect, signal, dispatcher };
     return (await undiciFetch(
       request.url,
       options as unknown as RequestInit,
