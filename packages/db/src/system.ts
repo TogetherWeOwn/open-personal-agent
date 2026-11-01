@@ -154,18 +154,30 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
     /** Redeeming a recovery code (M2-10b). Only the owner has codes. */
     recovery: {
       /**
-       * Denied attempts in the deployment's window, and those from `address` in its own window.
-       * Denied rows have no user, so the `(user_id, created_at)` index serves this.
+       * Writes a `denied` row for `address` before its code is checked, unless the address already
+       * has `limit` denied rows since `since`. Count and insert are one statement, so parallel
+       * requests can't all pass the check. Returns the row ID, or null when the address is limited.
+       * Denied rows have no user, so the `(user_id, created_at)` index serves the count.
        */
-      failures: (address: string, deploymentSince: number, addressSince: number) =>
+      attempt: async (address: string, since: number, limit: number) =>
+        (
+          await db
+            .prepare(
+              `INSERT INTO audit_log (action, module, result, detail)
+               SELECT 'recovery.code', 'auth', 'denied', ?1
+               WHERE (SELECT count(*) FROM audit_log WHERE user_id IS NULL AND created_at > ?2
+                 AND action = 'recovery.code' AND result = 'denied' AND detail = ?1) < ?3
+               RETURNING id`,
+            )
+            .bind(address, since, limit)
+            .first<{ id: number }>()
+        )?.id ?? null,
+      /** Turns an attempt whose code matched into `allowed`, so it no longer counts. */
+      allow: (attemptId: number, userId: string) =>
         db
-          .prepare(
-            `SELECT count(*) AS deployment, count(CASE WHEN detail = ?1 AND created_at > ?3 THEN 1 END) AS address
-             FROM audit_log WHERE user_id IS NULL AND created_at > ?2
-             AND action = 'recovery.code' AND result = 'denied'`,
-          )
-          .bind(address, deploymentSince, addressSince)
-          .first<{ deployment: number; address: number }>(),
+          .prepare("UPDATE audit_log SET result = 'allowed', user_id = ? WHERE id = ?")
+          .bind(userId, attemptId)
+          .run(),
       /** The owner's unused codes. */
       unused: async () =>
         (

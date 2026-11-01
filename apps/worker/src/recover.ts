@@ -4,6 +4,8 @@
 // and the session, so two browsers racing with one code can't both win. A recovery ends every
 // session and keeps the passkeys; the answer lists them so the owner can spot one they don't know.
 // Every attempt is audited. Denied rows carry a keyed hash of the address, and they are the limit.
+// There is no deployment-wide lock: codes have 130 bits, so it would add no brute-force protection,
+// and anyone could use it to keep the owner out (TWO-447).
 import { systemStore } from "@opa/db/system";
 import { type Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -14,9 +16,6 @@ import { checkHealth } from "./health";
 /** Denied attempts one address may make in its window. */
 export const ADDRESS_LIMIT = 5;
 const ADDRESS_WINDOW_MS = 15 * 60_000;
-/** Denied attempts from all addresses before code recovery locks for the rest of the window. */
-export const DEPLOYMENT_LIMIT = 20;
-const DEPLOYMENT_WINDOW_MS = 60 * 60_000;
 /** Longer than any typed code, spaces and dashes included; anything longer is hashed as empty. */
 const MAX_CODE_LENGTH = 100;
 
@@ -24,7 +23,7 @@ type Code = { id: string; owner: string; codeHash: string };
 type Body = { code?: unknown; credential?: unknown };
 
 /**
- * The checks both steps share, in order: a configured deployment, the rate limits, then the code.
+ * The checks both steps share, in order: a configured deployment, the rate limit, then the code.
  * A wrong, used and malformed code take the same path: hash, compare with every unused code,
  * audit. Returns the matching code, or the error response.
  */
@@ -33,16 +32,17 @@ async function redeemable(c: Context<AppEnv>): Promise<Response | (Code & { body
     return c.json({ error: "setup_required" }, 503);
   }
   const store = systemStore(c.env);
-  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  // Behind another proxy (Node self-host) the operator names the header it sets.
+  const ip = c.req.header(c.env.OPA_CLIENT_IP_HEADER || "CF-Connecting-IP") ?? "unknown";
   // Keyed, so the audit log never holds an address, nor a hash that can be brute-forced back.
   const address = await auth.sha256(`${c.env.OPA_SESSION_SECRET}\n${ip}`);
-  const now = Date.now();
-  const failures = await store.recovery.failures(
+  // The attempt counts as denied from before the code is checked, until it matches.
+  const attempt = await store.recovery.attempt(
     address,
-    now - DEPLOYMENT_WINDOW_MS,
-    now - ADDRESS_WINDOW_MS,
+    Date.now() - ADDRESS_WINDOW_MS,
+    ADDRESS_LIMIT,
   );
-  if (!failures || failures.address >= ADDRESS_LIMIT || failures.deployment >= DEPLOYMENT_LIMIT) {
+  if (attempt === null) {
     await store.audit(null, "recovery.code", "auth", "limited", address);
     return c.json({ error: "rate_limited" }, 429);
   }
@@ -58,10 +58,8 @@ async function redeemable(c: Context<AppEnv>): Promise<Response | (Code & { body
       match = { id: row.id, owner: row.user_id, codeHash };
     }
   }
-  if (!match) {
-    await store.audit(null, "recovery.code", "auth", "denied", address);
-    return c.json({ error: "invalid_code" }, 403);
-  }
+  if (!match) return c.json({ error: "invalid_code" }, 403);
+  await store.recovery.allow(attempt, match.owner);
   return { ...match, body };
 }
 
@@ -81,7 +79,6 @@ recover.post("/options", async (c) => {
     code.owner,
     code.codeHash,
   );
-  await store.audit(code.owner, "recovery.code", "auth", "allowed");
   const maxAge = auth.CHALLENGE_TTL_MS / 1000;
   setCookie(c, auth.CHALLENGE_COOKIE, cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");

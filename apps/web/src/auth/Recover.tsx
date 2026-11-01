@@ -20,7 +20,7 @@ interface Recovered {
 
 const FAILURES: Record<string, string> = {
   invalid_code: "That recovery code doesn't work. Each code works once.",
-  rate_limited: "Too many codes were tried. Wait up to an hour, then try again.",
+  rate_limited: "Too many codes were tried. Wait 15 minutes, then try again.",
 };
 
 async function redeem(code: string, retried = false): Promise<Recovered> {
