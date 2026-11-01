@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Default rules, plus: fake credentials in test files whose value contains "canary".
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test canaries"
+condition = "AND"
+paths = ['''(?:^|/)test/''', '''\.test\.[cm]?[jt]sx?$''']
+regexes = ['''(?i)canary''']

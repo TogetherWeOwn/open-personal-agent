@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  WRANGLER_SEND_METRICS: "false"
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: node scripts/check-boundaries.mjs # ports rule, dependency guard
+
+  builder-independence:
+    runs-on: ubuntu-latest
+    steps:
+      - *checkout
+      - uses: ./.github/actions/setup
+      - run: node scripts/check-builder-independence.mjs # imports, URLs, env names
+      - name: Test suite with only documented env vars
+        run: env -i PATH="$PATH" HOME="$HOME" CI=true pnpm test
+
+  security-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Install gitleaks
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+      - name: gitleaks (git history)
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=HEAD .' # this branch's history only
+      - run: pnpm deploy:dry-run
+      - name: gitleaks (built bundles)
+        # One path per run: given several, `gitleaks dir` silently scans `.` instead.
+        run: |
+          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner apps/web/dist
+          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner dist/worker
+      - run: node scripts/check-bundles.mjs # server-only names in the client bundle
+      - run: pnpm audit --prod --audit-level high
+      - run: node scripts/check-supply-chain.mjs # build-script allowlist, release age, workflow lint
+      - run: node scripts/generate-notices.mjs
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - *checkout
+      - uses: ./.github/actions/setup
+      - run: pnpm test:unit
+
+  worker-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - *checkout
+      - uses: ./.github/actions/setup
+      - run: pnpm test:worker --coverage
+
+  build-and-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - *checkout
+      - uses: ./.github/actions/setup
+      - run: pnpm deploy:dry-run
+      - run: node scripts/check-bundles.mjs # size budgets
+      - run: pnpm test:harness # createTestHarness: boot, migrations, health
