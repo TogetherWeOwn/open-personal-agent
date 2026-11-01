@@ -23,6 +23,7 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
+import { RETENTION_DEFAULTS, type RetentionSettings, toSettings } from "./retention";
 import {
   artifacts,
   attachments,
@@ -375,6 +376,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
       if (!issued.has(scope)) throw new Error("scope was not issued by the session layer");
       const { userId } = scope;
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
+      const memory = memoryService(db, userId);
       const attachmentKey = (id: string) => `u/${userId}/attachments/${checkId(id)}`;
       const own = (id: string) => and(eq(conversations.id, id), eq(conversations.userId, userId));
       /** `undefined` when the row is missing or someone else's: answer 404 for both. */
@@ -735,7 +737,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             db.select().from(usage).where(eq(usage.userId, userId)).orderBy(usage.createdAt),
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
-        memory: memoryService(db, userId),
+        memory,
         /** Onboarding answers and the model roles (M2-15, M3-06). */
         settings: {
           get: async () =>
@@ -773,6 +775,61 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               .update(secrets)
               .set({ lastUsedAt: Date.now() })
               .where(and(eq(secrets.id, secretId), eq(secrets.userId, userId)));
+          },
+          /** Retention (COST-10, M3-18 AC1); the defaults until the user changes one. */
+          retention: async (): Promise<RetentionSettings> => {
+            const row = (
+              await db
+                .select({
+                  messageRetentionDays: userSettings.messageRetentionDays,
+                  toolOutputRetentionDays: userSettings.toolOutputRetentionDays,
+                  memoryInboxDays: userSettings.memoryInboxDays,
+                })
+                .from(userSettings)
+                .where(eq(userSettings.userId, userId))
+                .limit(1)
+            )[0];
+            return row ? toSettings(row) : { ...RETENTION_DEFAULTS };
+          },
+          /**
+           * Saves retention with its audit row (old and new values) and, for a new memory-inbox
+           * expiry, the pending suggestions dated again from when each was made: all or none.
+           * Only the changed fields are written, so two saves of different fields both stand.
+           */
+          saveRetention: async (from: RetentionSettings, to: RetentionSettings) => {
+            const columns = {
+              messageRetentionDays: to.messageDays ?? 0,
+              toolOutputRetentionDays: to.toolOutputDays ?? 0,
+              memoryInboxDays: to.memoryInboxDays,
+            };
+            const set = {
+              ...(from.messageDays !== to.messageDays && {
+                messageRetentionDays: columns.messageRetentionDays,
+              }),
+              ...(from.toolOutputDays !== to.toolOutputDays && {
+                toolOutputRetentionDays: columns.toolOutputRetentionDays,
+              }),
+              ...(from.memoryInboxDays !== to.memoryInboxDays && {
+                memoryInboxDays: columns.memoryInboxDays,
+              }),
+              updatedAt: Date.now(),
+            };
+            const save = [
+              db
+                .insert(userSettings)
+                .values({ ...columns, userId, updatedAt: set.updatedAt })
+                .onConflictDoUpdate({ target: userSettings.userId, set }),
+              db.insert(auditLog).values({
+                userId,
+                action: "settings.retention",
+                module: "settings",
+                result: "ok",
+                detail: JSON.stringify({ from, to }),
+              }),
+            ] as const;
+            await (from.memoryInboxDays !== to.memoryInboxDays
+              ? db.batch([...save, memory.redate()])
+              : db.batch(save));
           },
         },
         /** The per-tool overrides and standing grants the policy engine reads (M3-02). */
