@@ -91,23 +91,37 @@ const SCOPES = ["once", "task", "hour", "destination"] as const;
 const shown = (v: unknown) => (v === null || v === undefined || v === "" ? "none" : String(v));
 const isChange = (v: unknown): v is { from: unknown; to: unknown } =>
   typeof v === "object" && v !== null && "from" in v && "to" in v;
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+
+/** `{ field: { from, to } }` for each field whose value differs between `from` and `to`. */
+const pairs = (from: Record<string, unknown>, to: Record<string, unknown>) =>
+  Object.fromEntries(
+    [...new Set([...Object.keys(from), ...Object.keys(to)])]
+      .filter((k) => from[k] !== to[k])
+      .map((k) => [k, { from: from[k], to: to[k] }]),
+  );
 
 /** A short line under the title: what changed, or the approval's scope; null when nothing adds. */
 export function summary(entry: LogEntry): string | null {
   const d = entry.detail;
   if (typeof d !== "object" || d === null) return null;
   const o = d as Record<string, unknown>;
-  // A tool's override: its old and new choice (M3-02 AC7).
+  // A tool's override: its old and new choice (M3-02 AC7); a refused one changed nothing.
   if (entry.action === "policy.override" && isChange(o)) {
     const label = (v: unknown) => (typeof v === "string" && OVERRIDES[v]) || "Default";
-    return `${entry.target ?? "A tool"}: ${label(o.from)} → ${label(o.to)}`;
+    const tool = entry.target ?? "A tool";
+    return entry.result === "ok"
+      ? `${tool}: ${label(o.from)} → ${label(o.to)}`
+      : `${tool}: stayed ${label(o.from)}; ${label(o.to)} was refused`;
   }
   const scope = o.scope;
   if (typeof scope === "string" && (SCOPES as readonly string[]).includes(scope)) {
     return `Scope: ${scopeLabel(scope as (typeof SCOPES)[number])}`;
   }
-  // A settings change: each field with its old and new value, or only that it changed.
-  const changes = Object.entries(o).flatMap(([field, v]) =>
+  // A settings change: each field with its old and new value, or only that it changed. Retention
+  // saves the whole setting as `from` and `to`, so its fields are compared one by one.
+  const fields = isChange(o) && isRecord(o.from) && isRecord(o.to) ? pairs(o.from, o.to) : o;
+  const changes = Object.entries(fields).flatMap(([field, v]) =>
     isChange(v)
       ? [`${field}: ${shown(v.from)} → ${shown(v.to)}`]
       : v === "changed"

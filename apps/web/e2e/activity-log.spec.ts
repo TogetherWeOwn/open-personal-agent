@@ -121,6 +121,37 @@ test("sends the kind filter and the search, and offers a way back from no match"
   await expect(page.getByRole("searchbox", { name: "Search the log" })).toHaveValue("");
 });
 
+test("pages again after the filter changes while older entries load", async ({ page }) => {
+  await stubShell(page);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let older = 0;
+  await page.route(
+    (url) => url.pathname === "/api/activity/log",
+    async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      if (params.get("before") === "7") {
+        // The first older page is still loading when the filter changes.
+        if (++older === 1) await held;
+        return route.fulfill({ json: { entries: OLDER, next: null, retentionDays: 365 } });
+      }
+      const entries = params.get("kind") ? FIRST.slice(1) : FIRST;
+      return route.fulfill({ json: { entries, next: 7, retentionDays: 365 } });
+    },
+  );
+  await page.goto("/activity/log");
+  await page.getByRole("button", { name: "Show older entries" }).click();
+  await expect(page.getByRole("button", { name: "Loading older entries…" })).toBeVisible();
+  await page.getByLabel("Show").selectOption("approvals");
+  await expect(page.getByText(/send_email: Asks you first/)).toHaveCount(0);
+  release();
+  await page.getByRole("button", { name: "Show older entries" }).click();
+  await expect(page.getByText("Signed in")).toBeVisible();
+  expect(older).toBe(2);
+});
+
 test("says so when nothing has happened, and when the log fails to load", async ({ page }) => {
   await stubShell(page);
   let fail = true;

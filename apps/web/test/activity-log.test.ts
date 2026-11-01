@@ -64,6 +64,9 @@ describe("summary", () => {
     expect(summary(override)).toBe("send_email: Asks you first → Does it without asking");
     const cleared = entry({ ...override, detail: { from: "never", to: null } });
     expect(summary(cleared)).toBe("send_email: Never → Default");
+    // A refused change left the setting as it was.
+    const refused = entry({ ...override, result: "denied", detail: { from: null, to: "auto" } });
+    expect(summary(refused)).toBe("send_email: stayed Default; Does it without asking was refused");
   });
 
   it("shows an approval's scope", () => {
@@ -86,6 +89,15 @@ describe("summary", () => {
     ).toBe(
       "dailyCapMicroUsd: 5000000 → 100000000; hardCapMicroUsd: none → 30000000; about changed",
     );
+  });
+
+  it("compares retention's saved settings field by field", () => {
+    const from = { messageDays: 30, toolOutputDays: 30, memoryInboxDays: 14 };
+    const retention = entry({
+      action: "settings.retention",
+      detail: { from, to: { ...from, messageDays: 90 } },
+    });
+    expect(summary(retention)).toBe("messageDays: 30 → 90");
   });
 
   it("adds nothing for a plain string or an object without changes", () => {

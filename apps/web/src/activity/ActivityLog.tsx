@@ -51,6 +51,9 @@ export function ActivityLog() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` is the Try again trigger.
   useEffect(() => {
     const mine = ++visit.current;
+    // An older page still loading belongs to the old filter: it will be dropped, so the button
+    // must not wait for it.
+    setLoadingMore(false);
     const q = query.trim();
     const timer = setTimeout(
       () => {
