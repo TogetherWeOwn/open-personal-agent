@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // The vault's storage and audit port over D1: the `user_keys`, `secrets` and `audit_log` tables
-// of schema v0. Moves into the scoped repository layer with M2-11.
+// of schema v0. System-level (ADR 0010 D3): the vault scopes each call by `userId` itself, and KEK
+// rotation walks every user's key.
 import type { SealedSecret, VaultStore, WrappedDek } from "@opa/vault";
+import type { SqlDatabase } from "./system";
 
 type Row = Record<string, unknown>;
 
@@ -18,7 +20,7 @@ const keyRow = (r: Row): WrappedDek => ({
   iv: bytes(r.iv),
 });
 
-export function d1VaultStore(db: D1Database): VaultStore {
+export function d1VaultStore({ DB: db }: { DB: SqlDatabase }): VaultStore {
   return {
     async userKeys(userId) {
       const { results } = await db
