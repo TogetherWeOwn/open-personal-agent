@@ -8,6 +8,7 @@ import { attachmentRoutes } from "./attachments";
 import { chatRoutes } from "./chat";
 import type { AppEnv, AppPorts } from "./env";
 import { checkHealth, setupRequired } from "./health";
+import { memoryRoutes, memorySettings } from "./memory";
 import { settings } from "./model-settings";
 import { publicRateLimit } from "./rate-limit";
 import { recover } from "./recover";
@@ -49,6 +50,7 @@ shared.use("/api/secrets/*", async (c, next) => {
 });
 
 shared.route("/api/settings/vault", vaultRoutes);
+shared.route("/api/settings/memory", memorySettings);
 shared.route("/api/settings/spending", spendingRoutes);
 shared.route("/api/settings", settings);
 shared.route("/api/settings", toolSettings);
@@ -78,6 +80,7 @@ shared.route("/api", chatRoutes);
 shared.route("/api/attachments", attachmentRoutes);
 shared.route("/api/artifacts", artifactRoutes);
 shared.route("/api/usage", usageRoutes);
+shared.route("/api/memory", memoryRoutes);
 shared.route("/api/tasks", taskRoutes);
 
 /** Who is signed in; the SPA calls it to decide between the login page and the app. */

@@ -64,6 +64,18 @@ const CASES: Record<string, Case> = {
   // The owner's loop cancels first (routes run sorted), so by Stop the task has ended: 409
   // still proves the row was found, since a foreign id answers 404 before the write.
   "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
+  "GET /api/memory/:id/versions": { params: (v) => ({ id: v.memory }), own: 200 },
+  "PUT /api/memory/:id": {
+    params: (v) => ({ id: v.memory }),
+    body: () => ({ text: "an edit" }),
+    own: 200,
+  },
+  // The spare note: the edit above superseded the first one.
+  "DELETE /api/memory/:id": { params: (v) => ({ id: v.spareMemory }), own: 204 },
+  "POST /api/memory/proposals/:id/:decision": {
+    params: (v) => ({ id: v.proposal, decision: "reject" }),
+    own: 204,
+  },
   // A tool name, not an item: the attacker sets their own override, and the victim's stays.
   "PUT /api/settings/tools/:name": {
     params: () => ({ name: TOOL }),

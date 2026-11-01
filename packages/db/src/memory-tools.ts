@@ -256,13 +256,24 @@ function forgetTool(service: MemoryToolService, context: () => MemoryToolContext
   };
 }
 
-/** The three tools over one scoped service; the host supplies taint, assertion and source. */
+/** What the user chose in Settings › Memory. */
+export interface MemoryToolOptions {
+  /**
+   * "Learn from our chats" (M3-15 AC5): the assistant may use `remember`. Off, the tool isn't
+   * offered to the model at all, and notes are added only on the Memory screen. `recall` and
+   * `forget` stay, so the user can still ask what is remembered and have it dropped.
+   */
+  learn: boolean;
+}
+
+/** The tools over one scoped service; the host supplies taint, assertion and source. */
 export function memoryTools(
   service: MemoryToolService,
   context: () => MemoryToolContext,
+  options: MemoryToolOptions = { learn: true },
 ): MemoryTool[] {
   return [
-    rememberTool(service, context),
+    ...(options.learn ? [rememberTool(service, context)] : []),
     recallTool(service, context),
     forgetTool(service, context),
   ];
@@ -273,6 +284,7 @@ export function registerMemoryTools(
   registry: MemoryToolRegistry,
   service: MemoryToolService,
   context: () => MemoryToolContext,
+  options?: MemoryToolOptions,
 ): void {
-  for (const tool of memoryTools(service, context)) registry.register(tool);
+  for (const tool of memoryTools(service, context, options)) registry.register(tool);
 }
