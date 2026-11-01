@@ -100,6 +100,16 @@ describe("tasks routes", () => {
     expect(((await theirs.json()) as { tasks: unknown[] }).tasks).toEqual([]);
   });
 
+  it("treats blank numeric filters as absent instead of zero", async () => {
+    const { browser, owner } = await claim();
+    await makeTask(owner);
+    await makeTask(owner);
+    // `until=` used to become 0 and hide every task; `limit=` used to clamp to one.
+    const res = await browser.req("/api/tasks?since=&until=&limit=");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { tasks: unknown[] }).tasks).toHaveLength(2);
+  });
+
   it("cancels the row first, then terminates the Workflow; an ended task is a 409", async () => {
     const { browser, owner } = await claim();
     const { taskId, instanceId } = await makeTask(owner);

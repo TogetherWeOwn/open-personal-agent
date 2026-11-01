@@ -144,7 +144,9 @@ export async function executeTask(
       await user.tasks.finish(task.id, outcome.status, outcome.error, outcome.limit?.kind ?? null);
       return null;
     });
-    if (outcome.limit) {
+    // Loop-emitted limits were already forwarded while draining the loop, so only a stop that
+    // originates here still needs its post-finish event.
+    if (outcome.limit && needsPostFinishProgress(outcome.limit)) {
       ctx.progress({ type: "limit.reached", payload: outcome.limit });
     }
   } catch (err) {
@@ -394,6 +396,18 @@ function parseState(json: string | null): TaskTurnState | null {
 /** A fresh task state for whoever creates the task (promotion fills in a live turn instead). */
 export function newTaskTurnState(history: ModelMessage[], turnId: string): TaskTurnState {
   return { history, turn: newTurn(), turnId };
+}
+
+/**
+ * Whether a finished loop's limit still needs its `limit.reached` progress event. A limit the
+ * loop itself emitted (an execution `calls`/`tools`/`steps`/`duration` stop) was already
+ * forwarded while draining `runTurn`, so emitting it again would notify every tab twice. Only
+ * the daily-cap stop originates here — its provider yields an `error`, never `limit.reached`.
+ */
+export function needsPostFinishProgress(
+  limit: { kind: TaskLimitKind; detail: string } | undefined,
+): boolean {
+  return limit?.kind === "daily";
 }
 
 const isTaskCancelled = (err: unknown) =>

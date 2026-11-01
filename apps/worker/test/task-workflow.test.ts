@@ -11,7 +11,7 @@ import { type LoopTool, resolveApprovals } from "@opa/harness-builtin";
 import { beforeAll, describe, expect, it } from "vitest";
 import { canaryForms } from "../../../scripts/canary-forms.mjs";
 import { compose, type WorkerEnv } from "../src/compose";
-import { executeTask, newTaskTurnState } from "../src/task-workflow";
+import { executeTask, needsPostFinishProgress, newTaskTurnState } from "../src/task-workflow";
 
 const env = workerEnv as unknown as WorkerEnv & {
   TEST_MIGRATIONS: D1Migration[];
@@ -327,6 +327,15 @@ describe("task workflow", () => {
     const row = await alice.tasks.get(taskId);
     expect(row?.status).toBe("budget_limited");
     expect(row?.limitKind).toBe("duration");
+  });
+
+  it("only the daily-cap stop needs a post-finish progress event", () => {
+    // A loop-emitted limit was already forwarded while draining the loop; emitting it again
+    // would notify every tab twice. Only the daily-cap stop originates post-finish.
+    expect(needsPostFinishProgress(undefined)).toBe(false);
+    expect(needsPostFinishProgress({ kind: "calls", detail: "8 calls" })).toBe(false);
+    expect(needsPostFinishProgress({ kind: "steps", detail: "too many steps" })).toBe(false);
+    expect(needsPostFinishProgress({ kind: "daily", detail: "daily spend cap" })).toBe(true);
   });
 
   it("records the loop's kind when the turn exhausts its model calls", async () => {
