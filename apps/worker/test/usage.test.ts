@@ -142,6 +142,20 @@ describe("usage ledger", () => {
     const member = { headers: await sessionHeaders("other") };
     const theirs = await workerApp.request(`${ORIGIN}/api/usage`, member, env);
     expect(await theirs.json<UsageBody>()).toMatchObject({ allowance: null, meters: null });
+    // A meter that can't be read leaves the rest of the page standing.
+    const broken = {
+      ...env,
+      FILES: Object.assign(Object.create(env.FILES), {
+        list: () => Promise.reject(new Error("R2 down")),
+      }),
+    };
+    const mine = { headers: await sessionHeaders(owner) };
+    const down = await workerApp.request(`${ORIGIN}/api/usage`, mine, broken);
+    expect(down.status).toBe(200);
+    expect(await down.json<UsageBody>()).toMatchObject({
+      meters: null,
+      today: { costMicroUsd: 5 },
+    });
     // The owner gets every allowance meter, from the list the reconciler's banners read.
     expect(body.meters?.map((m) => m.id)).toEqual([
       "d1_cap",

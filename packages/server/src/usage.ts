@@ -198,7 +198,9 @@ usageRoutes.get("/", async (c) => {
       : null;
   // Every Cloudflare allowance the app can estimate (M3-16 AC3), from the list the reconciler's
   // banners read. The owner's only, like the neurons: they are the account's, not one user's.
-  const meters = profile?.role === "owner" ? await allowanceMeters(c.env, now) : null;
+  // A meter that can't be read (a listing or size read failing) leaves the rest of Usage standing.
+  const meters =
+    profile?.role === "owner" ? await allowanceMeters(c.env, now).catch(() => null) : null;
   // Past the free allowance, neurons are billed (A-Co3). Other apps on the account may have
   // used some of it, so this is at least what is billed, never more.
   const allowanceView = allowance && {

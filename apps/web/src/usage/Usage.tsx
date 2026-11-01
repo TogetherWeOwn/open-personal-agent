@@ -48,12 +48,16 @@ function Figure({ term, value, note }: { term: string; value: string; note?: str
 
 /** This month against the monthly budget (M3-17 AC2): one meter, the budget's words beside it. */
 function MonthFigure({ data, spending }: { data: UsageData; spending: Spending | null }) {
-  const spent = data.month.costMicroUsd;
   const budget = spending?.settings.monthlyBudgetMicroUsd;
+  // The budget's own month (UTC) and total, so the meter agrees with the 50% line and the banners
+  // even in the hours where the local month and the UTC month differ.
+  const spent = spending?.monthMicroUsd ?? 0;
   return (
     <div className="flex flex-col gap-1">
       <dt className="text-sm text-text-muted">This month</dt>
-      <dd className="text-2xl font-semibold tabular-nums">about {money(spent, data.currency)}</dd>
+      <dd className="text-2xl font-semibold tabular-nums">
+        about {money(data.month.costMicroUsd, data.currency)}
+      </dd>
       {budget && (
         <dd>
           <Meter
