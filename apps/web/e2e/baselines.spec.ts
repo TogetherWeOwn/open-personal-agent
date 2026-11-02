@@ -222,6 +222,9 @@ async function stubAll(page: Page) {
                 text: "Sam is moving to York in spring",
                 trust: "inferred",
                 createdAt: now - 2 * HOUR - 30 * 60_000,
+                // Future expiry, so the "Expires in 9 days" branch is baselined, not just
+                // the null-expiry "Expires today" the note() factory would give it.
+                expiresAt: now + 9 * DAY,
               }),
               targets: [],
             },
