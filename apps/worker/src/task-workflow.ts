@@ -191,9 +191,10 @@ export async function executeTask(
     return;
   }
   // Every way out of a started task settles its budget (COST-3) and delivers the progress it
-  // queued — the turn's end among it, which an invocation that returns first can leave
-  // undelivered behind a reply already settled in D1; outside `ctx.step`, whose guard would
-  // skip it for a task that has already ended.
+  // queued, which an invocation that returns first can leave undelivered behind a reply
+  // already settled in D1; outside `ctx.step`, whose guard would skip it for a task that has
+  // already ended. The turn's end is announced only after this, so each exit drains once
+  // more behind its terminal announcement.
   const endBudget = async () => {
     const kept = await stepper
       .do("task:budget:end", {}, async () => await ctx.budget.end())
@@ -251,6 +252,7 @@ export async function executeTask(
     if (lateCancel) ctx.progress({ type: "turn.cancelled", payload: {} });
     else if (end.event) ctx.progress(end.event);
     else if (replyId && outcome.status === "budget_limited") ctx.progress(INTERRUPTED);
+    await ctx.drainProgress();
   } catch (err) {
     if (isTaskCancelled(err)) {
       // The row already says cancelled; nothing overwrites it.
@@ -309,6 +311,7 @@ export async function executeTask(
       if (replyId)
         ctx.progress(limit ? INTERRUPTED : { type: "turn.failed", payload: { message } });
     }
+    await ctx.drainProgress();
     if (err instanceof NonRetryableError) throw err;
   }
 }

@@ -9,7 +9,7 @@ import { env as workerEnv } from "cloudflare:workers";
 import type { JsonValue, ModelEvent, ModelProvider, ModelRequest, TaskStepper } from "@opa/core";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import type { LoopTool } from "@opa/harness-builtin";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { canaryForms } from "../../../scripts/canary-forms.mjs";
 import type { Assistant } from "../src/assistant";
 import { compose, type WorkerEnv } from "../src/compose";
@@ -191,9 +191,23 @@ async function makeTask(
   return { taskId, instanceId };
 }
 
-/** The progress a run sends its tabs, captured at the assistant's RPC boundary. */
-function captureProgress() {
+/**
+ * The progress a run sends its tabs, captured at the assistant's RPC boundary. With `hold`,
+ * an event of that type waits at the boundary until `release` — a capture that lands at once
+ * can't show a run that returns before its end is delivered, and a gated one can.
+ */
+function captureProgress(hold?: (type: string) => boolean) {
   const events: { type: string; payload: unknown }[] = [];
+  let releaseGate: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const seen = {
+    events,
+    held: 0,
+    release: () => releaseGate?.(),
+    env: undefined as unknown as typeof env,
+  };
   const namespace = {
     idFromName: (name: string) => env.ASSISTANT.idFromName(name),
     get: (id: DurableObjectId) => {
@@ -202,6 +216,10 @@ function captureProgress() {
         get(target, prop) {
           if (prop === "taskProgress") {
             return async (p: { type: string; payload: unknown }) => {
+              if (hold?.(p.type)) {
+                seen.held += 1;
+                await gate;
+              }
               events.push({ type: p.type, payload: p.payload });
               return (target.taskProgress as (p: unknown) => Promise<void>)(p);
             };
@@ -212,7 +230,8 @@ function captureProgress() {
       });
     },
   };
-  return { events, env: { ...env, ASSISTANT: namespace } as unknown as typeof env };
+  seen.env = { ...env, ASSISTANT: namespace } as unknown as typeof env;
+  return seen;
 }
 
 /** Runs one instance with a scripted model whose key is the canary. */
@@ -716,14 +735,47 @@ describe("a promoted turn's reply (M3-12b AC2)", () => {
 
   it("delivers the turn's end before the run returns", async () => {
     const { taskId, instanceId, replyId } = await promotedTask();
-    const seen = captureProgress();
-    await (await run([{ text: "Finished" }], instanceId, new FakeStepper(), [], { env: seen.env }))
-      .promise;
+    // The end's own RPC is held at the boundary: a run that queued it and returned without
+    // draining would have settled already, leaving the end behind a dead invocation.
+    const seen = captureProgress((type) => type === "turn.completed");
+    const running = await run([{ text: "Finished" }], instanceId, new FakeStepper(), [], {
+      env: seen.env,
+    });
+    let returned = false;
+    void running.promise.then(() => {
+      returned = true;
+    });
+    await vi.waitFor(() => expect(seen.held).toBe(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(returned).toBe(false);
+    seen.release();
+    await running.promise;
     expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
     expect(await reply(replyId)).toMatchObject({ status: "complete" });
-    // Already delivered when the run returned: nothing of the turn's end is still queued
-    // behind an invocation that has ended.
     expect(seen.events.at(-1)).toEqual({ type: "turn.completed", payload: {} });
+  });
+
+  it("delivers the failure before the run returns", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const seen = captureProgress((type) => type === "turn.failed");
+    let returned = false;
+    const promise = executeTask(
+      seen.env,
+      await compose(seen.env),
+      { resolveModel: async () => ({ error: "no_model" }), taskTools: [] },
+      instanceId,
+      new FakeStepper(),
+    ).then(() => {
+      returned = true;
+    });
+    await vi.waitFor(() => expect(seen.held).toBe(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(returned).toBe(false);
+    seen.release();
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("failed");
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "error" });
+    expect(seen.events.at(-1)?.type).toBe("turn.failed");
   });
 
   it("writes the same reply on, settles it and puts its calls on it", async () => {
