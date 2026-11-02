@@ -1506,6 +1506,9 @@ export class Assistant extends Agent<Bindings> {
       });
       if (!created) throw new Error("the conversation is gone");
       await this.taskWorkflows().create({ id: promoting.instanceId, params: { taskId } });
+      // A resumed turn's saved stop retires with the handoff: left behind, a later Continue
+      // would run the old state here while the task writes the same reply.
+      await repo.turns.remove(cp.turnId);
     } catch {
       // A row no run will pick up ends here; a run that did start finds it ended and stops.
       await repo.tasks.finish(taskId, "failed", "The task couldn't start.").catch(() => {});
@@ -1519,14 +1522,46 @@ export class Assistant extends Agent<Bindings> {
 
   /**
    * The rest of a promotion an eviction cut short: `true` once the task owns the turn, its
-   * instance started (again, if need be: the instance ID makes that idempotent). `false` when no
-   * live row was written, and the turn is interrupted like any other.
+   * instance started (again, if need be: the instance ID makes that idempotent). Any row at
+   * all is a completed handoff, even one that has since ended: its reply is the task's, and
+   * interrupting it as a DO turn would cut it short and announce its end twice. `false` only
+   * when no row was written, and the turn is interrupted like any other.
    */
   async #finishPromotion(cp: TurnCheckpoint): Promise<boolean> {
     const { taskId, instanceId } = cp.promoting ?? { taskId: "", instanceId: "" };
     const repo = this.#repo;
-    const status = (await repo.tasks.get(taskId))?.status;
-    if (status === undefined || TASK_ENDED.has(status)) return false;
+    const row = await repo.tasks.get(taskId);
+    if (row === undefined) return false;
+    const status = row.status;
+    if (TASK_ENDED.has(status)) {
+      await repo.turns.remove(cp.turnId).catch(() => {});
+      if (this.ctx.storage.kv.get(PROMOTED_KEY(cp.conversationId)) === taskId) {
+        this.ctx.storage.kv.delete(PROMOTED_KEY(cp.conversationId));
+      }
+      // A task that ended before its reply settled leaves it streaming with the task's text
+      // in D1: settle it as the task ended, with that text, never the checkpoint's older one.
+      const stored = (
+        (await repo.chat.listMessages(cp.conversationId).catch(() => null)) ?? []
+      ).find((m) => m.id === cp.replyId);
+      if (stored?.status === "streaming") {
+        const as =
+          status === "succeeded" ? "complete" : status === "failed" ? "error" : "interrupted";
+        const settled = await repo.chat
+          .settle({ replyId: cp.replyId, reply: stored.content }, as)
+          .then(
+            () => true,
+            () => false,
+          );
+        const emit = this.#emitter(cp.conversationId, cp.turnId);
+        if (status === "succeeded") emit("turn.completed", {});
+        else if (status === "cancelled") emit("turn.cancelled", {});
+        else if (status === "failed")
+          emit("turn.failed", { message: row.error ?? "The task failed." });
+        else emit("turn.interrupted", { message: "Retry?" });
+        if (settled) this.#events.trim(cp.conversationId, cp.turnId);
+      }
+      return true;
+    }
     if (status === "queued") {
       const workflows = this.taskWorkflows();
       const started = await workflows.create({ id: instanceId, params: { taskId } }).then(
@@ -1543,6 +1578,8 @@ export class Assistant extends Agent<Bindings> {
         return false;
       }
     }
+    // The handoff retires the turn's saved stop, as `#promote` does when it isn't cut short.
+    await repo.turns.remove(cp.turnId).catch(() => {});
     this.#promoted(cp, taskId);
     return true;
   }
@@ -1729,7 +1766,17 @@ export class Assistant extends Agent<Bindings> {
         const next = await gen.next();
         if (next.done) {
           if (next.value === "promoted") {
-            if (await this.#promote(cp, stash, run.history, state)) return;
+            // A call whose ledger row failed mid-turn is written before the handoff: a
+            // promoted turn never settles here, so nothing else would retry it. A row D1
+            // still refuses keeps the turn here, where its settle retries it again.
+            let moved = false;
+            try {
+              if (cp.callStarted && !cp.callRecorded) await recordCall();
+              moved = await this.#promote(cp, stash, run.history, state);
+            } catch {
+              moved = false;
+            }
+            if (moved) return;
             // It couldn't move (too large, D1, the Workflow binding): it goes on here, for good.
             promotable = false;
             delete state.promotion;
@@ -2004,6 +2051,19 @@ export class Assistant extends Agent<Bindings> {
     // Evicted while it moved to a task: once the task row exists, the task owns the turn.
     if (cp.promoting && (await this.#finishPromotion(cp))) {
       for (const hold of cp.holds) this.limits.release(hold);
+      // The handoff skips the settle below, so a call whose ledger row failed is written here.
+      if (cp.callStarted && !cp.callRecorded) {
+        await repo.usage
+          .record({
+            ...(cp.callId ? { id: cp.callId } : {}),
+            providerId: cp.providerId,
+            model: cp.model,
+            usage: cp.callUsage,
+            conversationId: cp.conversationId,
+            messageId: cp.replyId,
+          })
+          .catch(() => {});
+      }
       return;
     }
     // A turn that stopped cleanly saved its state to D1 before its fiber ended; if the process

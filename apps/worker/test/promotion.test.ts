@@ -270,6 +270,49 @@ describe("promotion at a step boundary (M3-12 AC2)", () => {
     ).not.toHaveProperty("promotion");
   });
 
+  it("retires a resumed turn's saved stop when it promotes, so Continue can't revive it", async () => {
+    const { browser, owner } = await claim();
+    // The tool asks to run on as a task only once `ask` flips, after the first run stops.
+    let ask = false;
+    const lookup: LoopTool = {
+      manifest: {
+        name: "lookup",
+        description: "The lookup tool.",
+        inputSchema: {
+          type: "object",
+          properties: { q: { type: "string", minLength: 1 } },
+          required: ["q"],
+          additionalProperties: false,
+        },
+        riskClass: "write_reversible",
+        destinations: [],
+        scopes: [],
+      },
+      execute: async () => {
+        const out = { ok: true, content: "page", context: { kind: "system" as const } };
+        return ask ? { ...out, promote: { mode: "background" as const } } : out;
+      },
+    };
+    const model = replying([{ calls: [["lookup", { q: "x" }]] }]);
+    await setUp(owner, model.provider, [lookup]);
+    const tab = await openTab(browser);
+    tab.send("conv-retire", "Keep looking");
+    await tab.until("limit.reached");
+    const turnId = tab.events.find((e) => e.type === "limit.reached")?.turnId as string;
+    expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(1);
+
+    ask = true;
+    expect(
+      await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeAfterLimit(turnId)),
+    ).toBe(true);
+    await tab.until("task.promoted");
+    // The saved stop went with the handoff: a second Continue finds nothing to revive.
+    expect(await count("turn_states", `turn_id = '${turnId}'`)).toBe(0);
+    expect(
+      await runInDurableObject(assistantOf(owner), (i: Assistant) => i.resumeAfterLimit(turnId)),
+    ).toBe(false);
+  });
+
   it("never promotes at an approval: the turn stops in D1 as before", async () => {
     const { browser, owner } = await claim();
     const send = slowTool("send", 60);
@@ -325,7 +368,7 @@ describe("an eviction mid-promotion", () => {
       holds: [],
       callStarted: true,
       callRecorded: true,
-      callUsage: null,
+      callUsage: null as typeof USAGE | null,
       promoting: { taskId, instanceId: `task-${taskId}` },
       owner,
     },
@@ -351,6 +394,67 @@ describe("an eviction mid-promotion", () => {
     );
     expect(created).toEqual([{ id: `task-${taskId}`, params: { taskId } }]);
     expect((await stored(browser, "conv-mid")).at(-1)?.status).toBe("streaming");
+  });
+
+  it("records the unrecorded call and drops the saved stop when it finishes a promotion", async () => {
+    const { owner } = await claim();
+    await setUp(owner, replying([{ text: "x" }]).provider, []);
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("conv-mid", "Mid", undefined);
+    await user.chat.startTurn("conv-mid", "Go", "reply-mid3", []);
+    await user.turns.save({
+      turnId: "turn-mid3",
+      conversationId: "conv-mid",
+      replyId: "reply-mid3",
+      providerId: "scripted",
+      model: "test-model",
+      status: "limit_reached",
+      state: "{}",
+    });
+    const taskId = crypto.randomUUID();
+    await user.tasks.create({
+      id: taskId,
+      conversationId: "conv-mid",
+      workflowInstanceId: `task-${taskId}`,
+      kind: "turn",
+      mode: "interactive",
+      state: "{}",
+    });
+    const cp = checkpoint(owner, "turn-mid3", "reply-mid3", taskId);
+    cp.snapshot.callRecorded = false;
+    cp.snapshot.callUsage = USAGE;
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.onFiberRecovered(cp as never));
+    expect(await count("usage", "message_id = 'reply-mid3'")).toBe(1);
+    expect(await user.turns.load("turn-mid3")).toBeUndefined();
+  });
+
+  it("leaves a finished task's reply to the task, settling it as the task ended", async () => {
+    const { browser, owner } = await claim();
+    const created = await setUp(owner, replying([{ text: "x" }]).provider, []);
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("conv-mid", "Mid", undefined);
+    await user.chat.startTurn("conv-mid", "Go", "reply-mid4", []);
+    const taskId = crypto.randomUUID();
+    await user.tasks.create({
+      id: taskId,
+      conversationId: "conv-mid",
+      workflowInstanceId: `task-${taskId}`,
+      kind: "turn",
+      mode: "interactive",
+      state: "{}",
+    });
+    // The task ran to its end while the DO was away; its reply text is in D1, unsettled.
+    await user.tasks.markRunning(taskId, Date.now());
+    await user.tasks.finish(taskId, "succeeded");
+    await user.chat.checkpointReply("reply-mid4", "The task's full answer");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered(checkpoint(owner, "turn-mid4", "reply-mid4", taskId) as never),
+    );
+    expect(created).toEqual([]);
+    expect((await stored(browser, "conv-mid")).at(-1)).toMatchObject({
+      content: "The task's full answer",
+      status: "complete",
+    });
   });
 
   it("interrupts the turn as usual when no task row was written", async () => {
