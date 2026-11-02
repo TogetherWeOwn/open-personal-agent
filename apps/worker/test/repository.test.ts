@@ -192,4 +192,51 @@ describe("a retried send's files (M3-12 AC5)", () => {
     expect(sends[0]?.attachments[0]?.id).toBe("retry-file");
     expect(await (await user.attachments.getObject(copy?.id ?? ""))?.text()).toBe("the brief");
   });
+
+  it("deletes a copied file when the retried send's write fails, so nothing is stranded", async () => {
+    const user = repo.forUser(scopeFromSession({ userId: "alice" }));
+    await user.createConversation("retry-c2", "Retry that fails");
+    const bytes = new TextEncoder().encode("the second brief");
+    await user.attachments.putObject(
+      "retry-file2",
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+      "text/plain",
+      bytes.byteLength,
+    );
+    await user.attachments.create({
+      id: "retry-file2",
+      name: "brief2.txt",
+      mediaType: "text/plain",
+      kind: "text",
+      sizeBytes: bytes.byteLength,
+    });
+    const linked = [{ id: "retry-file2", sentToModel: true }];
+    await user.chat.startTurn("retry-c2", "Read this", "retry-r3", linked);
+    const objects = async () => {
+      const listed = await env.FILES.list({ prefix: "u/alice/attachments/" });
+      const keys: string[] = [];
+      for (const { key } of listed.objects) {
+        if ((await (await env.FILES.get(key))?.text()) === "the second brief") keys.push(key);
+      }
+      return keys.sort();
+    };
+    const before = await objects();
+    expect(before).toEqual(["u/alice/attachments/retry-file2"]);
+    // The retry reuses the first send's reply id, so its batch fails after the copy is made.
+    // Without a cleanup the copy's object would keep no row, which the row-driven retention
+    // sweep could never find.
+    await expect(
+      user.chat.startTurn("retry-c2", "Read this", "retry-r3", linked),
+    ).rejects.toThrow();
+    expect(await objects()).toEqual(before);
+    const rows = (await user.chat.listMessages("retry-c2")) ?? [];
+    const sends = rows.filter((m) => m.role === "user");
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.attachments.map((f) => f.id)).toEqual(["retry-file2"]);
+  });
 });
