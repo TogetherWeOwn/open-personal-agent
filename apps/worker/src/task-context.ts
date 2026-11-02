@@ -69,7 +69,10 @@ export interface WorkflowTaskContextDeps {
     get(id: string): Promise<{ text(): Promise<string> } | null>;
   };
   assistant: AssistantTaskRpc;
-  /** Exact secret values that must never reach a persisted step output (values under 8 chars are ignored). */
+  /**
+   * Exact secret values that must never reach a persisted step output (values under 8 chars are
+   * ignored). Read at each use, so a key the run learns after making the context is guarded too.
+   */
   secrets?: readonly string[];
   now?: () => number;
   /** Overrides for tests; the COST-1 defaults otherwise. */
@@ -98,7 +101,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
   const durationMs =
     deps.limits?.durationMs ??
     (deps.mode === "interactive" ? TASK_LIMITS.interactiveMs : TASK_LIMITS.backgroundMs);
-  const secrets = (deps.secrets ?? []).filter((s) => s.length >= 8);
+  const secrets = () => (deps.secrets ?? []).filter((s) => s.length >= 8);
   const names = new Set<string>();
   let steps = 0;
   let progressSeq = 0;
@@ -174,7 +177,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
         async (): Promise<Persisted> => {
           const stopped = await guard();
           if (stopped) return { stopped };
-          const value = redactSecrets(await fn(idempotencyKey(name)), secrets);
+          const value = redactSecrets(await fn(idempotencyKey(name)), secrets());
           const json = JSON.stringify(value);
           const bytes = new TextEncoder().encode(json).length;
           if (bytes <= STEP_OUTPUT_INLINE_MAX_BYTES) return { value };
@@ -206,7 +209,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
 
     progress(event) {
       progressSeq += 1;
-      const clean = redactSecrets(event.payload as JsonValue, secrets);
+      const clean = redactSecrets(event.payload as JsonValue, secrets());
       void deps.assistant
         .taskProgress({
           conversationId: deps.conversationId,

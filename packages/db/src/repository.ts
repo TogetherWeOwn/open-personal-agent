@@ -1157,13 +1157,21 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * A stopped turn's partial reply so far, still `streaming`: what a tab that loads the
-           * conversation while the turn waits to resume reads (M3-03 AC5).
+           * conversation while the turn waits to resume reads (M3-03 AC5). Only while it still
+           * streams: a reply something else already settled or cut (a cancel landing mid-call)
+           * is final, and a late checkpoint must not rewrite it.
            */
           checkpointReply: async (replyId: string, content: string) => {
             await db
               .update(messages)
               .set({ content })
-              .where(and(eq(messages.id, replyId), eq(messages.userId, userId)));
+              .where(
+                and(
+                  eq(messages.id, replyId),
+                  eq(messages.userId, userId),
+                  eq(messages.status, "streaming"),
+                ),
+              );
           },
           /**
            * Finishes a reply. The ledger is written per model call as calls end (`usage.record`),

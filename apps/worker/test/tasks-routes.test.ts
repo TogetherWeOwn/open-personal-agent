@@ -140,6 +140,40 @@ describe("tasks routes", () => {
     );
   });
 
+  it("cuts a promoted turn's reply when it cancels its task, since the terminated run can't", async () => {
+    const { browser, owner } = await claim();
+    const user = repo.forUser(scopeFromSession({ userId: owner }));
+    seq += 1;
+    const conversationId = `rconv${seq}`;
+    const taskId = `rtask${seq}`;
+    const replyId = `rreply${seq}`;
+    await user.createConversation(conversationId, "Trip plan");
+    await user.chat.startTurn(conversationId, "Dig into it", replyId, []);
+    await user.chat.checkpointReply(replyId, "Half way.");
+    await user.tasks.create({
+      id: taskId,
+      conversationId,
+      workflowInstanceId: `rinst${seq}`,
+      kind: "turn",
+      mode: "interactive",
+      state: JSON.stringify({
+        history: [{ role: "user", content: "Dig into it" }],
+        turn: { messages: [{ role: "assistant", content: "Half way." }] },
+        turnId: `rturn${seq}`,
+        replyId,
+      }),
+    });
+    // No Workflow binding, so nothing but the route can close the reply.
+    const node = new Browser({ ...env, TASK_WORKFLOW: undefined } as unknown as Env);
+    node.cookies = new Map(browser.cookies);
+    const res = await node.req(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const reply = ((await user.chat.listMessages(conversationId)) ?? []).find(
+      (m) => m.id === replyId,
+    );
+    expect(reply).toMatchObject({ content: "Half way.", status: "interrupted" });
+  });
+
   it("cancels row-only without a Workflow binding, and survives a terminate failure", async () => {
     const { browser, owner } = await claim();
     const small = await makeTask(owner);

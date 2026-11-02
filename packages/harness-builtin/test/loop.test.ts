@@ -6,6 +6,7 @@ import {
   LimitStop,
   newTurn,
   resolveApprovals,
+  runTurn,
   type ToolOutput,
   TURN_LIMITS,
   WAITING_FOR_APPROVAL,
@@ -720,5 +721,113 @@ describe("steer (M3-09 AC4)", () => {
       "actually, shorter",
       "and friendlier",
     ]);
+  });
+});
+
+describe("promotion at a step boundary (M3-12 AC2)", () => {
+  it("asks between steps, never mid-step, and ends with the state whole for a Workflow", async () => {
+    const { provider, requests } = scripted([
+      { calls: [["fetch", { q: "a" }]] },
+      { text: "never called here" },
+    ]);
+    const fetch = tool("fetch", "read");
+    const asked: number[] = [];
+    // The first boundary is before the first call; the second follows the tool's result.
+    const promote = vi.fn((s: { messages: unknown[] }) => asked.push(s.messages.length) > 1);
+    const state = newTurn();
+    const { events, outcome } = await drain(host(provider, [fetch], { promote }), state);
+    expect(outcome).toBe("promoted");
+    expect(asked).toEqual([0, 2]);
+    expect(requests).toHaveLength(1);
+    expect(fetch.inputs).toEqual([{ q: "a" }]);
+    // Every step it started has ended, and no end of the turn was announced.
+    const started = ofType(events, "step.started").length;
+    expect(ofType(events, "step.completed")).toHaveLength(started);
+    expect(types(events).filter((t) => t.startsWith("turn."))).toEqual([]);
+    expect(state.messages.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect(state.pending).toBeNull();
+  });
+
+  it("records a tool's request to run on as a task, background over a plain request", async () => {
+    const ask = (mode: "interactive" | "background", title: string) =>
+      tool("task", "write_reversible", () => ({
+        ok: true,
+        content: "on it",
+        context: { kind: "system" },
+        promote: { mode, title },
+      }));
+    const { provider } = scripted([{ calls: [["task", { q: "a" }]] }, { text: "done" }]);
+    const state = newTurn();
+    const promote = vi.fn((s: typeof state) => s.promotion !== undefined);
+    const { outcome } = await drain(
+      host(provider, [ask("background", "Report")], { promote }),
+      state,
+    );
+    expect(outcome).toBe("promoted");
+    expect(state.promotion).toEqual({ mode: "background", title: "Report" });
+
+    // A failed call asks for nothing; a host that can't promote just runs the turn to its end.
+    const failing = tool("task", "write_reversible", () => ({
+      ok: false,
+      content: "no",
+      promote: { mode: "background" },
+    }));
+    const second = scripted([{ calls: [["task", { q: "a" }]] }, { text: "done" }]);
+    const plain = newTurn();
+    expect((await drain(host(second.provider, [failing], { promote }), plain)).outcome).toBe(
+      "completed",
+    );
+    expect(plain.promotion).toBeUndefined();
+    const third = scripted([{ calls: [["task", { q: "a" }]] }, { text: "done" }]);
+    expect((await drain(host(third.provider, [ask("interactive", "x")]), newTurn())).outcome).toBe(
+      "completed",
+    );
+  });
+
+  it("never promotes a turn cancelled while its steers drain", async () => {
+    const { provider } = scripted([
+      { calls: [["fetch", { q: "a" }]] },
+      { text: "never called here" },
+    ]);
+    let midRun = false;
+    const fetch = tool("fetch", "read", () => {
+      midRun = true;
+      return { ok: true, content: "page", context: { kind: "system" } };
+    });
+    const steers = [{ messageId: "m-steer-1", text: "shorter" }];
+    let boundaries = 0;
+    const h = host(provider, [fetch], {
+      takeSteer: () => (midRun ? (steers.shift() ?? null) : null),
+      promote: () => ++boundaries > 1,
+    });
+    const stop = new AbortController();
+    const gen = runTurn(h, history, newTurn(), stop.signal);
+    const seen: string[] = [];
+    let outcome: string | undefined;
+    for (;;) {
+      const next = await gen.next();
+      if (next.done) {
+        outcome = next.value;
+        break;
+      }
+      seen.push(next.value.type);
+      // The Stop lands after the steer was announced, before the boundary asks to promote.
+      if (next.value.type === "turn.steered") stop.abort();
+    }
+    expect(outcome).toBe("cancelled");
+    expect(seen.at(-1)).toBe("turn.cancelled");
+  });
+
+  it("never promotes at an approval: the turn stops there instead (§8 decision 9)", async () => {
+    const { provider } = scripted([{ calls: [["send", { q: "a" }]] }]);
+    const promote = vi.fn((_: unknown) => false);
+    const state = newTurn();
+    const { outcome } = await drain(
+      host(provider, [tool("send", "consequential")], { promote }),
+      state,
+    );
+    expect(outcome).toBe("awaiting_approval");
+    // Asked once, before the first call; the approval ended the run before another boundary.
+    expect(promote).toHaveBeenCalledTimes(1);
   });
 });

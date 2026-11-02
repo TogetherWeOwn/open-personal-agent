@@ -24,6 +24,71 @@ interface BudgetRpc {
   taskBudget(taskId: string): Promise<unknown>;
 }
 
+/** The assistant's task-progress RPC, for ending a promoted turn whose run was terminated. */
+interface ProgressRpc {
+  taskProgress(progress: {
+    conversationId: string;
+    turnId: string;
+    taskId: string;
+    seq: number;
+    type: string;
+    payload: unknown;
+    inTurn?: boolean;
+  }): Promise<void>;
+}
+
+type ScopedUser = ReturnType<ReturnType<typeof createRepository>["forUser"]>;
+
+/**
+ * Cuts a cancelled promoted task's reply where it is and tells its tabs the turn ended.
+ * Termination stops the run before its own cancel path can, so the route does it instead:
+ * conditional on the reply still streaming, so a run that settled first keeps its end.
+ * The route doesn't know the driver's per-task counter, so the end carries a sequence past
+ * any it could have sent, which the conversation's log never dedupes away.
+ */
+async function cutPromotedReply(
+  user: ScopedUser,
+  task: { id: string; conversationId: string; state: string | null },
+): Promise<void> {
+  let replyId: string | undefined;
+  let turnId: string | undefined;
+  let saved = "";
+  try {
+    const state = JSON.parse(task.state ?? "{}") as {
+      replyId?: string;
+      turnId?: string;
+      turn?: { messages?: { role?: string; content?: string }[] };
+    };
+    replyId = state.replyId;
+    turnId = state.turnId;
+    saved = (state.turn?.messages ?? [])
+      .flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []))
+      .join("\n\n");
+  } catch {}
+  if (!replyId) return;
+  const stored = ((await user.chat.listMessages(task.conversationId).catch(() => null)) ?? []).find(
+    (m) => m.id === replyId,
+  );
+  if (stored?.status !== "streaming") return;
+  // Whichever text is fuller: segments are checkpointed as they complete, ahead of the save.
+  const reply = stored.content.length >= saved.length ? stored.content : saved;
+  await user.chat.interrupt({ replyId, reply }).catch(() => {});
+  const assistant = user.assistant() as unknown as Partial<ProgressRpc>;
+  if (typeof assistant.taskProgress === "function") {
+    await assistant
+      .taskProgress({
+        conversationId: task.conversationId,
+        turnId: turnId ?? task.id,
+        taskId: task.id,
+        seq: Number.MAX_SAFE_INTEGER,
+        type: "turn.cancelled",
+        payload: {},
+        inTurn: true,
+      })
+      .catch(() => {});
+  }
+}
+
 export const taskRoutes = new Hono<AppEnv>();
 
 taskRoutes.use(async (c, next) => {
@@ -69,6 +134,8 @@ taskRoutes.post("/:id/cancel", async (c) => {
       .then((instance) => instance.terminate())
       .catch(() => {});
   }
+  // The terminated run never reaches its own cancel path, so the reply is cut here.
+  await cutPromotedReply(user, row);
   return c.json({ task: await user.tasks.details(id) });
 });
 
@@ -146,5 +213,8 @@ taskRoutes.post("/:id/stop", async (c) => {
   const { user, task } = found;
   if (!(await user.tasks.cancel(task.id))) return c.json({ error: "not_active" }, 409);
   await wake(c, task.workflowInstanceId);
+  // A run that never wakes (its wait already ended it) can't cut its reply; this is a no-op
+  // once the woken run has cut it itself.
+  await cutPromotedReply(user, task);
   return c.json({ status: "cancelled" });
 });

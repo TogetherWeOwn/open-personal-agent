@@ -34,7 +34,15 @@ const fred = repo.forUser(scopeFromSession({ userId: "fred" }));
 const rpc = (user: typeof alice) => user.assistant() as unknown as DurableObjectStub<Assistant>;
 
 /** `outputTokens` is what the model reports, up to the call's `max_tokens`. */
-type Reply = { text?: string; calls?: [name: string, args: unknown][]; outputTokens?: number };
+type Reply = {
+  text?: string;
+  calls?: [name: string, args: unknown][];
+  outputTokens?: number;
+  /** Runs as the call starts, while it is still in flight. */
+  before?: () => Promise<void>;
+  /** The call fails with this message instead of answering. */
+  error?: string;
+};
 
 /** A model that answers call n with replies[n], counting how often it really streamed. */
 function scripted(replies: Reply[]) {
@@ -47,6 +55,8 @@ function scripted(replies: Reply[]) {
     async *stream(req: ModelRequest): AsyncIterable<ModelEvent> {
       streams += 1;
       const reply = replies[streams - 1] ?? { text: "done" };
+      await reply.before?.();
+      if (reply.error) throw new Error(reply.error);
       if (reply.text) yield { type: "text.delta", text: reply.text };
       for (const [name, args] of reply.calls ?? []) {
         yield {
@@ -181,13 +191,42 @@ async function makeTask(
   return { taskId, instanceId };
 }
 
+/** The progress a run sends its tabs, captured at the assistant's RPC boundary. */
+function captureProgress() {
+  const events: { type: string; payload: unknown }[] = [];
+  const namespace = {
+    idFromName: (name: string) => env.ASSISTANT.idFromName(name),
+    get: (id: DurableObjectId) => {
+      const stub = env.ASSISTANT.get(id) as unknown as Record<string, unknown>;
+      return new Proxy(stub, {
+        get(target, prop) {
+          if (prop === "taskProgress") {
+            return async (p: { type: string; payload: unknown }) => {
+              events.push({ type: p.type, payload: p.payload });
+              return (target.taskProgress as (p: unknown) => Promise<void>)(p);
+            };
+          }
+          // RPC stub methods carry their receiver; binding one would call a "bind" method.
+          return Reflect.get(target, prop);
+        },
+      });
+    },
+  };
+  return { events, env: { ...env, ASSISTANT: namespace } as unknown as typeof env };
+}
+
 /** Runs one instance with a scripted model whose key is the canary. */
 async function run(
   replies: Reply[],
   instanceId: string,
   stepper: FakeStepper,
   tools: LoopTool[] = [],
-  over: { used?: () => Promise<void>; now?: () => number; picks?: unknown[] } = {},
+  over: {
+    used?: () => Promise<void>;
+    now?: () => number;
+    picks?: unknown[];
+    env?: typeof env;
+  } = {},
 ) {
   const { provider, streams } = scripted(replies);
   const resolved = {
@@ -197,9 +236,10 @@ async function run(
     billingId: "openai",
     ...(over.used ? { used: over.used } : {}),
   };
+  const runEnv = over.env ?? env;
   const promise = executeTask(
-    env,
-    await compose(env),
+    runEnv,
+    await compose(runEnv),
     {
       resolveModel: async (_env, _scope, _caller, pick) => {
         over.picks?.push(pick);
@@ -647,6 +687,217 @@ describe("task workflow", () => {
     // Each step the engine ran counts toward the Workflows-steps meter (M3-16 AC3).
     const steps = await createRepository(env).deployment.meterTotal("workflow_steps", 0);
     expect(steps).toBeGreaterThanOrEqual(2); // task:start, then the finish
+  });
+});
+
+describe("a promoted turn's reply (M3-12b AC2)", () => {
+  /** A task holding a turn the DO began: its reply is in the conversation, still streaming. */
+  async function promotedTask(user = alice, conversationId = "ca") {
+    seq += 1;
+    const taskId = `task${seq}`;
+    const instanceId = `inst${seq}`;
+    const replyId = `reply${seq}`;
+    await user.chat.startTurn(conversationId, "Dig into it", replyId, []);
+    await user.chat.checkpointReply(replyId, "Started.");
+    const state = newTaskTurnState([{ role: "user", content: "Dig into it" }], `turn${seq}`);
+    state.turn.messages.push({ role: "assistant", content: "Started." });
+    await user.tasks.create({
+      id: taskId,
+      conversationId,
+      workflowInstanceId: instanceId,
+      kind: "turn",
+      mode: "interactive",
+      state: JSON.stringify({ ...state, replyId }),
+    });
+    return { taskId, instanceId, replyId };
+  }
+  const reply = async (replyId: string) =>
+    ((await alice.chat.listMessages("ca")) ?? []).find((m) => m.id === replyId);
+
+  it("writes the same reply on, settles it and puts its calls on it", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    await (await run([{ text: "Finished" }], instanceId, new FakeStepper())).promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nFinished",
+      status: "complete",
+    });
+    const calls = await env.DB.prepare("SELECT count(*) AS n FROM usage WHERE message_id = ?")
+      .bind(replyId)
+      .first("n");
+    expect(calls).toBe(1);
+    // The state it saved still names the reply, so a later segment writes the same one.
+    expect(JSON.parse((await alice.tasks.get(taskId))?.state ?? "{}").replyId).toBe(replyId);
+  });
+
+  it("cuts the reply where it is when the task is cancelled before it runs", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    expect(await alice.tasks.cancel(taskId)).toBe(true);
+    const { promise, streams } = await run([{ text: "never" }], instanceId, new FakeStepper());
+    await promise;
+    expect(streams()).toBe(0);
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
+  });
+
+  it("keeps the segment the model just spoke when a cancel lands during its tool", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const fetch = tool("fetch", "read", async () => {
+      await alice.tasks.cancel(taskId);
+      return { ok: true, content: "page" };
+    });
+    const { promise } = await run(
+      [{ text: "I found it", calls: [["fetch", { q: "x" }]] }, { text: "never" }],
+      instanceId,
+      new FakeStepper(),
+      [fetch],
+    );
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nI found it",
+      status: "interrupted",
+    });
+  });
+
+  it("cuts the reply instead of settling it when the cancel lands just before the finish", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The cancel lands after the loop's last save, as the finish step begins.
+    class LateCancel extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") await alice.tasks.cancel(taskId);
+        return super.do(name, config, fn);
+      }
+    }
+    await (await run([{ text: "Finished" }], instanceId, new LateCancel())).promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nFinished",
+      status: "interrupted",
+    });
+  });
+
+  it("settles the reply of a task whose finish wrote the row before its settle failed", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The finish step's task write lands, then its reply settle fails for good (retries spent).
+    class SettleFails extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") {
+          await alice.tasks.finish(taskId, "succeeded");
+          throw new Error("the reply settle failed");
+        }
+        return super.do(name, config, fn);
+      }
+    }
+    await (await run([{ text: "Finished" }], instanceId, new SettleFails())).promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nFinished",
+      status: "complete",
+    });
+  });
+
+  it("doesn't rewrite the reply a cancel already cut when the in-flight call returns", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const { promise } = await run(
+      [
+        {
+          // The cancel route's cut lands while this call is in flight; its text arrives after.
+          before: async () => {
+            await alice.tasks.cancel(taskId);
+            await alice.chat.interrupt({ replyId, reply: "Started." });
+          },
+          text: "More details",
+        },
+      ],
+      instanceId,
+      new FakeStepper(),
+    );
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    // The segment the call went on to speak never joins the reply Stop already closed.
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
+  });
+
+  it("announces the loop's own failure when the finish step wrote the row before its settle failed", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The finish step writes the failed row, then its reply settle fails for good.
+    class FinishWroteFailed extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") {
+          await alice.tasks.finish(taskId, "failed", "the model call failed");
+          throw new Error("the reply settle failed");
+        }
+        return super.do(name, config, fn);
+      }
+    }
+    const seen = captureProgress();
+    const { promise } = await run(
+      [{ error: "provider exploded" }],
+      instanceId,
+      new FinishWroteFailed(),
+      [],
+      { env: seen.env },
+    );
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("failed");
+    expect(await reply(replyId)).toMatchObject({ status: "error" });
+    // The tabs hear why the turn failed, not why its bookkeeping did.
+    expect(seen.events.filter((e) => e.type === "turn.failed")).toEqual([
+      { type: "turn.failed", payload: { message: "provider exploded" } },
+    ]);
+  });
+
+  it("announces an interruption, not the settle error, when a final-limit finish wrote its row first", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The pause wrote the budget_limited row; the finish step's reply settle then fails.
+    class SettleFailsAtLimit extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") throw new Error("the reply settle failed");
+        return super.do(name, config, fn);
+      }
+    }
+    const seen = captureProgress();
+    const fetch = tool("fetch", "read", async () => ({ ok: true, content: "page" }));
+    const calls = [["fetch", { q: "x" }]] as [string, unknown][];
+    const replies: Reply[] = Array.from({ length: 9 }, () => ({ calls }));
+    const { promise } = await run(replies, instanceId, new SettleFailsAtLimit(), [fetch], {
+      env: seen.env,
+    });
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("budget_limited");
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
+    expect(seen.events.map((e) => e.type)).toContain("turn.interrupted");
+    expect(seen.events.map((e) => e.type)).not.toContain("turn.failed");
+  });
+
+  it("settles the reply as an error when the run fails, never leaving it streaming", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const stepper = new FakeStepper();
+    await executeTask(
+      env,
+      await compose(env),
+      { resolveModel: async () => ({ error: "no_model" }), taskTools: [] },
+      instanceId,
+      stepper,
+    );
+    expect((await alice.tasks.get(taskId))?.status).toBe("failed");
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "error" });
   });
 });
 
