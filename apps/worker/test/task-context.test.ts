@@ -326,4 +326,29 @@ describe("budget and progress over DO RPC (AC8)", () => {
     release?.();
     await vi.waitFor(() => expect(order).toEqual(["in:1", "out:1", "in:2", "out:2"]));
   });
+
+  it("drains its queued progress when the run asks, so its last event can't be left behind", async () => {
+    const sent: number[] = [];
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const assistant: AssistantTaskRpc = {
+      ...quietAssistant(),
+      taskProgress: async (p) => {
+        if (p.seq === 1) await gate;
+        sent.push(p.seq);
+      },
+    };
+    const { ctx } = await context({ assistant });
+    ctx.progress({ type: "step.started", payload: {} });
+    ctx.progress({ type: "turn.completed", payload: {} });
+    // The run drains before it returns: until it does, nothing has been delivered.
+    const drained = ctx.drainProgress();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sent).toEqual([]);
+    release?.();
+    await drained;
+    expect(sent).toEqual([1, 2]);
+  });
 });

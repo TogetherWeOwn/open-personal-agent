@@ -374,6 +374,9 @@ export function createSqliteTaskContext(deps: SqliteTaskContextDeps): TaskContex
         // progress is best-effort; the task's state lives in the database
       }
     },
+
+    // Node delivers progress as it is sent; there is never a queue to drain.
+    async drainProgress() {},
   };
 }
 

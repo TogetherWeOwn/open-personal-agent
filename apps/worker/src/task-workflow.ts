@@ -184,13 +184,23 @@ export async function executeTask(
   };
   if (started.status !== "running") {
     // Cancelled or finished before it began.
-    if (started.status === "cancelled") await cancelReply();
+    if (started.status === "cancelled") {
+      await cancelReply();
+      await ctx.drainProgress();
+    }
     return;
   }
-  // Every way out of a started task settles its budget (COST-3); outside `ctx.step`, whose guard
-  // would skip it for a task that has already ended.
-  const endBudget = () =>
-    stepper.do("task:budget:end", {}, async () => await ctx.budget.end()).catch(() => 0);
+  // Every way out of a started task settles its budget (COST-3) and delivers the progress it
+  // queued — the turn's end among it, which an invocation that returns first can leave
+  // undelivered behind a reply already settled in D1; outside `ctx.step`, whose guard would
+  // skip it for a task that has already ended.
+  const endBudget = async () => {
+    const kept = await stepper
+      .do("task:budget:end", {}, async () => await ctx.budget.end())
+      .catch(() => 0);
+    await ctx.drainProgress();
+    return kept;
+  };
   // The loop's own end of the turn, held back until D1 holds it.
   const end: { event: TaskProgressEvent | null } = { event: null };
   try {

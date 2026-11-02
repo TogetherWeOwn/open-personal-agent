@@ -231,6 +231,10 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
         )
         .catch(() => {}); // progress is best-effort; the task's state lives in D1
     },
+
+    drainProgress() {
+      return progressSends;
+    },
   };
 }
 

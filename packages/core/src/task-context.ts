@@ -111,6 +111,12 @@ export interface TaskContext {
   ): Promise<{ payload: T }>;
   /** Sends a progress event to the user's tabs. Fire-and-forget; never a persisted step. */
   progress(event: TaskProgressEvent): void;
+  /**
+   * Settles once every event sent so far is delivered (each still best-effort). A run awaits
+   * it before it returns: the turn's end is queued like any other event, and an invocation
+   * that ends first can leave a tab waiting on a turn that already finished.
+   */
+  drainProgress(): Promise<void>;
   readonly budget: TaskBudget;
   /** `instanceId:stepName`, the key every idempotent call in that step shares. */
   idempotencyKey(stepName: string): string;

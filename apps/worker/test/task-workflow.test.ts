@@ -714,6 +714,18 @@ describe("a promoted turn's reply (M3-12b AC2)", () => {
   const reply = async (replyId: string) =>
     ((await alice.chat.listMessages("ca")) ?? []).find((m) => m.id === replyId);
 
+  it("delivers the turn's end before the run returns", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const seen = captureProgress();
+    await (await run([{ text: "Finished" }], instanceId, new FakeStepper(), [], { env: seen.env }))
+      .promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    expect(await reply(replyId)).toMatchObject({ status: "complete" });
+    // Already delivered when the run returned: nothing of the turn's end is still queued
+    // behind an invocation that has ended.
+    expect(seen.events.at(-1)).toEqual({ type: "turn.completed", payload: {} });
+  });
+
   it("writes the same reply on, settles it and puts its calls on it", async () => {
     const { taskId, instanceId, replyId } = await promotedTask();
     await (await run([{ text: "Finished" }], instanceId, new FakeStepper())).promise;
