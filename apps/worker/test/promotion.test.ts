@@ -370,6 +370,7 @@ describe("an eviction mid-promotion", () => {
       callRecorded: true,
       callUsage: null as typeof USAGE | null,
       promoting: { taskId, instanceId: `task-${taskId}` },
+      resumed: undefined as boolean | undefined,
       owner,
     },
   });
@@ -528,6 +529,46 @@ describe("an eviction mid-promotion", () => {
     // The saved stop survives for Continue, and the reply is left as it was — waiting on
     // that stop, not closed as a failure by a task that never ran.
     expect(await user.turns.load("turn-mid6")).toBeDefined();
+    expect((await stored(browser, "conv-mid")).at(-1)).toMatchObject({
+      content: "Half",
+      status: "streaming",
+    });
+  });
+
+  it("keeps a resumed turn's saved stop when its task failed before it ever started", async () => {
+    const { browser, owner } = await claim();
+    await setUp(owner, replying([{ text: "x" }]).provider, []);
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("conv-mid", "Mid", undefined);
+    await user.chat.startTurn("conv-mid", "Go", "reply-mid7", []);
+    await user.chat.checkpointReply("reply-mid7", "Half");
+    // The stop this run resumed from: it stays until a handoff retires it, and no new stop
+    // was saved before the eviction, so the checkpoint names none.
+    await user.turns.save({
+      turnId: "turn-mid7",
+      conversationId: "conv-mid",
+      replyId: "reply-mid7",
+      providerId: "scripted",
+      model: "test-model",
+      status: "limit_reached",
+      state: "{}",
+    });
+    const taskId = crypto.randomUUID();
+    await user.tasks.create({
+      id: taskId,
+      conversationId: "conv-mid",
+      workflowInstanceId: `task-${taskId}`,
+      kind: "turn",
+      mode: "interactive",
+      state: "{}",
+    });
+    await user.tasks.finish(taskId, "failed", "The task couldn't start.");
+    const cp = checkpoint(owner, "turn-mid7", "reply-mid7", taskId);
+    cp.snapshot.resumed = true;
+    await runInDurableObject(assistantOf(owner), (i: Assistant) => i.onFiberRecovered(cp as never));
+    // A pre-start failure is no handoff for a resumed turn either: the stop it resumed from
+    // survives for Continue, and the reply stays as it was.
+    expect(await user.turns.load("turn-mid7")).toBeDefined();
     expect((await stored(browser, "conv-mid")).at(-1)).toMatchObject({
       content: "Half",
       status: "streaming",

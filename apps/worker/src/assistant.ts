@@ -2081,10 +2081,12 @@ export class Assistant extends Agent<Bindings> {
     // died between that save and the fiber's end, the turn is waiting, not interrupted. A resumed
     // turn's row is the stop it resumed from until a new stop saves over it (the save stamps
     // `updatedAt` after `stopping`): otherwise it is interrupted like any other, and its stale
-    // row goes, so the stop can't be resumed again.
-    if (!cp.resumed || cp.stopping !== undefined) {
+    // row goes, so the stop can't be resumed again. An eviction mid-promotion is the exception:
+    // `#finishPromotion` already refused the handoff, so the task never owned the turn, and the
+    // saved stop — an older one it resumed from included — is still this DO's to keep.
+    if (!cp.resumed || cp.stopping !== undefined || cp.promoting) {
       const row = await repo.turns.load(cp.turnId);
-      if (row && (!cp.resumed || row.updatedAt >= (cp.stopping ?? 0))) {
+      if (row && (!cp.resumed || !!cp.promoting || row.updatedAt >= (cp.stopping ?? 0))) {
         for (const hold of cp.holds) this.limits.release(hold);
         return;
       }
