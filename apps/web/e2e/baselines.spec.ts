@@ -5,10 +5,17 @@
 // the not-found screen, each in a populated state.
 //
 // Determinism: the app loads no webfonts (Tailwind's system stack), animations are disabled by
-// the Playwright config, and every timestamp below is either a fixed absolute date (where the
-// UI prints one) or a mid-bucket offset from now (where it prints "2 h ago" style text), so
-// the rendered words cannot tick over between recording and checking. Re-record only inside
-// the pinned Playwright image (see .github/workflows/visual.yml); host fonts differ.
+// the Playwright config, and the browser clock is frozen at NOW (`page.clock.setFixedTime`,
+// which fixes `Date.now`/`new Date()` while timers keep running). Every stubbed timestamp
+// below is derived from that same frozen instant — fixed absolute dates where the UI prints
+// one, mid-bucket offsets from NOW where it prints "2 h ago" style text — so nothing a screen
+// computes from the clock (a running task's elapsed time, the activity log's Today/Yesterday
+// groups, "recently learned", approval expiry) can depend on the run date. Re-record only
+// inside the pinned Playwright image (see .github/workflows/visual.yml); host fonts differ.
+//
+// `ApprovalLink` (`/approvals/:approvalId`) is baselined in its "This request isn't waiting
+// anymore" state: its populated state redirects to the chat scrolled to the approval card,
+// which the chat baselines already cover.
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 
@@ -18,7 +25,13 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 /** Fixed daylight moment for anything the UI prints as a date or time. */
 const AT = Date.UTC(2026, 10, 1, 9, 30);
-const now = Date.now();
+/**
+ * The frozen browser "now": Sunday 1 Nov 2026, 11:00 in Europe/London (GMT), 90 minutes
+ * after AT. The running task (started AT − 1 h) therefore reads "2h 30m", the log entry at
+ * AT groups under Today and the one at AT − 1 d under Yesterday — on every run date.
+ */
+const NOW = Date.UTC(2026, 10, 1, 11, 0);
+const now = NOW;
 
 const SETTINGS = {
   displayName: "Sam",
@@ -341,6 +354,7 @@ async function stubAll(page: Page) {
 /** name → [path, text that proves the populated screen rendered] */
 const SCREENS: Record<string, [string, string]> = {
   inbox: ["/inbox", "friend1@example.com"],
+  "approval-link": ["/approvals/appr_missing", "This request isn't waiting anymore"],
   tasks: ["/activity/tasks", "Research ferries to Orkney"],
   "task-details": ["/activity/tasks/t1", "Research ferries to Orkney"],
   outputs: ["/activity/outputs", "trip-plan.md"],
@@ -375,6 +389,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       }) => {
         await page.emulateMedia({ colorScheme });
         await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
+        await page.clock.setFixedTime(NOW);
         await stubAll(page);
         await page.goto(path);
         await expect(page.getByText(ready).first()).toBeVisible();
@@ -385,6 +400,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     test(`onboarding, ${colorScheme}, ${width} px: every step's baseline`, async ({ page }) => {
       await page.emulateMedia({ colorScheme });
       await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
+      await page.clock.setFixedTime(NOW);
       await page.route("/api/health", (r) => r.fulfill({ json: { status: "ok" } }));
       await page.route("/api/me", (r) => r.fulfill({ json: { id: "u", role: "owner" } }));
       await page.route("/api/settings**", (route) => {
