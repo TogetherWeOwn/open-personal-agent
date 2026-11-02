@@ -699,6 +699,71 @@ describe("a promoted turn's reply (M3-12b AC2)", () => {
     expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
   });
 
+  it("keeps the segment the model just spoke when a cancel lands during its tool", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const fetch = tool("fetch", "read", async () => {
+      await alice.tasks.cancel(taskId);
+      return { ok: true, content: "page" };
+    });
+    const { promise } = await run(
+      [{ text: "I found it", calls: [["fetch", { q: "x" }]] }, { text: "never" }],
+      instanceId,
+      new FakeStepper(),
+      [fetch],
+    );
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nI found it",
+      status: "interrupted",
+    });
+  });
+
+  it("cuts the reply instead of settling it when the cancel lands just before the finish", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The cancel lands after the loop's last save, as the finish step begins.
+    class LateCancel extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") await alice.tasks.cancel(taskId);
+        return super.do(name, config, fn);
+      }
+    }
+    await (await run([{ text: "Finished" }], instanceId, new LateCancel())).promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nFinished",
+      status: "interrupted",
+    });
+  });
+
+  it("settles the reply of a task whose finish wrote the row before its settle failed", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The finish step's task write lands, then its reply settle fails for good (retries spent).
+    class SettleFails extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") {
+          await alice.tasks.finish(taskId, "succeeded");
+          throw new Error("the reply settle failed");
+        }
+        return super.do(name, config, fn);
+      }
+    }
+    await (await run([{ text: "Finished" }], instanceId, new SettleFails())).promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("succeeded");
+    expect(await reply(replyId)).toMatchObject({
+      content: "Started.\n\nFinished",
+      status: "complete",
+    });
+  });
+
   it("settles the reply as an error when the run fails, never leaving it streaming", async () => {
     const { taskId, instanceId, replyId } = await promotedTask();
     const stepper = new FakeStepper();

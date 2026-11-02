@@ -6,6 +6,7 @@ import {
   LimitStop,
   newTurn,
   resolveApprovals,
+  runTurn,
   type ToolOutput,
   TURN_LIMITS,
   WAITING_FOR_APPROVAL,
@@ -781,6 +782,40 @@ describe("promotion at a step boundary (M3-12 AC2)", () => {
     expect((await drain(host(third.provider, [ask("interactive", "x")]), newTurn())).outcome).toBe(
       "completed",
     );
+  });
+
+  it("never promotes a turn cancelled while its steers drain", async () => {
+    const { provider } = scripted([
+      { calls: [["fetch", { q: "a" }]] },
+      { text: "never called here" },
+    ]);
+    let midRun = false;
+    const fetch = tool("fetch", "read", () => {
+      midRun = true;
+      return { ok: true, content: "page", context: { kind: "system" } };
+    });
+    const steers = [{ messageId: "m-steer-1", text: "shorter" }];
+    let boundaries = 0;
+    const h = host(provider, [fetch], {
+      takeSteer: () => (midRun ? (steers.shift() ?? null) : null),
+      promote: () => ++boundaries > 1,
+    });
+    const stop = new AbortController();
+    const gen = runTurn(h, history, newTurn(), stop.signal);
+    const seen: string[] = [];
+    let outcome: string | undefined;
+    for (;;) {
+      const next = await gen.next();
+      if (next.done) {
+        outcome = next.value;
+        break;
+      }
+      seen.push(next.value.type);
+      // The Stop lands after the steer was announced, before the boundary asks to promote.
+      if (next.value.type === "turn.steered") stop.abort();
+    }
+    expect(outcome).toBe("cancelled");
+    expect(seen.at(-1)).toBe("turn.cancelled");
   });
 
   it("never promotes at an approval: the turn stops there instead (§8 decision 9)", async () => {

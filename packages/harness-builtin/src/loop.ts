@@ -468,6 +468,8 @@ export async function* runTurn(
       messages.push({ role: "user", content: steer.text });
       yield ev("turn.steered", { messageId: steer.messageId, text: steer.text });
     }
+    // A Stop can land while a steer is being announced: a cancelled turn never promotes.
+    if (signal.aborted) return yield* cancelled();
     if (host.promote?.(state)) return "promoted";
     if (state.counts.calls >= TURN_LIMITS.calls) {
       return yield* limit("calls", `${TURN_LIMITS.calls} model calls`);

@@ -165,7 +165,17 @@ export async function executeTask(
     if (!replyId) return;
     await stepper
       .do("task:reply:cancelled", {}, async () => {
-        await user.chat.interrupt({ replyId, reply: await savedReply(user, task.id) });
+        // The reply's stored text can be ahead of the saved state: a segment is checkpointed
+        // as it completes, but its state is saved only at the segment's end, which a cancel
+        // during its tools never reaches. Cut at whichever text is fuller, never backwards.
+        const saved = await savedReply(user, task.id);
+        const stored =
+          ((await user.chat.listMessages(task.conversationId)) ?? []).find((m) => m.id === replyId)
+            ?.content ?? "";
+        await user.chat.interrupt({
+          replyId,
+          reply: stored.length >= saved.length ? stored : saved,
+        });
         return null;
       })
       .catch(() => {});
@@ -207,15 +217,28 @@ export async function executeTask(
       paused,
       end,
     );
-    await stepper.do("task:finish", {}, async () => {
+    const lateCancel = await stepper.do("task:finish", {}, async () => {
       // The reply settles with the row, so the end the tabs are sent is already in D1.
       await user.tasks.finish(task.id, outcome.status, outcome.error, outcome.limit?.kind ?? null);
-      if (replyId && (await user.tasks.get(task.id))?.status === outcome.status)
+      if (!replyId) return null;
+      const status = (await user.tasks.get(task.id))?.status;
+      if (status === outcome.status) {
         await settleReply(user, replyId, outcome.reply, outcome.status);
+      } else if (status === "cancelled") {
+        // A cancel that landed after the loop ended: the reply is cut, not settled, and the
+        // held end (a completion, say) must not be announced over it.
+        await user.chat.interrupt({ replyId, reply: outcome.reply });
+        return "cancelled";
+      } else if (status === "succeeded" || status === "failed" || status === "budget_limited") {
+        // A retry that finds the row already ended by its own earlier attempt: the reply
+        // still settles the way the row ended.
+        await settleReply(user, replyId, outcome.reply, status);
+      }
       return null;
     });
     await endBudget();
-    if (end.event) ctx.progress(end.event);
+    if (lateCancel) ctx.progress({ type: "turn.cancelled", payload: {} });
+    else if (end.event) ctx.progress(end.event);
     else if (replyId && outcome.status === "budget_limited") ctx.progress(INTERRUPTED);
   } catch (err) {
     if (isTaskCancelled(err)) {
@@ -225,9 +248,21 @@ export async function executeTask(
     }
     const limit = isTaskLimit(err);
     const message = redactSecrets(messageOf(err), secrets).slice(0, 500);
-    await stepper
+    const effective = await stepper
       .do("task:finish:error", {}, async () => {
-        const state = parseState((await user.tasks.get(task.id))?.state ?? null);
+        const row = await user.tasks.get(task.id);
+        const state = parseState(row?.state ?? null);
+        // The finish step may have written the row's end before its reply settle failed for
+        // good: the row can't be finished again, so settle the reply the way it ended.
+        if (
+          row?.status === "succeeded" ||
+          row?.status === "failed" ||
+          row?.status === "budget_limited"
+        ) {
+          if (replyId) await settleReply(user, replyId, replyOf(state), row.status);
+          return row.status;
+        }
+        if (row?.status === "cancelled") return "cancelled";
         if (limit && state) {
           // The run ends here, so this stop can't be continued: say so where Continue looks.
           const paused = { kind: limit.kind, detail: limit.detail, final: true };
@@ -240,14 +275,25 @@ export async function executeTask(
         // Never over a cancel that landed meanwhile: that one cuts the reply itself.
         if (replyId && (await user.tasks.get(task.id))?.status === status)
           await settleReply(user, replyId, replyOf(state), status);
-        return null;
+        return status;
       })
-      .catch(() => {}); // a failed finish must not mask the task's own end
+      .catch(() => null); // a failed finish must not mask the task's own end
     await endBudget();
-    // An execution limit, not money: "Paused: limit" (m3-ux §1.3).
-    if (limit)
-      ctx.progress({ type: "limit.reached", payload: { kind: limit.kind, detail: limit.detail } });
-    if (replyId) ctx.progress(limit ? INTERRUPTED : { type: "turn.failed", payload: { message } });
+    if (effective === "cancelled") {
+      await cancelReply();
+    } else if (effective === "succeeded") {
+      // The task succeeded; only its finish step's settle failed. Announce its own end.
+      if (end.event) ctx.progress(end.event);
+    } else {
+      // An execution limit, not money: "Paused: limit" (m3-ux §1.3).
+      if (limit)
+        ctx.progress({
+          type: "limit.reached",
+          payload: { kind: limit.kind, detail: limit.detail },
+        });
+      if (replyId)
+        ctx.progress(limit ? INTERRUPTED : { type: "turn.failed", payload: { message } });
+    }
     if (err instanceof NonRetryableError) throw err;
   }
 }
@@ -531,6 +577,11 @@ async function driveLoop(
       // The turn's end goes out once its finish step has settled it in D1.
       else if (ENDS.has(next.value.type)) end.event = next.value;
       else ctx.progress(next.value);
+      // A completed segment is checkpointed to the reply as it lands: its state isn't saved
+      // until the segment's tools finish, and a cancel during one must not erase the text.
+      // Best-effort, like the usage ledger: the save below writes the same text again.
+      if (next.value.type === "message.completed" && task.replyId)
+        await user.chat.checkpointReply(task.replyId, replyOf(state)).catch(() => {});
     }
     const saved = await ctx.step(`task:save:${cycle}`, async () => {
       const paused = outcome === "limit_reached" ? limit : undefined;
@@ -542,7 +593,9 @@ async function driveLoop(
         outcome === "awaiting_approval" ? "waiting_for_approval" : "running",
       );
       // A tab that loads the conversation meanwhile reads the reply so far (M3-03 AC5).
-      if (ok && replyId) await user.chat.checkpointReply(replyId, replyOf(state));
+      // Best-effort: the state above is saved, and the settlement writes the reply from it,
+      // so a checkpoint D1 rejects must not fail the task over a tab's fresher text.
+      if (ok && replyId) await user.chat.checkpointReply(replyId, replyOf(state)).catch(() => {});
       return ok;
     });
     if (!saved) throw new TaskCancelledError(taskId); // cancelled while the segment ran
