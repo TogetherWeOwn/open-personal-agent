@@ -781,13 +781,16 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
        * statements so the caller can delete their objects if its own write then fails:
        * retention only ever sweeps rows, so an object whose row never landed would strand.
        * A copy that fails part-way through the loop strands none of the earlier ones either.
+       * `ids` names each file as it landed on this message — a copy under its new id — so a
+       * caller that marks the files later (`beginReply`, at a queued send's drain) marks the
+       * rows this message actually holds, not the earlier message's.
        */
       const placeAttachments = async (
         conversationId: string,
         userMessageId: string,
         linked: readonly { id: string; sentToModel: boolean }[],
-      ): Promise<{ statements: BatchItem<"sqlite">[]; copied: string[] }> => {
-        if (!linked.length) return { statements: [], copied: [] };
+      ): Promise<{ statements: BatchItem<"sqlite">[]; copied: string[]; ids: string[] }> => {
+        if (!linked.length) return { statements: [], copied: [], ids: [] };
         const rows = await db
           .select({
             id: attachments.id,
@@ -814,6 +817,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .map((f) => f.id);
         const copies: BatchItem<"sqlite">[] = [];
         const copied: string[] = [];
+        const copyOf = new Map<string, string>();
         const seen = new Set<string>();
         try {
           for (const f of linked) {
@@ -823,6 +827,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             const stored = await FILES.get(attachmentKey(row.id));
             if (!stored?.body) continue;
             const copyId = crypto.randomUUID();
+            copyOf.set(row.id, copyId);
             // Tracked before the write, so a failure after the object landed still finds it;
             // deleting a key that never landed is harmless.
             copied.push(copyId);
@@ -859,6 +864,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ...copies,
           ],
           copied,
+          ids: linked.map((f) => copyOf.get(f.id) ?? f.id),
         };
       };
       /**
@@ -1023,12 +1029,39 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               : null,
           /**
            * What the chat shows: its messages and the `system` lines that record each model switch
-           * between them, oldest first. `null` when it isn't the user's.
+           * between them, oldest first. `null` when it isn't the user's. A still-streaming reply
+           * a live task is writing — a promoted turn (M3-12 AC2) — is marked `promoted`, so a tab
+           * loading cold, with no cursor to replay `task.promoted`, still shows that the reply
+           * keeps going without it. The task names its reply in its saved state.
            */
-          listThread: async (conversationId: string) =>
-            (await getConversation(conversationId))
-              ? thread(conversationId, ["user", "assistant", "system"])
-              : null,
+          listThread: async (conversationId: string) => {
+            if (!(await getConversation(conversationId))) return null;
+            const rows = await thread(conversationId, ["user", "assistant", "system"]);
+            if (!rows.some((r) => r.role === "assistant" && r.status === "streaming")) return rows;
+            const live = await db
+              .select({
+                replyId: sql<string | null>`json_extract(${tasks.state}, '$.replyId')`,
+              })
+              .from(tasks)
+              .where(
+                and(
+                  eq(tasks.userId, userId),
+                  eq(tasks.conversationId, conversationId),
+                  inArray(tasks.status, [
+                    "queued",
+                    "running",
+                    "waiting_for_approval",
+                    "budget_limited",
+                  ]),
+                ),
+              );
+            const promoted = new Set(
+              live.map((t) => t.replyId).filter((id): id is string => typeof id === "string"),
+            );
+            return promoted.size
+              ? rows.map((r) => (promoted.has(r.id) ? { ...r, promoted: true as const } : r))
+              : rows;
+          },
           /**
            * The caller's own messages containing `query` (M3-08 AC2), newest first. The query is
            * matched literally (LIKE's wildcards are escaped), and the conversation join is bound
@@ -1124,7 +1157,9 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            * and writes the user's row with its files and its empty reply row, both, so the
            * queued text is already in D1 and visible on reload. The pair keeps the thread's
            * shape — each user row immediately followed by its reply — so the waiting exchange
-           * reads where it will settle. `null` when the ID is someone else's.
+           * reads where it will settle. `null` when the ID is someone else's. The result's
+           * `attachmentIds` name the files as placed (a retry's file under its copy's id), so
+           * the drain reads and marks the queued message's own rows.
            */
           enqueue: async (
             conversationId: string,
@@ -1140,11 +1175,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               await createConversation(conversationId, title, pin).catch(() => {});
               if (!(await getConversation(conversationId))) return null;
             }
-            const { statements: files, copied } = await placeAttachments(
-              conversationId,
-              userMessageId,
-              linked,
-            );
+            const {
+              statements: files,
+              copied,
+              ids: placed,
+            } = await placeAttachments(conversationId, userMessageId, linked);
             try {
               await db.batch([
                 message(conversationId, userMessageId, "user", text),
@@ -1156,7 +1191,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               await deleteCopiedAttachments(copied);
               throw err;
             }
-            return { messageId: userMessageId, replyId };
+            return { messageId: userMessageId, replyId, attachmentIds: placed };
           },
           /**
            * Notes a steer that joined its conversation's running turn (M3-09 AC4): only the

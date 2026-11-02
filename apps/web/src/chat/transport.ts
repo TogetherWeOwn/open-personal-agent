@@ -28,6 +28,11 @@ export type StoredMessage = {
   role: "user" | "assistant" | "system";
   status: "complete" | "streaming" | "interrupted" | "error";
   content: string;
+  /**
+   * A still-streaming reply whose turn moved to a background task (M3-12 AC2): the server
+   * marks it on load, so a fresh tab — no cursor to replay `task.promoted` — shows the note.
+   */
+  promoted?: boolean;
   attachments?: StoredAttachment[];
 };
 

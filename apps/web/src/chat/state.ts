@@ -755,15 +755,19 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
   if (!current) return state;
   const local = new Map(current.messages.map((m) => [m.id, m]));
   // D1 holds a streaming reply's text only at its stops; the stream here is ahead.
-  const messages = stored.map(({ id, role, status, content, attachments }): Message => {
+  const messages = stored.map(({ id, role, status, content, promoted, attachments }): Message => {
     const m = local.get(id);
+    // The stored row says whether a task writes this reply (M3-12 AC2): a tab that never saw
+    // `task.promoted` — a fresh one, with no cursor to replay it — takes the mark from there.
+    const goingOn = promoted && status === "streaming" ? ({ promoted: true } as const) : {};
     return m?.status === "streaming" && status === "streaming"
-      ? m
+      ? { ...m, ...goingOn }
       : {
           id,
           role,
           status,
           text: content,
+          ...goingOn,
           ...(attachments?.length ? { attachments } : {}),
           // How a reply ended lives only in this tab (D1 stores a Stop and an interruption
           // alike, and no failure code): keep what the tab saw while it still matches.
