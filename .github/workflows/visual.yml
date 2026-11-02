@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-# Web UI: axe, keyboard send and screenshot baselines at 375, 768 and 1280 px in both themes.
-# Advisory in M2, required from M3. Refresh baselines inside this same image.
+# Web UI: axe, the keyboard-only walkthrough and screenshot baselines at 375, 768 and 1280 px
+# in both themes, for every MVP screen (M3-24 AC3). Advisory in M2; from M3 the `visual`
+# status context is a required check in the main-gate ruleset, so this workflow must report
+# on every pull request — do not re-add a paths filter, or a PR that touches no web file
+# would wait forever for a check that never runs. Refresh baselines inside this same image
+# (README, "Refreshing the screenshot baselines"). Keep the job named `visual`: that name is
+# the required status context.
 name: visual
 
 on:
   pull_request:
-    paths: ["apps/web/**", "pnpm-lock.yaml", ".github/workflows/visual.yml"]
 
 permissions:
   contents: read
