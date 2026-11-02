@@ -34,7 +34,15 @@ const fred = repo.forUser(scopeFromSession({ userId: "fred" }));
 const rpc = (user: typeof alice) => user.assistant() as unknown as DurableObjectStub<Assistant>;
 
 /** `outputTokens` is what the model reports, up to the call's `max_tokens`. */
-type Reply = { text?: string; calls?: [name: string, args: unknown][]; outputTokens?: number };
+type Reply = {
+  text?: string;
+  calls?: [name: string, args: unknown][];
+  outputTokens?: number;
+  /** Runs as the call starts, while it is still in flight. */
+  before?: () => Promise<void>;
+  /** The call fails with this message instead of answering. */
+  error?: string;
+};
 
 /** A model that answers call n with replies[n], counting how often it really streamed. */
 function scripted(replies: Reply[]) {
@@ -47,6 +55,8 @@ function scripted(replies: Reply[]) {
     async *stream(req: ModelRequest): AsyncIterable<ModelEvent> {
       streams += 1;
       const reply = replies[streams - 1] ?? { text: "done" };
+      await reply.before?.();
+      if (reply.error) throw new Error(reply.error);
       if (reply.text) yield { type: "text.delta", text: reply.text };
       for (const [name, args] of reply.calls ?? []) {
         yield {
@@ -181,13 +191,42 @@ async function makeTask(
   return { taskId, instanceId };
 }
 
+/** The progress a run sends its tabs, captured at the assistant's RPC boundary. */
+function captureProgress() {
+  const events: { type: string; payload: unknown }[] = [];
+  const namespace = {
+    idFromName: (name: string) => env.ASSISTANT.idFromName(name),
+    get: (id: DurableObjectId) => {
+      const stub = env.ASSISTANT.get(id) as unknown as Record<string, unknown>;
+      return new Proxy(stub, {
+        get(target, prop) {
+          if (prop === "taskProgress") {
+            return async (p: { type: string; payload: unknown }) => {
+              events.push({ type: p.type, payload: p.payload });
+              return (target.taskProgress as (p: unknown) => Promise<void>)(p);
+            };
+          }
+          // RPC stub methods carry their receiver; binding one would call a "bind" method.
+          return Reflect.get(target, prop);
+        },
+      });
+    },
+  };
+  return { events, env: { ...env, ASSISTANT: namespace } as unknown as typeof env };
+}
+
 /** Runs one instance with a scripted model whose key is the canary. */
 async function run(
   replies: Reply[],
   instanceId: string,
   stepper: FakeStepper,
   tools: LoopTool[] = [],
-  over: { used?: () => Promise<void>; now?: () => number; picks?: unknown[] } = {},
+  over: {
+    used?: () => Promise<void>;
+    now?: () => number;
+    picks?: unknown[];
+    env?: typeof env;
+  } = {},
 ) {
   const { provider, streams } = scripted(replies);
   const resolved = {
@@ -197,9 +236,10 @@ async function run(
     billingId: "openai",
     ...(over.used ? { used: over.used } : {}),
   };
+  const runEnv = over.env ?? env;
   const promise = executeTask(
-    env,
-    await compose(env),
+    runEnv,
+    await compose(runEnv),
     {
       resolveModel: async (_env, _scope, _caller, pick) => {
         over.picks?.push(pick);
@@ -762,6 +802,88 @@ describe("a promoted turn's reply (M3-12b AC2)", () => {
       content: "Started.\n\nFinished",
       status: "complete",
     });
+  });
+
+  it("doesn't rewrite the reply a cancel already cut when the in-flight call returns", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    const { promise } = await run(
+      [
+        {
+          // The cancel route's cut lands while this call is in flight; its text arrives after.
+          before: async () => {
+            await alice.tasks.cancel(taskId);
+            await alice.chat.interrupt({ replyId, reply: "Started." });
+          },
+          text: "More details",
+        },
+      ],
+      instanceId,
+      new FakeStepper(),
+    );
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("cancelled");
+    // The segment the call went on to speak never joins the reply Stop already closed.
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
+  });
+
+  it("announces the loop's own failure when the finish step wrote the row before its settle failed", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The finish step writes the failed row, then its reply settle fails for good.
+    class FinishWroteFailed extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") {
+          await alice.tasks.finish(taskId, "failed", "the model call failed");
+          throw new Error("the reply settle failed");
+        }
+        return super.do(name, config, fn);
+      }
+    }
+    const seen = captureProgress();
+    const { promise } = await run(
+      [{ error: "provider exploded" }],
+      instanceId,
+      new FinishWroteFailed(),
+      [],
+      { env: seen.env },
+    );
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("failed");
+    expect(await reply(replyId)).toMatchObject({ status: "error" });
+    // The tabs hear why the turn failed, not why its bookkeeping did.
+    expect(seen.events.filter((e) => e.type === "turn.failed")).toEqual([
+      { type: "turn.failed", payload: { message: "provider exploded" } },
+    ]);
+  });
+
+  it("announces an interruption, not the settle error, when a final-limit finish wrote its row first", async () => {
+    const { taskId, instanceId, replyId } = await promotedTask();
+    // The pause wrote the budget_limited row; the finish step's reply settle then fails.
+    class SettleFailsAtLimit extends FakeStepper {
+      override async do<T extends JsonValue>(
+        name: string,
+        config: unknown,
+        fn: () => Promise<T>,
+      ): Promise<T> {
+        if (name === "task:finish") throw new Error("the reply settle failed");
+        return super.do(name, config, fn);
+      }
+    }
+    const seen = captureProgress();
+    const fetch = tool("fetch", "read", async () => ({ ok: true, content: "page" }));
+    const calls = [["fetch", { q: "x" }]] as [string, unknown][];
+    const replies: Reply[] = Array.from({ length: 9 }, () => ({ calls }));
+    const { promise } = await run(replies, instanceId, new SettleFailsAtLimit(), [fetch], {
+      env: seen.env,
+    });
+    await promise;
+    expect((await alice.tasks.get(taskId))?.status).toBe("budget_limited");
+    expect(await reply(replyId)).toMatchObject({ content: "Started.", status: "interrupted" });
+    expect(seen.events.map((e) => e.type)).toContain("turn.interrupted");
+    expect(seen.events.map((e) => e.type)).not.toContain("turn.failed");
   });
 
   it("settles the reply as an error when the run fails, never leaving it streaming", async () => {

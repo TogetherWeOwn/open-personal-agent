@@ -253,14 +253,16 @@ export async function executeTask(
         const row = await user.tasks.get(task.id);
         const state = parseState(row?.state ?? null);
         // The finish step may have written the row's end before its reply settle failed for
-        // good: the row can't be finished again, so settle the reply the way it ended.
+        // good: the row can't be finished again, so settle the reply the way it ended. The
+        // `ended:` prefix tells the announcement below this end was the loop's own, not one
+        // this step is writing now.
         if (
           row?.status === "succeeded" ||
           row?.status === "failed" ||
           row?.status === "budget_limited"
         ) {
           if (replyId) await settleReply(user, replyId, replyOf(state), row.status);
-          return row.status;
+          return `ended:${row.status}`;
         }
         if (row?.status === "cancelled") return "cancelled";
         if (limit && state) {
@@ -281,9 +283,11 @@ export async function executeTask(
     await endBudget();
     if (effective === "cancelled") {
       await cancelReply();
-    } else if (effective === "succeeded") {
-      // The task succeeded; only its finish step's settle failed. Announce its own end.
+    } else if (effective?.startsWith("ended:")) {
+      // The finish step ended the row itself; only its settle failed. Announce the loop's
+      // own end, exactly as the success path does — never this settle's error.
       if (end.event) ctx.progress(end.event);
+      else if (replyId && effective === "ended:budget_limited") ctx.progress(INTERRUPTED);
     } else {
       // An execution limit, not money: "Paused: limit" (m3-ux §1.3).
       if (limit)
