@@ -101,6 +101,7 @@ function verifySetup({
   link = true,
   deployMinutes = 0,
   fail = null,
+  live = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
   fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
@@ -122,11 +123,40 @@ function verifySetup({
       return { changed: plan[deploys - 1], url };
     },
     firstRun: async (base, token) => calls.push(`first run ${base === url} ${token}`),
+    liveModels: async (base, _deps, paths) => {
+      calls.push(`live models ${base === url}`);
+      // A configured run records its per-adapter results; an unconfigured one records nothing.
+      if (_deps.env.LIVE_MODEL_API_KEY) {
+        fs.mkdirSync(path.dirname(paths.resultsPath), { recursive: true });
+        fs.writeFileSync(
+          paths.resultsPath,
+          JSON.stringify([
+            {
+              adapter: "openai-chat",
+              model: "m",
+              testMs: 412,
+              inputTokens: 100,
+              outputTokens: 30,
+              costMicroUsd: 40,
+              expectedMicroUsd: 40,
+              cost: "match",
+              artifactId: "a1",
+              artifactName: "live-check-openai-chat.md",
+              ok: true,
+              error: null,
+            },
+          ]),
+        );
+      }
+    },
     teardown: async (argv) =>
       calls.push(`teardown ${argv.join(" ")}`) && { deleted: [], skipped: [] },
   };
   const fetch = async () => ({ status: 200, json: async () => ({ status: "ok" }) });
-  const deps = { env: {}, root, fetch, stdout: (t) => out.push(t) };
+  const env = live
+    ? { LIVE_MODEL_API_KEY: "k", LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1" }
+    : {};
+  const deps = { env, root, fetch, stdout: (t) => out.push(t) };
   const report = path.join(root, "report.md");
   const run = () => verifyCloudflare(["--name", P, "--report", report], deps, steps);
   return { root, calls, out, run, report: () => fs.readFileSync(report, "utf8") };
@@ -142,6 +172,7 @@ describe("verify:cloudflare", () => {
     expect(t.calls).toEqual([
       `deploy ${base}`,
       "first run true tok/+=",
+      "live models true",
       `deploy ${base}`,
       `deploy ${base},${mig}`,
       `teardown --name ${P} --confirm ${P}`,
@@ -155,9 +186,22 @@ describe("verify:cloudflare", () => {
     expect(report).toMatch(/\| F-2\.1 AC1: fresh deploy \| .* \| 0\.0 min, 1 prompts \| met \|/);
     expect(report).toMatch(/\| A-O1: deploy to a first answer \| ≤ 15 min \| 0\.0 min \| met \|/);
     expect(report).toContain("| Claim, onboard, first answer |");
+    expect(report).toContain("| Live models on a configured endpoint |");
+    expect(report).toContain("## Live models");
+    expect(report).toContain("no LIVE_MODEL_* secrets were set");
     expect(t.out.join("")).not.toContain("tok/+=");
     expect(report).not.toMatch(/\{\{|owner-sub/);
     expect(t.out.join("")).not.toContain("owner-sub");
+  });
+
+  it("reports the live step per adapter when its secrets are set", async () => {
+    const t = verifySetup({ live: true });
+    await t.run();
+    const report = t.report();
+    expect(report).toContain("Result: **PASS**");
+    expect(report).toMatch(
+      /\| openai-chat \| m \| 412 ms \| 100 \/ 30 \| 40 uUSD \(match\) \| a1 \| pass \|/,
+    );
   });
 
   it("fails when the re-run is not up to date, and still tears down", async () => {

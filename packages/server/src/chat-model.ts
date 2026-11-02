@@ -136,12 +136,21 @@ export async function resolveChatModel(
   try {
     const options = { providerId, baseUrl, apiKey, privateHttp: privateHttp(env), ...fetch };
     // The OpenAI and Anthropic presets have their own APIs, with the same key and binding
-    // (M3-04 AC3, M3-05 AC3).
-    provider = usesOpenAIResponses(providerId, baseUrl)
-      ? createOpenAIResponsesProvider(options)
-      : usesAnthropicMessages(providerId, baseUrl)
-        ? createAnthropicMessagesProvider(options)
-        : createOpenAIChatProvider(options);
+    // (M3-04 AC3, M3-05 AC3). An explicit choice saved with the endpoint wins; without one the
+    // preset decides, as before.
+    const api =
+      row.api ??
+      (usesOpenAIResponses(providerId, baseUrl)
+        ? "openai-responses"
+        : usesAnthropicMessages(providerId, baseUrl)
+          ? "anthropic-messages"
+          : "openai-chat");
+    provider =
+      api === "openai-responses"
+        ? createOpenAIResponsesProvider(options)
+        : api === "anthropic-messages"
+          ? createAnthropicMessagesProvider(options)
+          : createOpenAIChatProvider(options);
   } catch {
     // Saved as plain HTTP while private hosts were allowed, and they no longer are.
     return { error: "invalid_base_url" };

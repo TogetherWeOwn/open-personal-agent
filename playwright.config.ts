@@ -17,6 +17,9 @@ export default defineConfig({
     { name: "acceptance", testDir: "acceptance", use: { baseURL } },
     // Claims the deployment, so it runs on its own local stack, or one `verify:cloudflare` made.
     { name: "first-run", testDir: "test/first-run" },
+    // The optional endpoint-generic live-model step: `verify:cloudflare` runs it after the
+    // first run, with the claimed session and the LIVE_MODEL_* secrets. Without them it skips.
+    { name: "live-models", testDir: "test/live-models", use: { baseURL } },
   ],
   webServer: process.env.BASE_URL
     ? []

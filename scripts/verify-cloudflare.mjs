@@ -34,21 +34,68 @@ export function maskToken(text, token) {
 }
 
 /** test/first-run in Playwright on the deployment. The setup token reaches it only in its env. */
-async function firstRun(url, setupToken, deps) {
+async function firstRun(url, setupToken, deps, statePath) {
   const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
   const res = await deps.run(
     process.execPath,
     [cli, "test", "--project", "first-run", "--reporter", "line", "--trace", "off"],
     {
       cwd: deps.root,
-      env: { ...deps.env, BASE_URL: url, OPA_SETUP_TOKEN: setupToken },
+      env: {
+        ...deps.env,
+        BASE_URL: url,
+        OPA_SETUP_TOKEN: setupToken,
+        OPA_STORAGE_STATE: statePath,
+      },
       onOutput: (text) => deps.stdout(maskToken(text, setupToken)),
     },
   );
   if (res.code !== 0) throw new DeployError(`the first run in the browser failed (${res.code})`);
 }
 
-const STEPS = { deploy: deployCloudflare, teardown: teardownCloudflare, inventory, firstRun };
+/**
+ * test/live-models in Playwright on the deployment, as the claimed user. Without the
+ * step-level LIVE_MODEL_* secrets the project skips itself and this passes with no results; the
+ * report says so. The endpoint key never reaches the log: output is scrubbed like a secret.
+ */
+async function liveModels(url, deps, paths) {
+  const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
+  const key = deps.env.LIVE_MODEL_API_KEY;
+  const scrub = (text) => (key ? text.replaceAll(key, "[redacted]") : text);
+  const res = await deps.run(
+    process.execPath,
+    [cli, "test", "--project", "live-models", "--reporter", "line", "--trace", "off"],
+    {
+      cwd: deps.root,
+      env: {
+        ...deps.env,
+        BASE_URL: url,
+        OPA_STORAGE_STATE: paths.statePath,
+        LIVE_MODELS_JSON: paths.resultsPath,
+      },
+      onOutput: (text) => deps.stdout(scrub(text)),
+    },
+  );
+  if (res.code !== 0) throw new DeployError(`the live-model step failed (${res.code})`);
+}
+
+/** The live_results file the spec recorded, or null when it recorded nothing. */
+function readLiveResults(resultsPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resultsPath, "utf8"));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+const STEPS = {
+  deploy: deployCloudflare,
+  teardown: teardownCloudflare,
+  inventory,
+  firstRun,
+  liveModels,
+};
 
 export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS) {
   const { values } = parseArgs({
@@ -101,7 +148,17 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
 
   let failure = null;
   let migration = null;
+  let live = null;
   const metrics = {};
+  const liveConfigured = Boolean(
+    vdeps.env.LIVE_MODEL_API_KEY &&
+      (vdeps.env.LIVE_MODEL_OPENAI_BASE_URL || vdeps.env.LIVE_MODEL_ANTHROPIC_BASE_URL),
+  );
+  const liveDir = path.join(deps.root, ".wrangler", "opa-verify");
+  const livePaths = {
+    statePath: path.join(liveDir, `${prefix}-state.json`),
+    resultsPath: path.join(liveDir, `${prefix}-live-models.json`),
+  };
   try {
     const start = Date.now();
     const { url } = await deploy("Fresh deploy", ["worker", "migrations", "secrets"]);
@@ -109,9 +166,13 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     await snapshot("after the fresh deploy");
     await phase("Claim, onboard, first answer", async () => {
       if (!setupToken) throw new DeployError("the fresh deploy printed no setup link");
-      await steps.firstRun(url, setupToken, vdeps);
+      await steps.firstRun(url, setupToken, vdeps, livePaths.statePath);
     });
     metrics.firstAnswer = { minutes: (Date.now() - start) / 60_000 };
+    await phase("Live models on a configured endpoint", async () => {
+      await steps.liveModels(url, vdeps, livePaths);
+      live = readLiveResults(livePaths.resultsPath);
+    });
     await deploy("Re-run (up to date)", []);
     await snapshot("after the re-run");
     migration = writeDummyMigration(deps.root);
@@ -136,7 +197,7 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
   });
 
   const report = renderReport(deps, {
-    ...{ prefix, failure, phases, prompts, snapshots, teardown, metrics },
+    ...{ prefix, failure, phases, prompts, snapshots, teardown, metrics, live, liveConfigured },
   });
   const file = values.report ?? path.join(deps.root, ".wrangler", "opa-verify", `${prefix}.md`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -194,6 +255,29 @@ function budgets({ deploy, firstAnswer }) {
   ].join("\n");
 }
 
+/** One row per adapter from the live step's results file, or why there is none. */
+function liveSection({ live, liveConfigured }) {
+  if (!liveConfigured) {
+    return "Skipped: no LIVE_MODEL_* secrets were set, so the endpoint-generic live step did not run.";
+  }
+  if (!live?.length) return "The step ran but recorded no per-adapter result; see the run's log.";
+  const cell = (value) => (value === null || value === undefined ? "—" : String(value));
+  const rows = live.map(
+    (a) =>
+      `| ${a.adapter} | ${cell(a.model)} | ${cell(a.testMs)} ms | ` +
+      `${cell(a.inputTokens)} / ${cell(a.outputTokens)} | ` +
+      (a.costMicroUsd === null ? "—" : `${a.costMicroUsd} uUSD (${a.cost})`) +
+      ` | ${cell(a.artifactId)} | ` +
+      (a.ok ? "pass" : `**fail**: ${(a.error ?? "unknown").slice(0, 120)}`) +
+      " |",
+  );
+  return (
+    "| Adapter | Model | Test probe | Tokens in / out | Cost | Artifact | Result |\n" +
+    "|---|---|---|---|---|---|---|\n" +
+    rows.join("\n")
+  );
+}
+
 function renderReport(deps, r) {
   const file = (p) => fs.readFileSync(path.join(deps.root, "deploy", p), "utf8");
   const outcome = (p) => {
@@ -218,6 +302,7 @@ function renderReport(deps, r) {
       .permissions.map((p) => `| \`${p.id}\` | ${p.group} | ${outcome(p)} |`)
       .join("\n"),
     budgets: budgets(r.metrics),
+    live: liveSection(r),
     rebinding: r.snapshots.map((s) => `| ${s.label} | ${s.d1} | ${s.r2} |`).join("\n"),
     teardown: t
       ? `Deleted ${t.deleted.length} (${t.deleted.join("; ")}); 0 left.` +

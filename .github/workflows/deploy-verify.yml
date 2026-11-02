@@ -18,7 +18,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     environment: cf-verify
-    timeout-minutes: 30
+    # The live-model step can add four probe-then-task runs; without its secrets it skips.
+    timeout-minutes: 60
     # The Cloudflare secrets are step-level: install and its lifecycle scripts never see them.
     env:
       TEARDOWN_PREFIX: ${{ inputs.teardown_prefix }}
@@ -31,11 +32,16 @@ jobs:
       - name: Install Chromium for the first run in the browser
         if: env.TEARDOWN_PREFIX == ''
         run: pnpm exec playwright install --with-deps chromium
-      - name: Verify (deploy, first run, re-run, upgrade, health, teardown)
+      - name: Verify (deploy, first run, live models, re-run, upgrade, health, teardown)
         if: env.TEARDOWN_PREFIX == ''
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # The optional endpoint-generic live-model step: without these the project skips
+          # itself and the report says so. Step-level, so installs never see them.
+          LIVE_MODEL_OPENAI_BASE_URL: ${{ secrets.LIVE_MODEL_OPENAI_BASE_URL }}
+          LIVE_MODEL_ANTHROPIC_BASE_URL: ${{ secrets.LIVE_MODEL_ANTHROPIC_BASE_URL }}
+          LIVE_MODEL_API_KEY: ${{ secrets.LIVE_MODEL_API_KEY }}
         run: pnpm verify:cloudflare --report "$RUNNER_TEMP/verify-report/report.md"
       # A passed verification certifies this commit for release (docs/releases.md). The
       # receipt's artifact name carries the commit SHA; the release workflow proves the

@@ -203,7 +203,7 @@ export type StoredGrant = StandingGrant & { id: string; createdAt: number };
 /** The `model_providers` columns a route may write. */
 export type ProviderValues = Pick<
   typeof modelProviders.$inferInsert,
-  "kind" | "providerId" | "baseUrl" | "model" | "keySecretId"
+  "kind" | "providerId" | "baseUrl" | "model" | "keySecretId" | "api"
 >;
 
 /** R2's smallest multipart part, except the last: an upload streams through in parts this size. */
@@ -710,6 +710,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             providerId: modelProviders.providerId,
             baseUrl: modelProviders.baseUrl,
             model: modelProviders.model,
+            api: modelProviders.api,
             keySecretId: modelProviders.keySecretId,
             createdAt: modelProviders.createdAt,
             keyLast4: secrets.last4,

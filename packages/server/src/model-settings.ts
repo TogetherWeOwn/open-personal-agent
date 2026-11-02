@@ -132,15 +132,19 @@ function priceHint(billingId: string, model: string | null) {
   return { inputUsdPerMTok, outputUsdPerMTok, verifiedAt, stale: isStale(verifiedAt) };
 }
 
-/** The wire API a provider's calls use: it follows the preset, so a saved OpenAI key moves as it is. */
-const apiOf = (row: Provider) =>
+/**
+ * The wire API a provider's calls use: an explicit choice saved with the endpoint wins; without
+ * one, it follows the preset, so a saved OpenAI key moves as it is.
+ */
+export const apiOf = (row: Provider) =>
   row.kind === "workers-ai"
     ? "workers-ai"
-    : usesOpenAIResponses(row.providerId, row.baseUrl)
-      ? "openai-responses"
-      : usesAnthropicMessages(row.providerId, row.baseUrl)
-        ? "anthropic-messages"
-        : "openai-chat";
+    : (row.api ??
+      (usesOpenAIResponses(row.providerId, row.baseUrl)
+        ? "openai-responses"
+        : usesAnthropicMessages(row.providerId, row.baseUrl)
+          ? "anthropic-messages"
+          : "openai-chat"));
 
 /**
  * Names a person reads ("GPT-4.1 mini · OpenAI"), from the price table where it has them; a
@@ -242,7 +246,22 @@ async function keyedValues(
   const baseUrl = text(body?.baseUrl, 500);
   const model = text(body?.model, 200);
   const apiKey = body?.apiKey === undefined ? null : text(body.apiKey, 4096);
-  if (!providerId || !baseUrl || !model || (body?.apiKey !== undefined && !apiKey)) {
+  // An explicit wire-API choice for a custom endpoint (a compatible gateway that speaks the
+  // Responses or Messages dialect); absent keeps the origin preset. The key binding and the
+  // Test probe are unchanged: only which adapter serves the endpoint moves.
+  const api =
+    body?.api === undefined
+      ? null
+      : ["openai-chat", "openai-responses", "anthropic-messages"].includes(body.api as string)
+        ? (body.api as "openai-chat" | "openai-responses" | "anthropic-messages")
+        : false;
+  if (
+    !providerId ||
+    !baseUrl ||
+    !model ||
+    api === false ||
+    (body?.apiKey !== undefined && !apiKey)
+  ) {
     return { status: 400, error: "invalid_model" } as const;
   }
   let binding: string;
@@ -298,7 +317,22 @@ async function keyedValues(
       return (await vaultBlocked(c)) ?? { status: 400, error: "key_required" };
     if (opened === "fault") return { status: 503, error: "vault_unavailable" } as const;
   }
-  return { kind: "openai-chat" as const, providerId, baseUrl, model, keySecretId: secretId };
+  // An explicit choice stays with its endpoint: a move to another endpoint without one falls
+  // back to the origin preset, while an edit that keeps the endpoint keeps a saved choice.
+  const moved =
+    !current?.baseUrl ||
+    !current?.providerId ||
+    credentialBinding(current.providerId, current.baseUrl) !== binding ||
+    path(current.baseUrl) !== path(baseUrl);
+  const keep = api ?? (moved ? null : undefined);
+  return {
+    kind: "openai-chat" as const,
+    providerId,
+    baseUrl,
+    model,
+    keySecretId: secretId,
+    ...(keep !== undefined ? { api: keep } : {}),
+  };
 }
 
 /**
