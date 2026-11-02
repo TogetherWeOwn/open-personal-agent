@@ -400,6 +400,23 @@ export function App({ transport }: AppProps) {
     const attachments: StoredAttachment[] = ready.flatMap((f) =>
       f.uploaded ? [{ ...f.uploaded, sentToModel: willRead(f.uploaded.kind, config.model) }] : [],
     );
+    deliver(conversationId, text, attachments);
+    const sent = new Set(ready.map((f) => f.key));
+    setPendingFiles((p) => ({
+      ...p,
+      [conversationId]: (p[conversationId] ?? []).filter((f) => !sent.has(f.key)),
+    }));
+  };
+
+  /** Retry on an interrupted reply (m3-ux Flow E): its request again, files and all, as a new turn. */
+  const retry = (replyId: string) => {
+    if (state.pending || queuedSend) return;
+    const at = active.messages.findIndex((m) => m.id === replyId);
+    const asked = active.messages.slice(0, at).findLast((m) => m.role === "user");
+    if (asked) deliver(active.id, asked.text, asked.attachments ?? []);
+  };
+
+  const deliver = (conversationId: string, text: string, attachments: StoredAttachment[]) => {
     dispatch({ type: "send", id: newId(), conversationId, text, attachments });
     const ids = attachments.map((a) => a.id);
     const go = () =>
@@ -412,11 +429,6 @@ export function App({ transport }: AppProps) {
     const saving = saves.current.get(conversationId);
     if (saving) void saving.then(go);
     else go();
-    const sent = new Set(ready.map((f) => f.key));
-    setPendingFiles((p) => ({
-      ...p,
-      [conversationId]: (p[conversationId] ?? []).filter((f) => !sent.has(f.key)),
-    }));
   };
 
   const send = (text: string): boolean => {
@@ -620,6 +632,8 @@ export function App({ transport }: AppProps) {
               </>
             }
             onDequeue={(conversationId, messageId) => transport.dequeue(conversationId, messageId)}
+            onRetry={retry}
+            busy={state.pending !== null || queuedSend !== null}
           />
           {waiting[0] && (
             <div className="mx-auto flex w-full max-w-[720px] items-center gap-2 px-4 pb-2 text-sm">

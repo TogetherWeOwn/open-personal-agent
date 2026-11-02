@@ -22,6 +22,8 @@ export function Thread({
   afterCount = 0,
   onDequeue,
   empty,
+  onRetry,
+  busy = false,
 }: {
   conversation: Conversation;
   showWork: ShowWork;
@@ -33,6 +35,10 @@ export function Thread({
   /** How many things `after` shows, so a new card scrolls into view as a message would. */
   afterCount?: number;
   onDequeue: (conversationId: string, messageId: string) => void;
+  /** Sends the request behind an interrupted reply again, as a new turn. */
+  onRetry?: (replyId: string) => void;
+  /** A reply is on its way, so Retry waits. */
+  busy?: boolean;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -83,7 +89,7 @@ export function Thread({
             if (turn) {
               return (
                 <TurnView key={m.id} turn={turn} showWork={showWork} prices={prices}>
-                  <MessageView message={m} />
+                  <MessageView message={m} onRetry={onRetry} busy={busy} />
                 </TurnView>
               );
             }
@@ -92,7 +98,7 @@ export function Thread({
             const queued = byMessage.get(m.id);
             return (
               <Fragment key={m.id}>
-                <MessageView message={m} />
+                <MessageView message={m} onRetry={onRetry} busy={busy} />
                 {queued && (
                   <QueuedRow
                     queued={queued}
@@ -103,7 +109,7 @@ export function Thread({
               </Fragment>
             );
           }
-          return <MessageView key={m.id} message={m} />;
+          return <MessageView key={m.id} message={m} onRetry={onRetry} busy={busy} />;
         })}
         {after}
         {upcoming.map((q) => (
@@ -155,7 +161,15 @@ function QueuedRow({
   );
 }
 
-function MessageView({ message: m }: { message: Message }) {
+function MessageView({
+  message: m,
+  onRetry,
+  busy,
+}: {
+  message: Message;
+  onRetry: ((replyId: string) => void) | undefined;
+  busy: boolean;
+}) {
   if (m.role === "system") {
     return <p className="self-center text-center text-sm text-text-muted">{m.text}</p>;
   }
@@ -192,9 +206,25 @@ function MessageView({ message: m }: { message: Message }) {
       <div className={`break-words ${m.status === "streaming" ? "caret" : ""}`}>
         <Markdown text={m.text} streaming={m.status === "streaming"} />
       </div>
-      {m.status === "interrupted" && (
-        <p className="mt-1 text-sm text-text-muted">Stopped before it finished.</p>
+      {m.status === "streaming" && m.promoted && (
+        <p className="mt-1 text-sm text-text-muted">This keeps going if you close the tab.</p>
       )}
+      {m.status === "interrupted" &&
+        (m.ended === "stopped" ? (
+          <p className="mt-1 text-sm text-text-muted">Stopped. Nothing after that ran.</p>
+        ) : (
+          // m3-ux Flow E: an interruption is said plainly, with the way to go on (M3-12 AC5).
+          <p className="mt-1 flex items-center gap-2 text-sm text-text-muted">
+            {m.ended === "interrupted"
+              ? "I was interrupted before I finished."
+              : "Stopped before it finished."}
+            {onRetry && (
+              <Button variant="quiet" isDisabled={busy} onPress={() => onRetry(m.id)}>
+                Retry
+              </Button>
+            )}
+          </p>
+        ))}
       {m.status === "error" &&
         (m.failure === "vault_reset_required" ? (
           <p className="mt-1 text-sm text-danger">

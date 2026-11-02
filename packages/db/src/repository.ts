@@ -765,6 +765,103 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ]
           : [];
       /**
+       * Deletes copied attachment objects whose rows never landed. Best-effort: a failed
+       * delete must not mask the error that stranded them.
+       */
+      const deleteCopiedAttachments = async (ids: readonly string[]) => {
+        await Promise.all(ids.map((id) => FILES.delete(attachmentKey(id)).catch(() => {})));
+      };
+      /**
+       * Batch statements putting a send's files on its message (M3-10 AC2): still-unlinked
+       * uploads link as above, but a file already on an earlier message — a Retry names the
+       * interrupted send's files again (M3-12 AC5) — can't move without leaving that message
+       * bare, so it is copied instead: its bytes under a new id, then a new row on this
+       * message, and the retry's reload shows the file it sent. A file whose bytes are gone
+       * is left off rather than point at nothing. The copies' ids come back with the
+       * statements so the caller can delete their objects if its own write then fails:
+       * retention only ever sweeps rows, so an object whose row never landed would strand.
+       * A copy that fails part-way through the loop strands none of the earlier ones either.
+       */
+      const placeAttachments = async (
+        conversationId: string,
+        userMessageId: string,
+        linked: readonly { id: string; sentToModel: boolean }[],
+      ): Promise<{ statements: BatchItem<"sqlite">[]; copied: string[] }> => {
+        if (!linked.length) return { statements: [], copied: [] };
+        const rows = await db
+          .select({
+            id: attachments.id,
+            messageId: attachments.messageId,
+            name: attachments.name,
+            mediaType: attachments.mediaType,
+            kind: attachments.kind,
+            sizeBytes: attachments.sizeBytes,
+          })
+          .from(attachments)
+          .where(
+            and(
+              eq(attachments.userId, userId),
+              inArray(
+                attachments.id,
+                linked.map((f) => f.id),
+              ),
+            ),
+          );
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        const fresh = (sentToModel: boolean) =>
+          linked
+            .filter((f) => f.sentToModel === sentToModel && byId.get(f.id)?.messageId == null)
+            .map((f) => f.id);
+        const copies: BatchItem<"sqlite">[] = [];
+        const copied: string[] = [];
+        const seen = new Set<string>();
+        try {
+          for (const f of linked) {
+            const row = byId.get(f.id);
+            if (!row || row.messageId === null || seen.has(row.id)) continue;
+            seen.add(row.id);
+            const stored = await FILES.get(attachmentKey(row.id));
+            if (!stored?.body) continue;
+            const copyId = crypto.randomUUID();
+            // Tracked before the write, so a failure after the object landed still finds it;
+            // deleting a key that never landed is harmless.
+            copied.push(copyId);
+            // The object first, as an upload does: a row is only written for bytes that exist.
+            await putStreamed(
+              FILES,
+              attachmentKey(copyId),
+              stored.body,
+              { httpMetadata: { contentType: row.mediaType } },
+              row.sizeBytes,
+            );
+            copies.push(
+              db.insert(attachments).values({
+                id: copyId,
+                userId,
+                conversationId,
+                messageId: userMessageId,
+                name: row.name,
+                mediaType: row.mediaType,
+                kind: row.kind,
+                sizeBytes: row.sizeBytes,
+                sentToModel: f.sentToModel,
+              }),
+            );
+          }
+        } catch (err) {
+          await deleteCopiedAttachments(copied);
+          throw err;
+        }
+        return {
+          statements: [
+            ...linkAttachments(conversationId, userMessageId, true, fresh(true)),
+            ...linkAttachments(conversationId, userMessageId, false, fresh(false)),
+            ...copies,
+          ],
+          copied,
+        };
+      };
+      /**
        * A conversation's rows with the given roles, oldest first, each with its files' sniffed
        * facts (M3-10). Only a user row has files; the others get `[]`.
        */
@@ -995,7 +1092,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /**
            * Writes the user's message and the empty streaming reply after it, both or neither,
            * and puts the message's files on it, each marked with whether the model received it
-           * (M3-10 AC2): only the user's own, still-unlinked uploads move.
+           * (M3-10 AC2): the user's own still-unlinked uploads move, one already on an earlier
+           * message is copied (see `placeAttachments`).
            */
           startTurn: async (
             conversationId: string,
@@ -1004,20 +1102,22 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             linked: readonly { id: string; sentToModel: boolean }[] = [],
           ) => {
             const userMessageId = crypto.randomUUID();
-            const link = (sentToModel: boolean) =>
-              linkAttachments(
-                conversationId,
-                userMessageId,
-                sentToModel,
-                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
-              );
-            await db.batch([
-              message(conversationId, userMessageId, "user", text),
-              message(conversationId, replyId, "assistant", ""),
-              ...link(true),
-              ...link(false),
-              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
-            ]);
+            const { statements: files, copied } = await placeAttachments(
+              conversationId,
+              userMessageId,
+              linked,
+            );
+            try {
+              await db.batch([
+                message(conversationId, userMessageId, "user", text),
+                message(conversationId, replyId, "assistant", ""),
+                ...files,
+                db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+              ]);
+            } catch (err) {
+              await deleteCopiedAttachments(copied);
+              throw err;
+            }
           },
           /**
            * Holds a send that arrived mid-run (M3-09 AC4): opens the conversation when it's new
@@ -1035,25 +1135,27 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           ) => {
             const userMessageId = crypto.randomUUID();
             const replyId = crypto.randomUUID();
-            const link = (sentToModel: boolean) =>
-              linkAttachments(
-                conversationId,
-                userMessageId,
-                sentToModel,
-                linked.filter((f) => f.sentToModel === sentToModel).map((f) => f.id),
-              );
             if (!(await getConversation(conversationId))) {
               // A conflict is either another user's row or this user's from a concurrent open.
               await createConversation(conversationId, title, pin).catch(() => {});
               if (!(await getConversation(conversationId))) return null;
             }
-            await db.batch([
-              message(conversationId, userMessageId, "user", text),
-              message(conversationId, replyId, "assistant", ""),
-              ...link(true),
-              ...link(false),
-              db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
-            ]);
+            const { statements: files, copied } = await placeAttachments(
+              conversationId,
+              userMessageId,
+              linked,
+            );
+            try {
+              await db.batch([
+                message(conversationId, userMessageId, "user", text),
+                message(conversationId, replyId, "assistant", ""),
+                ...files,
+                db.update(conversations).set({ updatedAt: Date.now() }).where(own(conversationId)),
+              ]);
+            } catch (err) {
+              await deleteCopiedAttachments(copied);
+              throw err;
+            }
             return { messageId: userMessageId, replyId };
           },
           /**
