@@ -1534,24 +1534,35 @@ export class Assistant extends Agent<Bindings> {
     if (row === undefined) return false;
     const status = row.status;
     if (TASK_ENDED.has(status)) {
+      // A task that failed before its run ever started (Workflow creation refused, so
+      // `#promote` ended the row itself, and the eviction cut in before the marker was
+      // cleared) never owned the turn: it stays this DO's, saved stop and all.
+      if (status === "failed" && row.startedAt == null) return false;
       await repo.turns.remove(cp.turnId).catch(() => {});
       if (this.ctx.storage.kv.get(PROMOTED_KEY(cp.conversationId)) === taskId) {
         this.ctx.storage.kv.delete(PROMOTED_KEY(cp.conversationId));
       }
-      // A task that ended before its reply settled leaves it streaming with the task's text
-      // in D1: settle it as the task ended, with that text, never the checkpoint's older one.
+      // A task that ended before its reply settled leaves it streaming in D1: settle it as
+      // the task ended. The task saved its whole turn before it finished, while the reply's
+      // checkpoints are best-effort — so the fuller of the saved answer and the stored text
+      // is the reply, never the checkpoint's older one.
       const stored = (
         (await repo.chat.listMessages(cp.conversationId).catch(() => null)) ?? []
       ).find((m) => m.id === cp.replyId);
       if (stored?.status === "streaming") {
+        let saved = "";
+        try {
+          saved = ((JSON.parse(row.state ?? "{}") as TaskTurnState).turn?.messages ?? [])
+            .flatMap((m) => (m.role === "assistant" && m.content ? [m.content] : []))
+            .join("\n\n");
+        } catch {}
+        const reply = stored.content.length >= saved.length ? stored.content : saved;
         const as =
           status === "succeeded" ? "complete" : status === "failed" ? "error" : "interrupted";
-        const settled = await repo.chat
-          .settle({ replyId: cp.replyId, reply: stored.content }, as)
-          .then(
-            () => true,
-            () => false,
-          );
+        const settled = await repo.chat.settle({ replyId: cp.replyId, reply }, as).then(
+          () => true,
+          () => false,
+        );
         const emit = this.#emitter(cp.conversationId, cp.turnId);
         if (status === "succeeded") emit("turn.completed", {});
         else if (status === "cancelled") emit("turn.cancelled", {});

@@ -457,6 +457,83 @@ describe("an eviction mid-promotion", () => {
     });
   });
 
+  it("settles a finished task's reply with its saved answer when a checkpoint didn't land", async () => {
+    const { browser, owner } = await claim();
+    await setUp(owner, replying([{ text: "x" }]).provider, []);
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("conv-mid", "Mid", undefined);
+    await user.chat.startTurn("conv-mid", "Go", "reply-mid5", []);
+    const taskId = crypto.randomUUID();
+    await user.tasks.create({
+      id: taskId,
+      conversationId: "conv-mid",
+      workflowInstanceId: `task-${taskId}`,
+      kind: "turn",
+      mode: "interactive",
+      // The task saved its whole answer before finishing; the reply's last checkpoint is
+      // best-effort and this one never landed.
+      state: JSON.stringify({
+        turn: {
+          messages: [
+            { role: "assistant", content: "First." },
+            { role: "assistant", content: "Second." },
+          ],
+        },
+      }),
+    });
+    await user.tasks.markRunning(taskId, Date.now());
+    await user.tasks.finish(taskId, "succeeded");
+    await user.chat.checkpointReply("reply-mid5", "First.");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered(checkpoint(owner, "turn-mid5", "reply-mid5", taskId) as never),
+    );
+    expect((await stored(browser, "conv-mid")).at(-1)).toMatchObject({
+      content: "First.\n\nSecond.",
+      status: "complete",
+    });
+  });
+
+  it("leaves the turn to the DO when its task failed before it ever started", async () => {
+    const { browser, owner } = await claim();
+    await setUp(owner, replying([{ text: "x" }]).provider, []);
+    const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await user.chat.open("conv-mid", "Mid", undefined);
+    await user.chat.startTurn("conv-mid", "Go", "reply-mid6", []);
+    // What #promote checkpointed before it tried to start the Workflow.
+    await user.chat.checkpointReply("reply-mid6", "Half");
+    await user.turns.save({
+      turnId: "turn-mid6",
+      conversationId: "conv-mid",
+      replyId: "reply-mid6",
+      providerId: "scripted",
+      model: "test-model",
+      status: "limit_reached",
+      state: "{}",
+    });
+    const taskId = crypto.randomUUID();
+    await user.tasks.create({
+      id: taskId,
+      conversationId: "conv-mid",
+      workflowInstanceId: `task-${taskId}`,
+      kind: "turn",
+      mode: "interactive",
+      state: "{}",
+    });
+    // Workflow creation refused, so #promote ended the row itself; the eviction then cut in
+    // before it cleared its checkpoint. The run never started and never owned the reply.
+    await user.tasks.finish(taskId, "failed", "The task couldn't start.");
+    await runInDurableObject(assistantOf(owner), (i: Assistant) =>
+      i.onFiberRecovered(checkpoint(owner, "turn-mid6", "reply-mid6", taskId) as never),
+    );
+    // The saved stop survives for Continue, and the reply is left as it was — waiting on
+    // that stop, not closed as a failure by a task that never ran.
+    expect(await user.turns.load("turn-mid6")).toBeDefined();
+    expect((await stored(browser, "conv-mid")).at(-1)).toMatchObject({
+      content: "Half",
+      status: "streaming",
+    });
+  });
+
   it("interrupts the turn as usual when no task row was written", async () => {
     const { browser, owner } = await claim();
     const created = await setUp(owner, replying([{ text: "x" }]).provider, []);
