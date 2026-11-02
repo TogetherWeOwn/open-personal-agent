@@ -46,7 +46,8 @@ type Envelope<T extends string, P> = {
   // Increases by one per event within a conversation and never restarts per turn (M3-03 AC10),
   // so a tab can name the last event it applied and replay the rest; 0 is a rejection outside
   // any turn, sent to one tab and never logged. A task's progress frame (it carries `taskId`)
-  // is numbered by its task's own counter instead, and is never logged or replayed.
+  // is numbered by its task's own counter instead, and is never logged or replayed, except a
+  // promoted turn's: that one goes on in the turn's own log, numbered as the turn's events are.
   seq: number;
   sessionId: string; // the conversation the turn belongs to
   turnId: string;

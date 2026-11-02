@@ -55,3 +55,41 @@ describe("EventLog (M3-03 AC10)", () => {
     expect(seen.next).toBe("frame-4");
   });
 });
+
+describe("a promoted turn's task events (M3-12 AC8)", () => {
+  it("admits each task event once, nothing after its turn ends, and forgets ended tasks", async () => {
+    const seen = await withLog("tasks", (log) => {
+      const admitted = [1, 2, 1, 2, 3].map((seq) => log.admit("task-a", seq));
+      const other = log.admit("task-b", 1);
+      log.endTask("task-a", 1_000);
+      const afterEnd = log.admit("task-a", 4);
+      // A week on, another task's end clears task-a's counter.
+      log.endTask("task-b", 1_000 + 8 * 86_400_000);
+      return { admitted, other, afterEnd, cleared: log.admit("task-a", 1) };
+    });
+    expect(seen).toEqual({
+      admitted: [true, true, false, false, true],
+      other: true,
+      afterEnd: false,
+      cleared: true,
+    });
+  });
+
+  it("still takes a turn's end whose diverging replay reused a sequence", async () => {
+    const seen = await withLog("end-reuse", (log) => {
+      const ran = [1, 2, 3].map((seq) => log.admit("task-c", seq));
+      // The replay diverges and its end arrives under a sequence already seen; dropping it
+      // would leave the tab waiting on a turn that ended.
+      const end = log.admit("task-c", 2, true);
+      const backwards = log.admit("task-c", 3); // the counter never went backwards
+      log.endTask("task-c", 1_000);
+      return { ran, end, backwards, lateEnd: log.admit("task-c", 2, true) };
+    });
+    expect(seen).toEqual({
+      ran: [true, true, true],
+      end: true,
+      backwards: false,
+      lateEnd: false,
+    });
+  });
+});
