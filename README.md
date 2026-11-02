@@ -59,7 +59,7 @@ internet unencrypted.
 
 ### Refreshing the screenshot baselines
 
-The `visual` CI job is a required check, and its baselines only match renders from the
+The `visual` CI job runs on every pull request, and its baselines only match renders from the
 Playwright image pinned in `.github/workflows/visual.yml` — host fonts and rendering differ.
 To re-record after an intended UI change, run one command from the repo root, using the image
 digest from that workflow file:
