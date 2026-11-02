@@ -37,6 +37,21 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm verify:cloudflare --report "$RUNNER_TEMP/verify-report/report.md"
+      # A passed verification certifies this commit for release (docs/releases.md). The
+      # receipt's artifact name carries the commit SHA; the release workflow proves the
+      # run, job, steps and receipt before anything is tagged. Teardown-only runs skip
+      # both steps, so they certify nothing. Neither step sees the Cloudflare secrets.
+      - name: Record the release receipt
+        if: env.TEARDOWN_PREFIX == ''
+        run: node scripts/write-release-receipt.mjs "$RUNNER_TEMP/release-receipt/promotion.json"
+      - name: Upload the release receipt
+        if: env.TEARDOWN_PREFIX == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: production-promotion-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-receipt/promotion.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Teardown only
         if: env.TEARDOWN_PREFIX != ''
         env:
