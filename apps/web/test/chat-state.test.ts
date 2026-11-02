@@ -121,6 +121,16 @@ describe("chatReducer", () => {
     expect(reply(done)).toMatchObject({ status: "complete", text: "Later" });
   });
 
+  it("shows the promoted note after a fresh load during a promoted turn", () => {
+    // A new tab has no turn and no cursor to replay `task.promoted` from: the stored row
+    // itself must say the reply's turn moved to a task, or the note never appears there.
+    const loadedFresh = run(
+      list("c1"),
+      load("c1", msg("u1", "Hi"), { ...msg("r1", "Hel", "streaming"), promoted: true }),
+    );
+    expect(reply(loadedFresh)).toMatchObject({ status: "streaming", promoted: true });
+  });
+
   it("keeps a vault reset refusal's code on the failed reply, so it can link there (TWO-650)", () => {
     const locked = ev("turn.failed", { message: "Reset.", code: "vault_reset_required" }, "");
     const state = run(send, locked);

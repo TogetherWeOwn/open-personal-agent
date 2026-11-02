@@ -678,7 +678,9 @@ export class Assistant extends Agent<Bindings> {
       replyId: admitted.replyId,
       text,
       own,
-      attachmentIds,
+      // As placed on the queued message — a retry's file under its copy's id — so the drain
+      // reads those rows and `beginReply` marks them, not the earlier message's.
+      attachmentIds: admitted.attachmentIds,
       at: Date.now(),
     };
     this.#parkOrStart(item);

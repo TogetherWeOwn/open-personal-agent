@@ -950,6 +950,74 @@ describe("run queue and steer (M3-09)", () => {
     ]);
   });
 
+  it("marks a queued retry's copied file as sent once the drain reads it (M3-10 AC2)", async () => {
+    const { browser, owner } = await claim();
+    const seen: ModelMessage[][] = [];
+    await useModel(owner, scripted(seen));
+    const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    const uploaded = await workerApp.request(
+      `${ORIGIN}/api/attachments`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          origin: ORIGIN,
+          "content-type": "text/plain",
+          "x-file-name": "notes.txt",
+        },
+        body: new TextEncoder().encode("the file's words"),
+      } as never,
+      browser.bindings,
+    );
+    const { id } = await uploaded.json<{ id: string }>();
+    const tab = await openTab(browser);
+    const completed = () => tab.events.filter((e) => e.type === "turn.completed").length;
+    const withFile = (text: string) =>
+      tab.ws?.send(
+        JSON.stringify({
+          type: "chat.send",
+          conversationId: "conv-qr",
+          text,
+          attachmentIds: [id],
+        }),
+      );
+    // The first send links the upload to its message and the model reads it.
+    withFile("Read this");
+    await vi.waitFor(() => expect(completed()).toBe(1), SOCKET_WAIT);
+    // A held turn keeps the conversation busy; a retry naming the first send's file — as a
+    // cross-tab retry can — queues behind it, so the admit places a copy on the retry's row.
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await useModel(owner, scripted(seen, gate));
+    tab.send?.("conv-qr", "Hold on");
+    await vi.waitFor(
+      () => expect(tab.events.filter((e) => e.type === "message.delta").length).toBeGreaterThan(2),
+      SOCKET_WAIT,
+    );
+    withFile("Read it again");
+    await tab.until?.("turn.queued");
+    release();
+    await vi.waitFor(() => expect(completed()).toBe(3), SOCKET_WAIT);
+    // The drained retry's model call carried the file…
+    expect(seen.at(-1)?.at(-1)).toMatchObject({
+      role: "user",
+      content: "Read it again",
+      attachments: [{ name: "notes.txt" }],
+    });
+    // …and the copy stored on its message says so, beside the first send's own mark.
+    const rows = await (await browser.req("/api/conversations/conv-qr/messages")).json<{
+      messages: {
+        role: string;
+        attachments?: { id: string; name: string; sentToModel: boolean | null }[];
+      }[];
+    }>();
+    const files = rows.messages.flatMap((m) => m.attachments ?? []);
+    expect(files).toHaveLength(2);
+    expect(files[0]).toMatchObject({ id, sentToModel: true });
+    expect(files[1]?.id).not.toBe(id);
+    expect(files[1]).toMatchObject({ name: "notes.txt", sentToModel: true });
+  });
+
   it("queues per conversation and drains another conversation after a cancel", async () => {
     const { browser, owner } = await claim();
     const seen: ModelMessage[][] = [];

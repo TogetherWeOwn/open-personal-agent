@@ -239,4 +239,74 @@ describe("a retried send's files (M3-12 AC5)", () => {
     expect(sends).toHaveLength(1);
     expect(sends[0]?.attachments.map((f) => f.id)).toEqual(["retry-file2"]);
   });
+
+  it("marks a queued retry's copied file with what the model received, once its reply begins", async () => {
+    const user = repo.forUser(scopeFromSession({ userId: "alice" }));
+    await user.createConversation("retry-c3", "Queued retry");
+    const bytes = new TextEncoder().encode("the third brief");
+    await user.attachments.putObject(
+      "retry-file3",
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+      "text/plain",
+      bytes.byteLength,
+    );
+    await user.attachments.create({
+      id: "retry-file3",
+      name: "brief3.txt",
+      mediaType: "text/plain",
+      kind: "text",
+      sizeBytes: bytes.byteLength,
+    });
+    // The first send's model never read the file; a retry of it queues behind a running turn,
+    // admitted with the placeholder `false` because the reading model isn't known yet.
+    await user.chat.startTurn("retry-c3", "Read this", "retry-r5", [
+      { id: "retry-file3", sentToModel: false },
+    ]);
+    const queued = await user.chat.enqueue("retry-c3", "Queued retry", "Read this", undefined, [
+      { id: "retry-file3", sentToModel: false },
+    ]);
+    // The admit placed a copy on the queued message, so the drain names the copy's id — the
+    // row `beginReply` can actually mark — not the earlier message's.
+    expect(queued?.attachmentIds).toHaveLength(1);
+    expect(queued?.attachmentIds[0]).not.toBe("retry-file3");
+    await user.chat.beginReply(
+      "retry-c3",
+      queued?.messageId ?? "",
+      (queued?.attachmentIds ?? []).map((id) => ({ id, sentToModel: true })),
+    );
+    const rows = (await user.chat.listMessages("retry-c3")) ?? [];
+    const sends = rows.filter((m) => m.role === "user");
+    expect(sends[1]?.attachments[0]).toMatchObject({ name: "brief3.txt", sentToModel: true });
+    // The earlier message's own mark is untouched: its model still never read the file.
+    expect(sends[0]?.attachments[0]).toMatchObject({ id: "retry-file3", sentToModel: false });
+  });
+});
+
+describe("a promoted turn's reply on load (M3-12 AC2)", () => {
+  it("marks the still-streaming reply its task is writing, so a fresh tab shows the note", async () => {
+    const user = repo.forUser(scopeFromSession({ userId: "alice" }));
+    await user.createConversation("promo-c1", "Promoted");
+    await user.chat.startTurn("promo-c1", "Keep going", "promo-r1");
+    await user.tasks.create({
+      id: "promo-task1",
+      conversationId: "promo-c1",
+      kind: "turn",
+      mode: "interactive",
+      state: JSON.stringify({ replyId: "promo-r1" }),
+    });
+    const thread = (await user.chat.listThread("promo-c1")) ?? [];
+    expect(thread.find((m) => m.id === "promo-r1")).toMatchObject({
+      status: "streaming",
+      promoted: true,
+    });
+    // Once the task has ended it no longer writes the reply, so the mark goes with it.
+    await user.tasks.finish("promo-task1", "failed", "The task couldn't start.");
+    const after = (await user.chat.listThread("promo-c1")) ?? [];
+    expect(after.find((m) => m.id === "promo-r1")).not.toHaveProperty("promoted");
+  });
 });
