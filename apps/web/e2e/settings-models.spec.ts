@@ -4,6 +4,20 @@ import { expect, type Page, test } from "@playwright/test";
 
 test.use({ locale: "en-US", timezoneId: "Europe/London" });
 
+/**
+ * A fullPage capture re-paints the sticky phone tab bar mid-page, over a tab-bar-height
+ * slice of content that then has no visual coverage. Unpinning it for the shot leaves it
+ * in the baseline once, in flow at the bottom, and uncovers the slice. Called after axe,
+ * so the a11y pass still sees the real page; from 640 px the tab bar isn't rendered, so
+ * the media query leaves those baselines untouched.
+ */
+async function unpinTabBar(page: Page) {
+  await page.addStyleTag({
+    content:
+      "@media (max-width: 639px) { nav[aria-label='Main'] { position: static !important; } }",
+  });
+}
+
 // Low entropy: the canary allowlist in .gitleaks.toml covers only `*.test.*` files.
 const KEY = "test-key-WXYZ";
 const ADDED = Date.UTC(2026, 9, 20);
@@ -275,6 +289,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       const { violations } = await new AxeBuilder({ page }).analyze();
       expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
+      await unpinTabBar(page);
       await expect(page).toHaveScreenshot(`settings-models-${colorScheme}-${width}.png`, {
         fullPage: true,
       });
