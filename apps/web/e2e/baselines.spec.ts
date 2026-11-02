@@ -382,10 +382,11 @@ const SCREENS: Record<string, [string, string]> = {
  * slice of content that then has no visual coverage. Unpinning it for the shot leaves it
  * in the baseline once, in flow at the bottom, and uncovers the slice. Called after axe,
  * so the a11y pass still sees the real page; from 640 px the tab bar isn't rendered, so
- * the media query leaves those baselines untouched.
+ * the media query leaves those baselines untouched. The caller removes the injected
+ * style after the shot, so later steps on the same page run under the real layout.
  */
 async function unpinTabBar(page: Page) {
-  await page.addStyleTag({
+  return page.addStyleTag({
     content:
       "@media (max-width: 639px) { nav[aria-label='Main'] { position: static !important; } }",
   });
@@ -395,8 +396,12 @@ async function shoot(page: Page, name: string, colorScheme: string, width: numbe
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target)}`)).toEqual([]);
-  await unpinTabBar(page);
-  await expect(page).toHaveScreenshot(`${name}-${colorScheme}-${width}.png`, { fullPage: true });
+  const unpin = await unpinTabBar(page);
+  try {
+    await expect(page).toHaveScreenshot(`${name}-${colorScheme}-${width}.png`, { fullPage: true });
+  } finally {
+    await unpin.evaluate((el) => (el as HTMLStyleElement).remove());
+  }
 }
 
 for (const colorScheme of ["light", "dark"] as const) {
