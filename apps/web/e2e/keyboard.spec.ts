@@ -168,9 +168,12 @@ test("keyboard only: edit a memory note and save the new version", async ({ page
     ...over,
   });
   let notes = [note({})];
+  const puts: { pathname: string; body: { text: string } }[] = [];
   await page.route("/api/memory**", (route) => {
     if (route.request().method() === "PUT") {
-      const { text } = route.request().postDataJSON() as { text: string };
+      const body = route.request().postDataJSON() as { text: string };
+      puts.push({ pathname: new URL(route.request().url()).pathname, body });
+      const { text } = body;
       const next = note({
         id: "n1-v2",
         text,
@@ -192,6 +195,8 @@ test("keyboard only: edit a memory note and save the new version", async ({ page
   await page.keyboard.type("Sam lives in Paris");
   await press(page, page.getByRole("button", { name: "Save" }));
   await expect(page.getByText("Sam lives in Paris")).toBeVisible();
+  // The save went to this note's own endpoint, once, with exactly the edited text.
+  expect(puts).toEqual([{ pathname: "/api/memory/n1", body: { text: "Sam lives in Paris" } }]);
   // Focus lands back on the note's Edit button, so the next Tab continues where the user was.
   await expect(page.getByRole("button", { name: "Edit: Sam lives in Paris" })).toBeFocused();
 });
