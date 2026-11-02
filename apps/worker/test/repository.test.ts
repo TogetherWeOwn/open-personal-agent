@@ -152,3 +152,44 @@ describe("attachment upload with no declared length", () => {
     expect(sizes).toEqual([part, part, part, part, 7 * 3_000_000 - 4 * part]);
   });
 });
+
+describe("a retried send's files (M3-12 AC5)", () => {
+  it("copies a file already on an earlier message, so the new message keeps it on reload", async () => {
+    const user = repo.forUser(scopeFromSession({ userId: "alice" }));
+    await user.createConversation("retry-c1", "Retry");
+    const bytes = new TextEncoder().encode("the brief");
+    await user.attachments.putObject(
+      "retry-file",
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+      "text/plain",
+      bytes.byteLength,
+    );
+    await user.attachments.create({
+      id: "retry-file",
+      name: "brief.txt",
+      mediaType: "text/plain",
+      kind: "text",
+      sizeBytes: bytes.byteLength,
+    });
+    // The first send links the upload; the retry names the same file again.
+    const linked = [{ id: "retry-file", sentToModel: true }];
+    await user.chat.startTurn("retry-c1", "Read this", "retry-r1", linked);
+    await user.chat.startTurn("retry-c1", "Read this", "retry-r2", linked);
+    const rows = (await user.chat.listMessages("retry-c1")) ?? [];
+    const sends = rows.filter((m) => m.role === "user");
+    expect(sends).toHaveLength(2);
+    expect(sends[0]?.attachments.map((f) => f.name)).toEqual(["brief.txt"]);
+    expect(sends[1]?.attachments.map((f) => f.name)).toEqual(["brief.txt"]);
+    // The retry's file is its own upload — the first message kept the original — and its
+    // bytes read back.
+    const copy = sends[1]?.attachments[0];
+    expect(copy?.id).not.toBe("retry-file");
+    expect(sends[0]?.attachments[0]?.id).toBe("retry-file");
+    expect(await (await user.attachments.getObject(copy?.id ?? ""))?.text()).toBe("the brief");
+  });
+});

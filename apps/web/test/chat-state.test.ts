@@ -81,6 +81,32 @@ describe("chatReducer", () => {
     expect(stopped.pending).toBe(null);
   });
 
+  it("keeps how a reply ended across a reload the stored row can't describe", () => {
+    // D1 stores a Stop and an interruption alike; only this tab knows which it saw, so a
+    // reload (a reconnect marks the chat stale) must not turn a Stop into an interruption.
+    const stopped = run(send, started(), ev("turn.cancelled", {}));
+    const reloaded = chatReducer(
+      stopped,
+      load("c1", msg("u1", "Plan my week"), msg("r-t1", "", "interrupted")),
+    );
+    expect(reply(reloaded)).toMatchObject({ status: "interrupted", ended: "stopped" });
+    // The same for a failure's code, which links the reply to its fix.
+    const failed = run(
+      send,
+      started(),
+      ev("turn.failed", { message: "Reset.", code: "vault_reset_required" }),
+    );
+    expect(reply(failed)).toMatchObject({ status: "error", failure: "vault_reset_required" });
+    const failedReloaded = chatReducer(
+      failed,
+      load("c1", msg("u1", "Plan my week"), msg("r-t1", "", "error")),
+    );
+    expect(reply(failedReloaded)).toMatchObject({
+      status: "error",
+      failure: "vault_reset_required",
+    });
+  });
+
   it("keeps streaming a promoted turn into the same reply, marked as going on (M3-12 AC2)", () => {
     const promoted = run(send, started(), ev("task.promoted", { taskId: "t1" }));
     expect(reply(promoted)).toMatchObject({ status: "streaming", promoted: true });

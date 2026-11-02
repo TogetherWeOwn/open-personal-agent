@@ -759,7 +759,17 @@ function loaded(state: ChatState, id: string, stored: StoredMessage[]): ChatStat
     const m = local.get(id);
     return m?.status === "streaming" && status === "streaming"
       ? m
-      : { id, role, status, text: content, ...(attachments?.length ? { attachments } : {}) };
+      : {
+          id,
+          role,
+          status,
+          text: content,
+          ...(attachments?.length ? { attachments } : {}),
+          // How a reply ended lives only in this tab (D1 stores a Stop and an interruption
+          // alike, and no failure code): keep what the tab saw while it still matches.
+          ...(m?.ended && status === "interrupted" ? { ended: m.ended } : {}),
+          ...(m?.failure && status === "error" ? { failure: m.failure } : {}),
+        };
   });
   const mine = pending?.conversationId === id ? pending : null;
   const reply = mine && stored.find((s) => s.id === mine.messageId);
