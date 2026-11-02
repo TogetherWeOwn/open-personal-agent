@@ -108,6 +108,7 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
   const names = new Set<string>();
   let steps = 0;
   let progressSeq = 0;
+  let progressSends: Promise<void> = Promise.resolve();
 
   const idempotencyKey = (stepName: string) => `${deps.instanceId}:${stepName}`;
 
@@ -212,17 +213,22 @@ export function createWorkflowTaskContext(deps: WorkflowTaskContextDeps): TaskCo
 
     progress(event) {
       progressSeq += 1;
+      const seq = progressSeq;
       const clean = redactSecrets(event.payload as JsonValue, secrets());
-      void deps.assistant
-        .taskProgress({
-          conversationId: deps.conversationId,
-          turnId: deps.turnId,
-          taskId: deps.taskId,
-          seq: progressSeq,
-          type: event.type,
-          payload: clean,
-          ...(deps.inTurn ? { inTurn: true } : {}),
-        })
+      // Sends wait their turn: the assistant discards an event a later sequence has passed,
+      // so concurrent sends that landed out of order would lose the earlier one.
+      progressSends = progressSends
+        .then(() =>
+          deps.assistant.taskProgress({
+            conversationId: deps.conversationId,
+            turnId: deps.turnId,
+            taskId: deps.taskId,
+            seq,
+            type: event.type,
+            payload: clean,
+            ...(deps.inTurn ? { inTurn: true } : {}),
+          }),
+        )
         .catch(() => {}); // progress is best-effort; the task's state lives in D1
     },
   };

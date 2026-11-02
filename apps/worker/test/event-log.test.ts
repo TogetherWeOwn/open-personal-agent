@@ -74,4 +74,22 @@ describe("a promoted turn's task events (M3-12 AC8)", () => {
       cleared: true,
     });
   });
+
+  it("still takes a turn's end whose diverging replay reused a sequence", async () => {
+    const seen = await withLog("end-reuse", (log) => {
+      const ran = [1, 2, 3].map((seq) => log.admit("task-c", seq));
+      // The replay diverges and its end arrives under a sequence already seen; dropping it
+      // would leave the tab waiting on a turn that ended.
+      const end = log.admit("task-c", 2, true);
+      const backwards = log.admit("task-c", 3); // the counter never went backwards
+      log.endTask("task-c", 1_000);
+      return { ran, end, backwards, lateEnd: log.admit("task-c", 2, true) };
+    });
+    expect(seen).toEqual({
+      ran: [true, true, true],
+      end: true,
+      backwards: false,
+      lateEnd: false,
+    });
+  });
 });

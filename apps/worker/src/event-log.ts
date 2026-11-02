@@ -36,16 +36,23 @@ export class EventLog {
   /**
    * Whether a promoted turn's task event is new, recording it if so (M3-12 AC8). A Workflow
    * replay sends its events again under the same per-task counter; a task whose turn has ended
-   * gets nothing more into the log.
+   * gets nothing more into the log. The turn's end is the one event still taken under a reused
+   * sequence: a replay that diverged can end on a number already seen, and dropping that end
+   * leaves the tab waiting on a turn that finished.
    */
-  admit(taskId: string, seq: number): boolean {
+  admit(taskId: string, seq: number, isEnd = false): boolean {
     const [row] = this.sql
       .exec<{ last_seq: number; ended_at: number | null }>(
         "SELECT last_seq, ended_at FROM task_progress WHERE task_id = ?1",
         taskId,
       )
       .toArray();
-    if (row && (row.ended_at !== null || seq <= row.last_seq)) return false;
+    if (row) {
+      if (row.ended_at !== null) return false;
+      // An old sequence is a replay, but the open task's end among them is still news; the
+      // counter never moves backwards to record it.
+      if (seq <= row.last_seq) return isEnd;
+    }
     this.sql.exec(
       `INSERT INTO task_progress (task_id, last_seq) VALUES (?1, ?2)
        ON CONFLICT(task_id) DO UPDATE SET last_seq = ?2`,

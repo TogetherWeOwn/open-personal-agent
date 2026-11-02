@@ -424,7 +424,7 @@ export class Assistant extends Agent<Bindings> {
       );
     }
     if (progress.inTurn) {
-      if (!this.#events.admit(progress.taskId, progress.seq)) return;
+      if (!this.#events.admit(progress.taskId, progress.seq, TURN_ENDS.has(progress.type))) return;
       const { conversationId, turnId, type } = progress;
       this.#send(conversationId, turnId, type as HarnessEvent["type"], progress.payload);
       if (!TURN_ENDS.has(type)) return;

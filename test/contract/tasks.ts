@@ -3,7 +3,7 @@
 // the Workflows adapter, the Node project against apps/node's SQLite journal and local files
 // (`selfhost-parity`). A relative path: this file sits outside every workspace package, as
 // `test/contract/storage.ts` does.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   TaskCancelledError,
   type TaskContext,
@@ -305,6 +305,8 @@ export function taskContextContract(
         expect(await h.readOutput(id)).not.toContain(SECRET);
       }
       h.ctx.progress({ type: "note", payload: `saw ${SECRET} here` });
+      // Wait for the send to land, or the redaction below would check an empty list.
+      await vi.waitFor(() => expect(h.progressEvents).toHaveLength(1));
       expect(JSON.stringify(h.progressEvents)).not.toContain(SECRET);
     });
 
@@ -334,10 +336,13 @@ export function taskContextContract(
       const h = await connect();
       h.ctx.progress({ type: "step.started", payload: { stepId: "s1" } });
       h.ctx.progress({ type: "step.completed", payload: { stepId: "s1" } });
-      expect(h.progressEvents).toEqual([
-        { seq: 1, type: "step.started", payload: { stepId: "s1" } },
-        { seq: 2, type: "step.completed", payload: { stepId: "s1" } },
-      ]);
+      // Sends are delivered in order, each after the one before it settles.
+      await vi.waitFor(() =>
+        expect(h.progressEvents).toEqual([
+          { seq: 1, type: "step.started", payload: { stepId: "s1" } },
+          { seq: 2, type: "step.completed", payload: { stepId: "s1" } },
+        ]),
+      );
     });
 
     it("sleeps, and waits for a posted event or throws when none arrives", async () => {
