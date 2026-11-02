@@ -67,7 +67,7 @@ async function signedOut(page: Page, error = "unauthenticated") {
 async function checkScreen(page: Page, name: string) {
   for (const colorScheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme });
-    for (const width of [375, 1280]) {
+    for (const width of [375, 768, 1280]) {
       await page.setViewportSize({ width, height: width < 640 ? 667 : 800 });
       expect(await new AxeBuilder({ page }).analyze()).toHaveProperty("violations", []);
       await expect(page).toHaveScreenshot(`${name}-${colorScheme}-${width}.png`);

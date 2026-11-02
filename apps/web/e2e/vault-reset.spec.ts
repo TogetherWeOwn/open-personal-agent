@@ -279,7 +279,7 @@ test("onboarding offers the reset when saving the model finds unopenable keys", 
 });
 
 for (const colorScheme of ["light", "dark"] as const) {
-  for (const width of [375, 1280]) {
+  for (const width of [375, 768, 1280]) {
     test(`vault reset panel, ${colorScheme}, ${width} px: axe clean, baseline`, async ({
       page,
     }) => {
