@@ -57,6 +57,23 @@ internet unencrypted.
 | `pnpm test:e2e`                   | Playwright on the real app (after `build`): claim, onboard, chat, restart |
 | `BASE_URL=… pnpm test:acceptance` | Read-only acceptance checks against a deployment (a local one if unset)   |
 
+### Refreshing the screenshot baselines
+
+The `visual` CI job is a required check, and its baselines only match renders from the
+Playwright image pinned in `.github/workflows/visual.yml` — host fonts and rendering differ.
+To re-record after an intended UI change, run one command from the repo root, using the image
+digest from that workflow file:
+
+```sh
+docker run --rm --ipc=host --user 1000:1000 -e HOME=/tmp -e CI=1 -v "$PWD":/work -w /work \
+  mcr.microsoft.com/playwright@sha256:<digest from .github/workflows/visual.yml> \
+  bash -lc 'mkdir -p /tmp/bin && corepack enable --install-directory /tmp/bin && export PATH=/tmp/bin:$PATH && pnpm install --frozen-lockfile && pnpm --filter @opa/web exec playwright test --update-snapshots'
+```
+
+Review the changed PNGs like code, then run the same command without `--update-snapshots` to
+prove the new baselines are stable. Never refresh a baseline to make an unexplained diff go
+away: the diff is the point of the check.
+
 `GET /api/health` reports the schema version, each binding (D1, R2, the Durable Object, the
 Workflow, Workers AI) and whether each secret is set, as booleans. While the database is
 unmigrated or a secret is missing, it answers `setup_required` and `/setup` shows a **Finish
