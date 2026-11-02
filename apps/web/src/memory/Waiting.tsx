@@ -45,13 +45,22 @@ function choices(p: Proposal): [Decision, string][] {
   ];
 }
 
-function Suggestion({ p, onDecide }: { p: Proposal; onDecide: (d: Decision) => void }) {
+function Suggestion({
+  p,
+  level,
+  onDecide,
+}: {
+  p: Proposal;
+  /** 3 under the section's own heading on Memory; 2 on the standalone screen, under its h1. */
+  level: 2 | 3;
+  onDecide: (d: Decision) => void;
+}) {
   const heading = `proposal-${p.id}`;
   const forget = p.op === "delete";
   return (
     <li>
       <Card labelledBy={heading}>
-        <Heading id={heading} level={3} className="break-words font-medium">
+        <Heading id={heading} level={level} className="break-words font-medium">
           {forget
             ? `Forget: ${p.targets.map((t) => t.text).join("; ")}`
             : `I'd like to remember: ${p.text}`}
@@ -208,7 +217,7 @@ export function Waiting({
       {list.length > 0 && (
         <ul className="flex flex-col gap-3">
           {list.map((p) => (
-            <Suggestion key={p.id} p={p} onDecide={(d) => pick(p, d)} />
+            <Suggestion key={p.id} p={p} level={heading ? 3 : 2} onDecide={(d) => pick(p, d)} />
           ))}
         </ul>
       )}
