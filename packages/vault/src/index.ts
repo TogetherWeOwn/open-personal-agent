@@ -10,8 +10,15 @@ import { type AadFormat, dekAad, secretAad } from "./aad";
 import { importKek, type Kek, vaultError } from "./kek";
 
 /** The closed set of things a secret can be used for (D4.1 #5). */
-export type Purpose = "model_api_key" | "connector_token";
-const PURPOSES: readonly string[] = ["model_api_key", "connector_token"] satisfies Purpose[];
+export type Purpose = "model_api_key" | "connector_token" | "ssh_private_key";
+const PURPOSES: readonly string[] = [
+  "model_api_key",
+  "connector_token",
+  // M4-06: the OpenSSH private key a ssh-vm provider entry authenticates with. A distinct
+  // purpose keeps its AAD domain separate from API keys and connector tokens, so a key saved
+  // for one entry never decrypts for another purpose even with the same secret id.
+  "ssh_private_key",
+] satisfies Purpose[];
 
 declare const scopeBrand: unique symbol;
 /** The signed-in user. Only the repository layer mints one, from the session (ADR 0010 D3). */

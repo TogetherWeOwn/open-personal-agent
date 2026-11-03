@@ -7,8 +7,15 @@ onlyBuiltDependencies:
   - esbuild
   - workerd
 # Its postinstall only prints a funding banner (agents -> mimetext -> @babel/runtime-corejs3).
+# ssh2's install only tries to build an optional native crypto binding via node-gyp and exits 0
+# when that fails; the library runs pure-JS without it, which is all the ssh-vm provider
+# (M4-06, apps/node only — never the Worker bundle) needs, so its script is never run.
+# cpu-features is ssh2's optional native CPU probe: ssh2 requires it inside try/catch
+# (lib/protocol/constants.js) and falls back without it, so its node-gyp rebuild is skipped too.
 ignoredBuiltDependencies:
   - core-js-pure
+  - cpu-features
+  - ssh2
 
 # Supply chain (ADR 0010 D12): pnpm resolves only versions published at least a day ago (minutes),
 # and fails the install if a dependency outside the allowlist above wants to run a build script.

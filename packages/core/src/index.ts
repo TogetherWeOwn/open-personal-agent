@@ -2,6 +2,7 @@
 
 export * from "./computer-conformance";
 export * from "./computer-provider";
+export * from "./computer-ssh-entry";
 export * from "./fake-computer-provider";
 export type * from "./harness-event";
 export type * from "./model-provider";
