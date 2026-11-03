@@ -103,6 +103,32 @@ describe("activity log", () => {
     expect(JSON.stringify(page)).not.toContain("u2-secret-marker");
   });
 
+  it("hides capability-token lifecycle rows but keeps a refused bearer visible", async () => {
+    const { browser, owner } = await seeded();
+    await db.batch([
+      row(owner, "capability_token.mint", { target: "t1" }),
+      row(owner, "capability_token.rotate", { target: "t1" }),
+      row(owner, "capability_token.revoke_task", {
+        target: "t1",
+        detail: JSON.stringify({ reason: "task_cancelled", revoked: 1 }),
+      }),
+      row(owner, "capability_token.use_denied", {
+        result: "denied",
+        target: "t1",
+        detail: JSON.stringify({ reason: "revoked" }),
+      }),
+    ]);
+    const actions = (await read(browser)).entries.map((e) => e.action);
+    for (const hidden of [
+      "capability_token.mint",
+      "capability_token.rotate",
+      "capability_token.revoke_task",
+    ])
+      expect(actions).not.toContain(hidden);
+    // A refused bearer is a security signal, not lifecycle noise.
+    expect(actions).toContain("capability_token.use_denied");
+  });
+
   it("filters by kind and refuses an unknown one", async () => {
     const { browser } = await seeded();
     const approvals = await read(browser, "?kind=approvals");

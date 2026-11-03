@@ -51,6 +51,33 @@ export function routeCredential(route: string): CapabilityAudience | null {
 }
 
 /**
+ * The table's audience for a concrete request path. An exact `METHOD /path` entry wins;
+ * otherwise the first registered `:param` pattern whose segments all match. Matching here
+ * rather than trusting Hono's matched-route introspection: in middleware `c.req.routePath`
+ * is the middleware's own mount (`/*`), and the last-matched-route helper misattributes a
+ * path two patterns match (a static route beside `:id`). Overlap resolves by registration
+ * order, so token routes must not shadow each other.
+ */
+function matchRoute(
+  routeTable: ReadonlyMap<string, CapabilityAudience>,
+  method: string,
+  path: string,
+): CapabilityAudience | undefined {
+  const exact = routeTable.get(`${method} ${path}`);
+  if (exact) return exact;
+  const segments = path.split("/");
+  for (const [key, aud] of routeTable) {
+    const space = key.indexOf(" ");
+    if (space === -1 || key.slice(0, space) !== method) continue;
+    const pattern = key.slice(space + 1).split("/");
+    if (pattern.length !== segments.length) continue;
+    if (pattern.every((segment, i) => segment.startsWith(":") || segment === segments[i]))
+      return aud;
+  }
+  return undefined;
+}
+
+/**
  * Verifies bearers for `routeTable` before the session guard runs. A route outside the table
  * passes through untouched; on a table route only a live token for the expected audience
  * continues, as `c.var.capability`, and every other shape — no header, a malformed one, a
@@ -62,7 +89,7 @@ export function tokenGuardFor(
 ): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const method = c.req.method === "HEAD" ? "GET" : c.req.method;
-    const expectedAud = routeTable.get(`${method} ${c.req.path}`);
+    const expectedAud = matchRoute(routeTable, method, c.req.path);
     if (!expectedAud) return next();
     const denied = () => c.json({ error: "unauthenticated" }, 401);
     // Both credentials at once is ambiguous: neither may win by accident.
@@ -94,7 +121,10 @@ export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (c.get("capability")) return next();
   // A bearer on a session route is never a session: fail closed rather than ignore it, so a
   // capability token presented to the wrong credential partition still answers 401 (M4-00a AC3).
-  if (c.req.header("authorization") !== undefined) return c.json({ error: "unauthenticated" }, 401);
+  // Bearer-scheme only: a self-hosted deployment behind a Basic-auth reverse proxy forwards
+  // `Authorization: Basic …` beside a valid cookie, and that must keep working.
+  if (/^\s*bearer\b/i.test(c.req.header("authorization") ?? ""))
+    return c.json({ error: "unauthenticated" }, 401);
   const session = await currentSession(c);
   if (!session) return c.json({ error: "unauthenticated" }, 401);
   c.set("session", session);

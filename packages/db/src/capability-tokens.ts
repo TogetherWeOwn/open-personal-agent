@@ -77,6 +77,12 @@ export interface CapabilityScope {
   computerId: string;
   aud: CapabilityAudience;
   expiresAt: number;
+  /**
+   * The (`provider_id`, `model`) ceiling snapshotted at mint, for `model_proxy` routes to
+   * intersect with the live provider configuration at use (M4-00b owns that intersection:
+   * there is no live-config reader on this side yet). Null when the mint named none.
+   */
+  modelAllowlist: readonly ModelCeiling[] | null;
 }
 
 /** Mint parameters. Every bound is server-side: no caller-supplied TTL or expiry (AC1c). */
@@ -143,6 +149,7 @@ interface TokenRow {
   task_id: string;
   computer_id: string;
   aud: string;
+  model_allowlist: string | null;
   task_epoch: number;
   user_epoch: number;
   expires_at: number;
@@ -296,8 +303,8 @@ export async function verifyCapabilityToken(
     if (!expectedAud || !AUDIENCES.has(expectedAud)) return null;
     const row = await db
       .prepare(
-        `SELECT id, user_id, task_id, computer_id, aud, task_epoch, user_epoch,
-                expires_at, revoked_at
+        `SELECT id, user_id, task_id, computer_id, aud, model_allowlist, task_epoch,
+                user_epoch, expires_at, revoked_at
          FROM capability_tokens WHERE token_hash = ?`,
       )
       .bind(await hashCapabilityToken(token))
@@ -332,6 +339,14 @@ export async function verifyCapabilityToken(
     if ((TASK_TERMINAL_STATUSES as readonly string[]).includes(epochs.task_status)) {
       return deny("task_ended");
     }
+    // The stored ceiling rides along for the consumer's intersection. Mint wrote it as
+    // JSON (or null); anything else is a corrupt row, so fail closed. A throw here is
+    // caught below and verifies as `null`, like every other store failure.
+    const modelAllowlist =
+      row.model_allowlist === null
+        ? null
+        : (JSON.parse(row.model_allowlist) as readonly ModelCeiling[]);
+    if (modelAllowlist !== null && !Array.isArray(modelAllowlist)) return null;
     return {
       tokenId: row.id,
       userId: row.user_id,
@@ -339,6 +354,7 @@ export async function verifyCapabilityToken(
       computerId: row.computer_id,
       aud: row.aud as CapabilityAudience,
       expiresAt: row.expires_at,
+      modelAllowlist,
     };
   } catch {
     // The verification store is unreachable: fail closed, never a cached or assumed pass.

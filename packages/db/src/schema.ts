@@ -120,7 +120,8 @@ export const capabilityTokens = sqliteTable(
     aud: text("aud", { enum: ["model_proxy", "artifact_upload", "tool_gateway"] }).notNull(),
     /**
      * The (`provider_id`, `model`) ceiling snapshotted at mint, as JSON (AC1; `model_proxy`
-     * only, null otherwise). Verification intersects it with the live configuration.
+     * only, null otherwise). Verification returns it in the scope; the `model_proxy` route
+     * intersects it with the live configuration at use (M4-00b).
      */
     modelAllowlist: text("model_allowlist"),
     /** The task and user epochs at mint; an epoch bump fails the token (AC1c). */

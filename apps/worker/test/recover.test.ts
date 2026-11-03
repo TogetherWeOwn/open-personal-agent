@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Redeeming a recovery code (M2-10b): single use, no oracle, rate limit, no lockout, audit.
 
+import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
+import type { SqlDatabase } from "@opa/db/system";
 import { ADDRESS_LIMIT } from "@opa/server/recover";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
@@ -100,6 +103,33 @@ describe("a recovery code", () => {
     expect(results.map((r) => r.status).sort()).toEqual([200, 403]);
     expect(await count("passkeys")).toBe(1);
     expect(await count("sessions", "revoked_at IS NULL")).toBe(1);
+  });
+
+  it("kills the owner's capability tokens with the old credentials", async () => {
+    const { owner, codes } = await claim();
+    const tag = `recover-${Date.now()}`;
+    const scoped = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await scoped.chat.open(`c-${tag}`, "G");
+    await scoped.tasks.create({
+      id: `t-${tag}`,
+      conversationId: `c-${tag}`,
+      kind: "turn",
+      mode: "background",
+    });
+    const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
+      userId: owner,
+      taskId: `t-${tag}`,
+      computerId: "comp-recover",
+      computerProfile: "host",
+      aud: "model_proxy",
+    });
+    const verify = () =>
+      verifyCapabilityToken(db as unknown as SqlDatabase, { token, expectedAud: "model_proxy" });
+    expect(await verify()).not.toBeNull();
+    expect((await recover(new Browser(), codes[0])).status).toBe(200);
+    // Recovery evicts everything the old set could spend: the user epoch moved, so the
+    // bearer fails even though its row is unexpired and its task still runs.
+    expect(await verify()).toBeNull();
   });
 
   it("wins once when two browsers race with two different codes", async () => {

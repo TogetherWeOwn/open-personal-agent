@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-2 (setup claim) and TWO-375 M2-12 (POST-only setup, recovery mode on rotation).
 
+import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
+import type { SqlDatabase } from "@opa/db/system";
 import {
   base64url,
   CHALLENGE_COOKIE,
@@ -208,6 +211,25 @@ describe("recovery after the token rotates", () => {
       .prepare("INSERT INTO conversations (id, user_id, title) VALUES ('c1', ?, 'kept')")
       .bind(owner)
       .run();
+    // A live task bearer from before the recovery: data, not credential.
+    const scoped = createRepository(env).forUser(scopeFromSession({ userId: owner as string }));
+    await scoped.chat.open("c-rec", "G");
+    await scoped.tasks.create({
+      id: "t-rec",
+      conversationId: "c-rec",
+      kind: "turn",
+      mode: "background",
+    });
+    const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
+      userId: owner as string,
+      taskId: "t-rec",
+      computerId: "comp-setup-rec",
+      computerProfile: "host",
+      aud: "model_proxy",
+    });
+    const verify = () =>
+      verifyCapabilityToken(db as unknown as SqlDatabase, { token, expectedAud: "model_proxy" });
+    expect(await verify()).not.toBeNull();
 
     // The old token no longer opens anything; the new one opens recovery.
     expect((await new Browser(rotated).options(TOKEN)).status).toBe(403);
@@ -243,6 +265,9 @@ describe("recovery after the token rotates", () => {
     expect(await count("conversations", "title = 'kept'")).toBe(1);
     expect(await count("setup_state", `claim_token_hash = '${await sha256(ROTATED)}'`)).toBe(1);
     expect(await count("audit_log", "action = 'setup.recovery'")).toBe(1);
+    // The pre-recovery bearer died with the old credentials, though its task still runs.
+    expect(await verify()).toBeNull();
+    expect(await count("audit_log", "action = 'capability_token.revoke_user'")).toBe(1);
 
     // Recovery is single-use for this token.
     expect((await br.options(ROTATED)).status).toBe(403);

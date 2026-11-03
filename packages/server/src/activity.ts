@@ -110,6 +110,16 @@ const HIDDEN = [
   { action: "vault.decrypt", result: "ok" },
   { action: "approval.claim" },
   { action: "approval.step_up_options" },
+  // Machine-credential lifecycle (M4-00a): a row per mint, rotation and revocation would bury
+  // the user's own actions — every task end writes one — so they stay in the audit trail and
+  // the data export but out of this view. `use_denied` stays visible: a refused token is a
+  // security signal, not lifecycle noise.
+  { action: "capability_token.mint" },
+  { action: "capability_token.rotate" },
+  { action: "capability_token.revoke_task" },
+  { action: "capability_token.revoke_computer" },
+  { action: "capability_token.revoke_user" },
+  { action: "capability_token.revoke_provider" },
 ] as const;
 
 const PAGE = 50;

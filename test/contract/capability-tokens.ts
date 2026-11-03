@@ -99,6 +99,20 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
       expect(drift).toBeLessThanOrEqual(Date.now() - before);
     });
 
+    it("returns the snapshotted model ceiling in the scope, null when the mint named none", async () => {
+      const { mint, live } = await setup();
+      const ceiling = [
+        { providerId: "p1", model: "m1" },
+        { providerId: "p2", model: "m2" },
+      ];
+      const { token } = await mint({ aud: "model_proxy", modelAllowlist: ceiling });
+      // The `model_proxy` route intersects this with the live provider configuration at
+      // use (M4-00b); the token service only carries what was snapshotted at mint.
+      expect((await live(token, "model_proxy"))?.modelAllowlist).toEqual(ceiling);
+      const { token: bare } = await mint({ aud: "tool_gateway" });
+      expect((await live(bare, "tool_gateway"))?.modelAllowlist).toBeNull();
+    });
+
     it("uses the per-audience TTL defaults within the ceiling", async () => {
       const { mint } = await setup();
       for (const aud of ["model_proxy", "artifact_upload", "tool_gateway"] as const) {

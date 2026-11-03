@@ -202,8 +202,15 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           ...credentials(o, "claim"),
         ]);
       },
-      /** Replaces the owner's credentials and ends every session. Data stays untouched. */
+      /**
+       * Replaces the owner's credentials and ends every session. Data stays untouched, but
+       * credentials do not: the owner's capability tokens die first through the one
+       * revocation code path (M4-00a AC2a) — recovery must not leave task bearers valid.
+       * Tokens-first is the fail-closed order: if the batch below then fails, the retry
+       * converges (the batch rolls back whole), and never the reverse.
+       */
       recover: async (o: OwnerCredentials) => {
+        await revokeUserTokens(db, o.userId, "account_recovery", o.now);
         await db.batch([
           db
             .prepare(
@@ -295,6 +302,9 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         now: number;
       }) => {
         const userId = r.session.userId;
+        // As with setup recovery above: the old credentials' task bearers die before the
+        // batch replaces them, so a redeemed code evicts everything the old set could spend.
+        await revokeUserTokens(db, userId, "account_recovery", r.now);
         await db.batch([
           db
             .prepare(
@@ -685,6 +695,10 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       revokeAll: async (userId: string, now: number) => {
         // The user's capability tokens die here too, through the one revocation code path:
         // a signed-out-everywhere computer keeps nothing it can still spend (M4-00a AC2a).
+        // Tokens-first is deliberate: the two phases cannot share one batch (the revocation
+        // audit names its row count), so the order is the fail-closed one — a failure between
+        // them leaves sessions live with tokens dead, and the retry converges, never the
+        // reverse.
         await revokeUserTokens(db, userId, "sign_out_everywhere", now);
         await db.batch([
           db

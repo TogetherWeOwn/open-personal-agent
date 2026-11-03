@@ -2405,6 +2405,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           remove: async (id: string, audit?: AuditRow) => {
             const row = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
             if (!row) return false;
+            // Revocation first: the allowlist names this row id, and verification has no
+            // provider-liveness check, so a failure after the delete would leave tokens
+            // verifiable with no retry path (the row is gone). Tokens-first fails closed
+            // and the retry converges.
+            await revokeProviderTokens(rawDb, userId, id);
             await db.batch([
               db.delete(modelProviders).where(ownProvider(id)),
               ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
@@ -2416,9 +2421,6 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   ]
                 : []),
             ]);
-            // The removed credential can buy nothing more: the user's `model_proxy` tokens
-            // naming it die through the one revocation code path (M4-00a AC2a, sign-off N2).
-            await revokeProviderTokens(rawDb, userId, id);
             return true;
           },
         },

@@ -26,6 +26,7 @@ freshDatabase();
 const TABLE = new Map<string, CapabilityAudience>([
   ["GET /api/agent/upload", "artifact_upload"],
   ["POST /api/agent/proxy", "model_proxy"],
+  ["GET /api/agent/:id", "artifact_upload"],
 ]);
 
 /**
@@ -40,6 +41,7 @@ function scratch() {
   probe.use(sessionGuard);
   probe.get("/api/agent/upload", (c) => c.json({ ok: true, aud: c.var.capability?.aud ?? null }));
   probe.post("/api/agent/proxy", (c) => c.json({ ok: true, aud: c.var.capability?.aud ?? null }));
+  probe.get("/api/agent/:id", (c) => c.json({ ok: true, aud: c.var.capability?.aud ?? null }));
   probe.get("/api/me", (c) => c.json({ ok: true, userId: c.var.session.userId }));
   probe.get("/api/health", (c) => c.json({ ok: true }));
   return probe;
@@ -148,6 +150,32 @@ describe("the capability-token partition", () => {
       },
     });
     expect(both.status).toBe(401);
+  });
+
+  it("matches a parameterised token route by its registered pattern, not the concrete path", async () => {
+    const app = scratch();
+    const { mint } = await ownerWithTask();
+    const { token } = await mint("artifact_upload");
+    const res = await get(app, "/api/agent/123", {
+      headers: { origin: ORIGIN, authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, aud: "artifact_upload" });
+  });
+
+  it("lets a non-bearer Authorization header beside a session cookie reach the session", async () => {
+    const app = scratch();
+    const { cookie } = await ownerWithTask();
+    // A Basic-auth reverse proxy in front of a self-hosted deployment forwards its own
+    // header; the session guard only denies the bearer scheme.
+    const res = await get(app, "/api/me", {
+      headers: {
+        origin: ORIGIN,
+        authorization: "Basic c2VsZi1ob3N0ZWQ6cHJveHk=",
+        cookie: `${SESSION_COOKIE}=${cookie}`,
+      },
+    });
+    expect(res.status).toBe(200);
   });
 
   it("leaves a public route unchanged when a bearer is sent", async () => {
