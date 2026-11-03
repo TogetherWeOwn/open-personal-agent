@@ -21,13 +21,13 @@ import {
 export const SSH_VM_PROVIDER_ID = "ssh-vm";
 
 /**
- * Guest contract: what the user-supplied VM must offer for the adapter to work. The shared OCI
- * image (M4-04 AC5) defines the full userland when it lands; until then the adapter probes this
- * documented minimum at `create()` and fails closed naming the gap: a POSIX `sh`, `mkdir`,
- * `rm`, `cat` and `pwd` on `PATH`, and a writable, persistent `HOME` (the workspace lives under
- * it, which is what `persistentDisk: true` means here — the VM's disk, not an image layer).
+ * The VM needs a usable Docker daemon/CLI, POSIX sh/rm, SFTP, writable HOME and the shared
+ * computer image preloaded from computers/image. create() resolves that build to its immutable
+ * image Id and uses --pull=never; a missing image or daemon fails closed, never to a host shell.
+ * Each computer has a named /work volume on the persistent VM disk, retained on stop and
+ * control-plane restart, and deleted on destroy. Only metadata is stored under HOME.
  */
-export const SSH_VM_GUEST_CONTRACT = ["sh", "mkdir", "rm", "cat", "pwd"] as const;
+export const SSH_VM_GUEST_CONTRACT = ["docker", "sh", "rm"] as const;
 
 const ENTRY_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const HOST_PIN = /^SHA256:[A-Za-z0-9+/]+={0,2}$/;

@@ -4,7 +4,7 @@
 // the computer (key-canary tests, AC1). In-process ssh2 server tests cover host-key pinning,
 // auth failure, argv quoting shape, timeout and abort without a guest OS; vault tests cover the
 // credential binding domain separation. Suites needing sshd or sftp-server skip where absent.
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -230,6 +230,15 @@ describe("capabilities and wiring", () => {
     ).toThrow("loadPrivateKey must be a function");
   });
 
+  it.each(["node:latest", "opa-computer:tag", "sha256:short"])(
+    "rejects mutable or malformed image reference %s",
+    (imageRef) => {
+      expect(() => createSshVmProvider(testEntry(), async () => "key", { imageRef })).toThrow(
+        "immutable sha256",
+      );
+    },
+  );
+
   it("refuses profiles and egress it cannot enforce (AC2)", async () => {
     const provider = createSshVmProvider(testEntry(), async () => "key");
     await expect(
@@ -308,6 +317,7 @@ async function startScriptServer(options: {
   hostKeyPem: string;
   acceptPublicKey: boolean;
   onExec: (command: string, stream: Channel) => void;
+  emulateDocker?: boolean;
 }): Promise<ScriptServer> {
   const commands: string[] = [];
   const children: ChildProcess[] = [];
@@ -332,7 +342,18 @@ async function startScriptServer(options: {
         const session = accept();
         session.on("exec", (acceptExec, _rejectExec, info) => {
           commands.push(info.command);
-          options.onExec(info.command, acceptExec());
+          const stream = acceptExec();
+          if (
+            options.emulateDocker &&
+            (!info.command.startsWith("'docker' 'exec'") || info.command.includes("kill -KILL"))
+          ) {
+            // Transport-only double: image and lifecycle replies, not an image conformance proof.
+            if (info.command.includes("'image' 'inspect'"))
+              stream.write(`sha256:${"a".repeat(64)}\n`);
+            else if (info.command.includes("{{.State.Running}}")) stream.write("true\n");
+            stream.exit(0);
+            stream.end();
+          } else options.onExec(info.command, stream);
         });
         session.on("subsystem", (acceptSub, rejectSub, info) => {
           if (info.name !== "sftp" || SFTP_SERVER === undefined) {
@@ -439,6 +460,7 @@ describe("ssh transport", () => {
       const server = await startScriptServer({
         hostKeyPem: host.privatePem,
         acceptPublicKey: true,
+        emulateDocker: true,
         onExec: (_command, stream) => {
           stream.stdout.write("marker\n");
           stream.exit(0);
@@ -463,10 +485,14 @@ describe("ssh transport", () => {
           { type: "stdout", text: "marker\n" },
           { type: "exit", code: 0 },
         ]);
-        // `create` probes the guest first, then runs the exec: the quoted command is the last one.
-        expect(server.commands).toHaveLength(2);
-        const dir = `${baseDir}/${handle.providerComputerId}`;
-        expect(server.commands[1]).toBe(remoteCommand(dir, request));
+        expect(server.commands.at(-1)).toContain(
+          `'docker' 'exec' '-i' 'opa-ssh-${handle.providerComputerId}' 'setsid' 'sh' '-c'`,
+        );
+        const launch = server.commands.find((command) => command.startsWith("'docker' 'run'"));
+        expect(launch).toContain("'--pull=never'");
+        expect(launch).toContain(`'sha256:${"a".repeat(64)}'`);
+        expect(launch).not.toContain(baseDir);
+        expect(launch).not.toContain("docker.sock");
         // Key canary: nothing the guest received contains the private key.
         expect(server.commands.join("\n")).not.toContain(key.privatePem);
         await provider.destroy(handle);
@@ -486,6 +512,7 @@ describe("ssh transport", () => {
       const server = await startScriptServer({
         hostKeyPem: host.privatePem,
         acceptPublicKey: true,
+        emulateDocker: true,
         onExec: (_command, stream) => {
           stream.exit(0);
           stream.end();
@@ -535,6 +562,7 @@ describe("ssh transport", () => {
       const server = await startScriptServer({
         hostKeyPem: host.privatePem,
         acceptPublicKey: true,
+        emulateDocker: true,
         // Answers the create-time guest probe, but never the sleep: the client must give up on
         // its own deadline.
         onExec: (command, stream) => {
@@ -576,6 +604,7 @@ describe("ssh transport", () => {
       const server = await startScriptServer({
         hostKeyPem: host.privatePem,
         acceptPublicKey: true,
+        emulateDocker: true,
         // Answers the create-time guest probe, but never the sleep: only the AbortSignal ends it.
         onExec: (command, stream) => {
           if (command.includes("sleep")) return;
@@ -624,6 +653,12 @@ function findOnPath(name: string): string | undefined {
 }
 
 const sshdBinary = SSHD ?? findOnPath("sshd");
+const dockerAvailable =
+  spawnSync("docker", ["info"], { stdio: "ignore", timeout: 10_000 }).status === 0;
+const loopbackAvailable = sshdBinary !== undefined && dockerAvailable;
+if (process.env.OPA_SSH_VM_TEST_REQUIRED === "1" && !loopbackAvailable) {
+  throw new Error("SSH conformance requires OpenSSH sshd and a usable Docker daemon");
+}
 
 interface SshdFixture {
   entry: SshVmProviderEntry;
@@ -662,8 +697,14 @@ async function startSshd(): Promise<SshdFixture> {
   const logPath = join(dir, "sshd.log");
   const pidPath = join(dir, "sshd.pid");
   const username = execFileSync("whoami", { encoding: "utf8" }).trim();
-  let child: ChildProcess | undefined;
   const args = [
+    "-D",
+    "-f",
+    "/dev/null",
+    "-o",
+    "ListenAddress=127.0.0.1",
+    "-o",
+    "Subsystem=sftp internal-sftp",
     "-p",
     String(port),
     "-h",
@@ -687,11 +728,18 @@ async function startSshd(): Promise<SshdFixture> {
     "-E",
     logPath,
   ];
-  child = spawn(sshdBinary as string, args, { stdio: "ignore" });
+  const child = spawn(sshdBinary as string, args, { stdio: ["ignore", "ignore", "pipe"] });
+  let startupError = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    startupError = (startupError + chunk.toString("utf8")).slice(-4096);
+  });
+  child.once("error", (error: Error) => {
+    startupError = error.message;
+  });
+  const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
   const stop = async (): Promise<void> => {
-    child?.kill();
-    child = undefined;
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
     rmSync(dir, { recursive: true, force: true });
   };
   // Poll for readiness: a present-but-broken sshd fails the suite, it does not skip it.
@@ -709,15 +757,14 @@ async function startSshd(): Promise<SshdFixture> {
       });
       break;
     } catch {
-      if (Date.now() > deadline || child?.exitCode !== null) {
-        const log = existsSync(logPath)
-          ? readFileSync(logPath, "utf8")
-              .replaceAll(host.privatePem, "[redacted]")
-              .replaceAll(key.privatePem, "[redacted]")
-              .replaceAll(dir, "<fixture>")
-              .slice(-4096)
-          : "no startup log";
-        const exitCode = child?.exitCode;
+      if (Date.now() > deadline || child.exitCode !== null || startupError.length > 0) {
+        const log =
+          `${startupError}\n${existsSync(logPath) ? readFileSync(logPath, "utf8") : "no startup log"}`
+            .replaceAll(host.privatePem, "[redacted]")
+            .replaceAll(key.privatePem, "[redacted]")
+            .replaceAll(dir, "<fixture>")
+            .slice(-4096);
+        const exitCode = child.exitCode;
         await stop();
         throw new Error(`test sshd did not start (exit ${exitCode}): ${log}`);
       }
@@ -741,16 +788,97 @@ async function startSshd(): Promise<SshdFixture> {
   };
 }
 
-describe.skipIf(sshdBinary === undefined)("loopback openssh", () => {
-  it("passes the M4-01 conformance suite over SSH (AC1)", async () => {
+describe.skipIf(!loopbackAvailable)("loopback openssh", () => {
+  it("closes the fixture listener on cleanup", async () => {
+    const sshd = await startSshd();
+    await sshd.stop();
+    const { connect } = await import("node:net");
+    const connected = await new Promise<boolean>((resolve) => {
+      const socket = connect(sshd.entry.port as number, "127.0.0.1", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.on("error", () => resolve(false));
+      socket.setTimeout(1000, () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+    expect(connected).toBe(false);
+  });
+
+  it("passes conformance inside the shared computer image over SSH (AC1)", async () => {
     const sshd = await startSshd();
     try {
       const provider = createSshVmProvider(sshd.entry, async () => sshd.privateKey);
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      try {
+        const events = [];
+        for await (const event of provider.exec(handle, { argv: ["id", "-u"] })) events.push(event);
+        expect(events).toEqual([
+          { type: "stdout", text: "10000\n" },
+          { type: "exit", code: 0 },
+        ]);
+        const path = `/tmp/ssh-image-${handle.providerComputerId}`;
+        await provider.putFile(handle, path, new Uint8Array([0, 128, 255, 10]));
+        expect(await provider.getFile(handle, path)).toEqual(new Uint8Array([0, 128, 255, 10]));
+        expect(existsSync(path)).toBe(false);
+        await provider.putFile(handle, "sub dir/.keep", new Uint8Array());
+        let quoted = "";
+        for await (const event of provider.exec(handle, {
+          argv: ["sh", "-c", 'printf "%s\\n" "$1" "$GREETING" "$PWD"; cat', "sh", "a'b $(id)"],
+          cwd: "sub dir",
+          env: { GREETING: "x'y $HOME" },
+          stdin: "input bytes",
+        })) {
+          if (event.type === "stdout") quoted += event.text;
+          else if (event.type === "exit") expect(event.code).toBe(0);
+          else if (event.type === "error") throw new Error(event.message);
+        }
+        expect(quoted).toBe("a'b $(id)\nx'y $HOME\n/work/sub dir\ninput bytes");
+      } finally {
+        await provider.destroy(handle);
+      }
       await checkComputerProvider(provider);
     } finally {
       await sshd.stop();
     }
   }, 120_000);
+
+  it.each(["timeout", "abort", "iterator return"] as const)(
+    "terminates guest processes on %s",
+    async (mode) => {
+      const sshd = await startSshd();
+      const provider = createSshVmProvider(sshd.entry, async () => sshd.privateKey);
+      let handle: ComputerHandle | undefined;
+      try {
+        handle = await provider.create(createComputerSpec({ profile: "standard" }));
+        const controller = new AbortController();
+        const events = [];
+        for await (const event of provider.exec(handle, {
+          argv: ["sh", "-c", "printf ready; sleep 2; printf leaked > /work/late-marker"],
+          ...(mode === "timeout" ? { timeoutSeconds: 0.5 } : { signal: controller.signal }),
+        })) {
+          events.push(event);
+          if (mode === "abort" && event.type === "stdout") controller.abort();
+          if (mode === "iterator return" && event.type === "stdout") break;
+        }
+        expect(events).toContainEqual({ type: "stdout", text: "ready" });
+        if (mode !== "iterator return")
+          expect(events.at(-1)).toMatchObject({ type: "error", code: "aborted" });
+        const check = [];
+        for await (const event of provider.exec(handle, {
+          argv: ["sh", "-c", "sleep 3; test ! -e /work/late-marker"],
+        }))
+          check.push(event);
+        expect(check).toEqual([{ type: "exit", code: 0 }]);
+      } finally {
+        if (handle) await provider.destroy(handle);
+        await sshd.stop();
+      }
+    },
+    120_000,
+  );
 
   it("names artifacts by basename and reads stopped computers as gone", async () => {
     const sshd = await startSshd();
@@ -785,10 +913,12 @@ describe.skipIf(sshdBinary === undefined)("loopback openssh", () => {
     try {
       const first = createSshVmProvider(sshd.entry, async () => sshd.privateKey);
       const handle = await first.create(createComputerSpec({ profile: "persistent" }));
+      await first.putFile(handle, "persist.txt", new TextEncoder().encode("saved"));
       // A new provider instance shares no process state, only the VM's metadata.
       const second = createSshVmProvider(sshd.entry, async () => sshd.privateKey);
       const listed = await second.list();
       expect(listed.map((entry) => entry.providerComputerId)).toContain(handle.providerComputerId);
+      expect(new TextDecoder().decode(await second.getFile(handle, "persist.txt"))).toBe("saved");
       const events = [];
       for await (const event of second.exec(handle, { argv: ["echo", "back"] })) events.push(event);
       expect(events).toEqual([
@@ -802,17 +932,86 @@ describe.skipIf(sshdBinary === undefined)("loopback openssh", () => {
     }
   }, 120_000);
 
+  it("fails closed before allocation when the shared image is missing", async () => {
+    const sshd = await startSshd();
+    try {
+      const provider = createSshVmProvider(sshd.entry, async () => sshd.privateKey, {
+        imageRef: `sha256:${"f".repeat(64)}`,
+      });
+      await expect(
+        provider.create(createComputerSpec({ profile: "standard" })),
+      ).rejects.toMatchObject({ code: "provider" });
+      expect(existsSync(sshd.baseDir)).toBe(false);
+      expect(await provider.list()).toEqual([]);
+    } finally {
+      await sshd.stop();
+    }
+  }, 120_000);
+
+  it("reports an externally stopped container without losing its persistent disk", async () => {
+    const sshd = await startSshd();
+    const provider = createSshVmProvider(sshd.entry, async () => sshd.privateKey);
+    let handle: ComputerHandle | undefined;
+    try {
+      handle = await provider.create(createComputerSpec({ profile: "persistent" }));
+      await provider.putFile(handle, "persist.txt", new TextEncoder().encode("saved"));
+      execFileSync("docker", ["stop", "--time=1", `opa-ssh-${handle.providerComputerId}`]);
+      expect(await provider.list()).toEqual([
+        expect.objectContaining({
+          providerComputerId: handle.providerComputerId,
+          state: "stopped",
+        }),
+      ]);
+      const volume = `opa-ssh-${handle.providerComputerId}-work`;
+      expect(
+        execFileSync("docker", ["volume", "inspect", "--format", "{{.Name}}", volume], {
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(volume);
+    } finally {
+      if (handle) await provider.destroy(handle);
+      await sshd.stop();
+    }
+  }, 120_000);
+
   it("keeps the private key off the guest (key canary, AC1)", async () => {
     const sshd = await startSshd();
     try {
       const provider = createSshVmProvider(sshd.entry, async () => sshd.privateKey);
       const handle = await provider.create(createComputerSpec({ profile: "standard" }));
-      await provider.putFile(handle, "data.txt", new TextEncoder().encode("payload"));
-      for await (const _event of provider.exec(handle, { argv: ["cat", "data.txt"] })) {
-        // drain
+      try {
+        await provider.putFile(handle, "data.txt", new TextEncoder().encode("payload"));
+        const events = [];
+        for await (const event of provider.exec(handle, {
+          argv: [
+            "sh",
+            "-c",
+            "env; ps; status=0; grep -R -l -- 'PRIVATE KEY' /work /tmp /home /run || status=$?; test \"$status\" = 1",
+          ],
+        }))
+          events.push(event);
+        expect(events.at(-1)).toEqual({ type: "exit", code: 0 });
+        expect(JSON.stringify(events)).not.toContain(sshd.privateKey.split("\n")[1]);
+        const config = JSON.parse(
+          execFileSync("docker", ["inspect", `opa-ssh-${handle.providerComputerId}`], {
+            encoding: "utf8",
+          }),
+        )[0];
+        expect(config.Config.User).toBe("10000");
+        expect(config.HostConfig.Privileged).toBe(false);
+        expect(config.HostConfig.CapDrop).toEqual(["ALL"]);
+        expect(config.HostConfig.SecurityOpt).toContain("no-new-privileges");
+        expect(
+          config.Mounts.map((mount: { Type: string; Destination: string }) => ({
+            type: mount.Type,
+            destination: mount.Destination,
+          })),
+        ).toEqual([{ type: "volume", destination: "/work" }]);
+        expect(JSON.stringify(config)).not.toContain(sshd.privateKey.split("\n")[1]);
+      } finally {
+        await provider.destroy(handle);
       }
-      await provider.destroy(handle);
-      // The workspace is gone with destroy; the canary scans the base dir for strays.
+      // The workspace is gone with destroy; also scan host metadata for strays.
       const { readdirSync, readFileSync, statSync } = await import("node:fs");
       const walk = (dir: string): string[] =>
         readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

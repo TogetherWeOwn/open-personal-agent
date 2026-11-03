@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // The ssh-vm computer provider (M4-06): the `ComputerProvider` port over SSH to a user-supplied
-// VM. One provider instance is bound to one `SshVmProviderEntry` (one VM); each `create()` makes
-// one workspace directory on that VM and tracks it with a `.computer.json` metadata file, so
-// `list()` rediscovers computers after a control-plane restart and workspace state never leaks
-// silently when the process map is gone.
+// VM. One provider instance is bound to one `SshVmProviderEntry` (one VM); each `create()` boots
+// the shared digest-pinned image in a Docker container with a named /work volume. A host-only
+// `.computer.json` record rediscovers computers after a control-plane restart; that directory,
+// the Docker socket and the SSH credential are never mounted into the computer.
 //
 // Security shape (AC1): the SSH key is a vault secret (`ssh_private_key` purpose) whose AAD
 // binding is `sshCredentialBinding(entry)`. The control plane loads it per connection through
@@ -18,9 +18,9 @@
 // What this provider does NOT do (AC2, honest capabilities): no egress enforcement (`none` —
 // `authenticated_browser`/`subscription_cli` profiles and non-empty `egressHosts` are refused as
 // `unsupported` rather than silently ignored), no snapshot/preview surfaces, and `stop()` never
-// touches the VM itself — it only marks the handle stopped, which reads as `gone` exactly like
-// the reference fake. `persistentDisk: true` means the VM's disk (and the workspace on it)
-// survives restarts, not that the control plane remembers handles without the metadata file.
+// touches the VM itself — it stops only that computer's container. `persistentDisk: true`
+// means its named /work volume survives container stops and control-plane restarts; destroy
+// removes the container, volume and host-only metadata.
 //
 // `exec()` can only throw synchronously for what it can check without I/O (undeclared surface,
 // malformed argv): lifecycle state lives on the VM across the network, so unknown/stopped
@@ -46,6 +46,12 @@ import {
 } from "@opa/core";
 import { decrypt, type UserScope, type Vault } from "@opa/vault";
 import { type Channel, Client, type SFTPWrapper } from "ssh2";
+import {
+  assertSshImageRef,
+  SSH_COMPUTER_IMAGE_TAG,
+  SSH_COMPUTER_UID,
+  type SshVmProviderOptions,
+} from "./ssh-image";
 
 /** Loads the entry's OpenSSH private key. The composition root binds vault, scope and entry. */
 export type SshPrivateKeyLoader = () => Promise<string>;
@@ -53,7 +59,70 @@ export type SshPrivateKeyLoader = () => Promise<string>;
 const METADATA_NAME = ".computer.json";
 const READY_TIMEOUT_MS = 30_000;
 const CREATE_ATTEMPTS = 3;
-const GUEST_TOOLS = ["sh", "mkdir", "rm", "cat", "pwd"] as const;
+const GUEST_TOOLS = ["docker", "sh", "rm"] as const;
+const OPERATION_TIMEOUT_SECONDS = 60;
+const commandFor = (argv: readonly string[]): string => argv.map(quoteForSh).join(" ");
+const containerName = (id: string): string => `opa-ssh-${id}`;
+const volumeName = (id: string): string => `opa-ssh-${id}-work`;
+
+/** A separate session lets cancellation kill this exec's descendants, not the computer. */
+function computerCommand(id: string, request: ExecRequest, executionId: string): string {
+  const path = `/tmp/.opa-exec-${executionId}`;
+  const script = [
+    `printf '%s\\n' "$$" > ${quoteForSh(`${path}.pid`)} || exit 125`,
+    `if test -e ${quoteForSh(`${path}.cancel`)}; then rm -f -- ${quoteForSh(`${path}.pid`)} ${quoteForSh(`${path}.cancel`)}; exit 125; fi`,
+    `(${remoteCommand("/work", request)})`,
+    "status=$?",
+    `rm -f -- ${quoteForSh(`${path}.pid`)} ${quoteForSh(`${path}.cancel`)}`,
+    'exit "$status"',
+  ].join("; ");
+  return commandFor(["docker", "exec", "-i", containerName(id), "setsid", "sh", "-c", script]);
+}
+
+async function cancelComputerExec(conn: Client, id: string, executionId: string): Promise<void> {
+  const path = `/tmp/.opa-exec-${executionId}`;
+  // Publish cancellation first: even an exec not yet dispatched must not start guest code.
+  const script = [
+    `: > ${quoteForSh(`${path}.cancel`)} || exit 125`,
+    `if test -f ${quoteForSh(`${path}.pid`)}; then`,
+    `read -r pid < ${quoteForSh(`${path}.pid`)}`,
+    'case "$pid" in ""|*[!0-9]*) exit 125 ;; esac',
+    'kill -KILL -- -"$pid" 2>/dev/null || true',
+    `rm -f -- ${quoteForSh(`${path}.pid`)}`,
+    "fi",
+  ].join("\n");
+  await checkedRemote(conn, ["docker", "exec", containerName(id), "sh", "-c", script]);
+}
+
+async function captureRemote(
+  conn: Client,
+  command: string,
+  stdin?: string,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  let stdout = "";
+  let stderr = "";
+  for await (const event of runRemote(conn, command, {
+    stdin,
+    timeoutSeconds: OPERATION_TIMEOUT_SECONDS,
+  })) {
+    if (event.type === "stdout") stdout += event.text;
+    else if (event.type === "stderr") stderr += event.text;
+    else if (event.type === "error") throw providerError(event.message, event.code);
+    else return { stdout, stderr, code: event.code };
+  }
+  throw providerError("remote operation ended without a status", "provider");
+}
+
+async function checkedRemote(conn: Client, argv: readonly string[]): Promise<string> {
+  const result = await captureRemote(conn, commandFor(argv));
+  if (result.code !== 0) {
+    throw providerError(
+      `remote ${argv[0]} failed (exit ${result.code}): ${result.stderr.slice(-4096)}`,
+      "provider",
+    );
+  }
+  return result.stdout.trim();
+}
 
 function providerError(
   message: string,
@@ -412,8 +481,10 @@ async function* runRemote(
 export function createSshVmProvider(
   entry: SshVmProviderEntry,
   loadPrivateKey: SshPrivateKeyLoader,
+  options: SshVmProviderOptions = {},
 ): ComputerProvider {
   assertSshVmEntry(entry);
+  if (options.imageRef !== undefined) assertSshImageRef(options.imageRef);
   if (typeof loadPrivateKey !== "function") {
     throw new Error("invalid ssh-vm provider: loadPrivateKey must be a function");
   }
@@ -426,7 +497,15 @@ export function createSshVmProvider(
     return `${await sftpRealpath(sftp, ".")}/.opa/computers`;
   };
 
+  const validId = (id: string): boolean =>
+    typeof id === "string" &&
+    id.startsWith(`${entry.id}-`) &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      id.slice(entry.id.length + 1),
+    );
+
   const computerDir = async (sftp: SFTPWrapper, providerComputerId: string): Promise<string> => {
+    if (!validId(providerComputerId)) throw providerError("unknown computer id", "not_found");
     return `${await workspaceBase(sftp)}/${providerComputerId}`;
   };
 
@@ -448,8 +527,8 @@ export function createSshVmProvider(
     try {
       const parsed = JSON.parse(raw.toString("utf8")) as Partial<ComputerHandle>;
       if (
-        typeof parsed.providerId !== "string" ||
-        typeof parsed.providerComputerId !== "string" ||
+        parsed.providerId !== SSH_VM_PROVIDER_ID ||
+        parsed.providerComputerId !== providerComputerId ||
         (parsed.state !== "running" && parsed.state !== "stopped")
       ) {
         throw new Error("metadata shape");
@@ -462,6 +541,8 @@ export function createSshVmProvider(
 
   /** Live handle or throw: never-seen ids are `not_found`, destroyed/stopped ones are `gone`. */
   const live = async (sftp: SFTPWrapper, handle: ComputerHandle): Promise<ComputerHandle> => {
+    if (handle.providerId !== SSH_VM_PROVIDER_ID)
+      throw providerError("foreign provider handle", "not_found");
     if (destroyed.has(handle.providerComputerId)) {
       throw providerError(`computer "${handle.providerComputerId}" is destroyed`, "gone");
     }
@@ -475,16 +556,51 @@ export function createSshVmProvider(
     return stored;
   };
 
-  const guestPath = async (
-    sftp: SFTPWrapper,
-    stored: ComputerHandle,
-    path: string,
-  ): Promise<string> => {
+  const guestPath = (path: string): string => {
     if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
       throw providerError("file path must be a non-empty string without NUL bytes", "invalid_spec");
     }
-    const dir = await computerDir(sftp, stored.providerComputerId);
-    return path.startsWith("/") ? path : `${dir}/${path}`;
+    return path.startsWith("/") ? path : `/work/${path}`;
+  };
+
+  const assertRunning = async (conn: Client, id: string): Promise<void> => {
+    const result = await captureRemote(
+      conn,
+      commandFor(["docker", "inspect", "--format", "{{.State.Running}}", containerName(id)]),
+    );
+    if (result.code !== 0 || result.stdout.trim() !== "true") {
+      throw providerError(`computer "${id}" is not running`, "gone");
+    }
+  };
+
+  const removeRuntime = async (conn: Client, id: string): Promise<void> => {
+    const name = containerName(id);
+    const containers = await checkedRemote(conn, [
+      "docker",
+      "container",
+      "ls",
+      "--all",
+      "--filter",
+      `name=^${name}$`,
+      "--format",
+      "{{.Names}}",
+    ]);
+    if (containers.split("\n").includes(name)) {
+      await checkedRemote(conn, ["docker", "rm", "--force", name]);
+    }
+    const volume = volumeName(id);
+    const volumes = await checkedRemote(conn, [
+      "docker",
+      "volume",
+      "ls",
+      "--filter",
+      `name=^${volume}$`,
+      "--format",
+      "{{.Name}}",
+    ]);
+    if (volumes.split("\n").includes(volume)) {
+      await checkedRemote(conn, ["docker", "volume", "rm", volume]);
+    }
   };
 
   const loadKey = async (): Promise<string> => loadPrivateKey().catch(wrapKeyError);
@@ -533,6 +649,17 @@ export function createSshVmProvider(
               "provider",
             );
           }
+          // Resolve the shared build's cache tag once per create. Only the immutable image Id
+          // reaches `docker run`; never pull, build or substitute a host-shell fallback.
+          const imageId = await checkedRemote(conn, [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            options.imageRef ?? SSH_COMPUTER_IMAGE_TAG,
+          ]);
+          assertSshImageRef(imageId);
           const base = await workspaceBase(sftp);
           let providerComputerId = "";
           for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
@@ -580,16 +707,58 @@ export function createSshVmProvider(
             ).toISOString(),
           };
           try {
+            // Persist before allocating runtime resources so a failed launch is discoverable
+            // and destroy() can finish cleanup even after a control-plane restart.
+            await sftpWriteFile(
+              sftp,
+              `${dir}/${METADATA_NAME}`,
+              new TextEncoder().encode(
+                `${JSON.stringify({ ...handle, state: "stopped" }, null, 2)}\n`,
+              ),
+            );
+            await checkedRemote(conn, [
+              "docker",
+              "run",
+              "--detach",
+              "--pull=never",
+              "--name",
+              containerName(providerComputerId),
+              "--label",
+              "opa.provider=ssh-vm",
+              "--label",
+              `opa.entry=${entry.id}`,
+              "--user",
+              SSH_COMPUTER_UID,
+              "--cap-drop=ALL",
+              "--security-opt=no-new-privileges",
+              "--pids-limit=256",
+              "--memory=512m",
+              "--cpus=1",
+              "--mount",
+              `type=volume,source=${volumeName(providerComputerId)},target=/work`,
+              "--workdir=/work",
+              imageId,
+              "sleep",
+              "infinity",
+            ]);
             await sftpWriteFile(
               sftp,
               `${dir}/${METADATA_NAME}`,
               new TextEncoder().encode(`${JSON.stringify(handle, null, 2)}\n`),
             );
           } catch (error) {
-            throw providerError(
-              `cannot write computer metadata: ${errorDetail(error)}`,
-              "provider",
-            );
+            // Keep the stopped record if cleanup fails: list()/destroy() can recover the
+            // exact resource names instead of silently orphaning a running computer.
+            try {
+              await removeRuntime(conn, providerComputerId);
+              await checkedRemote(conn, ["rm", "-rf", "--", dir]);
+            } catch {
+              throw providerError(
+                `create failed; cleanup required for "${providerComputerId}": ${errorDetail(error)}`,
+                "provider",
+              );
+            }
+            throw providerError(`cannot create computer: ${errorDetail(error)}`, "provider");
           }
           return { ...handle };
         } finally {
@@ -622,17 +791,37 @@ export function createSshVmProvider(
             return;
           }
           const sftp = await sftpOf(conn);
-          let dir: string;
           try {
-            const stored = await live(sftp, handle);
-            dir = await computerDir(sftp, stored.providerComputerId);
+            await live(sftp, handle);
+            await assertRunning(conn, handle.providerComputerId);
           } catch (error) {
             sftp.end();
             yield toTerminal(error);
             return;
           }
           sftp.end();
-          yield* runRemote(conn, remoteCommand(dir, request), options);
+          if (request.signal?.aborted) {
+            yield { type: "error", code: "aborted", message: "exec aborted" };
+            return;
+          }
+          const executionId = randomUUID();
+          let settled = false;
+          try {
+            for await (const event of runRemote(
+              conn,
+              computerCommand(handle.providerComputerId, request, executionId),
+              options,
+            )) {
+              if (event.type === "error") {
+                await cancelComputerExec(conn, handle.providerComputerId, executionId);
+                settled = true;
+              } else if (event.type === "exit") settled = true;
+              yield event;
+            }
+          } finally {
+            // Also cover a caller returning early from the output iterator.
+            if (!settled) await cancelComputerExec(conn, handle.providerComputerId, executionId);
+          }
         } catch (error) {
           yield toTerminal(error);
         } finally {
@@ -647,25 +836,26 @@ export function createSshVmProvider(
       try {
         const sftp = await sftpOf(conn);
         try {
-          const stored = await live(sftp, handle);
-          const target = await guestPath(sftp, stored, path);
-          try {
-            await sftpWriteFile(sftp, target, data);
-          } catch (error) {
-            if (!isNotFound(error)) {
-              throw providerError(`cannot write file "${path}": ${errorDetail(error)}`, "provider");
-            }
-            const slash = target.lastIndexOf("/");
-            if (slash > 0) await mkdirParents(sftp, target.slice(0, slash));
-            try {
-              await sftpWriteFile(sftp, target, data);
-            } catch (retryError) {
-              throw providerError(
-                `cannot write file "${path}": ${errorDetail(retryError)}`,
-                "provider",
-              );
-            }
-          }
+          await live(sftp, handle);
+          await assertRunning(conn, handle.providerComputerId);
+          const target = guestPath(path);
+          const parent = target.slice(0, target.lastIndexOf("/")) || "/";
+          const script = `mkdir -p -- ${quoteForSh(parent)} && base64 -d > ${quoteForSh(target)}`;
+          const result = await captureRemote(
+            conn,
+            commandFor([
+              "docker",
+              "exec",
+              "-i",
+              containerName(handle.providerComputerId),
+              "sh",
+              "-c",
+              script,
+            ]),
+            Buffer.from(data).toString("base64"),
+          );
+          if (result.code !== 0)
+            throw providerError(`cannot write file "${path}" (exit ${result.code})`, "provider");
         } finally {
           sftp.end();
         }
@@ -680,16 +870,25 @@ export function createSshVmProvider(
       try {
         const sftp = await sftpOf(conn);
         try {
-          const stored = await live(sftp, handle);
-          const target = await guestPath(sftp, stored, path);
-          try {
-            return new Uint8Array(await sftpReadFile(sftp, target));
-          } catch (error) {
-            if (isNotFound(error)) {
-              throw providerError(`file "${path}" not found`, "not_found");
-            }
-            throw providerError(`cannot read file "${path}": ${errorDetail(error)}`, "provider");
-          }
+          await live(sftp, handle);
+          await assertRunning(conn, handle.providerComputerId);
+          const target = guestPath(path);
+          const script = `test -f ${quoteForSh(target)} || exit 44; base64 < ${quoteForSh(target)}`;
+          const result = await captureRemote(
+            conn,
+            commandFor([
+              "docker",
+              "exec",
+              containerName(handle.providerComputerId),
+              "sh",
+              "-c",
+              script,
+            ]),
+          );
+          if (result.code === 44) throw providerError(`file "${path}" not found`, "not_found");
+          if (result.code !== 0)
+            throw providerError(`cannot read file "${path}" (exit ${result.code})`, "provider");
+          return new Uint8Array(Buffer.from(result.stdout, "base64"));
         } finally {
           sftp.end();
         }
@@ -720,7 +919,15 @@ export function createSshVmProvider(
           if (stored === null) {
             throw providerError(`unknown computer "${handle.providerComputerId}"`, "not_found");
           }
+          if (handle.providerId !== SSH_VM_PROVIDER_ID)
+            throw providerError("foreign provider handle", "not_found");
           if (stored.state === "stopped") return;
+          await checkedRemote(conn, [
+            "docker",
+            "stop",
+            "--time=5",
+            containerName(stored.providerComputerId),
+          ]);
           const dir = await computerDir(sftp, stored.providerComputerId);
           try {
             await sftpWriteFile(
@@ -756,37 +963,11 @@ export function createSshVmProvider(
         } finally {
           sftp.end();
         }
-        // SFTP has no recursive delete; removal is one quoted `rm -rf` over exec. The close
-        // listener goes on synchronously in the open callback for the same fast-server race that
-        // `runRemote` documents: open and close can arrive in one packet batch. `resume()` drains
-        // and discards any output: ssh2 only emits `close` after stream `end`, which needs the
-        // readable side consumed — without this a chatty `rm` (motd, warnings) would hang us.
-        const removalCode = await new Promise<number>((resolve, reject) => {
-          conn.exec(`rm -rf -- ${quoteForSh(dir)}`, (error, removal) => {
-            if (error) {
-              reject(providerError(`exec channel failed: ${errorDetail(error)}`, "provider"));
-              return;
-            }
-            removal.resume();
-            removal.once("close", (code: unknown) => {
-              resolve(typeof code === "number" ? code : Number.NaN);
-            });
-            removal.once("error", (removalError: Error) => {
-              reject(
-                providerError(
-                  `cannot remove computer directory: ${errorDetail(removalError)}`,
-                  "provider",
-                ),
-              );
-            });
-          });
-        });
-        if (removalCode !== 0) {
-          throw providerError(
-            `cannot remove computer directory (exit ${String(removalCode)})`,
-            "provider",
-          );
-        }
+        if (handle.providerId !== SSH_VM_PROVIDER_ID)
+          throw providerError("foreign provider handle", "not_found");
+        await removeRuntime(conn, handle.providerComputerId);
+        // Metadata is removed last; an interrupted cleanup remains discoverable for retry.
+        await checkedRemote(conn, ["rm", "-rf", "--", dir]);
         destroyed.add(handle.providerComputerId);
       } finally {
         conn.destroy();
@@ -808,13 +989,13 @@ export function createSshVmProvider(
           }
           const handles: ComputerHandle[] = [];
           for (const item of entries) {
-            if (item.filename === "." || item.filename === "..") continue;
+            if (!validId(item.filename)) continue;
             try {
               const raw = await sftpReadFile(sftp, `${base}/${item.filename}/${METADATA_NAME}`);
               const parsed = JSON.parse(raw.toString("utf8")) as Partial<ComputerHandle>;
               if (
-                typeof parsed.providerId !== "string" ||
-                typeof parsed.providerComputerId !== "string" ||
+                parsed.providerId !== SSH_VM_PROVIDER_ID ||
+                parsed.providerComputerId !== item.filename ||
                 (parsed.state !== "running" && parsed.state !== "stopped")
               ) {
                 continue;
@@ -822,7 +1003,26 @@ export function createSshVmProvider(
               handles.push(parsed as ComputerHandle);
             } catch {}
           }
-          return handles;
+          if (handles.length === 0) return [];
+          const names = await checkedRemote(conn, [
+            "docker",
+            "container",
+            "ls",
+            "--filter",
+            "label=opa.provider=ssh-vm",
+            "--filter",
+            `label=opa.entry=${entry.id}`,
+            "--format",
+            "{{.Names}}",
+          ]);
+          const running = new Set(names.split("\n"));
+          return handles.map((handle) => ({
+            ...handle,
+            state:
+              handle.state === "running" && running.has(containerName(handle.providerComputerId))
+                ? "running"
+                : "stopped",
+          }));
         } finally {
           sftp.end();
         }
