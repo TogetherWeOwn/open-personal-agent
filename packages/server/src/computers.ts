@@ -69,9 +69,10 @@ const isUniqueViolation = (error: unknown): boolean =>
  * Mode-A borrow (M4-02 AC2, ADR 0007 #5): a tool call starts or reuses the task's computer.
  * One computer serves one user and, where practical, one task — never shared, pooled or
  * reassigned (D5). A borrow reuses the task's computer only within the 60 s idle tail of its
- * last use; anything older, or for another task, is destroyed first and replaced. The
- * deployment-wide concurrency cap (COST-2) is enforced before anything is created. The
- * provider-side id the driver returns is stored as bookkeeping only, never as an identity.
+ * last use and while both D1 deadlines still hold; anything older, expired, or for another
+ * task is destroyed first and replaced. The deployment-wide concurrency cap (COST-2) is
+ * enforced before anything is created. The provider-side id the driver returns is stored as
+ * bookkeeping only, never as an identity.
  */
 export async function borrowComputer(
   env: AppPorts,
@@ -91,7 +92,14 @@ export async function borrowComputer(
       other.provider === spec.provider &&
       other.profile === spec.profile
     ) {
-      if (now - other.lastUsedAt <= COMPUTER_IDLE_TAIL_MS) {
+      // Reuse needs the tail and both D1 deadlines: a computer past its idle or
+      // lifetime deadline is returned to the sweep's next tick instead, so it is
+      // destroyed and replaced here rather than borrowed and immediately swept.
+      if (
+        now - other.lastUsedAt <= COMPUTER_IDLE_TAIL_MS &&
+        now < other.idleDeadline &&
+        now < other.lifetimeDeadline
+      ) {
         const reused = await store.heartbeat(other.id, now);
         if (reused) return { computer: reused, reused: true };
       }
@@ -135,29 +143,42 @@ export async function borrowComputer(
       now,
     );
   } catch (error) {
-    if (!isUniqueViolation(error)) throw error;
+    if (!isUniqueViolation(error)) {
+      // The D1 insert failed for another reason (e.g. invalid bounds): the provider
+      // computer from `create` above has no owner row. Destroy it rather than leak a
+      // billing computer no sweep can yet name.
+      await destroyUntracked(driver, created);
+      throw error;
+    }
     // A racing borrow claimed the user's live slot first: its row is the owner's, so
-    // reuse it when it is this borrow's computer. The provider-side `created` above
-    // has no D1 row — the sweep's orphan leg reaps it via `list()`. Anything else
-    // (another task's computer won the race) answers busy: the caller retries, and
-    // the retry sees the winner and replaces it normally.
+    // reuse it when it is this borrow's computer — and destroy this borrow's own
+    // provider computer, which has no D1 row. Anything else (another task's computer
+    // won the race, or the winner already expired) answers busy: the caller retries,
+    // and the retry sees the winner and reuses or replaces it normally.
     const live = await store.listActiveForUser(scope.userId);
     const winner = live.find(
       (row) =>
         row.taskId === spec.taskId &&
         row.provider === spec.provider &&
         row.profile === spec.profile &&
-        now - row.lastUsedAt <= COMPUTER_IDLE_TAIL_MS,
+        now - row.lastUsedAt <= COMPUTER_IDLE_TAIL_MS &&
+        now < row.idleDeadline &&
+        now < row.lifetimeDeadline,
     );
     if (winner) {
       const reused = await store.heartbeat(winner.id, now);
+      await destroyUntracked(driver, created);
       if (reused) return { computer: reused, reused: true };
+    } else {
+      await destroyUntracked(driver, created);
     }
     throw new Error("computer_busy");
   }
   // The pre-create cap check races: two borrows can both pass it, so verify the claim.
   // An overshoot destroys what this borrow just made and refuses — the retry then sees
-  // the winner. D5's per-user index already bounds the race to distinct users.
+  // the winner. D5's per-user index already bounds the race to distinct users. A failed
+  // self-destroy leaves one live row, still bounded by the sweep's idle/lifetime
+  // deadlines, for the next tick.
   if ((await store.countActive()) > COMPUTER_CONCURRENCY_CAP) {
     await destroyLive(store, driver, computer, "replaced", now);
     throw new Error("computer_limit");
@@ -179,6 +200,22 @@ export async function touchComputer(
   const found = await repo.scopeForComputer(computerId);
   if (!found || found.computer.userId !== scope.userId) return null;
   return computerStore(env).heartbeat(found.computer.id, now);
+}
+
+/**
+ * Destroy a provider computer that has no D1 row (a lost claim race, a failed insert):
+ * best-effort, since there is nothing to finish. A failed cleanup is logged, and the
+ * sweep's orphan leg remains the backstop once a provider driver is wired into it.
+ */
+async function destroyUntracked(driver: ComputerDriver, created: ComputerProvision): Promise<void> {
+  try {
+    await driver.destroy(created.providerComputerId, {
+      disks: created.disks ?? [],
+      snapshots: created.snapshots ?? [],
+    });
+  } catch (error) {
+    log.error("computers.borrow.cleanup", { errorName: (error as Error)?.name ?? "error" });
+  }
 }
 
 /** Destroy through the provider where one is configured, then finish the row. */
@@ -255,7 +292,7 @@ export async function sweepComputers(
     return done;
   };
   const live = await store.activeWithTasks();
-  const known = new Set(live.map((r) => r.computer.providerComputerId));
+  const destroyedThisTick = new Set<string>();
   for (const { computer, taskStatus, taskUserId } of live) {
     let reason: ComputerEndReason | null = null;
     // A null binding is a computer borrowed outside any task ("where practical", AC2): only
@@ -271,7 +308,7 @@ export async function sweepComputers(
     } else if (now >= computer.idleDeadline) {
       reason = "idle";
     }
-    if (reason && (await act(computer, reason))) known.delete(computer.providerComputerId);
+    if (reason && (await act(computer, reason))) destroyedThisTick.add(computer.providerComputerId);
   }
   if (driver) {
     let listed: { providerComputerId: string }[];
@@ -281,8 +318,22 @@ export async function sweepComputers(
       summary.errors += 1;
       listed = [];
     }
+    // Read live rows after `list()`, not before: a borrow that created its provider
+    // computer between the sweep's first read and the listing is claimed by the time
+    // we compare, so it is not mistaken for an orphan.
+    const claimed = new Set((await store.listActive()).map((row) => row.providerComputerId));
     for (const { providerComputerId } of listed) {
-      if (known.has(providerComputerId)) continue;
+      if (claimed.has(providerComputerId)) continue;
+      // Already provider-destroyed by this tick's deadline legs: reaping it again
+      // would double-destroy and misrecord a deadline kill as a swept orphan.
+      if (destroyedThisTick.has(providerComputerId)) continue;
+      // Re-check immediately before destroying: a borrow racing this loop lands its
+      // row first and must not lose its computer. One window remains: a provider
+      // computer created but not yet rowed (driver.create returned, store.create
+      // pending) is still unclaimed — closing that needs a provider creation
+      // timestamp the ComputerDriver port does not report yet.
+      const latest = new Set((await store.listActive()).map((row) => row.providerComputerId));
+      if (latest.has(providerComputerId)) continue;
       try {
         await driver.destroy(providerComputerId, { disks: [], snapshots: [] });
         await store.sweptOrphan(providerComputerId, now);

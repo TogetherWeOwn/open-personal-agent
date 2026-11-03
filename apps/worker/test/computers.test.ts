@@ -236,11 +236,59 @@ describe("mode-A borrowing (AC2)", () => {
     release();
     const [a, b] = await both;
     // One borrow created, the other reused the winner — never two live rows. The
-    // loser's provider-side computer has no D1 row; the sweep's orphan leg reaps it.
+    // loser's provider-side computer is destroyed inline: it never had a D1 row.
     expect([a.reused, b.reused].sort()).toEqual([false, true]);
     expect(a.computer.id).toBe(b.computer.id);
     expect(await count("computers", "state <> 'destroyed'")).toBe(1);
     expect(await count("computer_sessions")).toBe(0);
+    const winnerPc = a.computer.providerComputerId;
+    expect(driver.destroyed.map((d) => d.id)).toEqual([
+      winnerPc === "pc-new-1" ? "pc-new-2" : "pc-new-1",
+    ]);
+  });
+
+  it("destroys the provisioned computer when the D1 insert fails for another reason", async () => {
+    await seedUser("u1");
+    const driver = fakeDriver();
+    await expect(
+      borrowComputer(env, scopeOf("u1"), { ...spec("t1"), idleTimeoutSeconds: 0 }, driver, NOW),
+    ).rejects.toThrow("invalid idle timeout");
+    // The provider computer was created first, then cleaned up: no row, no leak.
+    expect(driver.created).toBe(1);
+    expect(driver.destroyed.map((d) => d.id)).toEqual(["pc-new-1"]);
+    expect(await count("computers")).toBe(0);
+  });
+
+  it("replaces a computer past its idle deadline even within the 60 s tail", async () => {
+    await seedUser("u1");
+    const driver = fakeDriver();
+    const first = await borrowComputer(env, scopeOf("u1"), spec("t1"), driver, NOW);
+    await db
+      .prepare("UPDATE computers SET idle_deadline = ? WHERE id = ?")
+      .bind(NOW + 30_000, first.computer.id)
+      .run();
+    const second = await borrowComputer(env, scopeOf("u1"), spec("t1"), driver, NOW + 59_000);
+    // Within the tail, but the idle deadline already passed: replace, not reuse.
+    expect(second.reused).toBe(false);
+    expect(second.computer.id).not.toBe(first.computer.id);
+    expect(driver.destroyed.map((d) => d.id)).toEqual([first.computer.providerComputerId]);
+    expect((await computerStore(env).get(first.computer.id))?.endReason).toBe("replaced");
+  });
+
+  it("replaces a computer past its lifetime deadline even within the tail", async () => {
+    await seedUser("u1");
+    const driver = fakeDriver();
+    const first = await borrowComputer(env, scopeOf("u1"), spec("t1"), driver, NOW);
+    await db
+      .prepare("UPDATE computers SET lifetime_deadline = ? WHERE id = ?")
+      .bind(NOW + 30_000, first.computer.id)
+      .run();
+    // Last use is seconds ago and the idle deadline is fresh, but the lifetime
+    // deadline passed: replace, so the sweep does not kill the just-borrowed row.
+    const second = await borrowComputer(env, scopeOf("u1"), spec("t1"), driver, NOW + 59_000);
+    expect(second.reused).toBe(false);
+    expect(second.computer.id).not.toBe(first.computer.id);
+    expect(driver.destroyed.map((d) => d.id)).toEqual([first.computer.providerComputerId]);
   });
 
   it("enforces the deployment-wide concurrency cap before creating", async () => {
@@ -369,7 +417,14 @@ describe("the sweep with a provider (AC3, COST-6)", () => {
   it("destroys provider orphans no D1 row claims, and records each", async () => {
     await seedUser("u1");
     const row = await seedComputer("u1", "t1");
-    const driver = fakeDriver({ list: async () => [{ providerComputerId: "pc-ghost" }] });
+    // The provider lists the live row's own computer too: claimed after the listing,
+    // it is not mistaken for an orphan.
+    const driver = fakeDriver({
+      list: async () => [
+        { providerComputerId: "pc-ghost" },
+        { providerComputerId: row.providerComputerId },
+      ],
+    });
     const summary = await sweepComputers(env, driver, NOW + 1);
     expect(summary.orphans).toBe(1);
     expect(driver.destroyed.map((d) => d.id).sort()).toEqual(["pc-ghost"]);
