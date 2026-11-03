@@ -468,7 +468,10 @@ export class NodeAssistant {
   #release(running: AbortController): void {
     if (this.#running !== running) return;
     this.#running = null;
-    void this.#drainResumes();
+    // While shutting down no new drive may start: the decided batches stay in D1, and the
+    // next start's recovery re-queues them. A drive started here would outlive `shutdown`'s
+    // wait and write to the database after it closes.
+    if (!this.#closing) void this.#drainResumes();
   }
 
   /**
@@ -513,9 +516,11 @@ export class NodeAssistant {
    * `interrupted` (keeping their text, as `interrupt` does). Those holds settle at their full
    * reservation: with no checkpoint, the model may already have been called and billed, as the
    * worker's `onFiberRecovered` settles a written turn whose `callUsage` is null. Settling
-   * twice charges once, so this costs nothing more if the turn already settled. Stopped turns
-   * (approval, limit) keep both for their resume, as the worker's `onFiberRecovered` keeps
-   * them: their `turn_states` row names the reply to spare.
+   * twice charges once, so this costs nothing more if the turn already settled. A parked
+   * approval keeps its reply for its resume instead, as the worker's `onFiberRecovered` keeps
+   * a cleanly stopped turn: its `turn_states` row names the reply to spare. (`limit_reached`
+   * keeps today's behavior until Node grows a Continue path: its reply still settles
+   * interrupted for a Retry.)
    */
   async #recover(): Promise<void> {
     const repo = await this.#repo;
@@ -535,6 +540,25 @@ export class NodeAssistant {
       // than forget a call the provider may have billed. An unknown provider prices at the
       // reservation, and a hold that already settled charges nothing more.
       for (const hold of holds) this.limits.settle(hold, "", "", null);
+    }
+    // A restart drops the in-memory resume queue, and a parked approval holds no budget (its
+    // stop settled the call's hold; `#drive` only releases an unspent first reservation), so
+    // neither the pass above nor the queue remembers it. Spare every parked approval's reply
+    // and re-queue its batch when nothing in it still waits on the user: it resumes when the
+    // next turn ends, as if the decision had landed mid-turn. An undecided batch stays parked
+    // for the Inbox to decide; a missing or foreign batch is for `resumeBatch` to call gone.
+    for (const saved of await repo.turns.list()) {
+      if (saved.status !== "awaiting_approval") continue;
+      stopped.add(saved.replyId);
+      if (this.#closing) continue;
+      const batchId = parseTurnState(saved.state)?.pending?.batchId;
+      if (!batchId || this.#resumeQueue.includes(batchId)) continue;
+      const rows = await repo.approvals.batch(batchId);
+      if (rows.length === 0 || rows[0]?.turnId !== saved.turnId) continue;
+      const now = Date.now();
+      if (rows.every((row) => row.status !== "pending" || row.expiresAt <= now)) {
+        this.#resumeQueue.push(batchId);
+      }
     }
     for (const conv of await repo.listConversations()) {
       for (const m of (await repo.chat.listMessages(conv.id)) ?? []) {
@@ -557,6 +581,9 @@ export class NodeAssistant {
    * turn already resumed, a missing batch) or no model is available.
    */
   async resumeBatch(batchId: string): Promise<ResumeResult> {
+    // While shutting down no new drive may start (see `#release`): the decisions are already
+    // in D1, so the next start's recovery resumes them.
+    if (this.#closing) return "queued";
     // Claimed before the first await, so two calls for one batch (a double-clicked Approve,
     // two tabs, a retried request) don't both load the same `awaiting_approval` row.
     if (this.#running) {
