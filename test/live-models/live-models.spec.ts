@@ -24,14 +24,19 @@ const BANNED = new Set(["gpt-5.6-terra", "gpt-6-sol"]);
 const banned = (id: string) => BANNED.has(id) || /terra/i.test(id);
 
 // Cloudflare's `/ai/v1` base has no `GET /models` (405): when listing is unavailable the run
-// probes this small curated list instead. Order is task-capable first: the priced starter probes
-// OK with tool calls but never completes the compare-and-save task (it fills example-domain text
-// until the artifact cap), while the path's Responses route only serves the GPT-OSS entries and
-// only without streaming. Every entry is in the provider's tool-capable set; unpriced ones record
-// `unpriced` with token counts per the spec, never a silent pass.
+// probes this small curated list instead. Order is task-capable first: the 120b entry and the
+// priced starter both pass the one-tool Test probe yet never call a tool in the multi-tool task
+// turn (8-minute example-domain stall on two dispatches), matching the T7 two-tool 0/8 chaining
+// gap on Workers AI — so the smaller GPT-OSS entry, documented for agentic function calling,
+// goes first because it has never yet run the task (the 120b entry always won the probe), with
+// the Kimi entry next as a second documented tool-calling candidate. The path's Responses route
+// only serves the GPT-OSS entries and only without streaming. Every entry is in the provider's
+// tool-capable set; unpriced ones record `unpriced` with token counts per the spec, never a
+// silent pass.
 const CURATED_MODELS = [
-  "@cf/openai/gpt-oss-120b",
   "@cf/openai/gpt-oss-20b",
+  "@cf/moonshotai/kimi-k2.5",
+  "@cf/openai/gpt-oss-120b",
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 ];
 

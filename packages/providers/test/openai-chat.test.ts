@@ -183,6 +183,24 @@ describe("openai-chat requests", () => {
     expect(() => createOpenAIChatProvider({ ...lan, privateHttp: true })).not.toThrow();
   });
 
+  it("sends tool_choice auto only when tools are present", async () => {
+    const tools = [
+      {
+        name: "report_ready",
+        description: "Signal readiness",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ];
+    const { p, body } = provider("https://x.test/v1", sse(openaiText));
+    await replay(p.stream({ ...hello, tools }));
+    expect(body().tool_choice).toBe("auto");
+    expect(body().tools).toHaveLength(1);
+    const { p: plain, body: plainBody } = provider("https://x.test/v1", sse(openaiText));
+    await replay(plain.stream(hello));
+    expect(plainBody()).not.toHaveProperty("tool_choice");
+    expect(plainBody()).not.toHaveProperty("tools");
+  });
+
   it("lists models", async () => {
     const { p, calls } = provider("https://x.test/v1", () =>
       Response.json({ data: [{ id: "a" }] }),
