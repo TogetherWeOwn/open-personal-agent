@@ -46,6 +46,34 @@ it("announces the saved Output to connected tabs without borrowing the Workflow 
   }
 });
 
+it("returns the published artifact when its notification fails", async () => {
+  const { token, user, browser } = await uploadOwner();
+  const response = await workerApp.request(
+    `${ORIGIN}/api/agent/tasks/upload-task/artifacts`,
+    {
+      method: "POST",
+      body: "hello",
+      headers: { origin: ORIGIN, authorization: `Bearer ${token}`, "x-file-name": "answer.txt" },
+    },
+    {
+      ...env,
+      ASSISTANT: {
+        idFromName: (name: string) => env.ASSISTANT.idFromName(name),
+        get: () => ({
+          artifactCreated: async () => {
+            throw new Error("notification unavailable");
+          },
+        }),
+      } as unknown as typeof env.ASSISTANT,
+    },
+  );
+  expect(response.status).toBe(201);
+  const artifact = await response.json<{ id: string }>();
+  expect(await user.artifacts.list()).toMatchObject([{ id: artifact.id, sizeBytes: 5 }]);
+  expect(await (await browser.req(`/api/artifacts/${artifact.id}/content`)).text()).toBe("hello");
+  expect(await db.prepare("SELECT count(*) AS n FROM capability_uploads").first("n")).toBe(1);
+});
+
 it("reserves object quota atomically before accepting concurrent uploads", async () => {
   const { upload, user } = await uploadOwner();
   const responses = await Promise.all(Array.from({ length: 17 }, () => upload("x")));

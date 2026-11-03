@@ -587,7 +587,10 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
               `UPDATE tasks SET status = 'cancelled', finished_at = ?, updated_at = ?
                WHERE status = 'waiting_for_approval' AND id IN (
                  SELECT task_id FROM approvals WHERE ${due} AND task_id IS NOT NULL
-                   AND user_id = tasks.user_id)`,
+                   AND user_id = tasks.user_id
+                   AND NOT EXISTS (SELECT 1 FROM capability_calls gc
+                     WHERE approvals.batch_id = 'gateway_' || gc.id AND gc.master_id = gc.id
+                       AND gc.user_id = approvals.user_id AND gc.task_id = approvals.task_id))`,
             )
             .bind(now, now, now, limit),
           db

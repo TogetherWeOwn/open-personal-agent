@@ -4,7 +4,20 @@
 // never wakes a Durable Object, and it records what it removed as audit rows (AC1). A chat with a
 // task that is still queued, running, waiting or paused, or with an approval still waiting for
 // the user, is never deleted (AC3).
-import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  notExists,
+  or,
+  sql,
+} from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { openD1 } from "./index";
 import { memoryService } from "./memory";
@@ -13,6 +26,7 @@ import {
   approvals,
   attachments,
   auditLog,
+  capabilityCalls,
   conversations,
   messages,
   tasks,
@@ -242,6 +256,41 @@ export function retentionStore({ DB, FILES }: Bindings) {
       await db.batch(statements as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]]);
       total += rows.length;
       if (rows.length < STATE_BATCH) break;
+    }
+    // Keep completed roots and aliases: deleting replay history could repeat a side effect.
+    const expiredResponse = JSON.stringify({ error: "output_expired" });
+    for (let round = 0; round < SWEEP_ROUNDS; round++) {
+      const stale = db
+        .select({ id: capabilityCalls.id })
+        .from(capabilityCalls)
+        .where(
+          and(
+            eq(capabilityCalls.userId, userId),
+            eq(capabilityCalls.status, "completed"),
+            ne(capabilityCalls.response, expiredResponse),
+            inArray(
+              capabilityCalls.taskId,
+              db
+                .select({ id: tasks.id })
+                .from(tasks)
+                .where(
+                  and(
+                    eq(tasks.userId, userId),
+                    inArray(tasks.status, [...ENDED_TASK_STATUSES]),
+                    lt(tasks.finishedAt, cutoff),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .limit(SWEEP_BATCH);
+      const removed = await db
+        .update(capabilityCalls)
+        .set({ response: expiredResponse, statusCode: 410 })
+        .where(and(eq(capabilityCalls.userId, userId), inArray(capabilityCalls.id, stale)))
+        .returning({ id: capabilityCalls.id });
+      total += removed.length;
+      if (removed.length < SWEEP_BATCH) break;
     }
     return total;
   };

@@ -8,7 +8,14 @@ import {
   type PendingItem,
   parseInput,
 } from "@opa/harness-builtin";
-import { decide, openApproval, sha256, toBase64Url, toolDefinitionHash } from "@opa/policy";
+import {
+  decide,
+  fitsApproval,
+  openApproval,
+  sha256,
+  toBase64Url,
+  toolDefinitionHash,
+} from "@opa/policy";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { attachmentMaxBytes, fileName, readAttachment, UploadError } from "./attachments";
@@ -95,6 +102,8 @@ capabilityAudiences.post(
       ...(target === undefined ? {} : { target }),
       now: Date.now(),
     });
+    if (policy.outcome === "ask" && !fitsApproval(input, target ?? null))
+      return c.json({ error: "invalid_input" }, 400);
     const requestHash = toBase64Url(
       await sha256(
         new TextEncoder().encode(
@@ -275,8 +284,12 @@ capabilityAudiences.post("/tasks/:taskId/artifacts", async (c) => {
       sizeBytes: upload.sizeBytes,
     });
     if (!published) return c.json({ error: "unauthenticated" }, 401);
-    const notifier = repository.forUser(binding.scope).assistant() as unknown as ArtifactNotifier;
-    await notifier.artifactCreated(id);
+    try {
+      const notifier = repository.forUser(binding.scope).assistant() as unknown as ArtifactNotifier;
+      await notifier.artifactCreated(id);
+    } catch {
+      // Publication succeeded: a missed live notification must not invite a duplicate upload.
+    }
     return c.json(
       { id, name: upload.name, mediaType: upload.mediaType, sizeBytes: upload.sizeBytes() },
       201,

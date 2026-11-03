@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mintCapabilityToken } from "@opa/db/capability-tokens";
+import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { FORGET_MANIFEST } from "@opa/db/memory-tools";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import type { SqlDatabase } from "@opa/db/system";
+import { DAY_MS, retentionStore } from "@opa/db/retention";
+import { type SqlDatabase, systemStore } from "@opa/db/system";
 import { toolDefinitionHash } from "@opa/policy";
 import { CREATE_ARTIFACT_MANIFEST, SEARCH_HISTORY_MANIFEST } from "@opa/tools-builtin";
 import { expect, it } from "vitest";
@@ -284,6 +285,43 @@ it("does not revive an original token's approved call after rotation", async () 
   expect(await fixture.user.artifacts.list()).toEqual([]);
 });
 
+it("creates a new approval for a fresh key after token rotation", async () => {
+  const fixture = await gatewayOwner();
+  const old = await decideArtifact(fixture);
+  const replacement = await mintCapabilityToken(db as unknown as SqlDatabase, {
+    userId: fixture.owner,
+    taskId: "gateway-task",
+    computerId: fixture.computer.id,
+    aud: "tool_gateway",
+    toolAllowlist: [
+      { tool: "create_artifact", manifestHash: await toolDefinitionHash(CREATE_ARTIFACT_MANIFEST) },
+    ],
+  });
+  const response = await fixture.call("fresh", "create_artifact", old.args, replacement.token);
+  expect(response.status).toBe(202);
+  const pending = await response.json<{ batchId: string; callId: string }>();
+  expect(pending.callId).not.toBe(old.callId);
+  const rows = await fixture.user.approvals.batch(pending.batchId);
+  expect(rows).toMatchObject([{ status: "pending" }]);
+  expect((await fixture.call("write", "create_artifact", old.args, replacement.token)).status).toBe(
+    409,
+  );
+  expect(await fixture.user.artifacts.list()).toEqual([]);
+  expect(
+    (
+      await fixture.browser.req(`/api/approvals/${pending.batchId}`, {
+        body: {
+          decisions: [{ approvalId: rows[0]?.approvalId, decision: "approve", scope: "once" }],
+        },
+      })
+    ).status,
+  ).toBe(200);
+  expect((await fixture.call("fresh", "create_artifact", old.args, replacement.token)).status).toBe(
+    200,
+  );
+  expect(await fixture.user.artifacts.list()).toHaveLength(1);
+});
+
 it("does not redispatch an outcome that may have executed before a restart", async () => {
   const fixture = await gatewayOwner();
   const { args } = await decideArtifact(fixture);
@@ -302,6 +340,18 @@ it("rejects oversized gateway bodies with a non-cacheable response", async () =>
   expect(response.headers.get("cache-control")).toBe("no-store");
 });
 
+it("rejects inputs beyond the approval binding limit before reserving a call", async () => {
+  const { call } = await gatewayOwner();
+  const args = { name: "large.txt", content: "x".repeat(70 * 1024) };
+  for (const key of ["large", "large", "fresh"]) {
+    const response = await call(key, "create_artifact", args);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_input" });
+  }
+  expect(await db.prepare("SELECT count(*) AS n FROM capability_calls").first("n")).toBe(0);
+  expect(await db.prepare("SELECT count(*) AS n FROM approvals").first("n")).toBe(0);
+});
+
 it.each([
   "UPDATE capability_tokens SET revoked_at = 1",
   "UPDATE tasks SET token_epoch = token_epoch + 1",
@@ -316,12 +366,83 @@ it.each([
   expect(await fixture.user.artifacts.list()).toEqual([]);
 });
 
+it("expires a gateway card without cancelling an unrelated runner approval wait", async () => {
+  const { call, user } = await gatewayOwner();
+  const response = await call("pending", "create_artifact", { name: "a.txt", content: "hello" });
+  expect(response.status).toBe(202);
+  const { batchId } = await response.json<{ batchId: string }>();
+  const row = (await user.approvals.batch(batchId))[0];
+  if (!row) throw new Error("missing gateway card");
+  const now = Date.now();
+  expect(
+    await user.approvals.create([
+      {
+        ...row,
+        batchId: "runner-batch",
+        approvalId: "runner-approval",
+        toolCallId: "runner-call",
+        expiresAt: now + 60_000,
+      },
+    ]),
+  ).toBe(true);
+  await db.batch([
+    db.prepare("UPDATE tasks SET status = 'waiting_for_approval' WHERE id = 'gateway-task'"),
+    db.prepare("UPDATE approvals SET expires_at = 1 WHERE batch_id = ?").bind(batchId),
+  ]);
+  expect(await systemStore(env).approvals.expireDue(now)).toBe(1);
+  expect((await user.approvals.batch(batchId))[0]?.status).toBe("expired");
+  expect((await user.approvals.batch("runner-batch"))[0]?.status).toBe("pending");
+  expect((await user.tasks.get("gateway-task"))?.status).toBe("waiting_for_approval");
+  expect(await systemStore(env).approvals.expireDue(now + 60_001)).toBe(1);
+  expect((await user.tasks.get("gateway-task"))?.status).toBe("cancelled");
+});
+
 it("refuses an expired approved card", async () => {
   const fixture = await gatewayOwner();
   const { args } = await decideArtifact(fixture);
   await db.prepare("UPDATE approvals SET expires_at = 1").run();
   expect((await fixture.call("write", "create_artifact", args)).status).toBe(403);
   expect(await fixture.user.artifacts.list()).toEqual([]);
+});
+
+it("removes retained gateway output without discarding replay tombstones or aliases", async () => {
+  const fixture = await gatewayOwner();
+  const { args, callId } = await decideArtifact(fixture);
+  expect((await fixture.call("alias", "create_artifact", args)).status).toBe(200);
+  const scope = await verifyCapabilityToken(db as unknown as SqlDatabase, {
+    token: fixture.minted.token,
+    expectedAud: "tool_gateway",
+  });
+  if (!scope) throw new Error("missing capability scope");
+  const calls = createRepository(env).capabilityGateway(scope);
+  const original = await calls.load(callId);
+  expect(original?.response).toContain("content");
+  const now = Date.now();
+  await db.batch([
+    db
+      .prepare("INSERT INTO user_settings (user_id, tool_output_retention_days) VALUES (?, 0)")
+      .bind(fixture.owner),
+    db
+      .prepare(
+        "UPDATE tasks SET status = 'succeeded', finished_at = ?, outputs_removed_at = 1 WHERE id = 'gateway-task'",
+      )
+      .bind(now - 8 * DAY_MS),
+  ]);
+  const retention = retentionStore(env);
+  expect((await retention.sweep(now)).toolOutputs).toBe(0);
+  expect((await calls.load(callId))?.response).toBe(original?.response);
+  await db.prepare("UPDATE user_settings SET tool_output_retention_days = 7").run();
+  expect((await retention.sweep(now)).toolOutputs).toBe(1);
+  const expired = await calls.load(callId);
+  expect(expired).toMatchObject({ status: "completed", statusCode: 410 });
+  expect(JSON.parse(expired?.response ?? "null")).toEqual({ error: "output_expired" });
+  for (const key of ["write", "alias"]) {
+    const replay = await calls.begin(key, original?.requestHash ?? "");
+    expect(replay).toEqual({ kind: "call", call: expired });
+  }
+  expect(await db.prepare("SELECT count(*) AS n FROM capability_calls").first("n")).toBe(2);
+  expect(await fixture.user.artifacts.list()).toHaveLength(1);
+  expect((await retention.sweep(now + DAY_MS)).toolOutputs).toBe(0);
 });
 
 it("enforces the per-token rolling-minute cap without charging retries again", async () => {
