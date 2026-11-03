@@ -176,8 +176,13 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     });
     metrics.firstAnswer = { minutes: (Date.now() - start) / 60_000 };
     await phase("Live models on a configured endpoint", async () => {
-      await steps.liveModels(url, vdeps, livePaths);
-      live = readLiveResults(livePaths.resultsPath);
+      try {
+        await steps.liveModels(url, vdeps, livePaths);
+      } finally {
+        // The spec exits non-zero on any adapter failure, so the step can throw after
+        // recording rows: read them anyway so the report keeps every per-adapter row.
+        live = readLiveResults(livePaths.resultsPath);
+      }
     });
     await deploy("Re-run (up to date)", []);
     await snapshot("after the re-run");

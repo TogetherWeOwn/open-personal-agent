@@ -103,6 +103,7 @@ function verifySetup({
   fail = null,
   live = false,
   liveErrorKey = false,
+  liveFailsAfterRows = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
   fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
@@ -138,25 +139,42 @@ function verifySetup({
         const error = liveErrorKey
           ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY}`
           : null;
-        fs.writeFileSync(
-          paths.resultsPath,
-          JSON.stringify([
-            {
-              adapter: "openai-chat",
-              model: "m",
-              testMs: 412,
-              inputTokens: 100,
-              outputTokens: 30,
-              costMicroUsd: 40,
-              expectedMicroUsd: 40,
-              cost: "match",
-              artifactId: "a1",
-              artifactName: "live-check-openai-chat.md",
-              ok: !liveErrorKey,
-              error,
-            },
-          ]),
-        );
+        const rows = [
+          {
+            adapter: "openai-chat",
+            model: "m",
+            testMs: 412,
+            inputTokens: 100,
+            outputTokens: 30,
+            costMicroUsd: 40,
+            expectedMicroUsd: 40,
+            cost: "match",
+            artifactId: "a1",
+            artifactName: "live-check-openai-chat.md",
+            ok: !liveErrorKey,
+            error,
+          },
+        ];
+        if (liveFailsAfterRows) {
+          // One adapter passed, one failed, then Playwright exits non-zero: the report
+          // must still keep both rows instead of saying no per-adapter result exists.
+          rows.push({
+            adapter: "anthropic-messages",
+            model: "m2",
+            testMs: 388,
+            inputTokens: null,
+            outputTokens: null,
+            costMicroUsd: null,
+            expectedMicroUsd: null,
+            cost: null,
+            artifactId: null,
+            artifactName: null,
+            ok: false,
+            error: "the Test probe failed: bad key",
+          });
+        }
+        fs.writeFileSync(paths.resultsPath, JSON.stringify(rows));
+        if (liveFailsAfterRows) throw new DeployError("the live-model step failed (1)");
       }
     },
     teardown: async (argv) =>
@@ -218,6 +236,39 @@ describe("verify:cloudflare", () => {
     expect(report).toMatch(
       /\| openai-chat \| m \| 412 ms \| 100 \/ 30 \| 40 uUSD \(match\) \| a1 \| pass \|/,
     );
+  });
+
+  it("keeps per-adapter rows when the live step fails after recording them", async () => {
+    const t = verifySetup({ live: true, liveFailsAfterRows: true });
+    await expect(t.run()).rejects.toThrow("the live-model step failed (1)");
+    expect(t.calls.at(-1)).toBe(`teardown --name ${P} --confirm ${P}`);
+    const report = t.report();
+    expect(report).toContain("Result: **FAIL**");
+    expect(report).toMatch(
+      /\| openai-chat \| m \| 412 ms \| 100 \/ 30 \| 40 uUSD \(match\) \| a1 \| pass \|/,
+    );
+    expect(report).toMatch(
+      /\| anthropic-messages \| m2 \| .* \| \*\*fail\*\*: the Test probe failed/,
+    );
+    expect(report).not.toContain("recorded no per-adapter result");
+  });
+
+  it("keeps the live step inside the job timeout with room for teardown", () => {
+    // The live project runs four adapters sequentially on one worker: four times the
+    // per-adapter ceiling must leave room for setup, three deploys, the first run,
+    // teardown and the report upload, or a job-timeout kill loses teardown and the report.
+    const workflow = fs.readFileSync(
+      path.join(REPO, ".github/workflows/deploy-verify.yml"),
+      "utf8",
+    );
+    const jobMinutes = Number(workflow.match(/timeout-minutes:\s*(\d+)/)?.[1]);
+    const spec = fs.readFileSync(path.join(REPO, "test/live-models/live-models.spec.ts"), "utf8");
+    const perAdapterMs = Number(
+      spec.match(/test\.setTimeout\(([\d_]+)\)/)?.[1].replaceAll("_", ""),
+    );
+    expect(jobMinutes).toBeGreaterThanOrEqual(90);
+    expect(perAdapterMs).toBeLessThanOrEqual(12 * 60_000);
+    expect((4 * perAdapterMs) / 60_000).toBeLessThanOrEqual(jobMinutes - 30);
   });
 
   it("redacts the live-model key an endpoint echoes in a recorded error", async () => {
