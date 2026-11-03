@@ -65,6 +65,7 @@ import {
   TURN_FILE_BYTES,
   UNREAD,
 } from "@opa/server/chat-protocol";
+import { resolveOwnHosts } from "@opa/server/deployment-hosts";
 import {
   type CallScope,
   checkSpending,
@@ -74,7 +75,7 @@ import {
   SPENDING_DEFAULTS,
   type SpendingSettings,
 } from "@opa/server/limits";
-import { composeTurnTools, parseOwnHosts, type TurnContext } from "@opa/server/turn-tools";
+import { composeTurnTools, type TurnContext } from "@opa/server/turn-tools";
 import {
   Agent,
   type Connection,
@@ -226,18 +227,19 @@ export class Assistant extends Agent<Bindings> {
    * (no runnable creation path yet: a queued row without instance or state never runs).
    * The context names the turn: file and memory tools file under its conversation, and the
    * taint thunk reads the loop's live taint, since a web, file or tool result mid-turn taints it.
-   * The page fetch is the runtime's, which can't reach a private network; the own hosts come
-   * from `OPA_OWN_HOSTS`, so a page can't make the turn read the deployment itself.
+   * The page fetch is the runtime's, which can't reach a private network; the own hosts are
+   * the recorded serving hostnames plus `OPA_OWN_HOSTS`, so a page can't make the turn read
+   * the deployment itself.
    */
   resolveTools: (
     context: TurnContext,
   ) =>
     | { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }
-    | Promise<{ tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }> = (context) =>
+    | Promise<{ tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }> = async (context) =>
     composeTurnTools({
       user: this.#repo,
       fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
-      ownHosts: parseOwnHosts(this.env.OPA_OWN_HOSTS),
+      ownHosts: await resolveOwnHosts(this.env),
       newId: () => crypto.randomUUID(),
       scope: {
         kind: "chat",

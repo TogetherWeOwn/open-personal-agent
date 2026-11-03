@@ -127,6 +127,20 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
   const requireChange = () =>
     db.prepare("INSERT INTO setup_state (id) SELECT 0 WHERE changes() = 0");
 
+  /**
+   * Remembers a hostname serving this deployment; first sighting keeps its time, every sighting
+   * refreshes the last. A statement, so callers batch it with the write it rides on instead of
+   * paying a round trip of its own.
+   */
+  const recordDeploymentHost = (hostname: string, now: number) =>
+    db
+      .prepare(
+        `INSERT INTO deployment_hosts (hostname, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(hostname) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+      )
+      .bind(hostname, now, now);
+
   /** The rows a claim and a recovery both write, after their `setup_state` change. */
   const credentials = (o: OwnerCredentials, mode: "claim" | "recovery") => [
     insertPasskey(o),
@@ -194,6 +208,27 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           ...credentials(o, "recovery"),
         ]);
       },
+    },
+
+    /**
+     * Hostnames seen serving this deployment. Callers record the request URL's host where the
+     * deployment learns it (setup POSTs, the session touch) and read the set where `web_fetch`
+     * needs its own-host list; a write here must never fail the request it rides on, so callers
+     * catch. Any hostname that reaches here genuinely routed to this deployment, and a wrong
+     * entry only ever refuses a fetch, never allows one.
+     */
+    deploymentHosts: {
+      /** Upserts `hostname`; first sighting keeps its time, every sighting refreshes the last. */
+      record: async (hostname: string, now: number) => {
+        await recordDeploymentHost(hostname, now).run();
+      },
+      /** Every recorded hostname, oldest first; empty when none was ever recorded. */
+      list: async (): Promise<string[]> =>
+        (
+          await db
+            .prepare("SELECT hostname FROM deployment_hosts ORDER BY first_seen_at")
+            .all<{ hostname: string }>()
+        ).results.map((r) => r.hostname),
     },
 
     /** Redeeming a recovery code (M2-10b). Only the owner has codes. */
@@ -537,8 +572,26 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           .prepare(`SELECT 1 FROM sessions WHERE id = ? AND user_id = ? AND ${LIVE}`)
           .bind(id, userId, now, now - SESSION_IDLE_MS)
           .first()) !== null,
-      touch: async (id: string, now: number) => {
-        await db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, id).run();
+      /**
+       * Notes the session's recent use, then — as its own best-effort write — the hostname
+       * serving this deployment, which the session's request arrived on. The touch runs at most
+       * hourly per session, so an added custom domain lands here soon after its first use;
+       * without a hostname this stays the single statement it was. Sequential on purpose: one
+       * D1 batch would roll the touch back with a failed hostname write (a table missing
+       * mid-deploy), silently stalling the session's idle deadline while the caller swallows it.
+       */
+      touch: async (id: string, now: number, hostname?: string) => {
+        const update = db
+          .prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
+          .bind(now, id);
+        if (!hostname) {
+          await update.run();
+          return;
+        }
+        await update.run();
+        await recordDeploymentHost(hostname, now)
+          .run()
+          .catch(() => {});
       },
       /** Records the login: the passkey's counter, the new session, the old one revoked. */
       login: async (l: {

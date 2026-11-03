@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Passkey login, session cookies, rotation, timeouts, logout, the session list and sign out
-// everywhere (ADR 0010 D2).
+// Passkey login, session cookies, rotation, timeouts, the deployment hostnames the session
+// touch records, logout, the session list and sign out everywhere (ADR 0010 D2).
 import { systemStore } from "@opa/db/system";
 import { CHALLENGE_COOKIE, SESSION_COOKIE, sha256 } from "@opa/server/auth";
 import { describe, expect, it } from "vitest";
@@ -155,6 +155,61 @@ describe("timeouts", () => {
     expect(Date.now() - touched).toBeLessThan(60_000);
     await br.req("/api/me");
     expect(await seen()).toBe(touched);
+  });
+});
+
+describe("deployment hostnames", () => {
+  it("upserts: the first sighting keeps its time, every sighting refreshes the last", async () => {
+    const store = systemStore(env);
+    await store.deploymentHosts.record("agent.example", 1000);
+    await store.deploymentHosts.record("other.example", 1500);
+    await store.deploymentHosts.record("agent.example", 2000);
+    const row = (await db
+      .prepare("SELECT first_seen_at, last_seen_at FROM deployment_hosts WHERE hostname = ?")
+      .bind("agent.example")
+      .first<{ first_seen_at: number; last_seen_at: number }>()) as {
+      first_seen_at: number;
+      last_seen_at: number;
+    };
+    expect([row.first_seen_at, row.last_seen_at]).toEqual([1000, 2000]);
+    // The list runs oldest first.
+    expect(await store.deploymentHosts.list()).toEqual(["agent.example", "other.example"]);
+  });
+
+  it("touches the session and records the serving hostname", async () => {
+    await login();
+    const id = (await db.prepare("SELECT id FROM sessions").first<string>("id")) as string;
+    const store = systemStore(env);
+    await store.sessions.touch(id, 5000, "agent.example");
+    expect(
+      await db
+        .prepare("SELECT last_seen_at FROM sessions WHERE id = ?")
+        .bind(id)
+        .first<number>("last_seen_at"),
+    ).toBe(5000);
+    expect(await count("deployment_hosts", "hostname = 'agent.example'")).toBe(1);
+  });
+
+  it("records the serving hostname on login, so a new domain is refused from first use", async () => {
+    const { key } = await claim();
+    await db.prepare("DELETE FROM deployment_hosts").run();
+    const br = new Browser();
+    expect((await br.login(key)).status).toBe(200);
+    // The session is fresh, so no hourly touch ran: this row came from the login itself.
+    expect(await count("deployment_hosts", "hostname = 'opa.test'")).toBe(1);
+  });
+
+  it("touches without a hostname in the single statement it was", async () => {
+    await login();
+    const id = (await db.prepare("SELECT id FROM sessions").first<string>("id")) as string;
+    await systemStore(env).sessions.touch(id, 6000);
+    expect(
+      await db
+        .prepare("SELECT last_seen_at FROM sessions WHERE id = ?")
+        .bind(id)
+        .first<number>("last_seen_at"),
+    ).toBe(6000);
+    expect(await count("deployment_hosts")).toBe(1); // only the claim's opa.test
   });
 });
 

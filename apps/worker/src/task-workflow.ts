@@ -39,7 +39,8 @@ import {
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
-import { composeTurnTools, parseOwnHosts } from "@opa/server/turn-tools";
+import { resolveOwnHosts } from "@opa/server/deployment-hosts";
+import { composeTurnTools } from "@opa/server/turn-tools";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
 import { type AssistantTaskRpc, createWorkflowTaskContext, stepperFor } from "./task-context";
@@ -223,7 +224,8 @@ export async function executeTask(
     // otherwise the run composes the production set, with the policy input read from the
     // task's user's stored overrides and grants. Composed once per run, outside the steps
     // like the model pick above; the steps below memoize what ran, so a Settings change
-    // lands on the next run, never mid-run. The taint box carries each cycle's turn to the
+    // lands on the next run, never mid-run. The own hosts are the recorded serving hostnames
+    // plus `OPA_OWN_HOSTS`, as in the Assistant. The taint box carries each cycle's turn to the
     // memory tools' trust gate: the loop mutates the turn in place, so the thunk reads it
     // live, and a turn that can't be read counts as tainted (fail-closed).
     const taintBox: { turn: TurnState | null } = { turn: null };
@@ -236,7 +238,7 @@ export async function executeTask(
       const composed = await composeTurnTools({
         user,
         fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
-        ownHosts: parseOwnHosts(env.OPA_OWN_HOSTS),
+        ownHosts: await resolveOwnHosts(env),
         newId: () => crypto.randomUUID(),
         scope: { kind: "task", taskId: task.id, conversationId: task.conversationId },
         taint: () => taintBox.turn?.taint.taint !== "trusted",

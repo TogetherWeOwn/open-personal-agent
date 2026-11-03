@@ -59,6 +59,20 @@ export const usedSetupTokens = sqliteTable("used_setup_tokens", {
   usedAt: integer("used_at").notNull().default(now),
 });
 
+/**
+ * Every hostname seen serving this deployment: the request URL's host on setup
+ * POSTs and on authenticated requests (piggybacked on the session touch). `web_fetch` refuses
+ * these, so a page can't make a turn read the app itself, with no deployer action beyond
+ * deploying — `OPA_OWN_HOSTS` stays as a manual override/addition. Deployment-wide, like the
+ * setup state above: any hostname that reaches here genuinely routed to this Worker, and a
+ * wrong entry only ever refuses a fetch (fail-closed), never allows one.
+ */
+export const deploymentHosts = sqliteTable("deployment_hosts", {
+  hostname: text("hostname").primaryKey(),
+  firstSeenAt: integer("first_seen_at").notNull(),
+  lastSeenAt: integer("last_seen_at").notNull(),
+});
+
 /** Session IDs are stored only as hashes. 30 days idle, 90 days absolute (ADR 0010 D2). */
 export const sessions = sqliteTable(
   "sessions",

@@ -13,6 +13,7 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
+import { hostnameOf, noteDeploymentHost } from "./deployment-hosts";
 import type { AppEnv, Session } from "./env";
 import { sameOrigin } from "./security";
 
@@ -57,7 +58,12 @@ export async function currentSession(c: Context<AppEnv>): Promise<Session | null
   const store = systemStore(c.env);
   const row = await store.sessions.find(await auth.sha256(cookie), now, now - IDLE_MS);
   if (!row) return null;
-  if (now - row.last_seen_at > TOUCH_MS) await store.sessions.touch(row.id, now);
+  if (now - row.last_seen_at > TOUCH_MS) {
+    // Piggybacked on the hourly write: the hostname serving this deployment, so an added
+    // custom domain lands here soon after its first use. Best-effort: a failed touch just
+    // leaves `last_seen_at` stale until the next one, never fails the request.
+    await store.sessions.touch(row.id, now, hostnameOf(c.req.url) ?? undefined).catch(() => {});
+  }
   return { id: row.id, userId: row.user_id, scope: row.scope, stepUpAt: row.step_up_at };
 }
 
@@ -115,6 +121,10 @@ authRoutes.post("/login", async (c) => {
     session: session.row,
     now: Date.now(),
   });
+  // A new serving domain is first used by a login (cookies never cross hosts), so record it
+  // here: the hourly touch would otherwise leave that domain fetchable for up to an hour.
+  // Best-effort, never fails the login.
+  await noteDeploymentHost(c.env, c.req.url).catch(() => {});
   const maxAge = auth.SESSION_ABSOLUTE_MS / 1000;
   setCookie(c, auth.SESSION_COOKIE, session.cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");
