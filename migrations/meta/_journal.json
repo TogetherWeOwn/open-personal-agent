@@ -211,6 +211,20 @@
       "when": 1793735732010,
       "tag": "0029_computer_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1793727293309,
+      "tag": "0030_capability_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1793729701860,
+      "tag": "0031_capability_token_owner",
+      "breakpoints": true
     }
   ]
 }

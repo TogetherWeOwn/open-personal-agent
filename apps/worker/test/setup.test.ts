@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // R7 M2-2 (setup claim) and TWO-375 M2-12 (POST-only setup, recovery mode on rotation).
 
+import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
+import { computerStore } from "@opa/db/computers";
+import { createRepository, scopeFromSession } from "@opa/db/repository";
+import { type SqlDatabase, systemStore } from "@opa/db/system";
 import {
   base64url,
   CHALLENGE_COOKIE,
   hashRecoveryCode,
   newRecoveryCode,
+  newSession,
+  randomId,
   SESSION_COOKIE,
   sha256,
 } from "@opa/server/auth";
@@ -208,6 +214,35 @@ describe("recovery after the token rotates", () => {
       .prepare("INSERT INTO conversations (id, user_id, title) VALUES ('c1', ?, 'kept')")
       .bind(owner)
       .run();
+    // A live task bearer from before the recovery: data, not credential.
+    const scoped = createRepository(env).forUser(scopeFromSession({ userId: owner as string }));
+    await scoped.chat.open("c-rec", "G");
+    await scoped.tasks.create({
+      id: "t-rec",
+      conversationId: "c-rec",
+      kind: "turn",
+      mode: "background",
+    });
+    const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
+      userId: owner as string,
+      taskId: "t-rec",
+      computerId: (
+        await computerStore(env).create(
+          {
+            userId: owner as string,
+            taskId: "t-rec",
+            provider: "fake",
+            profile: "host",
+            providerComputerId: "comp-setup-rec",
+          },
+          Date.now(),
+        )
+      ).id,
+      aud: "model_proxy",
+    });
+    const verify = () =>
+      verifyCapabilityToken(db as unknown as SqlDatabase, { token, expectedAud: "model_proxy" });
+    expect(await verify()).not.toBeNull();
 
     // The old token no longer opens anything; the new one opens recovery.
     expect((await new Browser(rotated).options(TOKEN)).status).toBe(403);
@@ -243,10 +278,82 @@ describe("recovery after the token rotates", () => {
     expect(await count("conversations", "title = 'kept'")).toBe(1);
     expect(await count("setup_state", `claim_token_hash = '${await sha256(ROTATED)}'`)).toBe(1);
     expect(await count("audit_log", "action = 'setup.recovery'")).toBe(1);
+    // The pre-recovery bearer died with the old credentials, though its task still runs.
+    expect(await verify()).toBeNull();
+    expect(await count("audit_log", "action = 'capability_token.revoke_user'")).toBe(1);
 
     // Recovery is single-use for this token.
     expect((await br.options(ROTATED)).status).toBe(403);
     expect((await br.req("/setup")).status).toBe(403);
+  });
+
+  it("a failed recovery leaves live task tokens alone", async () => {
+    expect((await new Browser().setup(TOKEN)).status).toBe(200);
+    const owner = (await db.prepare("SELECT id FROM users").first<string>("id")) as string;
+    const scoped = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await scoped.chat.open("c-rec-fail", "G");
+    await scoped.tasks.create({
+      id: "t-rec-fail",
+      conversationId: "c-rec-fail",
+      kind: "turn",
+      mode: "background",
+    });
+    const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
+      userId: owner,
+      taskId: "t-rec-fail",
+      computerId: (
+        await computerStore(env).create(
+          {
+            userId: owner,
+            taskId: "t-rec-fail",
+            provider: "fake",
+            profile: "host",
+            providerComputerId: "comp-setup-rec-fail",
+          },
+          Date.now(),
+        )
+      ).id,
+      aud: "tool_gateway",
+    });
+    const store = systemStore(env);
+    const verify = () =>
+      verifyCapabilityToken(db as unknown as SqlDatabase, { token, expectedAud: "tool_gateway" });
+    expect(await verify()).not.toBeNull();
+    const epochBefore = (
+      await db
+        .prepare("SELECT token_epoch FROM users WHERE id = ?")
+        .bind(owner)
+        .first<{ token_epoch: number }>()
+    )?.token_epoch;
+    // The revocation folds into the recovery batch, so a spent setup token — rejected here at
+    // `requireChange`, which rolls the batch back — must not kill the live bearer.
+    const spent = {
+      userId: owner,
+      tokenHash: await sha256(TOKEN),
+      passkey: {
+        id: randomId(),
+        webauthnUserId: "w",
+        publicKey: new Uint8Array([1]),
+        counter: 0,
+        transports: "",
+        deviceType: "",
+        backedUp: false,
+      },
+      recoveryCodes: [{ id: randomId(), hash: await hashRecoveryCode(newRecoveryCode()) }],
+      session: (await newSession(owner)).row,
+      now: Date.now(),
+    };
+    await expect(store.setup.recover(spent)).rejects.toThrow();
+    expect(await verify()).not.toBeNull();
+    expect(
+      (
+        await db
+          .prepare("SELECT token_epoch FROM users WHERE id = ?")
+          .bind(owner)
+          .first<{ token_epoch: number }>()
+      )?.token_epoch,
+    ).toBe(epochBefore);
+    expect(await count("audit_log", "action = 'capability_token.revoke_user'")).toBe(0);
   });
 
   it("never reopens for a token that was already used", async () => {

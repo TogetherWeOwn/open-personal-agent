@@ -2,6 +2,7 @@
 // The app's ports (ADR 0011 #4): the bindings it reads, as the structural shapes it uses. Each
 // composition root satisfies them with its own adapters (Cloudflare's bindings in apps/worker,
 // SQLite and the file system in apps/node), so no Cloudflare type is named here.
+import type { CapabilityScope } from "@opa/db";
 import type { DataBindings, UserScope } from "@opa/db/repository";
 import type { systemStore } from "@opa/db/system";
 import type { WorkersAIBinding } from "@opa/providers";
@@ -113,5 +114,6 @@ export interface Session {
 /** Hono's environment for the app: bindings, plus the session the guard resolved. */
 export interface AppEnv<P extends AppPorts = AppPorts> {
   Bindings: Env<P>;
-  Variables: { session: Session };
+  /** `capability` is set only by `tokenGuard`, on a route in `TOKEN_ROUTES`. */
+  Variables: { session: Session; capability?: CapabilityScope };
 }

@@ -22,6 +22,7 @@ export const LOG_FIELDS = [
 export type LogFields = Partial<Record<(typeof LOG_FIELDS)[number], string | number | boolean>>;
 
 const SECRET_SHAPES = [
+  /\bocap1_[A-Za-z0-9_-]{10,}/g, // task capability tokens (M4-00a): never logged, anywhere
   /\b(?:bearer|basic)\s+\S+/gi,
   /\beyJ[\w-]*\.[\w-]*\.[\w-]*/g, // JWT
   /\b(?:sk|pk|rk|ghp|gho|ghs|xox[abp])[-_][\w-]{8,}/gi, // vendor API keys

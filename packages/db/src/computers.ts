@@ -5,9 +5,11 @@
 // `forUser(scope).computers`. The provider-side id is opaque bookkeeping: every lookup keys on
 // the row's own `id`, never on it (T14).
 import { and, desc, eq, ne, sql } from "drizzle-orm";
+import { revokeTokenAuditStatement, revokeTokenStatements } from "./capability-tokens";
 import { openD1 } from "./index";
 import { type DataBindings, isId } from "./repository";
 import { auditLog, computerSessions, computers, tasks } from "./schema";
+import type { SqlDatabase } from "./system";
 
 /** A mode-A borrow reuses the task's computer when the last use is this recent (ADR 0007 #5). */
 export const COMPUTER_IDLE_TAIL_MS = 60_000;
@@ -87,6 +89,7 @@ const isUniqueViolation = (error: unknown): boolean =>
 
 export function computerStore(bindings: Pick<DataBindings<unknown, unknown>, "DB">) {
   const db = openD1(bindings.DB);
+  const tokenDb = bindings.DB as unknown as SqlDatabase;
 
   /**
    * Ends a live computer whatever ended it: the row moves to `destroyed`, one session row
@@ -111,14 +114,34 @@ export function computerStore(bindings: Pick<DataBindings<unknown, unknown>, "DB
       .where(eq(computers.id, check(id, "computer")))
       .limit(1);
     if (!row) return null;
+    const revoke = (endReason: ComputerEndReason) => [
+      ...revokeTokenStatements(tokenDb, {
+        userId: row.userId,
+        computerId: row.id,
+        reason: endReason,
+        now,
+      }),
+      revokeTokenAuditStatement(tokenDb, {
+        userId: row.userId,
+        targetId: row.id,
+        action: "capability_token.revoke_computer",
+        reason: endReason,
+        now,
+        onlyIfRevoked: true,
+      }),
+    ];
     if (row.state === "destroyed") {
       const [existing] = await db
         .select({ id: computerSessions.id })
         .from(computerSessions)
         .where(eq(computerSessions.computerId, row.id))
         .limit(1);
-      if (existing) return null;
       const healedReason = row.endReason ?? reason;
+      if (existing) {
+        // Historical finishes may predate token integration, even with a complete ledger.
+        await tokenDb.batch(revoke(healedReason));
+        return null;
+      }
       const healedEndedAt = row.endedAt ?? now;
       const healed: ComputerSessionRow = {
         id: crypto.randomUUID(),
@@ -133,7 +156,8 @@ export function computerStore(bindings: Pick<DataBindings<unknown, unknown>, "DB
         endReason: healedReason,
         createdAt: now,
       };
-      await db.$client.batch([
+      await tokenDb.batch([
+        ...revoke(healedReason),
         db.$client
           .prepare(
             `INSERT INTO computer_sessions (id, user_id, computer_id, task_id, provider, profile,
@@ -188,13 +212,14 @@ export function computerStore(bindings: Pick<DataBindings<unknown, unknown>, "DB
     };
     let changed: number;
     try {
-      const [updated] = await db.$client.batch([
+      const [updated] = await tokenDb.batch([
         db.$client
           .prepare(
             `UPDATE computers SET state = 'destroyed', ended_at = ?, end_reason = ?,
                updated_at = ? WHERE id = ? AND state <> 'destroyed'`,
           )
           .bind(now, reason, now, row.id),
+        ...revoke(reason),
         db.$client
           .prepare(
             `INSERT INTO computer_sessions (id, user_id, computer_id, task_id, provider, profile,

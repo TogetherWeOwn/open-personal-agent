@@ -3,6 +3,8 @@
 // a route is reachable without a session only if it is on `PUBLIC_ROUTES`, so a new route that
 // forgets to declare itself stays closed. apps/worker/test/routes.test.ts enumerates the route
 // table.
+import type { CapabilityAudience, CapabilityScope } from "@opa/db";
+import { parseBearerToken } from "@opa/db/capability-tokens";
 import { SESSION_IDLE_MS as IDLE_MS, type SystemStore, systemStore } from "@opa/db/system";
 import {
   type AuthenticationResponseJSON,
@@ -34,6 +36,80 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const TOUCH_MS = 60 * 60_000;
 
 /**
+ * The routes a capability token opens, as `METHOD /path` to the audience the route serves —
+ * the credential partition (M4-00a AC3). Session cookies never open these routes and capability
+ * tokens never open any other, so a bearer presented anywhere else is a 401, not a session.
+ * Empty in M4-00a: the audience routes that consume these tokens land in M4-00b
+ * (`model_proxy`) and M4-00c (`artifact_upload`, `tool_gateway`). Each of those adds its
+ * route here with its expected audience, plus an M3-21a isolation case for the new `:id` route.
+ * A token pattern must not match any other route's path: `matchRoute` cannot tell which route
+ * Hono would serve, so an overlap would let a bearer open a session route. `routes.test.ts`
+ * enforces this for every entry.
+ */
+export const TOKEN_ROUTES: ReadonlyMap<string, CapabilityAudience> = new Map([]);
+
+/** The audience a route expects a bearer for, or `null` when the route takes a session. */
+export function routeCredential(route: string): CapabilityAudience | null {
+  return TOKEN_ROUTES.get(route) ?? null;
+}
+
+/**
+ * The table's audience for a concrete request path. An exact `METHOD /path` entry wins;
+ * otherwise the first registered `:param` pattern whose segments all match. Matching here
+ * rather than trusting Hono's matched-route introspection: in middleware `c.req.routePath`
+ * is the middleware's own mount (`/*`), and the last-matched-route helper misattributes a
+ * path two patterns match (a static route beside `:id`). Overlap resolves by registration
+ * order, so token routes must not shadow each other.
+ */
+function matchRoute(
+  routeTable: ReadonlyMap<string, CapabilityAudience>,
+  method: string,
+  path: string,
+): CapabilityAudience | undefined {
+  const exact = routeTable.get(`${method} ${path}`);
+  if (exact) return exact;
+  const segments = path.split("/");
+  for (const [key, aud] of routeTable) {
+    const space = key.indexOf(" ");
+    if (space === -1 || key.slice(0, space) !== method) continue;
+    const pattern = key.slice(space + 1).split("/");
+    if (pattern.length !== segments.length) continue;
+    if (pattern.every((segment, i) => segment.startsWith(":") || segment === segments[i]))
+      return aud;
+  }
+  return undefined;
+}
+
+/**
+ * Verifies bearers for `routeTable` before the session guard runs. A route outside the table
+ * passes through untouched; on a table route only a live token for the expected audience
+ * continues, as `c.var.capability`, and every other shape — no header, a malformed one, a
+ * bearer for another audience, an expired or revoked token, both a cookie and a bearer —
+ * answers an indistinguishable 401. The store read fails closed: an unreachable store denies.
+ */
+export function tokenGuardFor(
+  routeTable: ReadonlyMap<string, CapabilityAudience>,
+): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const method = c.req.method === "HEAD" ? "GET" : c.req.method;
+    const expectedAud = matchRoute(routeTable, method, c.req.path);
+    if (!expectedAud) return next();
+    const denied = () => c.json({ error: "unauthenticated" }, 401);
+    // Both credentials at once is ambiguous: neither may win by accident.
+    if (getCookie(c, auth.SESSION_COOKIE) !== undefined) return denied();
+    const token = parseBearerToken(c.req.header("authorization"));
+    if (!token) return denied();
+    const scope = await systemStore(c.env).capability.verify({ token, expectedAud });
+    if (!scope) return denied();
+    c.set("capability", scope satisfies CapabilityScope);
+    return next();
+  };
+}
+
+/** The production bearer guard, over the production route table. */
+export const tokenGuard = tokenGuardFor(TOKEN_ROUTES);
+
+/**
  * Runs on every route after the claim guard. Every state change needs an exact Origin match:
  * same-site is never enough. Then every route not on the public list needs a live session.
  */
@@ -44,6 +120,14 @@ export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   // Hono answers HEAD with the GET handler, so the list's GET entries cover HEAD too.
   const method = c.req.method === "HEAD" ? "GET" : c.req.method;
   if (PUBLIC_ROUTES.has(`${method} ${c.req.path}`)) return next();
+  // A bearer-verified token route already passed `tokenGuard`, which runs first.
+  if (c.get("capability")) return next();
+  // A bearer on a session route is never a session: fail closed rather than ignore it, so a
+  // capability token presented to the wrong credential partition still answers 401 (M4-00a AC3).
+  // Bearer-scheme only: a self-hosted deployment behind a Basic-auth reverse proxy forwards
+  // `Authorization: Basic …` beside a valid cookie, and that must keep working.
+  if (/^\s*bearer\b/i.test(c.req.header("authorization") ?? ""))
+    return c.json({ error: "unauthenticated" }, 401);
   const session = await currentSession(c);
   if (!session) return c.json({ error: "unauthenticated" }, 401);
   c.set("session", session);

@@ -2,6 +2,20 @@
 // The system-level store (ADR 0010 D3): the deployment's identity tables, read before any user
 // scope exists. Setup state, WebAuthn challenges, passkeys, sessions and their audit rows. Every
 // multi-row change is one D1 batch, so it commits or rolls back as a whole.
+import {
+  type CapabilityAudience,
+  type CapabilityScope,
+  type MintOptions,
+  mintCapabilityToken,
+  revokeComputerTokens,
+  revokeProviderTokens,
+  revokeTaskTokens,
+  revokeTokenAuditStatement,
+  revokeTokenStatements,
+  revokeUserTokens,
+  type VerifyOptions,
+  verifyCapabilityToken,
+} from "./capability-tokens";
 import { scopeFromSession } from "./repository";
 
 /** The parts of a D1 database used here; the Node root supplies its own. */
@@ -190,8 +204,21 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           ...credentials(o, "claim"),
         ]);
       },
-      /** Replaces the owner's credentials and ends every session. Data stays untouched. */
+      /**
+       * Replaces the owner's credentials and ends every session. Data stays untouched, but
+       * credentials do not: the owner's capability tokens die in this same batch through the
+       * one revocation code path (M4-00a AC2a) — recovery must not leave task bearers valid,
+       * and a failed recovery (a spent setup token rolls back at `requireChange`) must not
+       * kill live task tokens either. Atomicity is the fail-closed order: the batch commits
+       * or rolls back whole, so there is no gap a bearer could cross.
+       */
       recover: async (o: OwnerCredentials) => {
+        const [revokeTokens, ...bumpEpoch] = revokeTokenStatements(db, {
+          userId: o.userId,
+          reason: "account_recovery",
+          bumpUserEpoch: true,
+          now: o.now,
+        });
         await db.batch([
           db
             .prepare(
@@ -206,6 +233,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           db.prepare("UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL").bind(o.now),
           ...expireApprovals(o.userId, o.now, "setup_recovery"),
           ...credentials(o, "recovery"),
+          // The audit runs immediately after the token UPDATE, so `changes()` still names it.
+          revokeTokens,
+          revokeTokenAuditStatement(db, {
+            userId: o.userId,
+            targetId: o.userId,
+            action: "capability_token.revoke_user",
+            reason: "account_recovery",
+            now: o.now,
+          }),
+          ...bumpEpoch,
         ]);
       },
     },
@@ -283,6 +320,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         now: number;
       }) => {
         const userId = r.session.userId;
+        // As with setup recovery above: the old credentials' task bearers die in this same
+        // batch, so a redeemed code evicts everything the old set could spend — while a spent
+        // code (this UPDATE changes nothing, `requireChange` rolls back) leaves live task
+        // tokens alone. Atomicity is the fail-closed order: no gap a bearer could cross.
+        const [revokeTokens, ...bumpEpoch] = revokeTokenStatements(db, {
+          userId,
+          reason: "account_recovery",
+          bumpUserEpoch: true,
+          now: r.now,
+        });
         await db.batch([
           db
             .prepare(
@@ -304,6 +351,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           insertSession(r.session),
           ...expireApprovals(userId, r.now, "recovery_code"),
           audit(userId, "recovery.code", "auth", "redeemed"),
+          // The audit runs immediately after the token UPDATE, so `changes()` still names it.
+          revokeTokens,
+          revokeTokenAuditStatement(db, {
+            userId,
+            targetId: userId,
+            action: "capability_token.revoke_user",
+            reason: "account_recovery",
+            now: r.now,
+          }),
+          ...bumpEpoch,
         ]);
       },
       /**
@@ -671,6 +728,13 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       },
       /** Sign out everywhere: every session of this user. */
       revokeAll: async (userId: string, now: number) => {
+        // The user's capability tokens die here too, through the one revocation code path:
+        // a signed-out-everywhere computer keeps nothing it can still spend (M4-00a AC2a).
+        // Tokens-first is deliberate: the two phases cannot share one batch (the revocation
+        // audit names its row count), so the order is the fail-closed one — a failure between
+        // them leaves sessions live with tokens dead, and the retry converges, never the
+        // reverse.
+        await revokeUserTokens(db, userId, "sign_out_everywhere", now);
         await db.batch([
           db
             .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
@@ -680,7 +744,33 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         ]);
       },
     },
+    /**
+     * Task capability tokens (M4-00a): mint, verify and revoke over this same store, so every
+     * check reads the live row. The audience routes that consume these tokens land in M4-00b
+     * (`model_proxy`) and M4-00c (`artifact_upload`, `tool_gateway`); the guards call
+     * `capability.verify` with the route table's expected audience.
+     */
+    capability: {
+      /** Mints one token for one audience; the value is returned once, never stored. */
+      mint: (options: MintOptions) => mintCapabilityToken(db, options),
+      /** Verifies a bearer for the route's expected audience, or `null` on any failure. */
+      verify: (options: VerifyOptions) => verifyCapabilityToken(db, options),
+      /** Task cancel or end: the task's tokens die now, and the epoch bump covers a miss. */
+      revokeTask: (taskId: string, userId: string, reason: string, now = Date.now()) =>
+        revokeTaskTokens(db, taskId, userId, reason, now),
+      /** Computer stop or destroy: only that computer's tokens die. */
+      revokeComputer: (computerId: string, userId: string, reason: string, now = Date.now()) =>
+        revokeComputerTokens(db, computerId, userId, reason, now),
+      /** Sign-out-everywhere or account deletion: every token of the user dies, epoch and all. */
+      revokeUser: (userId: string, reason: string, now = Date.now()) =>
+        revokeUserTokens(db, userId, reason, now),
+      /** Provider-credential removal: the user's `model_proxy` tokens naming it die. */
+      revokeProvider: (userId: string, providerId: string, now = Date.now()) =>
+        revokeProviderTokens(db, userId, providerId, now),
+    },
   };
 }
+
+export type { CapabilityAudience, CapabilityScope, MintOptions, VerifyOptions };
 
 export type SystemStore = ReturnType<typeof systemStore>;

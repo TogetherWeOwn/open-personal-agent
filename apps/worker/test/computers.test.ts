@@ -2,9 +2,15 @@
 // The computer lifecycle (M4-02): the owner record, mode-A borrowing with its 60 s idle tail,
 // idle/lifetime/task enforcement in the sweep, the provider-orphan leg, and account deletion
 // through the provider API — all against a fake driver, since no provider is configured yet.
+import {
+  MintRefusedError,
+  mintCapabilityToken,
+  verifyCapabilityToken,
+} from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { deleteUserData } from "@opa/db/deletion";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
+import type { SqlDatabase } from "@opa/db/system";
 import {
   borrowComputer,
   type ComputerDriver,
@@ -476,6 +482,57 @@ describe("the sweep with a provider (AC3, COST-6)", () => {
 });
 
 describe("finish (COST-9)", () => {
+  it("revokes tokens at the provider/sweep finish boundary without ending the task or another computer", async () => {
+    await seedUser("u1");
+    await seedUser("u2", ["t2"]);
+    const doomed = await seedComputer("u1", "t1", { idleDeadline: NOW + 1 });
+    const spared = await seedComputer("u2", "t2");
+    const sqlDb = db as unknown as SqlDatabase;
+    const options = {
+      userId: "u1",
+      taskId: "t1",
+      computerId: doomed.id,
+      aud: "tool_gateway",
+      now: NOW,
+    };
+    const first = await mintCapabilityToken(sqlDb, options);
+    const other = await mintCapabilityToken(sqlDb, {
+      ...options,
+      userId: "u2",
+      taskId: "t2",
+      computerId: spared.id,
+    });
+    const verify = (token: string) =>
+      verifyCapabilityToken(sqlDb, { token, expectedAud: "tool_gateway", now: NOW + 2 });
+    const failed = await sweepComputers(
+      env,
+      fakeDriver({
+        destroy: async () => {
+          throw new Error("provider down");
+        },
+      }),
+      NOW + 2,
+    );
+    expect(failed.errors).toBe(1);
+    expect(await verify(first.token)).not.toBeNull();
+    const driver = fakeDriver();
+    expect((await sweepComputers(env, driver, NOW + 2)).idle).toBe(1);
+    expect(driver.destroyed.map((d) => d.id)).toEqual([doomed.providerComputerId]);
+    expect(await verify(first.token)).toBeNull();
+    expect(await verify(other.token)).not.toBeNull();
+    await expect(mintCapabilityToken(sqlDb, options)).rejects.toBeInstanceOf(MintRefusedError);
+    expect(
+      await db.prepare("SELECT status, token_epoch FROM tasks WHERE id = 't1'").first(),
+    ).toMatchObject({ status: "running", token_epoch: 0 });
+    expect(
+      await db
+        .prepare("SELECT revoked_reason FROM capability_tokens WHERE id = ?")
+        .bind(first.id)
+        .first(),
+    ).toEqual({ revoked_reason: "idle" });
+    expect(await count("computer_sessions")).toBe(1);
+  });
+
   it("a racing second finish writes no second ledger row", async () => {
     await seedUser("u1");
     const row = await seedComputer("u1", "t1");

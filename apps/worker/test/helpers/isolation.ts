@@ -35,6 +35,8 @@ export interface Seeded {
   /** A memory suggestion waiting for the user. */
   proposal: string;
   task: string;
+  /** A live capability token on the user's task, for the owner-binding and leak checks. */
+  capabilityToken: string;
   attachment: string;
   artifact: string;
   export: string;
@@ -139,11 +141,13 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     spareMemory,
     proposal,
     task,
+    capabilityToken,
     grant,
     usage,
     passkey,
     exportId,
-  ] = Array.from({ length: 10 }, () => crypto.randomUUID()) as [
+  ] = Array.from({ length: 11 }, () => crypto.randomUUID()) as [
+    string,
     string,
     string,
     string,
@@ -155,6 +159,8 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     string,
     string,
   ];
+  const capabilityTokenHash =
+    `${crypto.randomUUID()}`.replace(/-/g, "") + `${crypto.randomUUID()}`.replace(/-/g, "");
   const run = (sql: string, ...values: unknown[]) => db.prepare(sql).bind(...values);
   await db.batch([
     run(
@@ -214,6 +220,15 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       conversation,
       `wf-${task}`,
       `task of ${tag}`,
+    ),
+    run(
+      "INSERT INTO capability_tokens (id, token_hash, user_id, task_id, computer_id, aud, expires_at) VALUES (?, ?, ?, ?, ?, 'model_proxy', ?)",
+      capabilityToken,
+      capabilityTokenHash,
+      id,
+      task,
+      crypto.randomUUID(),
+      Date.now() + 3_600_000,
     ),
     run(
       "INSERT INTO grants (id, user_id, tool, scope, expires_at) VALUES (?, ?, 'web_fetch', 'hour', ?)",
@@ -345,7 +360,17 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     ),
   ]);
 
-  const items = { session, conversation, message, memory, task, attachment, provider, secret };
+  const items = {
+    session,
+    conversation,
+    message,
+    memory,
+    task,
+    capabilityToken,
+    attachment,
+    provider,
+    secret,
+  };
   const ids = {
     ...items,
     spareSession,
@@ -361,7 +386,7 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     computer,
     computerSession,
   };
-  const markers = [id, ...Object.values(ids), apiKey, tag];
+  const markers = [id, ...Object.values(ids), capabilityTokenHash, apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };
 }
 

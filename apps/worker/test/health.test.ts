@@ -15,7 +15,7 @@ const SECRETS = {
   OPA_SETUP_TOKEN: "test-setup-token",
 };
 const TABLES =
-  `approvals artifacts attachments audit_log browser_usage computer_egress_hosts computer_sessions computers conversations deployment_hosts exports
+  `approvals artifacts attachments audit_log browser_usage capability_tokens computer_egress_hosts computer_sessions computers conversations deployment_hosts exports
   grants memories memories_fts memories_fts_config memories_fts_data memories_fts_docsize
   memories_fts_idx memory_links messages meters model_providers passkeys recovery_codes
   schema_version secrets sessions setup_state task_events task_steps tasks tool_overrides

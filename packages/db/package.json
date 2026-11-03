@@ -16,6 +16,7 @@
     "./task-tools": "./src/task-tools.ts",
     "./retention": "./src/retention.ts",
     "./system": "./src/system.ts",
+    "./capability-tokens": "./src/capability-tokens.ts",
     "./vault-store": "./src/vault-store.ts"
   },
   "scripts": {

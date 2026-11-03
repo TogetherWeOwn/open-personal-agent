@@ -24,8 +24,9 @@ import {
 import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
-import type { ComputerRow } from "./computers";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
+import { revokeProviderTokens, revokeTaskTokens } from "./capability-tokens";
+import type { ComputerRow } from "./computers";
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
 import { RETENTION_DEFAULTS, type RetentionSettings, toSettings } from "./retention";
@@ -51,6 +52,7 @@ import {
   userSettings,
   users,
 } from "./schema";
+import type { SqlDatabase } from "./system";
 
 declare const brand: unique symbol;
 /** A user's authority over their own rows. `scopeFromSession` and `scopeForAssistant` mint it. */
@@ -527,6 +529,11 @@ function ledgerValues({ providerId, model, usage: counts }: LedgerCall) {
 
 export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBindings<Stub, Id>) {
   const db = openD1(DB);
+  /**
+   * The same binding as raw SQL, for the capability-token revocation path (M4-00a AC2a): every
+   * trigger — task cancel/end, provider-credential removal — revokes through one code path.
+   */
+  const rawDb = DB as unknown as SqlDatabase;
   return {
     /**
      * For the Workflow entrypoint only (the lint enforces it): the scope of the user whose task
@@ -2587,6 +2594,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           remove: async (id: string, audit?: AuditRow) => {
             const row = (await providerRows(eq(modelProviders.id, id)).limit(1))[0];
             if (!row) return false;
+            // Revocation first: the allowlist names this row id, and verification has no
+            // provider-liveness check, so a failure after the delete would leave tokens
+            // verifiable with no retry path (the row is gone). Tokens-first fails closed
+            // and the retry converges.
+            await revokeProviderTokens(rawDb, userId, id);
             await db.batch([
               db.delete(modelProviders).where(ownProvider(id)),
               ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
@@ -2956,7 +2968,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               (current.limitKind ?? null) === nextKind
             )
               return true;
-            return (
+            const ended =
               (
                 await db
                   .update(tasks)
@@ -2976,8 +2988,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                     ),
                   )
                   .returning({ id: tasks.id })
-              ).length > 0
-            );
+              ).length > 0;
+            // An ended task's tokens die through the one revocation code path (M4-00a AC2a).
+            // A `budget_limited` pause is not an ending: the task may be continued, so its
+            // tokens stay live under the task deadline.
+            if (ended && status !== "budget_limited")
+              await revokeTaskTokens(rawDb, id, userId, `task_${status}`, now);
+            return ended;
           },
           /**
            * Continue on a task paused by a limit (M3-17 AC1): `budget_limited` back to `running`.
@@ -3005,7 +3022,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
            */
           cancel: async (id: string) => {
             const now = Date.now();
-            return (
+            const cancelled =
               (
                 await db
                   .update(tasks)
@@ -3018,8 +3035,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                     ),
                   )
                   .returning({ id: tasks.id })
-              ).length > 0
-            );
+              ).length > 0;
+            // A cancelled task's tokens die through the one revocation code path (M4-00a AC2a).
+            if (cancelled) await revokeTaskTokens(rawDb, id, userId, "task_cancelled", now);
+            return cancelled;
           },
           /**
            * Sets the task's computer provider override (M4-10 AC1): `null` clears it back to

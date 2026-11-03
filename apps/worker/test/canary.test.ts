@@ -30,6 +30,8 @@ const requests: [string, RequestInit][] = [
   ["/api/health", {}],
   ["/setup", {}],
   [`/api/nope?token=${canary}`, { headers: { Authorization: `Bearer ${canary}` } }],
+  // A capability-shaped bearer (M4-00a): the 401 it earns must not echo it, anywhere.
+  [`/api/nope`, { headers: { Authorization: `Bearer ocap1_${canary}${canary}` } }],
   [`/api/health?key=${canary}`, { method: "POST", headers: { Origin: `https://${canary}.test` } }],
   [
     "/api/x",

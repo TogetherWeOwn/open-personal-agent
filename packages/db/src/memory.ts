@@ -73,6 +73,7 @@ const SECRETS = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi,
+  /ocap1_[A-Za-z0-9_-]{10,}/g, // task capability tokens (M4-00a): never stored, anywhere
   /\b(?:password|passwd|passphrase|(?:api|secret)[_ -]?key|(?:access|auth)[_ -]?token)\b(\s*(?:is|[:=])\s*)\S+/gi,
 ];
 const CARD = /\b\d(?:[ -]?\d){12,18}\b/g;
