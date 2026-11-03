@@ -490,6 +490,11 @@ export async function* runTurn(
           .manifests()
           .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
       : [];
+    // Offering is an enforcement boundary (TWO-2001): a fresh call for a tool the model was
+    // not offered — a buggy or hostile provider emitting a structured call for a name it
+    // learned earlier — is refused like an unknown tool. The approved-call resume above
+    // keeps resolving against the registry, so an approval survives a model change.
+    const offered = new Set(tools.map((t) => t.name));
     // A third party's description is in the context from this call on, so it taints the turn
     // before anything the call asks for is decided.
     for (const { name } of tools) {
@@ -575,10 +580,12 @@ export async function* runTurn(
     }
     state.counts.tools += calls.length;
 
-    // Validate every call before policy sees it (M3-03 AC2).
+    // Validate every call before policy sees it (M3-03 AC2). A call for a tool the model
+    // was not offered on this step is refused like an unknown tool, even if the registry
+    // holds it (TWO-2001); the approved-call resume above still resolves against the registry.
     const runs: Run[] = [];
     for (const call of calls) {
-      const entry = host.tools.get(call.name);
+      const entry = offered.has(call.name) ? host.tools.get(call.name) : undefined;
       const parsed = entry && parseInput(entry.manifest.inputSchema, call.arguments);
       const args = parsed?.ok ? canonical(parsed.input) : call.arguments;
       const risk = entry?.manifest.riskClass ?? "irreversible";

@@ -708,6 +708,77 @@ describe("tool offering (TWO-1960)", () => {
   });
 });
 
+describe("offered-set enforcement (TWO-2001)", () => {
+  it("refuses a call for a tool the model was not offered, running nothing", async () => {
+    const { provider, requests } = scripted([
+      { calls: [["fetch", { q: "x" }]] },
+      { text: "Sorry!" },
+    ]);
+    const chatOnly = {
+      ...provider,
+      capabilities: () => ({ tools: false, usageInStream: true }),
+    };
+    const fetch = tool("fetch", "read");
+    const policy = vi.fn(() => ({}));
+    const state = newTurn();
+    const { events, outcome } = await drain(host(chatOnly, [fetch], { policy }), state);
+
+    expect(outcome).toBe("completed");
+    // Offered nothing: the request carries no tools.
+    expect(requests[0]).not.toHaveProperty("tools");
+    // Refused like an unknown tool: named in tool.called, then an error result, with
+    // nothing executed, decided or asked.
+    expect(ofType(events, "tool.called").map((e) => e.payload.tool)).toEqual(["fetch"]);
+    expect(fetch.inputs).toEqual([]);
+    expect(policy).not.toHaveBeenCalled();
+    expect(ofType(events, "approval.requested")).toEqual([]);
+    const results = ofType(events, "tool.result").map((e) => e.payload);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ ok: false });
+    expect(results[0]?.error).toContain('no tool named "fetch"');
+    // The model reads the refusal on its next call and answers.
+    expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "Sorry!" });
+  });
+
+  it("still runs an approved call from the registry after the model changes", async () => {
+    const send = tool("send", "consequential");
+    const { provider } = scripted([
+      {
+        text: "Sending. ",
+        calls: [
+          ["send", { q: "a" }],
+          ["send", { q: "b" }],
+        ],
+      },
+      { text: "Sent." },
+    ]);
+    const h = host(provider, [send]);
+    const live = newTurn();
+    await drain(h, live);
+    const batchId = live.pending?.batchId as string;
+    resolveApprovals(
+      live,
+      batchId,
+      [
+        { approvalId: "appr_call_1", decision: "approve", scope: "once" },
+        { approvalId: "appr_call_2", decision: "deny", scope: "once" },
+      ],
+      NOW,
+    );
+    // The model changed to a chat-only one before the resume: the approved call still
+    // resolves against the registry and runs.
+    const chatOnly = {
+      ...provider,
+      capabilities: () => ({ tools: false, usageInStream: true }),
+    };
+    const { outcome } = await drain({ ...h, provider: chatOnly }, live);
+    expect(outcome).toBe("completed");
+    expect(send.inputs).toEqual([{ q: "a" }]);
+    expect(live.pending).toBeNull();
+    expect(live.messages.at(-1)).toEqual({ role: "assistant", content: "Sent." });
+  });
+});
+
 describe("steer (M3-09 AC4)", () => {
   it("drains steers at the next step boundary without restarting the turn", async () => {
     const { provider, requests } = scripted([
