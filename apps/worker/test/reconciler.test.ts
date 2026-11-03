@@ -264,12 +264,14 @@ describe("one reconciler tick", () => {
     exports: await db.prepare("SELECT status FROM exports WHERE id = 'e1'").first("status"),
     retention: await count("audit_log", "action = 'retention.sweep' AND user_id IS NULL"),
     database: await count("meters", "meter = 'd1_bytes'"),
+    computers: await count("computers", "state <> 'destroyed'"),
   });
 
-  it("runs rotation, the D1 size reading and allowance warning, the export sweep, retention and approval expiry", async () => {
+  it("runs rotation, the D1 size reading and allowance warning, the export sweep, retention, approval expiry and the computer sweep", async () => {
     expect(Object.keys(reconcilerParts).sort()).toEqual([
       "allowances",
       "approvals",
+      "computers",
       "exports",
       "retention",
       "rotation",
@@ -281,6 +283,7 @@ describe("one reconciler tick", () => {
       exports: "expired",
       retention: 1,
       database: 1,
+      computers: 0,
     });
   });
 
@@ -302,11 +305,12 @@ describe("one reconciler tick", () => {
       exports: "expired",
       retention: 0,
       database: 1,
+      computers: 0,
     });
   });
 
   it("logs every part's failure when the environment can't be composed", async () => {
     const settled = await Promise.allSettled(reconcile(Promise.reject(new Error("no keys")), NOW));
-    expect(settled.map((s) => s.status)).toEqual(Array(5).fill("fulfilled"));
+    expect(settled.map((s) => s.status)).toEqual(Array(6).fill("fulfilled"));
   });
 });

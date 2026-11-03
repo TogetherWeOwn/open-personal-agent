@@ -15,6 +15,7 @@ import {
   isNull,
   lt,
   lte,
+  ne,
   notInArray,
   or,
   type SQL,
@@ -23,6 +24,7 @@ import {
 import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
+import type { ComputerRow } from "./computers";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
@@ -32,6 +34,7 @@ import {
   artifacts,
   attachments,
   auditLog,
+  computers,
   conversations,
   dataExports,
   grants,
@@ -529,6 +532,19 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         .where(eq(dataExports.workflowInstanceId, instanceId))
         .limit(1);
       return row ? { scope: issue(row.userId), export: row } : null;
+    },
+    /**
+     * For the computer lifecycle module only (the lint enforces it, M4-02 AC1): the scope of
+     * the user whose computers row carries this internal id, with the row itself. The
+     * provider-side id is never consulted — it is not an identity (T14) — so a value naming
+     * another deployment's computer mints nothing. `null` when no computers row has the id.
+     */
+    scopeForComputer: async (
+      id: string,
+    ): Promise<{ scope: UserScope; computer: ComputerRow } | null> => {
+      if (!isId(id)) return null;
+      const [computer] = await db.select().from(computers).where(eq(computers.id, id)).limit(1);
+      return computer ? { scope: issue(computer.userId), computer } : null;
     },
     /** Deployment-level checks that read no user's data. */
     deployment: {
@@ -3011,6 +3027,21 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ).length > 0,
           /** Deletes the final ZIP, for a finish that expired before it could turn ready. */
           removeZip: (id: string) => FILES.delete(`u/${userId}/exports/${checkId(id)}.zip`),
+        },
+        /**
+         * The user's live computers (M4-02 AC4): the running-computers feed M4-10 lists and
+         * M4-15 prices. Borrowing, heartbeats and destroys live in the lifecycle module
+         * (`@opa/server/computers`), which mints with `scopeForComputer`; this is the read
+         * feed only, so a screen can never borrow or destroy through it.
+         */
+        computers: {
+          /** Every live computer, newest first. Destroyed rows stay out of the list. */
+          list: (): Promise<ComputerRow[]> =>
+            db
+              .select()
+              .from(computers)
+              .where(and(eq(computers.userId, userId), ne(computers.state, "destroyed")))
+              .orderBy(desc(computers.createdAt)),
         },
         /**
          * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they
