@@ -33,6 +33,7 @@ const USER_TABLES = [
   "usage",
   "model_providers",
   "tasks",
+  "capability_tokens",
   "exports",
   "artifacts",
   "user_settings",
@@ -97,6 +98,18 @@ async function seedUser(userId: string) {
         "INSERT INTO tasks (id, user_id, conversation_id, kind, mode, status, workflow_instance_id) VALUES (?, ?, ?, 'turn', 'interactive', 'succeeded', ?)",
       )
       .bind(id("t-done"), userId, id("c1"), id("inst-done")),
+    db
+      .prepare(
+        "INSERT INTO capability_tokens (id, token_hash, user_id, task_id, computer_id, aud, expires_at) VALUES (?, ?, ?, ?, ?, 'model_proxy', ?)",
+      )
+      .bind(
+        id("tok1"),
+        `${userId}-tokhash`,
+        userId,
+        id("t-active"),
+        id("comp1"),
+        Date.now() + 3_600_000,
+      ),
     db
       .prepare("INSERT INTO task_steps (instance_id, name, output) VALUES (?, 's', '{}')")
       .bind(id("inst-active")),
