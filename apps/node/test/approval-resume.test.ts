@@ -287,6 +287,28 @@ describe("approval resume on Node", () => {
     }
   });
 
+  it("answers gone for a batch that was never parked", async () => {
+    stubTurnTools();
+    await expect(app.assistantFor(userId).resumeBatch("batch_missing")).resolves.toBe("gone");
+  });
+
+  it("answers gone once the parked turn has settled", async () => {
+    stubTurnTools();
+    const { batchId, approvalId, ws, done } = await stopAt("conv-gone");
+    try {
+      const res = await post(`/api/approvals/${batchId}`, {
+        decisions: [{ approvalId, decision: "approve", scope: "once" }],
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "resumed" });
+      await done();
+      // Settled, so no awaiting turn waits on the batch anymore.
+      await expect(app.assistantFor(userId).resumeBatch(batchId)).resolves.toBe("gone");
+    } finally {
+      ws.close();
+    }
+  });
+
   it("queues a decision that lands mid-turn, then runs it late at the chat's end", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

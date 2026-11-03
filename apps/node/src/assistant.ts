@@ -474,6 +474,10 @@ export class NodeAssistant {
   /**
    * Resumes decided batches that arrived while a turn ran, in order. A resume that fails goes
    * back to the front, and the next turn's end retries it, rather than spin on it here.
+   *
+   * No re-entrancy guard: `resumeBatch` claims `#running` synchronously before its first await,
+   * and this method's synchronous prefix (through that claim) runs atomically inside `#release`,
+   * so a second drain can never start while one runs.
    */
   async #drainResumes(): Promise<void> {
     while (!this.#running) {
