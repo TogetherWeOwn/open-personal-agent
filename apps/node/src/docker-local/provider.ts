@@ -534,7 +534,12 @@ export class DockerLocalProvider implements ComputerProvider {
 
   async destroy(handle: ComputerHandle): Promise<void> {
     const live = this.live.get(handle.providerComputerId);
-    if (!live) return; // idempotent: never seen, nothing to do
+    if (!live) {
+      // Unknown to this process (restarted host): reap by label so the sweep's orphan
+      // leg actually removes the container instead of counting a no-op as destroyed.
+      await this.destroyByLabel(handle.providerComputerId);
+      return;
+    }
     if (live.state !== "destroyed") {
       live.bridge.revoke();
       try {
@@ -552,6 +557,52 @@ export class DockerLocalProvider implements ComputerProvider {
         // and the sweep's next listing still reconciles it.
       }
       live.state = "destroyed";
+    }
+  }
+
+  /**
+   * Removes a computer this process never created (host restart between create and sweep):
+   * finds the container by its `opa.computer` label, force-removes it, drops the firewall
+   * chain for its subnet, and deletes its `opa-<id>` network. Missing pieces are already
+   * gone and succeed; anything else throws so the sweep keeps the row live.
+   */
+  private async destroyByLabel(providerComputerId: string): Promise<void> {
+    const filters = encodeURIComponent(JSON.stringify({ label: [`opa.provider=${this.id}`] }));
+    let listed: { Id: string; Labels?: Record<string, string> }[];
+    try {
+      listed = await this.engine.call("GET", `/containers/json?all=1&filters=${filters}`);
+    } catch (error) {
+      throw providerError(error instanceof Error ? error.message : String(error), "provider");
+    }
+    // The computer label names it; the Id prefix covers containers whose labels were lost
+    // (the `list()` fallback synthesizes their ids from the Id prefix the same way).
+    const ours = listed.filter(
+      (entry) =>
+        entry.Labels?.["opa.computer"] === providerComputerId ||
+        entry.Id.startsWith(providerComputerId),
+    );
+    for (const entry of ours) {
+      try {
+        await this.engine.call("DELETE", `/containers/${entry.Id}?force=true`);
+      } catch (error) {
+        if (engineErrorStatus(error) !== 404) {
+          throw providerError(error instanceof Error ? error.message : String(error), "provider");
+        }
+      }
+    }
+    // The chain name and network name derive from the computer id the same way create()
+    // builds them, so an unknown computer's rules are still addressable.
+    const chain = `opa-${providerComputerId.replace(/[^a-z0-9]/g, "").slice(0, 12)}`;
+    try {
+      const network = await this.engine.call<{
+        IPAM?: { Config?: { Subnet?: string }[] };
+      }>("GET", `/networks/opa-${providerComputerId}`);
+      const subnet = network.IPAM?.Config?.[0]?.Subnet ?? "";
+      if (subnet) await removeComputerFirewall(chain, subnet, this.firewallRunner);
+      await this.engine.call("DELETE", `/networks/opa-${providerComputerId}`);
+    } catch (error) {
+      if (engineErrorStatus(error) === 404) return;
+      throw providerError(error instanceof Error ? error.message : String(error), "provider");
     }
   }
 

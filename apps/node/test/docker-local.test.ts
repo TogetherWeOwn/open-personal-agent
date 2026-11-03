@@ -353,6 +353,21 @@ dockerSuite("docker-local provider", () => {
       await provider.destroy(handle); // idempotent
     }, 120_000);
 
+    it("reaps an orphan unknown to this process (post-restart destroy by label)", async () => {
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      expect(
+        (await provider.list()).some((e) => e.providerComputerId === handle.providerComputerId),
+      ).toBe(true);
+      // A fresh instance has no in-memory state — the host-restart case — yet destroy()
+      // must still remove the container, firewall chain and network by label.
+      const restarted = makeProvider(tag);
+      await restarted.destroy(handle);
+      expect(
+        (await restarted.list()).some((e) => e.providerComputerId === handle.providerComputerId),
+      ).toBe(false);
+      await restarted.destroy(handle); // idempotent
+    }, 120_000);
+
     it("runs D5-hardened by construction (non-root, dropped caps, no mounts)", async () => {
       const handle = await provider.create(createComputerSpec({ profile: "standard" }));
       const run = async (argv: string[]): Promise<{ out: string; exit: number }> => {
