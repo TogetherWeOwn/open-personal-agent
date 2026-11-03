@@ -30,6 +30,8 @@ const USER_TABLES = [
   "turn_states",
   "approvals",
   "attachments",
+  "computers",
+  "computer_sessions",
   "usage",
   "model_providers",
   "tasks",
@@ -261,7 +263,7 @@ describe("DELETE /api/account", () => {
     expect((await stepUp(bound, key)).status).toBe(200);
     const res = await bound.req("/api/account", { method: "DELETE", body: {} });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: true, unclaimed: true });
+    expect(await res.json()).toEqual({ deleted: true, unclaimed: true, computers: [] });
     expect(await userR2Keys(owner)).toEqual([]);
   });
 
@@ -345,7 +347,7 @@ describe("DELETE /api/account", () => {
 
     const res = await browser.req("/api/account", { method: "DELETE", body: {} });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: true, unclaimed: true });
+    expect(await res.json()).toEqual({ deleted: true, unclaimed: true, computers: [] });
 
     // No row with the user_id remains, in any user-data table.
     for (const table of USER_TABLES) {
@@ -386,7 +388,7 @@ describe("DELETE /api/account", () => {
     expect((await stepUp(browser, key)).status).toBe(200);
     const res = await browser.req("/api/account", { method: "DELETE", body: {} });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: true, unclaimed: false });
+    expect(await res.json()).toEqual({ deleted: true, unclaimed: false, computers: [] });
 
     // The owner's rows, R2 and DEK are gone; the member's survive untouched.
     for (const table of USER_TABLES) {
@@ -424,7 +426,7 @@ describe("DELETE /api/account", () => {
 
     const res = await member.req("/api/account", { method: "DELETE", body: {} });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: true, unclaimed: false });
+    expect(await res.json()).toEqual({ deleted: true, unclaimed: false, computers: [] });
     expect(await count("users", `id = 'u2'`)).toBe(0);
   });
 });

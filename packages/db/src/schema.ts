@@ -544,6 +544,86 @@ export const dataExports = sqliteTable(
 );
 
 /**
+ * A computer's owner record (M4-02 AC1, ADR 0007 #1/#5, D5): one row per computer, keyed by an
+ * internal id that is the only identity the app authorizes on. `provider_computer_id` is opaque
+ * bookkeeping for the provider API — it is never used in an authorization lookup (T14), and the
+ * sweep reconciles it against the provider's `list()`, never the other way round. `task_id`
+ * binds the computer to its task where one exists; a computer is never shared, pooled or
+ * reassigned, so the binding only ever moves by destroying the row and creating another (AC2).
+ * `disks` and `snapshots` name the provider-side resources account deletion destroys with the
+ * computer (AC5). Times are Unix epoch milliseconds; destroyed rows stay as history for the
+ * running-computers feed and the session ledger below.
+ */
+export const computers = sqliteTable(
+  "computers",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    provider: text("provider").notNull(),
+    profile: text("profile").notNull(),
+    providerComputerId: text("provider_computer_id").notNull(),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    /** JSON array of provider disk names destroyed with the computer. */
+    disks: text("disks").notNull().default("[]"),
+    /** JSON array of provider snapshot names destroyed with the computer. */
+    snapshots: text("snapshots").notNull().default("[]"),
+    idleTimeoutSeconds: integer("idle_timeout_seconds").notNull(),
+    maxLifetimeSeconds: integer("max_lifetime_seconds").notNull(),
+    state: text("state", { enum: ["creating", "ready", "destroyed"] })
+      .notNull()
+      .default("ready"),
+    lastUsedAt: integer("last_used_at").notNull(),
+    idleDeadline: integer("idle_deadline").notNull(),
+    lifetimeDeadline: integer("lifetime_deadline").notNull(),
+    endedAt: integer("ended_at"),
+    endReason: text("end_reason", {
+      enum: ["idle", "lifetime", "task_ended", "replaced", "deleted", "swept"],
+    }),
+    createdAt: createdAt(),
+    updatedAt: integer("updated_at").notNull().default(now),
+  },
+  (t) => [
+    index("computers_user_idx").on(t.userId, t.createdAt),
+    index("computers_sweep_idx").on(t.state, t.idleDeadline, t.lifetimeDeadline),
+    // D5, one live computer per user: the borrow claims its row under this index, so two
+    // racing borrows cannot both stay live — the loser re-lists and reuses (or retries).
+    uniqueIndex("computers_live_user_unique").on(t.userId).where(sql`${t.state} <> 'destroyed'`),
+  ],
+);
+
+/**
+ * One ledger row per computer session (M4-02 AC4, COST-9): written when the computer is
+ * destroyed, whatever destroyed it. M4-15 prices sessions off this table; the provider-side id
+ * rides along so metering can reconcile against provider bills, never as an identity.
+ */
+export const computerSessions = sqliteTable(
+  "computer_sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    computerId: text("computer_id")
+      .notNull()
+      .references(() => computers.id, { onDelete: "cascade" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    provider: text("provider").notNull(),
+    profile: text("profile").notNull(),
+    providerComputerId: text("provider_computer_id").notNull(),
+    startedAt: integer("started_at").notNull(),
+    endedAt: integer("ended_at").notNull(),
+    endReason: text("end_reason", {
+      enum: ["idle", "lifetime", "task_ended", "replaced", "deleted", "swept"],
+    }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("computer_sessions_user_idx").on(t.userId, t.createdAt),
+    // COST-9, one ledger row per session: the finish writes its row under this index, so two
+    // racing finishes cannot ledger the same computer twice — the loser sees the conflict.
+    uniqueIndex("computer_sessions_computer_unique").on(t.computerId),
+  ],
+);
+
+/**
  * The Node step journal (M3-23b): one row per completed step of a task run, keyed by the
  * Workflow instance and the step name. A resumed run replays these rows instead of re-running
  * their functions, the way the Workflow engine replays `step.do` on Cloudflare. Only the Node

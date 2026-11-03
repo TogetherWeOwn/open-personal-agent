@@ -165,8 +165,8 @@ export function createNodeApp(options: NodeOptions): NodeApp {
     // and the export Workflow. The D1 size reading, which the Worker takes before the warning,
     // runs on its own.
     scheduled: async () => {
-      const { rotation, retention, approvals } = reconcilerParts;
-      const parts = { rotation, database: recordDatabase, retention, approvals };
+      const { rotation, retention, approvals, computers } = reconcilerParts;
+      const parts = { rotation, database: recordDatabase, retention, approvals, computers };
       await Promise.all(reconcile(env, Date.now(), parts));
     },
     db,

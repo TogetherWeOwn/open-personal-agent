@@ -66,6 +66,12 @@ export const RULES = [
     "only the Workflow entrypoint scopes an export, from its D1 row (M3-20 AC1)",
   ],
   [
+    "scope-minting",
+    /^(?:packages\/db\/|packages\/server\/src\/computers\.ts$)/,
+    /\bscopeForComputer\b/g,
+    "only the lifecycle module scopes a computer, from its D1 row (M4-02 AC1)",
+  ],
+  [
     "master-key",
     /^(?:packages\/vault\/|(?:apps\/(?:worker|node)|packages\/server)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,

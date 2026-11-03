@@ -33,6 +33,12 @@ accountRoutes.delete("/", async (c) => {
   const { userId } = c.var.session;
   // Fail closed with a stable code: a purge the store cannot prove empty (or any object
   // delete that throws) refuses the delete instead of stranding the user's objects.
+  //
+  // M4-02 AC5 seam: no computer provider is configured yet, so there is no driver to pass —
+  // `deleteUserData` destroys nothing and reports none. When M4-04 lands the configured
+  // provider's adapter, it is resolved from the env here and passed as `destroyComputer`,
+  // so the delete destroys the user's computers, disks and snapshots through the provider
+  // API (a provider failure then refuses with the same `delete_failed`).
   let result: DeletionResult | null;
   try {
     result = await deleteUserData(c.env, userId);
@@ -78,5 +84,5 @@ accountRoutes.delete("/", async (c) => {
   }
   deleteCookie(c, auth.SESSION_COOKIE, auth.COOKIE_OPTIONS);
   c.header("Cache-Control", "no-store");
-  return c.json({ deleted: true, unclaimed: result.unclaimed });
+  return c.json({ deleted: true, unclaimed: result.unclaimed, computers: result.computers });
 });
