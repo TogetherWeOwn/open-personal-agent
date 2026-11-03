@@ -349,12 +349,11 @@ export class DockerLocalProvider implements ComputerProvider {
     const env = request.env
       ? Object.entries(request.env).map(([key, value]) => `${key}=${value}`)
       : [];
-    return this.runExec(live, handle.providerComputerId, request, env);
+    return this.runExec(live, request, env);
   }
 
   private async *runExec(
     live: LiveComputer,
-    providerComputerId: string,
     request: ExecRequest,
     env: string[],
   ): AsyncGenerator<ExecEvent> {
@@ -389,7 +388,6 @@ export class DockerLocalProvider implements ComputerProvider {
       };
       return;
     }
-    void providerComputerId;
     const events: ExecEvent[] = [];
     try {
       await this.engine.startExec(
