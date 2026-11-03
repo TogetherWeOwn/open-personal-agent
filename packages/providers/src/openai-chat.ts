@@ -42,7 +42,11 @@ export function createOpenAIChatProvider(options: OpenAIChatOptions): ModelProvi
         messages: chatMessages(request.messages),
         stream: true,
       };
-      if (tools.length) body.tools = chatTools(tools);
+      if (tools.length) {
+        body.tools = chatTools(tools);
+        // Explicit, not a default: some OpenAI-compatible hosts only call tools when asked.
+        body.tool_choice = "auto";
+      }
       if (compat.supportsUsageInStreaming) body.stream_options = { include_usage: true };
       if (request.maxOutputTokens !== undefined) {
         body[compat.maxTokensField] = request.maxOutputTokens;
