@@ -190,7 +190,10 @@ interface ReplayContext {
 /**
  * An error that blames streaming, and nothing else. Auth, quota, network and cancellation are
  * never retried; a malformed stream means the endpoint *is* streaming, and its first request
- * may already have generated output, so only a rejection names `stream`.
+ * may already have generated output, so only a rejection names `stream`. Callers narrow
+ * further: the HTTP leg only trusts 4xx (a 5xx may already have run server-side), and the SSE
+ * leg only trusts provider-originated `error` events, never this adapter's own synthesized
+ * ones (which carry no status and code `bad_response`).
  */
 function isStreamRejection(event: ModelEvent): boolean {
   return (
@@ -366,6 +369,8 @@ function* replayCompleted(response: unknown, context: ReplayContext): Generator<
   const final = (response ?? {}) as RawResponse;
   const output = Array.isArray(final.output) ? final.output : null;
   if (!output) {
+    // Malformed, but billed like any other settled reply: usage first, as everywhere else.
+    if (final.usage) yield { type: "usage", usage: usageOf(final.usage) };
     yield error("bad_response", "The provider sent a response with no output");
     return;
   }
@@ -471,9 +476,10 @@ export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): 
         request.signal,
       );
       if ("type" in stream) {
-        // An HTTP rejection of `stream: true` before anything was generated: answer the same
-        // request once without streaming, with the same body otherwise.
-        if (isStreamRejection(stream)) {
+        // An HTTP 4xx rejection of `stream: true` before anything was generated: answer the
+        // same request once without streaming, with the same body otherwise. A 5xx naming
+        // streaming (even "upstream ...") may already have run server-side, so it stands.
+        if (stream.type === "error" && (stream.status ?? 500) < 500 && isStreamRejection(stream)) {
           yield* complete();
           return;
         }
@@ -481,10 +487,17 @@ export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): 
         return;
       }
       // The rejection can also arrive as an SSE error event; only one seen before any event
-      // or usage retries, so a call that already produced output never runs twice.
+      // or usage retries, so a call that already produced output never runs twice. The
+      // adapter's own synthesized errors (no status, code `bad_response`) are not provider
+      // rejections, so they stand instead of retrying.
       let produced = false;
       for await (const event of replayResponses(sseData(stream, request.signal), context)) {
-        if (event.type === "error" && !produced && isStreamRejection(event)) {
+        if (
+          event.type === "error" &&
+          !produced &&
+          event.code !== "bad_response" &&
+          isStreamRejection(event)
+        ) {
           yield* complete();
           return;
         }

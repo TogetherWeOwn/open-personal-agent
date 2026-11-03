@@ -307,13 +307,33 @@ describe("openai-responses non-streaming endpoints (M4-20)", () => {
     ]);
   });
 
-  it("reports a completed response with no output as malformed", async () => {
-    const { p } = provider(json({ status: "completed" }), "openai", BASE, {
-      supportsStreaming: false,
-    });
+  it("reports a completed response with no output as malformed, usage first", async () => {
+    const malformed = { status: "completed", usage: { input_tokens: 5, output_tokens: 1 } };
+    const { p } = provider(json(malformed), "openai", BASE, { supportsStreaming: false });
     expect(await replay(p.stream({ model: MODEL, messages: ask }))).toEqual([
+      "usage 5/1/0/0",
       "error bad_response: The provider sent a response with no output",
     ]);
+  });
+
+  it("never retries a 5xx, even when its message names streaming", async () => {
+    // "Upstream ..." contains "stream", and a 500 maps to code `upstream`: neither retries,
+    // because a 5xx may already have run server-side.
+    const { p, calls } = provider(() =>
+      Response.json({ error: { message: "Upstream connect error" } }, { status: 500 }),
+    );
+    expect(await replay(p.stream({ model: MODEL, messages: ask }))).toEqual([
+      "error upstream: Upstream connect error",
+    ]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("never retries the adapter's own malformed-stream error", async () => {
+    const { p, calls } = provider(() => new Response(byteStream("data: not-json\n\n")));
+    expect(await replay(p.stream({ model: MODEL, messages: ask }))).toEqual([
+      "error bad_response: The provider sent a malformed stream event",
+    ]);
+    expect(calls).toHaveLength(1);
   });
 
   it("falls back once on a pre-output HTTP rejection of `stream: true`", async () => {
