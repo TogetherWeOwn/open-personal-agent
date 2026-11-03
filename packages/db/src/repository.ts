@@ -15,6 +15,7 @@ import {
   isNull,
   lt,
   lte,
+  ne,
   notInArray,
   or,
   type SQL,
@@ -23,6 +24,7 @@ import {
 import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
+import type { ComputerRow } from "./computers";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { revokeProviderTokens, revokeTaskTokens } from "./capability-tokens";
 import { openD1, readSchemaVersion } from "./index";
@@ -33,6 +35,8 @@ import {
   artifacts,
   attachments,
   auditLog,
+  browserUsage,
+  computers,
   conversations,
   dataExports,
   grants,
@@ -100,7 +104,9 @@ export interface DataBindings<Stub, Id> {
     get(key: string): Promise<StoredObject | null>;
     put(
       key: string,
-      value: string | ReadableStream,
+      // Bytes join text and streams for binary artifacts (a browser screenshot, M4-09); both
+      // R2 and the Node store take them as a body.
+      value: string | ReadableStream | Uint8Array,
       options: { httpMetadata: { contentType: string } },
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
@@ -537,6 +543,19 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         .limit(1);
       return row ? { scope: issue(row.userId), export: row } : null;
     },
+    /**
+     * For the computer lifecycle module only (the lint enforces it, M4-02 AC1): the scope of
+     * the user whose computers row carries this internal id, with the row itself. The
+     * provider-side id is never consulted — it is not an identity (T14) — so a value naming
+     * another deployment's computer mints nothing. `null` when no computers row has the id.
+     */
+    scopeForComputer: async (
+      id: string,
+    ): Promise<{ scope: UserScope; computer: ComputerRow } | null> => {
+      if (!isId(id)) return null;
+      const [computer] = await db.select().from(computers).where(eq(computers.id, id)).limit(1);
+      return computer ? { scope: issue(computer.userId), computer } : null;
+    },
     /** Deployment-level checks that read no user's data. */
     deployment: {
       schemaVersion: () => readSchemaVersion(db),
@@ -554,6 +573,19 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .select({ n: sql<number>`coalesce(sum(${usage.neurons}), 0)`.mapWith(Number) })
             .from(usage)
             .where(gte(usage.createdAt, since))
+        )[0]?.n ?? 0,
+      /**
+       * Metered browser seconds all users used since `since`: one total, no rows. The
+       * included Browser Rendering hours are the Cloudflare account's, not each user's, so
+       * splitting one user's seconds against them would hide billable overage whenever
+       * several users browse; Usage splits this total for the owner (M4-09 AC3).
+       */
+      browserSeconds: async (since: number) =>
+        (
+          await db
+            .select({ n: sql<number>`coalesce(sum(${browserUsage.seconds}), 0)`.mapWith(Number) })
+            .from(browserUsage)
+            .where(gte(browserUsage.createdAt, since))
         )[0]?.n ?? 0,
       /** Adds to a ledger meter's UTC day (M3-16 AC3): one upsert, no read. */
       addToMeter: async (meter: "workflow_steps" | "do_ms", amount: number, at: number) => {
@@ -967,7 +999,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         id: string;
         name: string;
         mediaType: string;
-        content: string;
+        /** Text a tool wrote, or the bytes of a binary one (a browser screenshot, M4-09). */
+        content: string | Uint8Array;
         source: ArtifactSource;
       }) => {
         const { conversationId = null, taskId = null, turnId = null } = input.source;
@@ -984,7 +1017,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           if (!own.length) throw new Error("not the user's task");
         }
         const key = fileKey(input.id);
-        const sizeBytes = new TextEncoder().encode(input.content).length;
+        const sizeBytes =
+          typeof input.content === "string"
+            ? new TextEncoder().encode(input.content).length
+            : input.content.length;
         // The row first: a taken ID fails here, before the put could overwrite that file's bytes.
         await db.insert(artifacts).values({
           id: input.id,
@@ -2006,6 +2042,48 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /** Every ledger row, oldest first, for the data export (M3-20 AC1). */
           list: () =>
             db.select().from(usage).where(eq(usage.userId, userId)).orderBy(usage.createdAt),
+        },
+        /** Browser-session metering (M4-09 AC3, COST-9): one row per finished session. */
+        browserUsage: {
+          /**
+           * Record one finished session's whole seconds. `id` is host-minted, so a retried
+           * write (a recovery that can't tell whether the first landed) changes nothing.
+           */
+          record: async (session: {
+            id: string;
+            seconds: number;
+            conversationId?: string;
+            taskId?: string;
+          }) => {
+            await db
+              .insert(browserUsage)
+              .values({
+                id: checkId(session.id),
+                userId,
+                conversationId: session.conversationId ?? null,
+                taskId: session.taskId === undefined ? null : checkId(session.taskId),
+                // A session ran for at least a second once it opened; never record a negative.
+                seconds: Math.max(1, Math.floor(session.seconds)),
+              })
+              .onConflictDoNothing({ target: browserUsage.id });
+          },
+          /** Every browser-session row, oldest first, for the data export. */
+          list: () =>
+            db
+              .select()
+              .from(browserUsage)
+              .where(eq(browserUsage.userId, userId))
+              .orderBy(browserUsage.createdAt),
+          /** This user's metered browser seconds since `since` (Usage's month line). */
+          secondsSince: async (since: number): Promise<number> => {
+            const [row] = await db
+              .select({
+                seconds: sql<number>`coalesce(sum(${browserUsage.seconds}), 0)`.mapWith(Number),
+              })
+              .from(browserUsage)
+              .where(and(eq(browserUsage.userId, userId), gte(browserUsage.createdAt, since)));
+            return row?.seconds ?? 0;
+          },
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
         memory,
@@ -3030,6 +3108,21 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             ).length > 0,
           /** Deletes the final ZIP, for a finish that expired before it could turn ready. */
           removeZip: (id: string) => FILES.delete(`u/${userId}/exports/${checkId(id)}.zip`),
+        },
+        /**
+         * The user's live computers (M4-02 AC4): the running-computers feed M4-10 lists and
+         * M4-15 prices. Borrowing, heartbeats and destroys live in the lifecycle module
+         * (`@opa/server/computers`), which mints with `scopeForComputer`; this is the read
+         * feed only, so a screen can never borrow or destroy through it.
+         */
+        computers: {
+          /** Every live computer, newest first. Destroyed rows stay out of the list. */
+          list: (): Promise<ComputerRow[]> =>
+            db
+              .select()
+              .from(computers)
+              .where(and(eq(computers.userId, userId), ne(computers.state, "destroyed")))
+              .orderBy(desc(computers.createdAt)),
         },
         /**
          * Step outputs too large to persist inline (M3-12 AC4), under their own prefix so they

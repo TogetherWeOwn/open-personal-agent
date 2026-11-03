@@ -430,6 +430,50 @@ describe("the OpenAI preset on Responses (M3-04 AC3)", () => {
   });
 });
 
+describe("a Responses endpoint without streaming (M4-20 AC2)", () => {
+  it("passes Test through one non-streaming request per call, and says so", async () => {
+    const saved = await put("/model", {
+      kind: "openai-chat",
+      providerId: "custom",
+      baseUrl: "https://api.cloudflare.com/client/v4/accounts/abc/ai/v1",
+      model: "gpt-5-mini",
+      apiKey: CANARY,
+      api: "openai-responses",
+    });
+    expect(JSON.parse(saved.text).model).toMatchObject({ api: "openai-responses" });
+    // Recorded shapes of non-streaming /responses replies: a text answer, then the probe's tool.
+    const completed = (output: unknown) =>
+      Response.json({ status: "completed", output, usage: { input_tokens: 9, output_tokens: 1 } });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (offersTools(init)) {
+        return completed([
+          { type: "function_call", call_id: "call_1", name: "report_ready", arguments: "{}" },
+        ]);
+      }
+      return completed([
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "ready" }] },
+      ]);
+    });
+    const tested = JSON.parse((await call("/model/test", { method: "POST" })).text);
+    expect(tested).toMatchObject({
+      ok: true,
+      tools: true,
+      toolProbe: "called",
+      reply: "ready",
+      transport: "non-streaming",
+    });
+    // One request per Test call, both non-streaming and stateless, key on the saved origin.
+    expect(fetch).toHaveBeenCalledTimes(2);
+    for (const [url, init] of fetch.mock.calls) {
+      expect(url).toBe("https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/responses");
+      expect(JSON.parse(String(init?.body))).toMatchObject({ store: false, stream: false });
+    }
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      `Bearer ${CANARY}`,
+    );
+  });
+});
+
 describe("the Anthropic preset on Messages (M3-05 AC3)", () => {
   const preset = {
     kind: "openai-chat",

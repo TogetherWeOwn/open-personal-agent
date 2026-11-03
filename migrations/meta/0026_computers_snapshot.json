@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9783c4c1-41d2-4f02-8ebc-5c437bef6ffd",
-  "prevId": "b0a1d687-88e3-4be6-ab3e-5379ffdd1819",
+  "id": "42f47f31-58ff-4bfd-9698-cb45fe595e9f",
+  "prevId": "db414f6b-7d55-44a4-a62f-57e706eeb477",
   "tables": {
     "approvals": {
       "name": "approvals",
@@ -579,8 +579,8 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "capability_tokens": {
-      "name": "capability_tokens",
+    "computer_sessions": {
+      "name": "computer_sessions",
       "columns": {
         "id": {
           "name": "id",
@@ -589,22 +589,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
         "user_id": {
           "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "task_id": {
-          "name": "task_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -617,39 +603,51 @@
           "notNull": true,
           "autoincrement": false
         },
-        "aud": {
-          "name": "aud",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "model_allowlist": {
-          "name": "model_allowlist",
+        "task_id": {
+          "name": "task_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "task_epoch": {
-          "name": "task_epoch",
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "profile": {
+          "name": "profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_computer_id": {
+          "name": "provider_computer_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "started_at": {
+          "name": "started_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": 0
+          "autoincrement": false
         },
-        "user_epoch": {
-          "name": "user_epoch",
+        "ended_at": {
+          "name": "ended_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": 0
+          "autoincrement": false
         },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
+        "end_reason": {
+          "name": "end_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -661,56 +659,212 @@
           "notNull": true,
           "autoincrement": false,
           "default": "(unixepoch('subsec') * 1000)"
-        },
-        "revoked_at": {
-          "name": "revoked_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "revoked_reason": {
-          "name": "revoked_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {
-        "capability_tokens_token_hash_unique": {
-          "name": "capability_tokens_token_hash_unique",
-          "columns": ["token_hash"],
-          "isUnique": true
-        },
-        "capability_tokens_task_idx": {
-          "name": "capability_tokens_task_idx",
-          "columns": ["task_id", "aud", "computer_id"],
-          "isUnique": false
-        },
-        "capability_tokens_user_idx": {
-          "name": "capability_tokens_user_idx",
+        "computer_sessions_user_idx": {
+          "name": "computer_sessions_user_idx",
           "columns": ["user_id", "created_at"],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "capability_tokens_user_id_users_id_fk": {
-          "name": "capability_tokens_user_id_users_id_fk",
-          "tableFrom": "capability_tokens",
+        "computer_sessions_user_id_users_id_fk": {
+          "name": "computer_sessions_user_id_users_id_fk",
+          "tableFrom": "computer_sessions",
           "tableTo": "users",
           "columnsFrom": ["user_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "capability_tokens_task_id_tasks_id_fk": {
-          "name": "capability_tokens_task_id_tasks_id_fk",
-          "tableFrom": "capability_tokens",
+        "computer_sessions_computer_id_computers_id_fk": {
+          "name": "computer_sessions_computer_id_computers_id_fk",
+          "tableFrom": "computer_sessions",
+          "tableTo": "computers",
+          "columnsFrom": ["computer_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "computer_sessions_task_id_tasks_id_fk": {
+          "name": "computer_sessions_task_id_tasks_id_fk",
+          "tableFrom": "computer_sessions",
           "tableTo": "tasks",
           "columnsFrom": ["task_id"],
           "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "computers": {
+      "name": "computers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "profile": {
+          "name": "profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider_computer_id": {
+          "name": "provider_computer_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "disks": {
+          "name": "disks",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
+        "snapshots": {
+          "name": "snapshots",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
+        "idle_timeout_seconds": {
+          "name": "idle_timeout_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "max_lifetime_seconds": {
+          "name": "max_lifetime_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'ready'"
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "idle_deadline": {
+          "name": "idle_deadline",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "lifetime_deadline": {
+          "name": "lifetime_deadline",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "end_reason": {
+          "name": "end_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {
+        "computers_user_idx": {
+          "name": "computers_user_idx",
+          "columns": ["user_id", "created_at"],
+          "isUnique": false
+        },
+        "computers_sweep_idx": {
+          "name": "computers_sweep_idx",
+          "columns": ["state", "idle_deadline", "lifetime_deadline"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "computers_user_id_users_id_fk": {
+          "name": "computers_user_id_users_id_fk",
+          "tableFrom": "computers",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "computers_task_id_tasks_id_fk": {
+          "name": "computers_task_id_tasks_id_fk",
+          "tableFrom": "computers",
+          "tableTo": "tasks",
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -2177,14 +2331,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "token_epoch": {
-          "name": "token_epoch",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
         }
       },
       "indexes": {
@@ -2831,14 +2977,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": "(unixepoch('subsec') * 1000)"
-        },
-        "token_epoch": {
-          "name": "token_epoch",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
         }
       },
       "indexes": {},

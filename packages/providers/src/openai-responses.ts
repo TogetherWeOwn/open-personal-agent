@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // `openai-responses`: OpenAI's Responses API (ADR 0006), the only OpenAI API where current models
 // call tools. Stateless: every request sends `store: false` and the whole history, and reasoning
-// comes back encrypted so it can be replayed on the next step (A-M2). Fetch only, no SDK.
+// comes back encrypted so it can be replayed on the next step (A-M2). Endpoints that cannot
+// stream (M4-20) are answered with one non-streaming request mapped onto the same events.
+// Fetch only, no SDK.
 import type {
   FinishReason,
   ModelErrorCode,
@@ -17,7 +19,14 @@ import type {
 import { attachmentText, dataUri } from "./attachments";
 import { aborted, error } from "./chat-chunks";
 import { canonicalOrigin } from "./credential-binding";
-import { type EndpointOptions, endpoint, listModels, openStream } from "./http";
+import {
+  type Endpoint,
+  type EndpointOptions,
+  endpoint,
+  listModels,
+  openStream,
+  postJson,
+} from "./http";
 import { sseData } from "./sse";
 
 export const OPENAI_RESPONSES_API = "openai-responses";
@@ -36,8 +45,40 @@ export function usesOpenAIResponses(providerId: string | null, baseUrl: string |
   }
 }
 
+export interface OpenAIResponsesCompat {
+  /** The endpoint answers whole responses only: skip the streaming attempt (M4-20). */
+  supportsStreaming: boolean;
+}
+
+export const DEFAULT_OPENAI_RESPONSES_COMPAT: OpenAIResponsesCompat = {
+  supportsStreaming: true,
+};
+
+/**
+ * Per-host streaming support, by exact hostname. Anything else is assumed to stream; a host is
+ * added here only with a recorded rejection or a documented non-streaming endpoint. AI Gateway
+ * (`gateway.ai.cloudflare.com`) is absent on purpose: it forwards streaming to the provider
+ * behind it, so a rejection there still falls back per request.
+ */
+export const OPENAI_RESPONSES_HOST_PRESETS: Readonly<
+  Record<string, Partial<OpenAIResponsesCompat>>
+> = {
+  // Cloudflare's Responses endpoints answer whole responses only; `stream: true` is rejected.
+  "api.cloudflare.com": { supportsStreaming: false },
+};
+
+/** Defaults, then the host preset, then explicit overrides (which win). */
+export function resolveResponsesCompat(
+  baseUrl: string,
+  overrides: Partial<OpenAIResponsesCompat> = {},
+): OpenAIResponsesCompat {
+  const preset = OPENAI_RESPONSES_HOST_PRESETS[new URL(baseUrl).hostname] ?? {};
+  return { ...DEFAULT_OPENAI_RESPONSES_COMPAT, ...preset, ...overrides };
+}
+
 export interface OpenAIResponsesOptions extends EndpointOptions {
   providerId: string;
+  compat?: Partial<OpenAIResponsesCompat>;
 }
 
 /** An output item: a function call, or reasoning kept so it can go back as input. */
@@ -48,7 +89,8 @@ interface RawItem {
   name?: string;
   arguments?: string;
   encrypted_content?: string | null;
-  summary?: unknown[];
+  summary?: { type?: string; text?: string }[];
+  content?: { type?: string; text?: string; refusal?: string }[];
 }
 
 interface RawResponse {
@@ -61,6 +103,8 @@ interface RawResponse {
     input_tokens_details?: { cached_tokens?: number };
     output_tokens_details?: { reasoning_tokens?: number };
   } | null;
+  /** Only on a completed (non-streaming) response; a stream carries items as events. */
+  output?: RawItem[] | null;
 }
 
 interface RawEvent {
@@ -127,6 +171,9 @@ const CODES: Readonly<Record<string, ModelErrorCode>> = {
   invalid_api_key: "auth",
   invalid_prompt: "bad_request",
   context_length_exceeded: "bad_request",
+  // An explicitly unsupported parameter (for example `stream`) is the client's mistake, not an
+  // upstream failure: it must never land in the `upstream` bucket, whose errors never retry.
+  unsupported_parameter: "bad_request",
 };
 
 const usageOf = (u: NonNullable<RawResponse["usage"]>): ModelUsage => ({
@@ -141,6 +188,91 @@ interface ReplayContext {
   model: string;
   signal?: AbortSignal | undefined;
   redact: (text: string) => string;
+}
+
+/**
+ * An error that explicitly rejects streaming, and nothing else. Auth, quota, network,
+ * cancellation and `upstream` failures are never retried: an upstream failure does not prove
+ * the `stream: true` request was rejected before generation, so retrying it could generate or
+ * bill twice. The message must name `stream` as a word (never the substring inside
+ * "Upstream") alongside an explicit refusal ("not supported", "does not support",
+ * "unsupported"); near-misses like "Upstream connect error" or "the stream broke" stand.
+ * Callers narrow further: the HTTP leg only trusts 4xx (a 5xx may already have run
+ * server-side), and the SSE leg only trusts provider-originated `error` events, never this
+ * adapter's own synthesized ones (which carry no status and code `bad_response`).
+ */
+function isStreamRejection(event: ModelEvent): boolean {
+  return (
+    event.type === "error" &&
+    event.code === "bad_request" &&
+    /\bstream/i.test(event.message) &&
+    /not supported|does not support|unsupported/i.test(event.message)
+  );
+}
+
+/**
+ * The tail every settled response shares, streamed or whole: usage, then the error or the
+ * tool calls, the reasoning replay state and `done`. A reply cut off before it finished may
+ * hold a call with half its arguments: never run it.
+ */
+function* settle({
+  final,
+  failed,
+  calls,
+  reasoning,
+  providerId,
+  model,
+  redact,
+  transport,
+}: {
+  final: RawResponse;
+  failed: boolean;
+  calls: ModelToolCall[];
+  reasoning: RawItem[];
+  providerId: string;
+  model: string;
+  redact: (text: string) => string;
+  transport: "streaming" | "non-streaming";
+}): Generator<ModelEvent> {
+  // The model was billed whatever else happened, so usage is always reported.
+  const usage: ModelEvent[] = final.usage ? [{ type: "usage", usage: usageOf(final.usage) }] : [];
+  if (failed) {
+    const e = final.error ?? {};
+    const code = (e.code && CODES[e.code]) || "upstream";
+    yield* usage;
+    yield error(code, redact(e.message ?? "The provider reported an error").slice(0, 300));
+    return;
+  }
+  const reason = final.incomplete_details?.reason;
+  let finishReason: FinishReason =
+    final.status !== "incomplete"
+      ? "stop"
+      : reason === "max_output_tokens"
+        ? "length"
+        : reason === "content_filter"
+          ? "content_filter"
+          : "other";
+  const complete = finishReason === "stop";
+  const run = complete ? calls : [];
+  // One bad call rejects the reply before any call is emitted, so none of it runs.
+  if (run.some((call) => !call.id || !call.name)) {
+    yield* usage;
+    yield error("bad_response", "The provider sent a tool call with no id or name");
+    return;
+  }
+  for (const toolCall of run) yield { type: "tool_call", toolCall };
+  if (complete && calls.length) finishReason = "tool_calls";
+  if (complete && reasoning.length) {
+    const state: ModelReasoning = {
+      providerId,
+      api: OPENAI_RESPONSES_API,
+      model,
+      items: reasoning,
+    };
+    yield { type: "reasoning", reasoning: state };
+  }
+  yield* usage;
+  yield { type: "done", finishReason, transport };
 }
 
 /** Turns the SSE `data` payloads of a Responses stream into normalized events. */
@@ -222,46 +354,79 @@ export async function* replayResponses(
     yield error("network", "The stream ended before the model finished");
     return;
   }
-  // The model was billed whatever else happened, so usage is always reported.
-  const usage: ModelEvent[] = final.usage ? [{ type: "usage", usage: usageOf(final.usage) }] : [];
-  if (failed) {
-    const e = final.error ?? {};
-    const code = (e.code && CODES[e.code]) || "upstream";
-    yield* usage;
-    yield error(code, redact(e.message ?? "The provider reported an error").slice(0, 300));
+  yield* settle({
+    final,
+    failed,
+    calls,
+    reasoning,
+    providerId,
+    model,
+    redact,
+    transport: "streaming",
+  });
+}
+
+/** Maps a whole `/responses` object onto the same events a stream of it would replay. */
+function* replayCompleted(response: unknown, context: ReplayContext): Generator<ModelEvent> {
+  const { providerId, model, signal, redact } = context;
+  if (signal?.aborted) {
+    yield aborted();
     return;
   }
-  const reason = final.incomplete_details?.reason;
-  let finishReason: FinishReason =
-    final.status !== "incomplete"
-      ? "stop"
-      : reason === "max_output_tokens"
-        ? "length"
-        : reason === "content_filter"
-          ? "content_filter"
-          : "other";
-  // A reply cut off before it finished may hold a call with half its arguments: never run it.
-  const complete = finishReason === "stop";
-  const run = complete ? calls : [];
-  // One bad call rejects the reply before any call is emitted, so none of it runs.
-  if (run.some((call) => !call.id || !call.name)) {
-    yield* usage;
-    yield error("bad_response", "The provider sent a tool call with no id or name");
+  const final = (response ?? {}) as RawResponse;
+  const output = Array.isArray(final.output) ? final.output : null;
+  if (!output) {
+    // Malformed, but billed like any other settled reply: usage first, as everywhere else.
+    if (final.usage) yield { type: "usage", usage: usageOf(final.usage) };
+    yield error("bad_response", "The provider sent a response with no output");
     return;
   }
-  for (const toolCall of run) yield { type: "tool_call", toolCall };
-  if (complete && calls.length) finishReason = "tool_calls";
-  if (complete && reasoning.length) {
-    const state: ModelReasoning = {
-      providerId,
-      api: OPENAI_RESPONSES_API,
-      model,
-      items: reasoning,
-    };
-    yield { type: "reasoning", reasoning: state };
+  const calls: ModelToolCall[] = [];
+  const reasoning: RawItem[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    if (item.type === "function_call") {
+      calls.push({
+        id: item.call_id ?? "",
+        name: item.name ?? "",
+        arguments: item.arguments || "{}",
+      });
+    } else if (item.type === "reasoning") {
+      // Same filter as the stream: only encrypted reasoning replays statelessly.
+      if (item.encrypted_content) {
+        reasoning.push({
+          type: "reasoning",
+          ...(item.id ? { id: item.id } : {}),
+          encrypted_content: item.encrypted_content,
+          summary: item.summary ?? [],
+        });
+      }
+      for (const part of item.summary ?? []) {
+        if (part?.type === "summary_text" && part.text) {
+          yield { type: "reasoning.delta", text: part.text };
+        }
+      }
+    } else if (item.type === "message") {
+      for (const part of item.content ?? []) {
+        if (part?.type === "output_text" && part.text) {
+          yield { type: "text.delta", text: part.text };
+        } else if (part?.type === "refusal" && part.refusal) {
+          yield { type: "text.delta", text: part.refusal };
+        }
+      }
+    }
   }
-  yield* usage;
-  yield { type: "done", finishReason };
+  // A stream reports failure as `response.failed`; a whole response does it as its status.
+  yield* settle({
+    final,
+    failed: final.status === "failed",
+    calls,
+    reasoning,
+    providerId,
+    model,
+    redact,
+    transport: "non-streaming",
+  });
 }
 
 /**
@@ -276,6 +441,7 @@ const readsFiles = (model: string) => FILE_FAMILIES.test(model) && !TEXT_ONLY.te
 
 export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): ModelProvider {
   const http = endpoint(options);
+  const compat = resolveResponsesCompat(options.baseUrl, options.compat);
   const providerId = options.providerId;
 
   return {
@@ -295,7 +461,6 @@ export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): 
       const body: Record<string, unknown> = {
         model,
         input: responsesInput(request.messages, same),
-        stream: true,
         // Nothing is kept upstream; the history lives in D1 (ADR 0002).
         store: false,
         include: ["reasoning.encrypted_content"],
@@ -304,13 +469,63 @@ export function createOpenAIResponsesProvider(options: OpenAIResponsesOptions): 
       if (tools.length) body.tools = responsesTools(tools);
       if (request.maxOutputTokens !== undefined) body.max_output_tokens = request.maxOutputTokens;
       if (request.temperature !== undefined) body.temperature = request.temperature;
-      const stream = await openStream(http, "/responses", body, request.signal);
+      const context = { providerId, model, signal: request.signal, redact: http.redact };
+      const complete = (): AsyncGenerator<ModelEvent> =>
+        completeResponse(http, body, request.signal, context);
+      if (!compat.supportsStreaming) {
+        yield* complete();
+        return;
+      }
+      const stream = await openStream(
+        http,
+        "/responses",
+        { ...body, stream: true },
+        request.signal,
+      );
       if ("type" in stream) {
+        // An HTTP 4xx rejection of `stream: true` before anything was generated: answer the
+        // same request once without streaming, with the same body otherwise. A 5xx naming
+        // streaming (even "upstream ...") may already have run server-side, so it stands.
+        if (stream.type === "error" && (stream.status ?? 500) < 500 && isStreamRejection(stream)) {
+          yield* complete();
+          return;
+        }
         yield stream;
         return;
       }
-      const context = { providerId, model, signal: request.signal, redact: http.redact };
-      yield* replayResponses(sseData(stream, request.signal), context);
+      // The rejection can also arrive as an SSE error event; only one seen before any event
+      // or usage retries, so a call that already produced output never runs twice. The
+      // adapter's own synthesized errors (no status, code `bad_response`) are not provider
+      // rejections, so they stand instead of retrying.
+      let produced = false;
+      for await (const event of replayResponses(sseData(stream, request.signal), context)) {
+        if (
+          event.type === "error" &&
+          !produced &&
+          event.code !== "bad_response" &&
+          isStreamRejection(event)
+        ) {
+          yield* complete();
+          return;
+        }
+        if (event.type !== "error") produced = true;
+        yield event;
+      }
     },
   };
+}
+
+/** One non-streaming `/responses` call for the same body, mapped onto the same events. */
+async function* completeResponse(
+  http: Endpoint,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  context: ReplayContext,
+): AsyncGenerator<ModelEvent> {
+  const posted = await postJson(http, "/responses", { ...body, stream: false }, signal);
+  if ("error" in posted) {
+    yield posted.error;
+    return;
+  }
+  yield* replayCompleted(posted.json, context);
 }

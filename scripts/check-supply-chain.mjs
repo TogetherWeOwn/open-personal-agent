@@ -65,6 +65,13 @@ export const REVIEWED_RUNTIME = [
   "nanoid",
   "pkce-challenge",
   "zod",
+  // @cloudflare/puppeteer 1.4.0 (the browser tool's CDP driver over Browser Rendering) and what
+  // of its closure the bundle contains. Imported lazily, only when a browser session opens.
+  "@cloudflare/puppeteer",
+  "debug",
+  "ms",
+  "supports-color",
+  "ws",
 ];
 
 /** esbuild's metafile for the Worker bundle, written by `pnpm deploy:dry-run`. */

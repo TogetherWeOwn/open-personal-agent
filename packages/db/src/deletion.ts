@@ -30,6 +30,7 @@
 // possibly left behind; without a listing the purge cannot prove the prefix empty, so
 // the delete refuses rather than strand objects.
 import { and, eq, inArray, ne } from "drizzle-orm";
+import { computerStore, type DestroyReport } from "./computers";
 import { openD1 } from "./index";
 import { type DataBindings, isId } from "./repository";
 import {
@@ -54,6 +55,8 @@ export interface DeletionResult {
   taskInstances: string[];
   /** Workflow instances of the user's failed export runs, for best-effort termination. */
   exportInstances: string[];
+  /** The user's computers, disks and snapshots destroyed through the provider API (M4-02 AC5). */
+  computers: DestroyReport[];
 }
 
 /**
@@ -131,11 +134,25 @@ export async function purgeDeletedUserFiles(
  * Stops short of the final purge: the caller terminates `taskInstances`/`exportInstances`
  * first, then finishes with `purgeDeletedUserFiles`, so nothing still running can write
  * under the prefix after the last pass.
+ *
+ * The user's computers go through the provider API (M4-02 AC5): `destroyComputer` destroys
+ * one provider-side computer with its disks and snapshots, and whatever it destroyed is
+ * named in the returned report. A provider failure refuses the delete with the rows still
+ * live — like the R2 purge, the delete never strands a billing computer with no record of
+ * it — and computers with no destroyer refuse too, so a half-wired provider cannot silently
+ * keep them. The route resolves the driver (M4-04) and passes it here.
  */
 export async function deleteUserData(
   bindings: Pick<DataBindings<unknown, unknown>, "DB" | "FILES">,
   userId: string,
   now: number = Date.now(),
+  opts: {
+    destroyComputer?: (target: {
+      providerComputerId: string;
+      disks: string[];
+      snapshots: string[];
+    }) => Promise<unknown>;
+  } = {},
 ): Promise<DeletionResult | null> {
   if (!isId(userId)) throw new Error("invalid user id");
   const db = openD1(bindings.DB);
@@ -197,6 +214,17 @@ export async function deleteUserData(
   // Second purge: catches what an active step wrote between the first purge and the stop.
   await purgeUserPrefix(bindings.FILES, userId);
 
+  // The user's computers, through the provider API: provider destroy first, then the rows
+  // finish, so a failure refuses with every row still live. Before the D1 batch, while the
+  // provider-side ids are still readable — the cascade below would take them.
+  const store = computerStore(bindings);
+  const liveComputers = await store.listActiveForUser(userId);
+  let computers: DestroyReport[] = [];
+  if (liveComputers.length > 0) {
+    if (!opts.destroyComputer) throw new Error("computer destroy unavailable");
+    computers = await store.destroyUserComputers(userId, opts.destroyComputer, now);
+  }
+
   // Fresh task snapshot after the purges, so a run that started in between still has its
   // journals deleted below.
   const freshTasks = await db
@@ -241,9 +269,12 @@ export async function deleteUserData(
       action: "account.delete",
       module: "account",
       result: "ok",
-      detail: JSON.stringify({ unclaimed }),
+      detail: JSON.stringify({
+        unclaimed,
+        computers: computers.map((c) => c.providerComputerId),
+      }),
     }),
   ]);
 
-  return { unclaimed, taskInstances, exportInstances };
+  return { unclaimed, taskInstances, exportInstances, computers };
 }

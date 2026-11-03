@@ -555,6 +555,9 @@ async function timedCall(provider: ModelProvider, request: Omit<Call, "signal">)
     reply: "",
     toolCalls: [] as string[],
     usage: null as ModelUsage | null,
+    // Which transport answered: adapters that can fall back to whole responses (M4-20) say so
+    // on `done`, and the Test report passes it on so the UI can say so too.
+    transport: null as "streaming" | "non-streaming" | null,
   };
   const signal = AbortSignal.timeout(TEST_TIMEOUT_MS);
   const consume = async () => {
@@ -565,6 +568,7 @@ async function timedCall(provider: ModelProvider, request: Omit<Call, "signal">)
       if (event.type === "text.delta") result.reply += event.text;
       else if (event.type === "tool_call") result.toolCalls.push(event.toolCall.name);
       else if (event.type === "usage") result.usage = event.usage;
+      else if (event.type === "done") result.transport = event.transport ?? "streaming";
       else if (event.type === "error") return { code: event.code, message: event.message };
     }
     return null;
@@ -627,6 +631,8 @@ async function test(c: Ctx, pick: ModelPick) {
     totalMs: first.totalMs + probe.totalMs,
     tools: called,
     toolProbe: called ? "called" : probeOutcome(probe.failure?.code),
+    // A non-streaming endpoint passes Test through the adapter's fallback: say so honestly.
+    transport: first.transport ?? "streaming",
     price: priceHint(billingId, model),
     reply: echoesKey(reply) ? "" : reply,
   });

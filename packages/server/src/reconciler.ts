@@ -8,6 +8,7 @@ import { sweepExports } from "@opa/db/export";
 import { systemStore } from "@opa/db/system";
 import { log } from "@opa/log";
 import { reconcileAllowances, recordDatabaseBytes } from "./allowances";
+import { sweepComputers } from "./computers";
 import type { Env } from "./env";
 import { runRetention } from "./retention";
 import { runRotation } from "./vault-rotation";
@@ -36,6 +37,12 @@ export const reconcilerParts = {
   exports: (env, now) => sweepExports(env, () => now),
   retention: (env, now) => runRetention(env, now),
   approvals: (env, now) => expireApprovals(env, now),
+  // The computer sweep (M4-02 AC3): no provider driver exists yet — M4-04 resolves one
+  // from the configured computer provider and passes it here — so this tick fails closed:
+  // rows past their idle/lifetime deadlines or with an ended task stay live and count as
+  // errors instead of being finished without a provider destroy, and the provider-listing
+  // orphan leg is skipped until then.
+  computers: (env, now) => sweepComputers(env, undefined, now),
 } satisfies Record<string, ReconcilerPart>;
 
 /** One promise per part, each settled once its part has; the Worker hands each to `waitUntil`. */

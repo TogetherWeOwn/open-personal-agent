@@ -4,6 +4,8 @@
 // labels, subtotals and staleness worked out here, so the page does no arithmetic.
 import { createRepository } from "@opa/db/repository";
 import {
+  browserCost,
+  browserRendering,
   cloudflareAllowances,
   findPrice,
   isStale,
@@ -197,11 +199,14 @@ usageRoutes.get("/", async (c) => {
   const first = dateOf(month);
   const repo = createRepository(c.env);
   const user = repo.forUser(c.var.session.scope);
-  const [todayRows, monthRows, breakdownRows, profile] = await Promise.all([
+  const [todayRows, monthRows, breakdownRows, profile, browserSeconds] = await Promise.all([
     user.usage.totals(today),
     user.usage.totals(month),
     user.usage.breakdowns(month),
     user.profile(),
+    // The calling user's own metered browser time this month (M4-09 AC3). Unlike the account
+    // allowances below it is per user, so every user sees their own line.
+    user.browserUsage.secondsSince(month),
   ]);
   const todayPeriod = period(todayRows, now);
   const monthPeriod = period(monthRows, now);
@@ -229,6 +234,16 @@ usageRoutes.get("/", async (c) => {
     freeNeuronsUsed: Math.min(allowance.neuronsUsedHere, allowance.neuronsPerDay),
     billedNeurons: Math.max(allowance.neuronsUsedHere - allowance.neuronsPerDay, 0),
   };
+  // The browser tool's included-hours split (M4-09 AC3), on the deployment's total browser
+  // seconds: the included hours are the account's, so splitting the caller's own seconds
+  // against them would hand every user a fresh allowance and hide billable overage. The
+  // owner's only, like the allowances above; a member keeps their own seconds below.
+  const browserAllowance =
+    profile?.role === "owner"
+      ? await repo.deployment
+          .browserSeconds(month)
+          .then((seconds) => ({ seconds, ...browserCost(seconds) }))
+      : null;
   c.header("Cache-Control", "no-store");
   return c.json({
     currency: "USD",
@@ -245,5 +260,15 @@ usageRoutes.get("/", async (c) => {
     meters,
     // The date the included amounts were checked, which every meter's line gives (AC3).
     metersVerifiedAt: meters && cloudflareAllowances.verifiedAt,
+    // The calling user's own browser time this month, plus the owner-only deployment split
+    // above: a member gets their own seconds and no claim about an allowance of their own.
+    browser: {
+      seconds: browserSeconds,
+      allowance: browserAllowance,
+      includedHoursPerMonth: browserRendering.includedHoursPerMonth,
+      usdPerHour: browserRendering.usdPerHour,
+      priceVerifiedAt: browserRendering.verifiedAt,
+      stale: isStale(browserRendering.verifiedAt, now),
+    },
   });
 });

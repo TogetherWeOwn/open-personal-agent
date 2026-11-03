@@ -1,0 +1,24 @@
+{
+  "id": "resp_01",
+  "object": "response",
+  "created_at": 1762041600,
+  "status": "incomplete",
+  "model": "gpt-5-mini-2026-08-07",
+  "output": [
+    {
+      "id": "fc_01",
+      "type": "function_call",
+      "status": "in_progress",
+      "call_id": "call_wx1",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Lis"
+    }
+  ],
+  "incomplete_details": { "reason": "max_output_tokens" },
+  "usage": {
+    "input_tokens": 320,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 64,
+    "output_tokens_details": { "reasoning_tokens": 0 }
+  }
+}

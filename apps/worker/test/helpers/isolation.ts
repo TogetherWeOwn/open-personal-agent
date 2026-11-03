@@ -50,6 +50,10 @@ export interface Seeded {
   batch: string;
   /** The second task, waiting on that batch. */
   approvalTask: string;
+  /** The user's computer, bound to their task, for the owner-reference checks. */
+  computer: string;
+  /** The computer's finished session, in the metering ledger. */
+  computerSession: string;
   /** The plaintext of the user's model key, which no response may carry. */
   apiKey: string;
   /** Every ID and every piece of content above: none may reach another user. */
@@ -251,6 +255,14 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       conversation,
       message,
     ),
+    // One metered browser session, filed under this user's own conversation and task.
+    run(
+      "INSERT INTO browser_usage (id, user_id, conversation_id, task_id, seconds) VALUES (?, ?, ?, ?, 60)",
+      `browser-usage-${tag}`,
+      id,
+      conversation,
+      task,
+    ),
     // A turn stopped at its call limit, waiting on Continue.
     run(
       "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state) VALUES (?, ?, ?, ?, 'openai', 'gpt-4o', 'limit_reached', ?)",
@@ -312,6 +324,42 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     .run();
   await FILES.put(`u/${id}/exports/${exportId}.zip`, `export of ${tag}`);
 
+  // The user's computer, bound to their task, and its finished session: the owner-reference
+  // checks (M3-21 AC6) need a row of every user-owned type for both users.
+  const computer = crypto.randomUUID();
+  const computerSession = crypto.randomUUID();
+  const now = Date.now();
+  await db.batch([
+    run(
+      `INSERT INTO computers (id, user_id, provider, profile, provider_computer_id, task_id, disks, snapshots,
+        idle_timeout_seconds, max_lifetime_seconds, state, last_used_at, idle_deadline, lifetime_deadline,
+        created_at, updated_at)
+       VALUES (?, ?, 'fake', 'standard-1', ?, ?, '[]', '[]', 300, 3600, 'ready', ?, ?, ?, ?, ?)`,
+      computer,
+      id,
+      `pc-${tag}`,
+      task,
+      now,
+      now + 300_000,
+      now + 3_600_000,
+      now,
+      now,
+    ),
+    run(
+      `INSERT INTO computer_sessions (id, user_id, computer_id, task_id, provider, profile,
+        provider_computer_id, started_at, ended_at, end_reason, created_at)
+       VALUES (?, ?, ?, ?, 'fake', 'standard-1', ?, ?, ?, 'idle', ?)`,
+      computerSession,
+      id,
+      computer,
+      task,
+      `pc-${tag}`,
+      now - 60_000,
+      now,
+      now,
+    ),
+  ]);
+
   const items = {
     session,
     conversation,
@@ -335,6 +383,8 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     export: exportId,
     batch: `batch-${tag}`,
     approvalTask: `approval-task-${tag}`,
+    computer,
+    computerSession,
   };
   const markers = [id, ...Object.values(ids), capabilityTokenHash, apiKey, tag];
   return { ...user, name, id, ...ids, apiKey, markers };

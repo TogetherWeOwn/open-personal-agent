@@ -27,6 +27,12 @@ export function TestResultView({ test }: { test: TestResult }) {
       <dd>{test.latencyMs} ms to the first word</dd>
       <dt>Tool calls</dt>
       <dd>{toolsLine(test)}</dd>
+      {test.transport === "non-streaming" && (
+        <>
+          <dt>Streaming</dt>
+          <dd>This endpoint doesn't support it — the model answered without it.</dd>
+        </>
+      )}
       {test.price !== undefined && (
         <>
           <dt>Price</dt>

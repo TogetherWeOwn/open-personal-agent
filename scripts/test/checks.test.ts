@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   findAppImports,
+  findAxisCrossImports,
   findDependencyViolations,
   findPortViolations,
 } from "../check-boundaries.mjs";
@@ -97,6 +98,65 @@ describe("boundaries", () => {
       devDependencies: { wrangler: "1" },
     });
     expect(findDependencyViolations(file("package.json", text))).toHaveLength(3);
+  });
+
+  it("rejects cross-imports between the three axis port modules (M4-01 AC5)", () => {
+    const axis = (path: string, text: string) => findAxisCrossImports(file(path, text));
+    // Relative cross-imports, types included, in every direction.
+    expect(
+      axis("packages/core/src/harness-event.ts", 'import type { x } from "./model-provider";'),
+    ).toEqual([
+      'packages/core/src/harness-event.ts:1: imports "./model-provider" (axis-separation: axis ports must not import each other)',
+    ]);
+    expect(
+      axis("packages/core/src/computer-provider.ts", 'import { x } from "./harness-event";'),
+    ).toHaveLength(1);
+    expect(
+      axis("packages/core/src/model-provider.ts", 'import "./computer-provider";'),
+    ).toHaveLength(1);
+    // Via the barrel through relative paths: every spelling resolving to index.ts flags.
+    for (const spec of [
+      "./index",
+      "./index.ts",
+      "./index.js",
+      ".",
+      "./",
+      "../src",
+      "../src/index.ts",
+    ]) {
+      expect(
+        axis("packages/core/src/computer-provider.ts", `import { x } from "${spec}";`),
+        spec,
+      ).toHaveLength(1);
+    }
+    // Via the barrel: the index re-exports the other axes.
+    expect(
+      axis("packages/core/src/computer-provider.ts", 'import { x } from "@opa/core";'),
+    ).toHaveLength(1);
+    expect(
+      axis(
+        "packages/core/src/model-provider.ts",
+        'import type { x } from "@opa/core/computer-provider";',
+      ),
+    ).toHaveLength(1);
+    // Allowed: the barrel re-exporting all three is composition, not a cross-import.
+    expect(
+      axis(
+        "packages/core/src/index.ts",
+        'export type * from "./model-provider";\nexport type * from "./harness-event";',
+      ),
+    ).toEqual([]);
+    // Allowed: same-axis consumers and other core modules importing the ports.
+    expect(
+      axis("packages/core/src/computer-conformance.ts", 'import { x } from "./computer-provider";'),
+    ).toEqual([]);
+    expect(
+      axis("packages/core/src/task-context.ts", 'import type { x } from "./model-provider";'),
+    ).toEqual([]);
+    // Allowed: an axis port importing a non-axis sibling.
+    expect(axis("packages/core/src/computer-provider.ts", 'import { x } from "./setup";')).toEqual(
+      [],
+    );
   });
 });
 
@@ -282,6 +342,7 @@ describe("docs-cost-lint", () => {
         "AI",
         "ASSETS",
         "ASSISTANT",
+        "BROWSER",
         "DB",
         "EXPORT_WORKFLOW",
         "FILES",

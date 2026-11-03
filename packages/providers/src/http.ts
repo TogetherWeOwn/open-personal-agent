@@ -85,6 +85,36 @@ export async function openStream(
   return res.body ?? error("bad_response", "The provider returned no stream");
 }
 
+/** POSTs a non-streaming request: the parsed JSON body, or the one error event. */
+export async function postJson(
+  { base, headers, fetch, redact }: Endpoint,
+  path: string,
+  body: unknown,
+  signal: AbortSignal | undefined,
+): Promise<{ json: unknown } | { error: ModelEvent }> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      // A followed redirect would carry the key to another origin.
+      redirect: "manual",
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    return {
+      error: signal?.aborted ? aborted() : error("network", "Could not reach the provider"),
+    };
+  }
+  if (!res.ok) return { error: await httpError(res, redact) };
+  try {
+    return { json: (await res.json()) as unknown };
+  } catch {
+    return { error: error("bad_response", "The provider returned invalid JSON") };
+  }
+}
+
 async function httpError(res: Response, redact: (text: string) => string): Promise<ModelEvent> {
   if (res.status >= 300 && res.status < 400) {
     return error(

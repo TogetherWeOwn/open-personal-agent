@@ -13,7 +13,7 @@ import { type MemoryToolUser, registerMemoryTools } from "@opa/db/memory-tools";
 import type { ArtifactSource, createRepository } from "@opa/db/repository";
 import type { LoopHost, LoopTool } from "@opa/harness-builtin";
 import type { ToolRegistry } from "@opa/policy";
-import { builtinToolRegistry } from "@opa/tools-builtin";
+import { type BrowserPorts, builtinToolRegistry } from "@opa/tools-builtin";
 
 /** The calling user's scoped repository slice, as `createRepository(env).forUser(scope)`. */
 export type TurnUser = ReturnType<ReturnType<typeof createRepository>["forUser"]>;
@@ -48,6 +48,13 @@ export interface TurnToolsInput {
   ownHosts: readonly string[];
   /** Mints artifact ids (single safe segments). */
   newId: () => string;
+  /**
+   * Opens a logged-out browser session (Browser Rendering on Workers, M4-09). A host with no
+   * browser (the Node root) omits it and the `browser` tool is not offered. Screenshots and
+   * metering are composed here from the caller's repository slice, so the host supplies only
+   * the session itself.
+   */
+  openBrowserSession?: BrowserPorts["openBrowserSession"];
   scope: TurnScope;
   /** The turn's live taint (see `TurnContext.taint`). */
   taint: () => boolean;
@@ -93,6 +100,34 @@ export async function composeTurnTools(input: TurnToolsInput): Promise<{
     getFile: (id) => files.getFile(id),
     putFile: (id, content, mediaType, name) => files.putFile(id, content, mediaType, name),
     newId: input.newId,
+    // The `browser` tool's storage and meter, over the same scoped slice as the file tools:
+    // screenshots land in Outputs under this turn/task, and a finished session's seconds are
+    // attributed to the conversation (and the task, in a task run) for Usage (M4-09 AC2/AC3).
+    ...(input.openBrowserSession
+      ? {
+          browser: {
+            openBrowserSession: input.openBrowserSession,
+            saveScreenshot: async (png, name) => {
+              const artifactId = input.newId();
+              await user.artifacts.save({
+                id: artifactId,
+                name,
+                mediaType: "image/png",
+                content: png,
+                source: fileSource,
+              });
+              return { artifactId, name, bytes: png.length };
+            },
+            meterBrowserSeconds: (seconds) =>
+              user.browserUsage.record({
+                id: input.newId(),
+                seconds,
+                conversationId,
+                ...(scope.kind === "task" ? { taskId: scope.taskId } : {}),
+              }),
+          },
+        }
+      : {}),
   });
   // The memory tools file under the turn's conversation. Untainted, the model's call answers
   // the user's own message, so it saves (A-Me1); tainted, outside content may have induced it,

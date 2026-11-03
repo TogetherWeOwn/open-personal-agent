@@ -102,7 +102,11 @@ export type ModelEvent =
   | { type: "tool_call"; toolCall: ModelToolCall }
   | { type: "reasoning"; reasoning: ModelReasoning }
   | { type: "usage"; usage: ModelUsage }
-  | { type: "done"; finishReason: FinishReason }
+  /**
+   * How the reply arrived: streamed deltas, or one completed response mapped onto the same
+   * events (M4-20). Absent on adapters that only stream; the loop treats both alike.
+   */
+  | { type: "done"; finishReason: FinishReason; transport?: "streaming" | "non-streaming" }
   | { type: "error"; code: ModelErrorCode; message: string; status?: number };
 
 export interface ModelInfo {
