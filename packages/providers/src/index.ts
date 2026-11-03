@@ -15,8 +15,12 @@ export { isLoopbackHost } from "./http";
 export { createOpenAIChatProvider, type OpenAIChatOptions } from "./openai-chat";
 export {
   createOpenAIResponsesProvider,
+  DEFAULT_OPENAI_RESPONSES_COMPAT,
   OPENAI_RESPONSES_API,
+  OPENAI_RESPONSES_HOST_PRESETS,
+  type OpenAIResponsesCompat,
   type OpenAIResponsesOptions,
+  resolveResponsesCompat,
   usesOpenAIResponses,
 } from "./openai-responses";
 export {
