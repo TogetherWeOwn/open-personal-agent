@@ -9,6 +9,7 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { ModelEvent, ModelProvider, TaskStepper } from "@opa/core";
+import { mintCapabilityToken } from "@opa/db/capability-tokens";
 import { type MemoryTool, memoryTools } from "@opa/db/memory-tools";
 import {
   createRepository,
@@ -16,9 +17,10 @@ import {
   scopeFromSession,
   type UserScope,
 } from "@opa/db/repository";
+import type { SqlDatabase } from "@opa/db/system";
 import { credentialBinding } from "@opa/providers";
 import { resolveChatModel } from "@opa/server/chat-model";
-import { PUBLIC_ROUTES } from "@opa/server/session";
+import { PUBLIC_ROUTES, routeCredential } from "@opa/server/session";
 import { decrypt } from "@opa/vault";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { compose, type WorkerEnv } from "../src/compose";
@@ -179,18 +181,31 @@ describe("R2 keys, DO names and Workflow ids (AC2)", () => {
     const touched = record();
     for (const route of idRoutes) {
       const [method = "", path = ""] = route.split(" ");
+      const audience = routeCredential(route);
+      const token = audience
+        ? await mintCapabilityToken(env.DB as unknown as SqlDatabase, {
+            userId: b.id,
+            taskId: b.task,
+            computerId: b.computer,
+            aud: audience,
+          })
+        : null;
       for (const id of fuzz(a, victimId(route, a))) {
         // Encoded, so `/` and `:` reach the handler as part of the ID; raw, so they reach the router.
         for (const value of [encodeURIComponent(id), id]) {
           const url = path.replace(/:(\w+)/, value);
-          const res = await as(b, method, url, { body: BODIES[route]?.(b) });
+          const res = await as(token ? null : b, method, url, {
+            body: BODIES[route]?.(b),
+            ...(token ? { headers: { authorization: `Bearer ${token.token}` } } : {}),
+          });
           const text = await res.text();
           // The tool route takes a name, not an ID: setting B's own override is fine (200).
           // Removing a passkey needs the account step-up the harness never performs, so the
           // guard answers 403 before any lookup: still nothing of A's, as the snapshot and
           // recorder assertions below hold (M3-19 AC2).
-          const allowed =
-            route === "PUT /api/settings/tools/:name"
+          const allowed = audience
+            ? [401]
+            : route === "PUT /api/settings/tools/:name"
               ? [200, 400, 404]
               : route === "DELETE /api/passkeys/:id"
                 ? [400, 403, 404]

@@ -245,6 +245,15 @@ function batchesOf(rows: readonly { row: ApprovalRow; conversationTitle: string 
 }
 
 export function approvalRoutes(forward: ApprovalForward) {
+  const forwardDecision: ApprovalForward = async (c, rows) => {
+    const batchId = rows[0]?.batchId;
+    if (
+      batchId &&
+      (await createRepository(c.env).forUser(c.var.session.scope).approvals.isGatewayBatch(batchId))
+    )
+      return "queued";
+    return forward(c, rows);
+  };
   const routes = new Hono<AppEnv>();
   routes.use(async (c, next) => {
     c.header("Cache-Control", "no-store");
@@ -341,7 +350,7 @@ export function approvalRoutes(forward: ApprovalForward) {
     const now = Date.now();
     const live = rows.filter((r) => r.status === "pending" && r.expiresAt > now);
     if (!live.length) {
-      if (!decisions.length) return c.json({ status: await forward(c, rows) });
+      if (!decisions.length) return c.json({ status: await forwardDecision(c, rows) });
       const expired = rows.some((r) => r.status === "pending" || r.status === "expired");
       return refuse(expired ? "expired" : "already_decided", 409);
     }
@@ -385,7 +394,7 @@ export function approvalRoutes(forward: ApprovalForward) {
       }
       return refuse("stale", 409);
     }
-    return c.json({ status: await forward(c, rows) });
+    return c.json({ status: await forwardDecision(c, rows) });
   });
 
   return routes;

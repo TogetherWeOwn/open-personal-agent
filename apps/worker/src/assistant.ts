@@ -304,6 +304,28 @@ export class Assistant extends Agent<Bindings> {
     this.ctx.blockConcurrencyWhile(() => this.#recoverQueues());
   }
 
+  /** Server-only RPC: allocate through the conversation log, never the Workflow's sequence. */
+  async artifactCreated(artifactId: string): Promise<void> {
+    const artifact = await this.#repo.artifacts.get(artifactId);
+    if (!artifact?.conversationId) return;
+    await Promise.all(
+      [...this.getConnections()].map((tab) =>
+        this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
+      ),
+    );
+    this.#send(
+      artifact.conversationId,
+      artifact.turnId ?? artifact.taskId ?? artifact.id,
+      "artifact.created",
+      {
+        artifactId: artifact.id,
+        name: artifact.name,
+        type: artifact.mediaType,
+        bytes: artifact.sizeBytes,
+      },
+    );
+  }
+
   /** Liveness check for `/api/health`. */
   ping(): string {
     return "pong";

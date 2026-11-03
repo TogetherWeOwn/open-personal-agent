@@ -124,6 +124,7 @@ export const capabilityTokens = sqliteTable(
      * intersects it with the live configuration at use (M4-00b).
      */
     modelAllowlist: text("model_allowlist"),
+    toolAllowlist: text("tool_allowlist"),
     /** The task and user epochs at mint; an epoch bump fails the token (AC1c). */
     taskEpoch: integer("task_epoch").notNull().default(0),
     userEpoch: integer("user_epoch").notNull().default(0),
@@ -135,6 +136,53 @@ export const capabilityTokens = sqliteTable(
   (t) => [
     index("capability_tokens_task_idx").on(t.taskId, t.aud, t.computerId),
     index("capability_tokens_user_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+/** Monotonic upload consumption: failed attempts and token rotation never refund task quota. */
+export const capabilityUploads = sqliteTable(
+  "capability_uploads",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    tokenId: text("token_id").notNull(),
+    bytes: integer("bytes").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("capability_uploads_token_idx").on(t.tokenId),
+    index("capability_uploads_task_idx").on(t.taskId),
+  ],
+);
+
+/** Each client key consumes quota; equivalent pending keys point at one execution record. */
+export const capabilityCalls = sqliteTable(
+  "capability_calls",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    tokenId: text("token_id").notNull(),
+    computerId: text("computer_id").notNull(),
+    clientKey: text("client_key").notNull(),
+    requestHash: text("request_hash").notNull(),
+    masterId: text("master_id").notNull(),
+    status: text("status", {
+      enum: ["new", "preparing", "pending", "executing", "completed"],
+    }).notNull(),
+    response: text("response"),
+    statusCode: integer("status_code"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("capability_calls_task_key_idx").on(t.taskId, t.clientKey),
+    index("capability_calls_token_idx").on(t.tokenId, t.createdAt),
+    index("capability_calls_pending_idx").on(t.taskId, t.computerId, t.requestHash, t.status),
   ],
 );
 

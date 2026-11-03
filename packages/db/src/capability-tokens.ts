@@ -88,6 +88,27 @@ export interface CapabilityScope {
    * there is no live-config reader on this side yet). Null when the mint named none.
    */
   modelAllowlist: readonly ModelCeiling[] | null;
+  toolAllowlist: readonly ToolCeiling[] | null;
+}
+
+/** Names and SHA-256 pins from host-owned manifests, snapshotted by the minting service. */
+export interface ToolCeiling {
+  tool: string;
+  manifestHash: string;
+}
+
+function validToolAllowlist(value: unknown): value is readonly ToolCeiling[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 64 &&
+    value.every(
+      (entry) =>
+        typeof entry?.tool === "string" &&
+        /^[A-Za-z0-9_-]{1,64}$/.test(entry.tool) &&
+        typeof entry?.manifestHash === "string" &&
+        /^[A-Za-z0-9_-]{43}$/.test(entry.manifestHash),
+    )
+  );
 }
 
 /** Mint parameters. Every bound is server-side: no caller-supplied TTL or expiry (AC1c). */
@@ -98,6 +119,7 @@ export interface MintOptions {
   aud: string;
   /** Snapshotted at mint for `model_proxy`; verification intersects it with live config. */
   modelAllowlist?: readonly ModelCeiling[];
+  toolAllowlist?: readonly ToolCeiling[];
   /** The task's deadline, when known; computer eligibility/lifetime always comes from its row. */
   taskDeadlineMs?: number;
   now?: number;
@@ -152,6 +174,7 @@ interface TokenRow {
   computer_id: string;
   aud: string;
   model_allowlist: string | null;
+  tool_allowlist: string | null;
   task_epoch: number;
   user_epoch: number;
   expires_at: number;
@@ -172,6 +195,8 @@ export async function mintCapabilityToken(
   const { userId, taskId, computerId, aud, modelAllowlist, taskDeadlineMs } = options;
   const now = options.now ?? Date.now();
   if (!AUDIENCES.has(aud)) throw new MintRefusedError("unknown_audience");
+  if (options.toolAllowlist !== undefined && !validToolAllowlist(options.toolAllowlist))
+    throw new MintRefusedError("invalid_tool_allowlist");
   if (modelAllowlist !== undefined) {
     const valid =
       Array.isArray(modelAllowlist) &&
@@ -229,9 +254,9 @@ export async function mintCapabilityToken(
     db
       .prepare(
         `INSERT INTO capability_tokens
-           (id, token_hash, user_id, task_id, computer_id, aud, model_allowlist,
+           (id, token_hash, user_id, task_id, computer_id, aud, model_allowlist, tool_allowlist,
             task_epoch, user_epoch, expires_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          FROM tasks JOIN users ON users.id = tasks.user_id
          JOIN computers ON computers.task_id = tasks.id AND computers.user_id = tasks.user_id
          WHERE tasks.id = ? AND tasks.user_id = ? AND computers.id = ? AND ${LIVE_COMPUTER}
@@ -246,6 +271,7 @@ export async function mintCapabilityToken(
         computerId,
         aud,
         allowlistJson,
+        aud === "tool_gateway" ? JSON.stringify(options.toolAllowlist ?? []) : null,
         binding.task_epoch,
         binding.user_epoch,
         expiresAt,
@@ -311,7 +337,7 @@ export async function verifyCapabilityToken(
     if (!expectedAud || !AUDIENCES.has(expectedAud)) return null;
     const row = await db
       .prepare(
-        `SELECT id, user_id, task_id, computer_id, aud, model_allowlist, task_epoch,
+        `SELECT id, user_id, task_id, computer_id, aud, model_allowlist, tool_allowlist, task_epoch,
                 user_epoch, expires_at, revoked_at
          FROM capability_tokens WHERE token_hash = ?`,
       )
@@ -356,6 +382,9 @@ export async function verifyCapabilityToken(
         ? null
         : (JSON.parse(row.model_allowlist) as readonly ModelCeiling[]);
     if (modelAllowlist !== null && !Array.isArray(modelAllowlist)) return null;
+    const toolAllowlist =
+      row.tool_allowlist === null ? null : (JSON.parse(row.tool_allowlist) as unknown);
+    if (toolAllowlist !== null && !validToolAllowlist(toolAllowlist)) return null;
     return {
       tokenId: row.id,
       userId: row.user_id,
@@ -364,6 +393,7 @@ export async function verifyCapabilityToken(
       aud: row.aud as CapabilityAudience,
       expiresAt: row.expires_at,
       modelAllowlist,
+      toolAllowlist,
     };
   } catch {
     // The verification store is unreachable: fail closed, never a cached or assumed pass.

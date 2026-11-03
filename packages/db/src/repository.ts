@@ -25,7 +25,14 @@ import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
-import { revokeProviderTokens, revokeTaskTokens } from "./capability-tokens";
+import {
+  capabilityBinding,
+  capabilityParams,
+  gatewayCalls,
+  LIVE_CAPABILITY,
+  uploadBudget,
+} from "./capability-actions";
+import { type CapabilityScope, revokeProviderTokens, revokeTaskTokens } from "./capability-tokens";
 import type { ComputerRow } from "./computers";
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
@@ -535,6 +542,49 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
    */
   const rawDb = DB as unknown as SqlDatabase;
   return {
+    /** Only the bearer audience handler derives a user scope from a live persisted binding. */
+    scopeForCapability: async (capability: CapabilityScope) => {
+      const binding = await capabilityBinding(rawDb, capability);
+      return binding ? { scope: issue(capability.userId), ...binding } : null;
+    },
+    capabilityGateway: (capability: CapabilityScope) => gatewayCalls(rawDb, capability),
+    /** Write-only object storage; metadata is inserted only after all bytes and the live commit. */
+    capabilityArtifact: (capability: CapabilityScope, maxBytes: number) => ({
+      ...uploadBudget(rawDb, capability, maxBytes),
+      put: async (input: {
+        id: string;
+        name: string;
+        mediaType: string;
+        body: ReadableStream;
+        sizeBytes: () => number;
+      }) => {
+        if (capability.aud !== "artifact_upload") return false;
+        const key = `u/${capability.userId}/files/${checkId(input.id)}`;
+        try {
+          await putStreamed(FILES, key, input.body, {
+            httpMetadata: { contentType: input.mediaType },
+          });
+          const result = await rawDb
+            .prepare(`INSERT INTO artifacts
+            (id, user_id, conversation_id, task_id, name, media_type, size_bytes)
+            SELECT ?, ct.user_id, tasks.conversation_id, ct.task_id, ?, ?, ? ${LIVE_CAPABILITY}`)
+            .bind(
+              input.id,
+              input.name,
+              input.mediaType,
+              input.sizeBytes(),
+              ...capabilityParams(capability),
+            )
+            .run();
+          if (result.meta.changes === 1) return true;
+          await FILES.delete(key);
+          return false;
+        } catch (error) {
+          await FILES.delete(key).catch(() => {});
+          throw error;
+        }
+      },
+    }),
     /**
      * For the Workflow entrypoint only (the lint enforces it): the scope of the user whose task
      * row names this Workflow instance, with the row itself (M3-12 AC9). The Workflow's instance
@@ -1569,6 +1619,16 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             await db.insert(approvals).values(rows);
             return true;
           },
+          isGatewayBatch: async (batchId: string) =>
+            batchId.startsWith("gateway_") &&
+            Boolean(
+              await rawDb
+                .prepare(
+                  "SELECT 1 FROM capability_calls WHERE id = ? AND user_id = ? AND master_id = id",
+                )
+                .bind(batchId.slice("gateway_".length), userId)
+                .first(),
+            ),
           /** A batch's rows in their stored order; empty when it is missing or someone else's. */
           batch: (batchId: string): Promise<ApprovalRow[]> =>
             isBatchId(batchId)

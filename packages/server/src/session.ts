@@ -39,14 +39,16 @@ const TOUCH_MS = 60 * 60_000;
  * The routes a capability token opens, as `METHOD /path` to the audience the route serves —
  * the credential partition (M4-00a AC3). Session cookies never open these routes and capability
  * tokens never open any other, so a bearer presented anywhere else is a 401, not a session.
- * Empty in M4-00a: the audience routes that consume these tokens land in M4-00b
- * (`model_proxy`) and M4-00c (`artifact_upload`, `tool_gateway`). Each of those adds its
- * route here with its expected audience, plus an M3-21a isolation case for the new `:id` route.
+ * Each audience handler adds its route here with its expected audience, plus an M3-21a
+ * isolation case for every new ID-taking route.
  * A token pattern must not match any other route's path: `matchRoute` cannot tell which route
  * Hono would serve, so an overlap would let a bearer open a session route. `routes.test.ts`
  * enforces this for every entry.
  */
-export const TOKEN_ROUTES: ReadonlyMap<string, CapabilityAudience> = new Map([]);
+export const TOKEN_ROUTES: ReadonlyMap<string, CapabilityAudience> = new Map([
+  ["POST /api/agent/tasks/:taskId/artifacts", "artifact_upload"],
+  ["POST /api/agent/tasks/:taskId/tools", "tool_gateway"],
+]);
 
 /** The audience a route expects a bearer for, or `null` when the route takes a session. */
 export function routeCredential(route: string): CapabilityAudience | null {
