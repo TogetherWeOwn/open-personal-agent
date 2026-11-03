@@ -89,4 +89,31 @@ describe("workers-ai-binding", () => {
       "error upstream: Tool calls are not supported for this model (the model refused a request offering tools; retry without tools or use a tool-capable model)",
     ]);
   });
+
+  it("stays conditional when a tools-bearing request fails without naming tools (TWO-1960)", async () => {
+    const offered: unknown[] = [];
+    const ai: WorkersAIBinding = {
+      run: async (_model, inputs) => {
+        offered.push(inputs);
+        throw new Error("3036: account limit");
+      },
+    };
+    const events = await replay(
+      createWorkersAIProvider(ai).stream({
+        model: "@cf/openai/gpt-oss-20b",
+        messages: [{ role: "user", content: "Hi" }],
+        tools: [
+          {
+            name: "web_fetch",
+            description: "Fetch a page.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    );
+    expect(offered).toHaveLength(1);
+    expect(events).toEqual([
+      "error upstream: 3036: account limit (this request offered tools; if the model does not support tools, retry without tools or use a tool-capable model)",
+    ]);
+  });
 });
