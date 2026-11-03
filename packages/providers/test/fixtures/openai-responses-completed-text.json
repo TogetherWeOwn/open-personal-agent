@@ -1,0 +1,30 @@
+{
+  "id": "resp_01",
+  "object": "response",
+  "created_at": 1762041600,
+  "status": "completed",
+  "model": "gpt-5-mini-2026-08-07",
+  "output": [
+    {
+      "id": "msg_01",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hello there.",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "incomplete_details": null,
+  "usage": {
+    "input_tokens": 1210,
+    "input_tokens_details": { "cached_tokens": 1024 },
+    "output_tokens": 3,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 1213
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "resp_01",
+  "object": "response",
+  "created_at": 1762041600,
+  "status": "failed",
+  "model": "gpt-5-mini-2026-08-07",
+  "output": [],
+  "error": {
+    "code": "server_error",
+    "message": "The server had an error processing your request."
+  },
+  "usage": {
+    "input_tokens": 12,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 1,
+    "output_tokens_details": { "reasoning_tokens": 0 }
+  }
+}

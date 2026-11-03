@@ -74,6 +74,8 @@ export type TestResult =
       tools: boolean;
       /** How the tool-call probe went; absent from older test doubles. */
       toolProbe?: "called" | "ignored" | "rejected" | "timeout" | "failed";
+      /** Which transport answered; non-streaming means Test passed through the fallback. */
+      transport?: "streaming" | "non-streaming";
       price?: PriceHint | null;
       reply: string;
     }

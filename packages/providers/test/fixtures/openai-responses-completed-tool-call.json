@@ -1,0 +1,36 @@
+{
+  "id": "resp_01",
+  "object": "response",
+  "created_at": 1762041600,
+  "status": "completed",
+  "model": "gpt-5-mini-2026-08-07",
+  "output": [
+    {
+      "id": "rs_01",
+      "type": "reasoning",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Need the weather."
+        }
+      ],
+      "encrypted_content": "gAAAAABo-enc-rs01"
+    },
+    {
+      "id": "fc_01",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_wx1",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Lisbon\"}"
+    }
+  ],
+  "incomplete_details": null,
+  "usage": {
+    "input_tokens": 320,
+    "input_tokens_details": { "cached_tokens": 256 },
+    "output_tokens": 48,
+    "output_tokens_details": { "reasoning_tokens": 32 },
+    "total_tokens": 368
+  }
+}
