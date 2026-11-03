@@ -59,6 +59,9 @@ async function firstRun(url, setupToken, deps, statePath) {
  * report says so. The endpoint key never reaches the log: output is scrubbed like a secret.
  */
 async function liveModels(url, deps, paths) {
+  // One run, one results file: drop a stale file so retried adapters never inherit old rows
+  // (the spec merges rows already on disk, for workers restarted after a failure).
+  fs.rmSync(paths.resultsPath, { force: true });
   const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
   const key = deps.env.LIVE_MODEL_API_KEY;
   const scrub = (text) => (key ? text.replaceAll(key, "[redacted]") : text);

@@ -43,7 +43,24 @@ interface AdapterResult {
   error: string | null;
 }
 
+const ADAPTERS = new Set<Adapter>([
+  "workers-ai-binding",
+  "openai-chat",
+  "openai-responses",
+  "anthropic-messages",
+]);
+
 const results = new Map<Adapter, AdapterResult>();
+
+/** Rows already on disk, if a restarted worker left them there. */
+function readRows(): AdapterResult[] {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(RESULTS, "utf8"));
+    return Array.isArray(parsed) ? (parsed as AdapterResult[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 /** The endpoint key never reaches the report: an endpoint that echoes it fails redacted. */
 const scrubKey = (value: string | null) =>
@@ -54,6 +71,13 @@ const scrubKey = (value: string | null) =>
 function record(result: AdapterResult) {
   result = { ...result, model: scrubKey(result.model), error: scrubKey(result.error) };
   results.set(result.adapter, result);
+  // Playwright restarts the worker after a failed test, so a later adapter starts with an
+  // empty module-level Map: fold in rows already on disk so earlier adapters are never lost.
+  for (const row of readRows()) {
+    if (row && ADAPTERS.has(row.adapter) && !results.has(row.adapter)) {
+      results.set(row.adapter, row);
+    }
+  }
   fs.mkdirSync("test-results", { recursive: true });
   fs.writeFileSync(RESULTS, `${JSON.stringify([...results.values()], null, 2)}\n`);
   console.log(
