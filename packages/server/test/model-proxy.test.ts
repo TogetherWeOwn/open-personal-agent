@@ -420,9 +420,119 @@ describe("the model proxy inference surface", () => {
       300,
     );
     expect(request?.url).toBe("https://api.example/v1/chat/completions");
-    expect(request?.body.max_tokens).toBeUndefined();
-    expect(request?.body.max_completion_tokens).toBe(300);
+    expect(request?.body.max_tokens).toBe(300);
+    expect(request?.body.max_completion_tokens).toBeUndefined();
     expect(request?.body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it.each([
+    ["https://api.openai.com/v1", "max_completion_tokens"],
+    ["https://api.example/v1", "max_tokens"],
+  ])("uses the configured chat host's output cap at %s", (baseUrl, outputKey) => {
+    const request = proxyRequest(
+      { ...provider, baseUrl },
+      "/chat/completions",
+      { ...BODY, max_tokens: 999999, max_completion_tokens: 999999, max_output_tokens: 999999 },
+      300,
+    );
+    expect(request?.body[outputKey]).toBe(300);
+    for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+      if (key !== outputKey) expect(request?.body[key]).toBeUndefined();
+  });
+
+  it.each([
+    { type: "auto" },
+    { type: "any", disable_parallel_tool_use: true },
+    { type: "none" },
+    { type: "tool", name: "lookup", disable_parallel_tool_use: false },
+  ])("accepts bounded Messages tool choice %j", (tool_choice) => {
+    const request = proxyRequest(
+      { ...provider, api: "anthropic-messages" },
+      "/messages",
+      { ...BODY, tool_choice },
+      300,
+    );
+    expect(request?.body.tool_choice).toEqual(tool_choice);
+  });
+
+  it.each([
+    ["openai-chat", "/chat/completions", "auto"],
+    ["openai-chat", "/chat/completions", "required"],
+    ["openai-chat", "/chat/completions", { type: "function", function: { name: "lookup" } }],
+    ["openai-responses", "/responses", "none"],
+    ["openai-responses", "/responses", { type: "function", name: "lookup" }],
+  ] as const)("accepts %s function-only tool choice %j", (api, path, tool_choice) => {
+    const request = proxyRequest({ ...provider, api }, path, { ...BODY, tool_choice }, 300);
+    expect(request?.body.tool_choice).toEqual(tool_choice);
+  });
+
+  it.each([
+    { type: "web_search" },
+    { type: "auto", url: "https://content.example" },
+    { type: "auto", disable_parallel_tool_use: "yes" },
+    { type: "tool" },
+    { type: "tool", name: 123 },
+    { type: {} },
+    { type: ["auto"] },
+    { type: "tool", name: "lookup", function: { name: "lookup" } },
+    "required",
+  ])("rejects unsupported or malformed Messages tool choice %j", (tool_choice) => {
+    expect(
+      proxyRequest(
+        { ...provider, api: "anthropic-messages" },
+        "/messages",
+        { ...BODY, tool_choice },
+        300,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    { type: "function", function: { name: "lookup", url: "https://content.example" } },
+    { type: "function", function: { name: 123 } },
+    { type: "function", name: "lookup" },
+    { type: "web_search" },
+    "tool",
+    [],
+    false,
+  ])("rejects unsupported or malformed chat tool choice %j", (tool_choice) => {
+    expect(proxyRequest(provider, "/chat/completions", { ...BODY, tool_choice }, 300)).toBeNull();
+  });
+
+  it("accounts for all inert function-argument JSON without resolving its contents", () => {
+    const input = { document: { type: "file", url: "https://content.example/manual" } };
+    const body = {
+      ...BODY,
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call", name: "lookup", input }] },
+      ],
+    };
+    const request = proxyRequest(
+      { ...provider, api: "anthropic-messages" },
+      "/messages",
+      body,
+      300,
+    );
+    expect(request?.body.messages).toEqual(body.messages);
+    expect(request?.inputTokens).toBe(
+      new TextEncoder().encode(JSON.stringify(body)).byteLength + 1024 + 256,
+    );
+    expect(
+      proxyRequest(
+        { ...provider, api: "anthropic-messages" },
+        "/messages",
+        {
+          ...body,
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "tool_use", input: { text: "x".repeat(256 * 1024) } }],
+            },
+          ],
+        },
+        300,
+      ),
+    ).toBeNull();
   });
 
   it.each([

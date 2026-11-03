@@ -2,6 +2,7 @@
 import type { CapabilityScope } from "@opa/db/capability-tokens";
 import type { LedgerCall } from "@opa/db/repository";
 import { findPrice } from "@opa/pricing";
+import { resolveCompat } from "@opa/providers";
 import type { Kv, Limits } from "./limits";
 
 interface ProxyDeps {
@@ -455,6 +456,40 @@ function boundedContent(value: unknown): boolean {
   });
 }
 
+function boundedToolChoice(value: unknown, api: ProxyProvider["api"]): boolean {
+  if (value === undefined) return true;
+  if (typeof value === "string")
+    return api !== "anthropic-messages" && ["auto", "none", "required"].includes(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const choice = value as Record<string, unknown>;
+  const named = (name: unknown) =>
+    typeof name === "string" && name.length > 0 && name.length <= 256;
+  if (api === "anthropic-messages") {
+    return (
+      typeof choice.type === "string" &&
+      ["auto", "any", "none", "tool"].includes(choice.type) &&
+      Object.keys(choice).every((key) =>
+        ["type", "name", "disable_parallel_tool_use"].includes(key),
+      ) &&
+      (choice.type === "tool" ? named(choice.name) : choice.name === undefined) &&
+      (choice.disable_parallel_tool_use === undefined ||
+        typeof choice.disable_parallel_tool_use === "boolean")
+    );
+  }
+  if (choice.type !== "function") return false;
+  if (api === "openai-responses")
+    return Object.keys(choice).every((key) => ["type", "name"].includes(key)) && named(choice.name);
+  const fn = choice.function;
+  return (
+    Object.keys(choice).every((key) => ["type", "function"].includes(key)) &&
+    !!fn &&
+    typeof fn === "object" &&
+    !Array.isArray(fn) &&
+    Object.keys(fn).every((key) => key === "name") &&
+    named((fn as Record<string, unknown>).name)
+  );
+}
+
 /** A relative inference path is selected, never resolved against a caller-controlled URL. */
 export function proxyRequest(
   provider: ProxyProvider,
@@ -468,14 +503,10 @@ export function proxyRequest(
   if (Object.keys(source).some((key) => !KEYS.has(key))) return null;
   if (typeof source.model !== "string" || !source.model || source.model.length > 256) return null;
   if (
-    ![
-      source.messages,
-      source.input,
-      source.tools,
-      source.system,
-      source.instructions,
-      source.tool_choice,
-    ].every(boundedContent)
+    ![source.messages, source.input, source.tools, source.system, source.instructions].every(
+      boundedContent,
+    ) ||
+    !boundedToolChoice(source.tool_choice, provider.api)
   )
     return null;
   if (source.stream !== undefined && typeof source.stream !== "boolean") return null;
@@ -497,9 +528,14 @@ export function proxyRequest(
       ? "max_tokens"
       : provider.api === "openai-responses"
         ? "max_output_tokens"
-        : "max_completion_tokens";
+        : resolveCompat(provider.baseUrl).maxTokensField;
   body[outputKey] = maxOutputTokens;
-  if (provider.api === "openai-chat" && body.stream) body.stream_options = { include_usage: true };
+  if (
+    provider.api === "openai-chat" &&
+    body.stream &&
+    resolveCompat(provider.baseUrl).supportsUsageInStreaming
+  )
+    body.stream_options = { include_usage: true };
   // UTF-8 bytes upper-bound text tokens, with ample per-message/tool framing allowance.
   // Never accept files or opaque server-side context whose input this bound cannot cover.
   const json = JSON.stringify(source);
