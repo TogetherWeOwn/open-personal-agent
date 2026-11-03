@@ -4,6 +4,8 @@
 // labels, subtotals and staleness worked out here, so the page does no arithmetic.
 import { createRepository } from "@opa/db/repository";
 import {
+  browserCost,
+  browserRendering,
   cloudflareAllowances,
   findPrice,
   isStale,
@@ -197,11 +199,14 @@ usageRoutes.get("/", async (c) => {
   const first = dateOf(month);
   const repo = createRepository(c.env);
   const user = repo.forUser(c.var.session.scope);
-  const [todayRows, monthRows, breakdownRows, profile] = await Promise.all([
+  const [todayRows, monthRows, breakdownRows, profile, browserSeconds] = await Promise.all([
     user.usage.totals(today),
     user.usage.totals(month),
     user.usage.breakdowns(month),
     user.profile(),
+    // The calling user's own metered browser time this month (M4-09 AC3). Unlike the account
+    // allowances below it is per user, so every user sees their own line.
+    user.browserUsage.secondsSince(month),
   ]);
   const todayPeriod = period(todayRows, now);
   const monthPeriod = period(monthRows, now);
@@ -245,5 +250,15 @@ usageRoutes.get("/", async (c) => {
     meters,
     // The date the included amounts were checked, which every meter's line gives (AC3).
     metersVerifiedAt: meters && cloudflareAllowances.verifiedAt,
+    // The calling user's own browser time this month, with the included-hours split worked out
+    // here so the page does no arithmetic (the browser tool's AC3 included-hours line).
+    browser: {
+      seconds: browserSeconds,
+      ...browserCost(browserSeconds),
+      includedHoursPerMonth: browserRendering.includedHoursPerMonth,
+      usdPerHour: browserRendering.usdPerHour,
+      priceVerifiedAt: browserRendering.verifiedAt,
+      stale: isStale(browserRendering.verifiedAt, now),
+    },
   });
 });

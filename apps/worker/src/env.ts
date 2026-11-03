@@ -17,6 +17,8 @@ export interface Bindings extends AppPorts {
   ASSISTANT: DurableObjectNamespace<Assistant>;
   TASK_WORKFLOW: Workflow;
   EXPORT_WORKFLOW: Workflow;
+  /** Browser Rendering for the `browser` tool; optional, so a deployment without it just doesn't offer the tool. */
+  BROWSER?: unknown;
   PUBLIC_LIMIT?: RateLimit;
 }
 

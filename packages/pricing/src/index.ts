@@ -61,6 +61,33 @@ export const cloudflareAllowances: {
   verifiedAt: string;
 } = table.cloudflare;
 
+/**
+ * Cloudflare Browser Rendering for the `browser` tool (M4-09 AC3): hours included with
+ * Workers Paid each month, then a per-hour price. Dated like every entry (COST-8); the app's
+ * own metered seconds are estimates against Cloudflare's bill, never the bill itself.
+ */
+export const browserRendering: {
+  includedHoursPerMonth: number;
+  usdPerHour: number;
+  verifiedAt: string;
+  source: string;
+} = table.browserRendering;
+
+/**
+ * A month's metered browser seconds split at the included allowance, with the billed part's
+ * estimated cost in micro-USD. Rounds up like `estimate`, so time past the allowance never
+ * shows as free.
+ */
+export function browserCost(seconds: number) {
+  const includedSeconds = browserRendering.includedHoursPerMonth * 3600;
+  const billedSeconds = Math.max(0, seconds - includedSeconds);
+  return {
+    includedSeconds: Math.min(seconds, includedSeconds),
+    billedSeconds,
+    costMicroUsd: up((billedSeconds / 3600) * browserRendering.usdPerHour * 1e6),
+  };
+}
+
 const providers: Record<string, ProviderInfo> = table.providers as Record<string, ProviderInfo>;
 const models: ModelPrice[] = table.models;
 

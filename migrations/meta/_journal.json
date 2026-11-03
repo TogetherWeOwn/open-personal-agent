@@ -197,6 +197,13 @@
       "when": 1793729835255,
       "tag": "0027_computers_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1793727273015,
+      "tag": "0028_browser_usage",
+      "breakpoints": true
     }
   ]
 }

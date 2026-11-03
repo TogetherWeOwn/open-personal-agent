@@ -414,6 +414,30 @@ export const usage = sqliteTable(
 );
 
 /**
+ * One row per finished `browser` tool session (M4-09 AC3, COST-9): its whole seconds between
+ * open and close, metered by the tool layer. Browser time is not a model call, so it does not
+ * ride the token-shaped `usage` table (its totals and projections count calls); Usage prices
+ * these rows from the dated Browser Rendering entry in the price table. `task_id` attributes a
+ * background task's browsing to it, like `usage.task_id`; chat browsing keeps `conversation_id`.
+ */
+export const browserUsage = sqliteTable(
+  "browser_usage",
+  {
+    id: text("id").primaryKey(),
+    userId: userId(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    taskId: text("task_id").references((): AnySQLiteColumn => tasks.id, {
+      onDelete: "set null",
+    }),
+    seconds: integer("seconds").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("browser_usage_user_idx").on(t.userId, t.createdAt)],
+);
+
+/**
  * A user's saved model providers (M3-06). The key lives envelope-encrypted in `secrets` (ADR 0010
  * D4), bound to `provider_id` and `base_url`'s origin and path (ADR 0006 #5). The Workers AI starter
  * is a row too, with no URL and no key. `model` is the one saved and tested with it. `api` is an

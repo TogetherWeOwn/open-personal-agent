@@ -25,6 +25,11 @@ export interface AppPorts extends DataPorts {
   /** Workers AI. Absent where the runtime has none; health reports it by presence only. */
   AI?: WorkersAIBinding;
   /**
+   * Browser Rendering (the `browser` tool, Workers only). Opaque here: only the Worker's
+   * session adapter speaks to it. Absent, the tool is not offered — the Node root has none.
+   */
+  BROWSER?: unknown;
+  /**
    * Background task runs. Health reports it by presence only, so it never creates one.
    * The Tasks cancel route terminates the run's instance through `get`; a root without the
    * binding (apps/node) leaves it absent and the cancel is row-only.

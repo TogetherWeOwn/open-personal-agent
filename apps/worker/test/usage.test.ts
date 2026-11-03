@@ -46,6 +46,16 @@ type UsageBody = {
   allowance: { resetsAt: number; freeNeuronsUsed: number; billedNeurons: number } | null;
   meters: { id: string; used: number; limit: number; unit: string }[] | null;
   metersVerifiedAt: string | null;
+  browser: {
+    seconds: number;
+    includedSeconds: number;
+    billedSeconds: number;
+    costMicroUsd: number;
+    includedHoursPerMonth: number;
+    usdPerHour: number;
+    priceVerifiedAt: string;
+    stale: boolean;
+  };
 };
 const DAY = 86_400_000;
 
@@ -169,6 +179,27 @@ describe("usage ledger", () => {
     expect(body.today.groups[0]?.lines).toMatchObject([
       { name: "GPT-4.1", priceVerifiedAt: "2020-01-01", stale: true },
     ]);
+  });
+
+  it("shows the caller's own browser time against the included hours, nobody else's", async () => {
+    const { browser, owner } = await claim();
+    const insert = db.prepare("INSERT INTO browser_usage (id, user_id, seconds) VALUES (?, ?, ?)");
+    await db.batch([
+      db.prepare("INSERT INTO users (id, display_name, role) VALUES ('b-other', 'O', 'member')"),
+      // 10.5 h of the owner's browsing, 2 h of someone else's.
+      insert.bind("b1", owner, 37_800),
+      insert.bind("b2", "b-other", 7_200),
+    ]);
+    const body = await (await browser.req("/api/usage")).json<UsageBody>();
+    expect(body.browser).toMatchObject({
+      seconds: 37_800,
+      includedSeconds: 36_000, // 10 h included
+      billedSeconds: 1_800,
+      costMicroUsd: 45_000, // half an hour at $0.09/h
+      includedHoursPerMonth: 10,
+      usdPerHour: 0.09,
+    });
+    expect(body.browser.priceVerifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it("marks a category billed once one of its meters passes the included amount", async () => {

@@ -154,6 +154,18 @@ const breakdowns = {
   day: days,
 };
 
+/** Two and a quarter hours of browsing, inside the 10 included hours. */
+const browser = {
+  seconds: 8_100,
+  includedSeconds: 8_100,
+  billedSeconds: 0,
+  costMicroUsd: 0,
+  includedHoursPerMonth: 10,
+  usdPerHour: 0.09,
+  priceVerifiedAt: "2026-11-03",
+  stale: false,
+};
+
 function body(today: typeof period, month: typeof period, allowed: unknown = allowance) {
   const projected = month.costMicroUsd * 3;
   return {
@@ -166,6 +178,7 @@ function body(today: typeof period, month: typeof period, allowed: unknown = all
     allowance: allowed,
     meters: allowed ? meters : null,
     metersVerifiedAt: allowed ? "2026-11-01" : null,
+    browser,
   };
 }
 
@@ -272,6 +285,29 @@ test("past an included amount Cloudflare bills it; the neuron line stands withou
   await expect(rows).toContainText("3,200 of 10,000 free today · 0 billed");
 });
 
+test("browser time shows against the included hours, and its overage is priced", async ({
+  page,
+}) => {
+  await open(page, body(period, period));
+  const region = page.getByRole("region", { name: "Browser" });
+  await expect(region).toContainText("2h 15m of 10h included this month");
+  await expect(region).toContainText("Past the included hours, Cloudflare bills $0.09 an hour.");
+  await expect(region).toContainText("Price as of Nov 3, 2026.");
+  // Past the included hours, the extra time and its estimated cost are named.
+  await open(page, {
+    ...body(period, period),
+    browser: {
+      ...browser,
+      seconds: 37_800,
+      includedSeconds: 36_000,
+      billedSeconds: 1_800,
+      costMicroUsd: 45_000,
+    },
+  });
+  await expect(region).toContainText("10h 30m of 10h included this month");
+  await expect(region).toContainText("Past the included hours: 30m, about $0.05");
+});
+
 test("a member sees no allowance meters, and half the budget shows the quiet line", async ({
   page,
 }) => {
@@ -339,7 +375,10 @@ test("an unknown cost is never shown or exported as zero", async ({ page }) => {
 });
 
 test("nothing used yet still shows the plan; a member has no meter", async ({ page }) => {
-  await open(page, body(empty, empty, null));
+  await open(page, {
+    ...body(empty, empty, null),
+    browser: { ...browser, seconds: 0, includedSeconds: 0 },
+  });
   await expect(page.getByRole("meter")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Nothing used yet this month" })).toBeVisible();
   await expect(page.getByText("$5.00 a month")).toBeVisible();

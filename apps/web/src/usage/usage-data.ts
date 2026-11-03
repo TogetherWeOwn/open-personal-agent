@@ -92,6 +92,17 @@ export interface UsageData {
   meters: AllowanceMeter[] | null;
   /** When the included amounts were checked; null with the meters. */
   metersVerifiedAt: string | null;
+  /** The calling user's own browser time this month, split by the included hours. */
+  browser: {
+    seconds: number;
+    includedSeconds: number;
+    billedSeconds: number;
+    costMicroUsd: number;
+    includedHoursPerMonth: number;
+    usdPerHour: number;
+    priceVerifiedAt: string;
+    stale: boolean;
+  };
 }
 
 export const num = new Intl.NumberFormat();

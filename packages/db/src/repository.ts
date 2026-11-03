@@ -34,6 +34,7 @@ import {
   artifacts,
   attachments,
   auditLog,
+  browserUsage,
   computers,
   conversations,
   dataExports,
@@ -101,7 +102,9 @@ export interface DataBindings<Stub, Id> {
     get(key: string): Promise<StoredObject | null>;
     put(
       key: string,
-      value: string | ReadableStream,
+      // Bytes join text and streams for binary artifacts (a browser screenshot, M4-09); both
+      // R2 and the Node store take them as a body.
+      value: string | ReadableStream | Uint8Array,
       options: { httpMetadata: { contentType: string } },
     ): Promise<unknown>;
     delete(key: string): Promise<unknown>;
@@ -976,7 +979,8 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
         id: string;
         name: string;
         mediaType: string;
-        content: string;
+        /** Text a tool wrote, or the bytes of a binary one (a browser screenshot, M4-09). */
+        content: string | Uint8Array;
         source: ArtifactSource;
       }) => {
         const { conversationId = null, taskId = null, turnId = null } = input.source;
@@ -993,7 +997,10 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           if (!own.length) throw new Error("not the user's task");
         }
         const key = fileKey(input.id);
-        const sizeBytes = new TextEncoder().encode(input.content).length;
+        const sizeBytes =
+          typeof input.content === "string"
+            ? new TextEncoder().encode(input.content).length
+            : input.content.length;
         // The row first: a taken ID fails here, before the put could overwrite that file's bytes.
         await db.insert(artifacts).values({
           id: input.id,
@@ -2015,6 +2022,41 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           /** Every ledger row, oldest first, for the data export (M3-20 AC1). */
           list: () =>
             db.select().from(usage).where(eq(usage.userId, userId)).orderBy(usage.createdAt),
+        },
+        /** Browser-session metering (M4-09 AC3, COST-9): one row per finished session. */
+        browserUsage: {
+          /**
+           * Record one finished session's whole seconds. `id` is host-minted, so a retried
+           * write (a recovery that can't tell whether the first landed) changes nothing.
+           */
+          record: async (session: {
+            id: string;
+            seconds: number;
+            conversationId?: string;
+            taskId?: string;
+          }) => {
+            await db
+              .insert(browserUsage)
+              .values({
+                id: checkId(session.id),
+                userId,
+                conversationId: session.conversationId ?? null,
+                taskId: session.taskId === undefined ? null : checkId(session.taskId),
+                // A session ran for at least a second once it opened; never record a negative.
+                seconds: Math.max(1, Math.floor(session.seconds)),
+              })
+              .onConflictDoNothing({ target: browserUsage.id });
+          },
+          /** This user's metered browser seconds since `since` (Usage's month line). */
+          secondsSince: async (since: number): Promise<number> => {
+            const [row] = await db
+              .select({
+                seconds: sql<number>`coalesce(sum(${browserUsage.seconds}), 0)`.mapWith(Number),
+              })
+              .from(browserUsage)
+              .where(and(eq(browserUsage.userId, userId), gte(browserUsage.createdAt, since)));
+            return row?.seconds ?? 0;
+          },
         },
         /** Memory behind its trust gate (ADR 0008): the only way to the memory tables. */
         memory,

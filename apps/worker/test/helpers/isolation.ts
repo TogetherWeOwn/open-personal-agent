@@ -240,6 +240,14 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
       conversation,
       message,
     ),
+    // One metered browser session, filed under this user's own conversation and task.
+    run(
+      "INSERT INTO browser_usage (id, user_id, conversation_id, task_id, seconds) VALUES (?, ?, ?, ?, 60)",
+      `browser-usage-${tag}`,
+      id,
+      conversation,
+      task,
+    ),
     // A turn stopped at its call limit, waiting on Continue.
     run(
       "INSERT INTO turn_states (turn_id, user_id, conversation_id, reply_id, provider_id, model, status, state) VALUES (?, ?, ?, ?, 'openai', 'gpt-4o', 'limit_reached', ?)",
