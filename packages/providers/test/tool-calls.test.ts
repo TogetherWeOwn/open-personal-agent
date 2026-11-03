@@ -2,7 +2,7 @@
 import type { ModelEvent, ModelMessage, ModelTool, ModelToolCall } from "@opa/core";
 import { describe, expect, it } from "vitest";
 import { createOpenAIChatProvider } from "../src/openai-chat";
-import { createWorkersAIProvider } from "../src/workers-ai";
+import { createWorkersAIProvider, STARTER_MODEL } from "../src/workers-ai";
 import openaiText from "./fixtures/openai-chat-text.sse?raw";
 import openaiToolCall from "./fixtures/openai-chat-tool-call.sse?raw";
 import workersAiToolCall from "./fixtures/workers-ai-tool-call.sse?raw";
@@ -198,7 +198,9 @@ describe("openai-chat tool calls", () => {
 });
 
 describe("workers-ai-binding tool calls", () => {
-  const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  // The starter model is chat-only (see the refusal test below), so the tool-call wire tests
+  // run against a tool-capable model.
+  const MODEL = "@cf/openai/gpt-oss-20b";
 
   it("replays the older whole-call shape and gives the call an id", async () => {
     const { p, inputs } = workersAi(workersAiToolCall);
@@ -216,6 +218,22 @@ describe("workers-ai-binding tool calls", () => {
     });
     // A model the catalogue doesn't list as taking tools isn't reported as supporting them.
     expect(p.capabilities("@cf/meta/llama-2-7b-chat-int8").tools).toBe(false);
+    expect(p.capabilities(STARTER_MODEL).tools).toBe(false);
+  });
+
+  it("sends tools to the binding for an unlisted model, so the probe gathers evidence (TWO-1960)", async () => {
+    // The starter is chat-only and the loop never offers it tools, but a direct
+    // tools-bearing request (the M3-06 Test probe) must still reach the binding: a local
+    // refusal would make the probe circular and it could never produce evidence.
+    const { p, inputs } = workersAi(workersAiToolCall);
+    const events = await replay(
+      p.stream({ model: STARTER_MODEL, messages: ask, tools: [weather] }),
+    );
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toEqual({ messages: ask, stream: true, tools: [wireTool] });
+    // The stub binding answers with a tool call, so the request reaches it and the evidence
+    // comes back from the binding instead of a local refusal.
+    expect(events[0]).toMatch(/ get_weather \{"city":"Lisbon"\}$/);
   });
 
   it("replays models that stream OpenAI-shaped calls", async () => {

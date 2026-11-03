@@ -24,8 +24,15 @@ export const WORKERS_AI_PROVIDER_ID = "workers-ai";
 export const STARTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 /**
- * Models whose input schema takes `tools`, from `@cloudflare/workers-types` 5.20261031. A model
- * missing here reports no tool support until the model Test's tool probe (M3-06) finds it.
+ * Models that actually perform tool calls, seeded from `@cloudflare/workers-types` 5.20261031
+ * (models whose input schema takes `tools`) and corrected by live evidence. A model missing here
+ * reports no tool support; a successful model Test tool probe (M3-06) is the evidence that
+ * justifies adding it here in a code change — the probe does not enable tools at runtime.
+ * The keyless starter
+ * (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`) is deliberately absent although its schema takes
+ * `tools`: the T7 probe called one tool 7 of 8 times and two tools 0 of 8, so it is sold as chat
+ * only, and offering the production registry to it failed the first answer on a fresh deploy
+ * (TWO-1960). Gating reads this set through `capabilities`, never a model-name check elsewhere.
  */
 const TOOL_MODELS: ReadonlySet<string> = new Set([
   "@cf/aisingapore/gemma-sea-lion-v4-27b-it",
@@ -34,7 +41,6 @@ const TOOL_MODELS: ReadonlySet<string> = new Set([
   "@cf/google/gemma-3-12b-it",
   "@cf/google/gemma-4-26b-a4b-it",
   "@cf/meta/llama-3.2-11b-vision-instruct",
-  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "@cf/meta/llama-4-scout-17b-16e-instruct",
   "@cf/mistralai/mistral-small-3.1-24b-instruct",
   "@cf/moonshotai/kimi-k2.5",
@@ -92,7 +98,22 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
           ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
         });
       } catch (e) {
-        yield error("upstream", e instanceof Error ? e.message.slice(0, 300) : "Workers AI failed");
+        const detail = e instanceof Error ? e.message.slice(0, 300) : "Workers AI failed";
+        // A tools-bearing request can fail for reasons unrelated to tools (quota, outage),
+        // so only an error that names tools states a refusal as fact; otherwise the advice
+        // stays conditional and the upstream detail leads (TWO-1960). The loop only offers
+        // where `capabilities` reports tool support; the Test probe offers to gather
+        // evidence for any model. Either way the outcome came from the binding, so it is
+        // real evidence, not a local refusal.
+        const namesTools = /tool/i.test(detail);
+        yield error(
+          "upstream",
+          request.tools?.length
+            ? namesTools
+              ? `${detail} (the model refused a request offering tools; retry without tools or use a tool-capable model)`
+              : `${detail} (this request offered tools; if the model does not support tools, retry without tools or use a tool-capable model)`
+            : detail,
+        );
         return;
       }
       if (!(body instanceof ReadableStream)) {

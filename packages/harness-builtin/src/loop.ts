@@ -482,9 +482,14 @@ export async function* runTurn(
     const began = host.now();
     yield ev("step.started", { stepId, label: "Thinking" });
 
-    const tools = host.tools
-      .manifests()
-      .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+    // A chat-only model is never offered tools: the turn reads the declared per-model
+    // capability (TWO-1960), so the keyless starter chats instead of failing its first answer.
+    // Execution still resolves against `host.tools`, so already-approved calls keep working.
+    const tools = host.provider.capabilities(host.model).tools
+      ? host.tools
+          .manifests()
+          .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))
+      : [];
     // A third party's description is in the context from this call on, so it taints the turn
     // before anything the call asks for is decided.
     for (const { name } of tools) {

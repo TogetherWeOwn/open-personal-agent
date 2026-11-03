@@ -237,19 +237,28 @@ describe("model settings", () => {
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
-    const called = '{"tool_calls":[{"name":"report_ready","arguments":{}}]}';
+    const runs: { tools?: unknown }[] = [];
     const AI = {
-      run: async (_model: string, inputs: { tools?: unknown }) =>
-        inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]"),
+      run: async (_model: string, inputs: { tools?: unknown }) => {
+        runs.push(inputs);
+        // As the live starter does (starter-chat.test.ts): plain text answers, while a
+        // tools-offering request is refused. The probe must still reach the binding so its
+        // outcome is real evidence, not a local refusal (TWO-1960).
+        if (inputs.tools) throw new Error("`tools` is not supported for this model");
+        return sse('{"response":"ready"}', usage, "[DONE]");
+      },
     } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
-    // Both calls are billed, so the ledger has them. The first is priced: 25 × $0.293/M +
-    // 6 × $2.253/M. The probe reported no usage, so it is unpriced.
+    // The probe reached the binding and the binding refused tools, so Test reports no tool
+    // support from real evidence; the refused probe ran no model, so it isn't billed.
+    expect(tested).toMatchObject({ ok: true, tools: false, toolProbe: "failed", reply: "ready" });
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).not.toHaveProperty("tools");
+    expect(runs[1]).toHaveProperty("tools");
+    // Only the text call ran, so only it is billed: 25 × $0.293/M + 6 × $2.253/M.
     const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai' ORDER BY rowid";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
       { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
-      { input_tokens: 0, cost_micro_usd: null },
     ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);
