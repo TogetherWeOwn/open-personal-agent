@@ -30,8 +30,8 @@ import {
   type VaultStore,
   type WrappedDek,
 } from "@opa/vault";
-import { type Channel, Server } from "ssh2";
-import { describe, expect, it } from "vitest";
+import { Client, Server, type ServerChannel, type SFTPWrapper } from "ssh2";
+import { describe, expect, it, vi } from "vitest";
 import {
   createSshVmProvider,
   loadSshPrivateKey,
@@ -74,7 +74,7 @@ function rsaWireFormat(publicKey: KeyObject): Buffer {
 
 /** The `SHA256:` pin for a host key, computed independently of the provider's hasher. */
 function hostPin(publicKey: KeyObject): string {
-  return `SHA256:${createHash("sha256").update(rsaWireFormat(publicKey)).digest("base64")}`;
+  return `SHA256:${createHash("sha256").update(rsaWireFormat(publicKey)).digest("base64").replace(/=+$/, "")}`;
 }
 
 /** An `authorized_keys` line for an RSA public key. */
@@ -316,8 +316,9 @@ interface ScriptServer {
 async function startScriptServer(options: {
   hostKeyPem: string;
   acceptPublicKey: boolean;
-  onExec: (command: string, stream: Channel) => void;
+  onExec: (command: string, stream: ServerChannel) => void;
   emulateDocker?: boolean;
+  failCancellation?: boolean;
 }): Promise<ScriptServer> {
   const commands: string[] = [];
   const children: ChildProcess[] = [];
@@ -342,16 +343,23 @@ async function startScriptServer(options: {
         const session = accept();
         session.on("exec", (acceptExec, _rejectExec, info) => {
           commands.push(info.command);
+          const command = info.command.replace(/^PATH=\/usr\/bin:\/bin; export PATH; /, "");
           const stream = acceptExec();
           if (
             options.emulateDocker &&
-            (!info.command.startsWith("'docker' 'exec'") || info.command.includes("kill -KILL"))
+            (!command.startsWith("'docker' 'exec'") || info.command.includes("kill -KILL"))
           ) {
             // Transport-only double: image and lifecycle replies, not an image conformance proof.
+            if (command.startsWith("'rm' ")) {
+              // Metadata cleanup must be real, otherwise restart tests retain deleted records.
+              stream.exit(spawnSync("/bin/sh", ["-c", info.command]).status ?? 1);
+              stream.end();
+              return;
+            }
             if (info.command.includes("'image' 'inspect'"))
               stream.write(`sha256:${"a".repeat(64)}\n`);
             else if (info.command.includes("{{.State.Running}}")) stream.write("true\n");
-            stream.exit(0);
+            stream.exit(options.failCancellation && info.command.includes("kill -KILL") ? 1 : 0);
             stream.end();
           } else options.onExec(info.command, stream);
         });
@@ -399,6 +407,224 @@ function scriptEntry(
     hostKeyPins: [hostPin(host)],
   });
 }
+
+describe.skipIf(SFTP_SERVER === undefined)("SSH failure recovery", () => {
+  it("ignores writable directories in the SSH account PATH", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const dir = mkdtempSync(join(tmpdir(), "ssh-vm-path-"));
+    const marker = join(dir, "substituted");
+    writeFileSync(join(dir, "docker"), `#!/bin/sh\nprintf substituted > '${marker}'\nexit 1\n`, {
+      mode: 0o700,
+    });
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      onExec: (command, stream) => {
+        const result = spawnSync("/bin/sh", ["-c", command], {
+          env: { ...process.env, PATH: `${dir}:/usr/bin:/bin` },
+          encoding: "utf8",
+          timeout: 10_000,
+        });
+        stream.write(result.stdout ?? "");
+        stream.stderr.write(result.stderr ?? "");
+        stream.exit(result.status ?? 1);
+        stream.end();
+      },
+    });
+    try {
+      const provider = createSshVmProvider(
+        scriptEntry(server, host.publicKey, { baseDir: join(dir, "computers") }),
+        async () => key.privatePem,
+        { imageRef: `sha256:${"f".repeat(64)}` },
+      );
+      await expect(
+        provider.create(createComputerSpec({ profile: "standard" })),
+      ).rejects.toMatchObject({ code: "provider" });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+  it("handles a post-ready connection error without an uncaught exception", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-network-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      onExec: (_command, stream) => stream.write("ready"),
+    });
+    let active: Client | undefined;
+    const original = Client.prototype.exec;
+    const spy = vi.spyOn(Client.prototype, "exec").mockImplementation(function (
+      this: Client,
+      command,
+      callback,
+    ) {
+      active = this;
+      return original.call(this, command, callback);
+    });
+    try {
+      const provider = createSshVmProvider(
+        scriptEntry(server, host.publicKey, { baseDir }),
+        async () => key.privatePem,
+      );
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      const events = [];
+      for await (const event of provider.exec(handle, { argv: ["long-command"] })) {
+        events.push(event);
+        if (event.type === "stdout") {
+          expect(() => active?.emit("error", new Error("ECONNRESET"))).not.toThrow();
+          active?.destroy();
+        }
+      }
+      expect(events.at(-1)).toMatchObject({ type: "error", code: "provider" });
+      expect(events.filter((event) => event.type === "error")).toHaveLength(1);
+    } finally {
+      active?.destroy();
+      spy.mockRestore();
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("preserves aborted status when cancellation cleanup fails", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-cancel-failure-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      failCancellation: true,
+      onExec: () => {},
+    });
+    try {
+      const provider = createSshVmProvider(
+        scriptEntry(server, host.publicKey, { baseDir }),
+        async () => key.privatePem,
+      );
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      const events = [];
+      for await (const event of provider.exec(handle, {
+        argv: ["sleep", "30"],
+        timeoutSeconds: 0.1,
+      }))
+        events.push(event);
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: "error",
+          code: "aborted",
+          message: expect.stringContaining("cleanup failed"),
+        }),
+      ]);
+    } finally {
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("retains valid metadata after an interrupted state write", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-atomic-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      onExec: () => {},
+    });
+    let interruptWrite = false;
+    const original = Client.prototype.sftp;
+    const spy = vi.spyOn(Client.prototype, "sftp").mockImplementation(function (
+      this: Client,
+      callback,
+    ) {
+      return original.call(this, (error, sftp) => {
+        if (!error) {
+          const write = sftp.writeFile.bind(sftp);
+          sftp.writeFile = ((
+            path: string,
+            data: string | Buffer,
+            done: (error?: Error | null) => void,
+          ) => {
+            if (interruptWrite) {
+              interruptWrite = false;
+              write(path, Buffer.from(data).subarray(0, 5), (error?: Error | null) =>
+                done(error ?? new Error("interrupted write")),
+              );
+            } else write(path, data, done);
+          }) as SFTPWrapper["writeFile"];
+        }
+        callback(error, sftp);
+      });
+    });
+    try {
+      const provider = createSshVmProvider(
+        scriptEntry(server, host.publicKey, { baseDir }),
+        async () => key.privatePem,
+      );
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      interruptWrite = true;
+      await expect(provider.stop(handle)).rejects.toMatchObject({ code: "provider" });
+      expect(
+        JSON.parse(
+          readFileSync(join(baseDir, handle.providerComputerId, ".computer.json"), "utf8"),
+        ),
+      ).toMatchObject({ providerComputerId: handle.providerComputerId });
+      const restarted = createSshVmProvider(
+        scriptEntry(server, host.publicKey, { baseDir }),
+        async () => key.privatePem,
+      );
+      expect(await restarted.list()).toEqual([
+        expect.objectContaining({ providerComputerId: handle.providerComputerId }),
+      ]);
+      await restarted.destroy(handle);
+    } finally {
+      spy.mockRestore();
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("keeps destroy idempotent across restart while rejecting unknown IDs", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-tombstone-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      onExec: () => {},
+    });
+    try {
+      const entry = scriptEntry(server, host.publicKey, { baseDir });
+      const first = createSshVmProvider(entry, async () => key.privatePem);
+      const handle = await first.create(createComputerSpec({ profile: "standard" }));
+      await first.destroy(handle);
+      const restarted = createSshVmProvider(entry, async () => key.privatePem);
+      await expect(restarted.destroy(handle)).resolves.toBeUndefined();
+      await expect(restarted.getFile(handle, "data")).rejects.toMatchObject({ code: "gone" });
+      await expect(restarted.stop(handle)).rejects.toMatchObject({ code: "gone" });
+      await expect(
+        restarted.destroy({
+          ...handle,
+          providerComputerId: `${entry.id}-00000000-0000-4000-8000-000000000000`,
+        }),
+      ).rejects.toMatchObject({ code: "not_found" });
+      await expect(restarted.destroy({ ...handle, providerId: "foreign" })).rejects.toMatchObject({
+        code: "not_found",
+      });
+      expect(await restarted.list()).toEqual([]);
+    } finally {
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
 
 describe("ssh transport", () => {
   it("refuses a host key that is not pinned (no TOFU)", async () => {
@@ -488,7 +714,7 @@ describe("ssh transport", () => {
         expect(server.commands.at(-1)).toContain(
           `'docker' 'exec' '-i' 'opa-ssh-${handle.providerComputerId}' 'setsid' 'sh' '-c'`,
         );
-        const launch = server.commands.find((command) => command.startsWith("'docker' 'run'"));
+        const launch = server.commands.find((command) => command.includes("'docker' 'run'"));
         expect(launch).toContain("'--pull=never'");
         expect(launch).toContain(`'sha256:${"a".repeat(64)}'`);
         expect(launch).not.toContain(baseDir);
@@ -501,6 +727,7 @@ describe("ssh transport", () => {
         rmSync(baseDir, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 
   it.skipIf(SFTP_SERVER === undefined)(
@@ -691,6 +918,12 @@ async function startSshd(): Promise<SshdFixture> {
   const hostPath = join(dir, "host");
   const authPath = join(dir, "authorized_keys");
   writeFileSync(hostPath, host.privatePem, { mode: 0o600 });
+  writeFileSync(`${hostPath}.pub`, authorizedKeysLine(host.publicKey), { mode: 0o600 });
+  const opensshPin = execFileSync("ssh-keygen", ["-lf", `${hostPath}.pub`, "-E", "sha256"], {
+    encoding: "utf8",
+  })
+    .trim()
+    .split(/\s+/)[1] as string;
   writeFileSync(authPath, authorizedKeysLine(key.publicKey), { mode: 0o600 });
   const baseDir = join(dir, "computers");
   const port = await freePort();
@@ -777,7 +1010,7 @@ async function startSshd(): Promise<SshdFixture> {
       host: "127.0.0.1",
       port,
       username,
-      hostKeyPins: [hostPin(host.publicKey)],
+      hostKeyPins: [opensshPin],
       credentialSecretId: "ssh-lab",
       baseDir,
     },

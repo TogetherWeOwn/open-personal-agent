@@ -5,13 +5,27 @@ using SSH only as the control-plane transport. It is an optional second provider
 an M4 exit criterion**; it can move to M5 without changing the M4 exit criteria. This
 adapter does not provision a VM, install a daemon, or deploy the control plane.
 
+## Integration status
+
+This change supplies the Node-only `ComputerProvider` implementation and conformance
+suite, not an enabled application computer path. Neither `createNodeApp` nor the
+Worker composition root registers this factory, and there is no Settings switch or
+environment variable that enables it. An integrating composition root must bind a
+provider entry to its owner's vault scope and bridge the lifecycle `ComputerDriver`
+interface; this adapter must not be handed to that interface unchanged. Task tools,
+owner authorization, token delivery and lifecycle sweep wiring are not supplied here.
+Do not treat standalone provider conformance as an end-to-end application acceptance.
+
 ## VM prerequisites
 
 - A reachable OpenSSH server with SFTP, public-key authentication and a writable home
   directory for a dedicated control-plane account.
 - A working Docker CLI and daemon accessible to that account, plus POSIX `sh` and `rm`.
-  Docker access is host-privileged: use an account and VM dedicated to this provider,
-  not a login used inside managed computers. This is not a hardened multi-tenant VM.
+  Host commands use only `/usr/bin:/bin`, never account-writable PATH entries; install
+  the required tools there. The login shell, system binaries and daemon remain trusted
+  administrator-controlled prerequisites. Docker access is host-privileged: use an
+  account and VM dedicated to this provider, not a login used inside managed computers.
+  This is not a hardened multi-tenant VM.
 - The shared image preloaded on that daemon. Build it from this repository's Dockerfile
   and pins; neither `create()` nor `exec()` installs tools, builds, or pulls an image.
 
@@ -55,16 +69,27 @@ Host-only `.computer.json` records live under `baseDir` (default
 container and named `/work` volume. Neither the host metadata directory nor the Docker
 socket is mounted into the computer. Commands and relative or absolute file paths are
 resolved inside the container, running as UID 10000 with dropped capabilities,
-`no-new-privileges` and CPU/memory/PID limits.
+`no-new-privileges` and CPU/memory/PID limits. `/work` is the default working directory
+and persistent mount, not a file-access sandbox: absolute paths and `..` may address
+other files writable by UID 10000 inside that same container. They cannot address the
+VM's host filesystem or metadata because those paths are not mounted. Exec already
+grants the same guest account access; file operations do not grant a wider host scope.
 
 ## Lifecycle and capabilities
 
 - `stop()` stops only the computer's container, not the VM. The named volume remains.
 - A control-plane restart rediscovers metadata and retains files on the VM disk.
   `list()` reconciles running records with the current daemon's containers.
-- `destroy()` removes the container, named volume, then metadata. Interrupted cleanup
-  keeps the record so cleanup can be retried. A failed create likewise retains a
-  stopped recovery record if resource cleanup cannot finish.
+- Metadata changes write a sibling temporary file, then publish with OpenSSH's atomic
+  POSIX rename extension. Interrupted writes retain the previous valid record. The
+  initial stopped record is published before any container or volume is allocated;
+  interruption before publication can leave only an unused directory/temporary file.
+- `destroy()` removes the container and named volume, then atomically persists a small
+  `destroyed` metadata tombstone. It is excluded from listings, keeps destroy idempotent
+  across restarts, and distinguishes destroyed IDs from never-created IDs. Tombstones
+  are retained without an automatic expiry. Interrupted cleanup keeps the old record
+  for retry. A failed create likewise retains a stopped recovery record if resource
+  cleanup cannot finish.
 - Exec timeout, AbortSignal cancellation and early iterator return clean up the exec's
   process group without stopping other execs or the computer. This is process cleanup,
   not a security boundary against guest code deliberately creating another session.

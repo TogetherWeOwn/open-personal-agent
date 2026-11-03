@@ -20,7 +20,7 @@
 // `unsupported` rather than silently ignored), no snapshot/preview surfaces, and `stop()` never
 // touches the VM itself — it stops only that computer's container. `persistentDisk: true`
 // means its named /work volume survives container stops and control-plane restarts; destroy
-// removes the container, volume and host-only metadata.
+// removes the container and volume, retaining only a host-only metadata tombstone.
 //
 // `exec()` can only throw synchronously for what it can check without I/O (undeclared surface,
 // malformed argv): lifecycle state lives on the VM across the network, so unknown/stopped
@@ -208,7 +208,7 @@ export async function loadSshPrivateKey(
 
 /** SHA256 pin of a raw host key, in the OpenSSH `SHA256:` fingerprint form pins use. */
 function hostKeyPin(key: Buffer): string {
-  return `SHA256:${createHash("sha256").update(key).digest("base64")}`;
+  return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
 }
 
 function errorDetail(error: unknown): string {
@@ -230,11 +230,10 @@ function openConnection(entry: SshVmProviderEntry, privateKey: string): Promise<
       // and neither message does either, so both are safe to relay verbatim.
       fail(`cannot connect to ${target}: ${errorDetail(error)}`);
     };
-    conn.once("ready", () => {
-      conn.removeListener("error", onError);
-      resolve(conn);
-    });
-    conn.once("error", onError);
+    conn.once("ready", () => resolve(conn));
+    // Keep the listener after ready: ssh2 forwards socket/protocol errors to the Client.
+    // Destroy closes in-flight channels so operations terminate instead of crashing Node.
+    conn.on("error", onError);
     conn.once("close", () => {
       fail(`connection to ${target} closed before ready`);
     });
@@ -304,6 +303,29 @@ function sftpWriteFile(sftp: SFTPWrapper, path: string, data: Uint8Array): Promi
       else resolve();
     });
   });
+}
+
+/** OpenSSH's POSIX rename replaces the old record atomically, even if a write is cut short. */
+async function writeMetadata(
+  sftp: SFTPWrapper,
+  path: string,
+  handle: ComputerHandle,
+): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await sftpWriteFile(
+      sftp,
+      temporary,
+      new TextEncoder().encode(`${JSON.stringify(handle, null, 2)}\n`),
+    );
+    await new Promise<void>((resolve, reject) => {
+      sftp.ext_openssh_rename(temporary, path, (error) => (error ? reject(error) : resolve()));
+    });
+  } catch (error) {
+    // A process crash can leave a temporary file, but never destroys the previous record.
+    await new Promise<void>((resolve) => sftp.unlink(temporary, () => resolve()));
+    throw error;
+  }
 }
 
 function sftpStat(sftp: SFTPWrapper, path: string): Promise<unknown> {
@@ -388,7 +410,9 @@ async function* runRemote(
   let timedOut = false;
   let aborted = false;
   const stream = await new Promise<Channel>((resolve, reject) => {
-    conn.exec(command, (error, candidate) => {
+    // Host orchestration must never resolve tools through an account-writable PATH entry.
+    // The VM administrator still owns the login shell, system binaries and Docker daemon.
+    conn.exec(`PATH=/usr/bin:/bin; export PATH; ${command}`, (error, candidate) => {
       if (error) {
         reject(providerError(`exec channel failed: ${errorDetail(error)}`, "provider"));
         return;
@@ -489,7 +513,7 @@ export function createSshVmProvider(
     throw new Error("invalid ssh-vm provider: loadPrivateKey must be a function");
   }
 
-  /** Process-lifetime tombstones: `destroy()` is idempotent and reads as `gone` afterwards. */
+  /** Cache of the durable metadata tombstones, avoiding a connection for repeated cleanup. */
   const destroyed = new Set<string>();
 
   const workspaceBase = async (sftp: SFTPWrapper): Promise<string> => {
@@ -529,7 +553,7 @@ export function createSshVmProvider(
       if (
         parsed.providerId !== SSH_VM_PROVIDER_ID ||
         parsed.providerComputerId !== providerComputerId ||
-        (parsed.state !== "running" && parsed.state !== "stopped")
+        (parsed.state !== "running" && parsed.state !== "stopped" && parsed.state !== "destroyed")
       ) {
         throw new Error("metadata shape");
       }
@@ -709,13 +733,7 @@ export function createSshVmProvider(
           try {
             // Persist before allocating runtime resources so a failed launch is discoverable
             // and destroy() can finish cleanup even after a control-plane restart.
-            await sftpWriteFile(
-              sftp,
-              `${dir}/${METADATA_NAME}`,
-              new TextEncoder().encode(
-                `${JSON.stringify({ ...handle, state: "stopped" }, null, 2)}\n`,
-              ),
-            );
+            await writeMetadata(sftp, `${dir}/${METADATA_NAME}`, { ...handle, state: "stopped" });
             await checkedRemote(conn, [
               "docker",
               "run",
@@ -741,11 +759,7 @@ export function createSshVmProvider(
               "sleep",
               "infinity",
             ]);
-            await sftpWriteFile(
-              sftp,
-              `${dir}/${METADATA_NAME}`,
-              new TextEncoder().encode(`${JSON.stringify(handle, null, 2)}\n`),
-            );
+            await writeMetadata(sftp, `${dir}/${METADATA_NAME}`, handle);
           } catch (error) {
             // Keep the stopped record if cleanup fails: list()/destroy() can recover the
             // exact resource names instead of silently orphaning a running computer.
@@ -813,14 +827,29 @@ export function createSshVmProvider(
               options,
             )) {
               if (event.type === "error") {
-                await cancelComputerExec(conn, handle.providerComputerId, executionId);
                 settled = true;
+                try {
+                  await cancelComputerExec(conn, handle.providerComputerId, executionId);
+                } catch {
+                  // Preserve the original terminal code; cleanup must not replace cancellation.
+                  yield { ...event, message: `${event.message}; exec cancellation cleanup failed` };
+                  continue;
+                }
               } else if (event.type === "exit") settled = true;
               yield event;
             }
           } finally {
             // Also cover a caller returning early from the output iterator.
-            if (!settled) await cancelComputerExec(conn, handle.providerComputerId, executionId);
+            if (!settled) {
+              try {
+                await cancelComputerExec(conn, handle.providerComputerId, executionId);
+              } catch {
+                // The caller already returned: no event consumer remains. Never log guest data.
+                console.warn(
+                  "ssh-vm provider: exec cancellation cleanup failed after iterator return",
+                );
+              }
+            }
           }
         } catch (error) {
           yield toTerminal(error);
@@ -908,6 +937,8 @@ export function createSshVmProvider(
     },
 
     async stop(handle: ComputerHandle): Promise<void> {
+      if (handle.providerId !== SSH_VM_PROVIDER_ID)
+        throw providerError("foreign provider handle", "not_found");
       const conn = await openConnection(entry, await loadKey());
       try {
         const sftp = await sftpOf(conn);
@@ -919,8 +950,8 @@ export function createSshVmProvider(
           if (stored === null) {
             throw providerError(`unknown computer "${handle.providerComputerId}"`, "not_found");
           }
-          if (handle.providerId !== SSH_VM_PROVIDER_ID)
-            throw providerError("foreign provider handle", "not_found");
+          if (stored.state === "destroyed")
+            throw providerError(`computer "${handle.providerComputerId}" is destroyed`, "gone");
           if (stored.state === "stopped") return;
           await checkedRemote(conn, [
             "docker",
@@ -930,13 +961,7 @@ export function createSshVmProvider(
           ]);
           const dir = await computerDir(sftp, stored.providerComputerId);
           try {
-            await sftpWriteFile(
-              sftp,
-              `${dir}/${METADATA_NAME}`,
-              new TextEncoder().encode(
-                `${JSON.stringify({ ...stored, state: "stopped" }, null, 2)}\n`,
-              ),
-            );
+            await writeMetadata(sftp, `${dir}/${METADATA_NAME}`, { ...stored, state: "stopped" });
           } catch (error) {
             throw providerError(`cannot stop computer: ${errorDetail(error)}`, "provider");
           }
@@ -949,26 +974,27 @@ export function createSshVmProvider(
     },
 
     async destroy(handle: ComputerHandle): Promise<void> {
+      if (handle.providerId !== SSH_VM_PROVIDER_ID)
+        throw providerError("foreign provider handle", "not_found");
       if (destroyed.has(handle.providerComputerId)) return; // idempotent
       const conn = await openConnection(entry, await loadKey());
       try {
         const sftp = await sftpOf(conn);
-        let dir: string;
         try {
           const stored = await readHandle(sftp, handle.providerComputerId);
           if (stored === null) {
             throw providerError(`unknown computer "${handle.providerComputerId}"`, "not_found");
           }
-          dir = await computerDir(sftp, stored.providerComputerId);
+          if (stored.state !== "destroyed") {
+            await removeRuntime(conn, handle.providerComputerId);
+            // Keep a durable tombstone; interrupted cleanup leaves the old recovery record.
+            const dir = await computerDir(sftp, stored.providerComputerId);
+            await writeMetadata(sftp, `${dir}/${METADATA_NAME}`, { ...stored, state: "destroyed" });
+          }
+          destroyed.add(handle.providerComputerId);
         } finally {
           sftp.end();
         }
-        if (handle.providerId !== SSH_VM_PROVIDER_ID)
-          throw providerError("foreign provider handle", "not_found");
-        await removeRuntime(conn, handle.providerComputerId);
-        // Metadata is removed last; an interrupted cleanup remains discoverable for retry.
-        await checkedRemote(conn, ["rm", "-rf", "--", dir]);
-        destroyed.add(handle.providerComputerId);
       } finally {
         conn.destroy();
       }
