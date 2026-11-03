@@ -194,8 +194,10 @@ export class DockerEngine {
 
   /**
    * Starts an exec instance over a hijacked socket connection: the start config goes out as
-   * one HTTP request, then the raw stdin bytes stream in while multiplexed output frames
-   * stream back. A half-close (FIN after the bytes) tells the process stdin hit EOF.
+   * one HTTP request, and only after the daemon answers 101/200 do the raw stdin bytes
+   * stream in while multiplexed output frames stream back. Pipelining stdin with the
+   * request risks the daemon consuming bytes as HTTP; the hijacked stream only exists
+   * after the upgrade. A half-close (FIN after the bytes) tells the process stdin hit EOF.
    */
   private startExecHijacked(
     execId: string,
@@ -253,8 +255,6 @@ export class DockerEngine {
             `Content-Length: ${Buffer.byteLength(config)}\r\n\r\n` +
             config,
         );
-        socket.write(Buffer.from(stdin, "utf8"));
-        socket.end();
       });
       socket.on("data", (chunk: Buffer) => {
         if (!headersDone) {
@@ -267,6 +267,8 @@ export class DockerEngine {
           headersDone = true;
           header = Buffer.alloc(0);
           if (!/^101|^200/.test(status)) return fail(status, rest);
+          // The upgrade is confirmed: stdin now belongs to the hijacked stream.
+          socket.end(Buffer.from(stdin, "utf8"));
           if (rest.length > 0) pumpFrame(rest);
           return;
         }
