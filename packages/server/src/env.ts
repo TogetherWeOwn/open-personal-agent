@@ -6,6 +6,7 @@ import type { DataBindings, UserScope } from "@opa/db/repository";
 import type { systemStore } from "@opa/db/system";
 import type { WorkersAIBinding } from "@opa/providers";
 import type { Vault } from "@opa/vault";
+import type { ComputerDriver } from "./computers";
 
 /** The user's assistant as the app reaches it: `/api/health` pings one. */
 export interface AssistantStub {
@@ -79,6 +80,13 @@ export interface AppPorts extends DataPorts {
    * the Node root defaults to a header it fills from the socket.
    */
   OPA_CLIENT_IP_HEADER?: string;
+  /**
+   * The computer driver, when a composition root configures a provider (M4-04/M4-05). The
+   * reconciler sweep and account deletion destroy through it; absent means the provider
+   * legs are skipped (rows alone still enforce the deadlines). Set by Node's root for
+   * `docker-local`; the Worker sets it for the Cloudflare Sandbox adapter (M4-04).
+   */
+  COMPUTER_DRIVER?: ComputerDriver;
   /**
    * The per-address limit on the routes that answer without a session (`rate-limit.ts`). The
    * Worker's is `ratelimits` in wrangler.jsonc; the Node root passes one in memory.

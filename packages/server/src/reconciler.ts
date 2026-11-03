@@ -38,10 +38,10 @@ export const reconcilerParts = {
   retention: (env, now) => runRetention(env, now),
   approvals: (env, now) => expireApprovals(env, now),
   // The computer orphan sweep (M4-02 AC3): idle and lifetime deadlines and task binding are
-  // enforced from D1 even with no provider configured. No provider driver exists yet — M4-04
-  // resolves one from the configured computer provider and passes it here — so this tick
-  // skips the provider-listing leg until then.
-  computers: (env, now) => sweepComputers(env, undefined, now),
+  // enforced from D1 even with no provider configured. The composition root sets
+  // `COMPUTER_DRIVER` when it configures a provider (M4-04/M4-05); with none, this tick
+  // skips the provider-listing leg.
+  computers: (env, now) => sweepComputers(env, env.COMPUTER_DRIVER, now),
 } satisfies Record<string, ReconcilerPart>;
 
 /** One promise per part, each settled once its part has; the Worker hands each to `waitUntil`. */
