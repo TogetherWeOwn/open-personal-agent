@@ -269,7 +269,9 @@ const fail = (adapter: Adapter, error: unknown): AdapterResult => ({
   artifactId: null,
   artifactName: null,
   ok: false,
-  error: String(error instanceof Error ? error.message : error).slice(0, 300),
+  // The bound must fit the longest diagnostic message whole: the artifact-timeout error
+  // carries a ~300-char log tail at its end, so a shorter cap would cut the tail first.
+  error: String(error instanceof Error ? error.message : error).slice(0, 500),
 });
 
 test.describe("live models on a configured endpoint", () => {

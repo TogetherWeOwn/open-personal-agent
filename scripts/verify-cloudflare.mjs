@@ -352,7 +352,9 @@ function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnt
       `${cell(a.inputTokens)} / ${cell(a.outputTokens)} | ` +
       (a.costMicroUsd === null ? "—" : `${a.costMicroUsd} uUSD (${a.cost})`) +
       ` | ${cell(a.artifactId)} | ` +
-      (a.ok ? "pass" : `**fail**: ${scrub(a.error ?? "unknown").slice(0, 120)}`) +
+      // The cell must fit a whole recorded error: the timeout row's diagnostic log tail
+      // sits at the end of the message, so a shorter cap would hide exactly that part.
+      (a.ok ? "pass" : `**fail**: ${scrub(a.error ?? "unknown").slice(0, 500)}`) +
       " |",
   );
   return (
