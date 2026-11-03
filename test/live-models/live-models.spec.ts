@@ -363,7 +363,12 @@ test.describe("live models on a configured endpoint", () => {
       fallback ??= { model, test: probed };
     }
     if (!fallback) {
-      const detail = reasons.length ? `; probe failures: ${reasons.join(" | ").slice(0, 200)}` : "";
+      // Give every distinct failure a slice of the 200-char budget so one long
+      // first message cannot crowd later reasons out of the recorded row.
+      const budget = Math.max(20, Math.floor(200 / reasons.length));
+      const detail = reasons.length
+        ? `; probe failures: ${reasons.map((r) => r.slice(0, budget)).join(" | ")}`
+        : "";
       throw new Error(
         `no listed model passed the Test probe with tool calls (probed ${tried} of ${candidates.length} listed${detail})`,
       );
