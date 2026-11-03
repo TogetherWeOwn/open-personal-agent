@@ -3,8 +3,8 @@ import { max } from "drizzle-orm";
 import { type AnyD1Database, type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
 
-export * from "./schema";
 export * from "./capability-tokens";
+export * from "./schema";
 
 /** The schema version this build expects: the version the newest migration records. */
 export const SCHEMA_VERSION = 26;
