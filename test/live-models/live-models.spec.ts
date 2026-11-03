@@ -23,6 +23,16 @@ const CONFIGURED = Boolean(API_KEY && (OPENAI_BASE || ANTHROPIC_BASE));
 const BANNED = new Set(["gpt-5.6-terra", "gpt-6-sol"]);
 const banned = (id: string) => BANNED.has(id) || /terra/i.test(id);
 
+// Cloudflare's `/ai/v1` base has no `GET /models` (405): when listing is unavailable the run
+// probes this small curated list instead — the priced starter first, then the spec's GPT-OSS
+// picks. Every entry is in the provider's tool-capable set; unpriced ones record `unpriced`
+// with token counts per the spec, never a silent pass.
+const CURATED_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/openai/gpt-oss-120b",
+  "@cf/openai/gpt-oss-20b",
+];
+
 // Three small stable pages for the compare-and-save task.
 const PAGES = ["https://example.com", "https://example.org", "https://example.net"];
 
@@ -132,6 +142,15 @@ async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> 
     headers,
     redirect: "error",
   });
+  // Cloudflare's `/ai/v1` base has no list call (405, and 404 on some bases): fall back to
+  // the curated free tool-calling `@cf/` list instead of failing the adapter. Anything else
+  // still throws so a real auth or server failure stays visible.
+  if (!res.ok && (res.status === 404 || res.status === 405)) {
+    const picked = CURATED_MODELS.filter((id) => !banned(id));
+    if (!picked.length) throw new Error("the curated list has no usable model");
+    console.log(`live-models: ${adapter} GET /models HTTP ${res.status}, using curated list`);
+    return picked;
+  }
   if (!res.ok) throw new Error(`GET /models: HTTP ${res.status}`);
   const body = (await res.json()) as { data?: { id?: unknown }[] } | { id?: unknown }[];
   const data = Array.isArray(body) ? body : (body.data ?? []);
@@ -250,7 +269,9 @@ const fail = (adapter: Adapter, error: unknown): AdapterResult => ({
   artifactId: null,
   artifactName: null,
   ok: false,
-  error: String(error instanceof Error ? error.message : error).slice(0, 300),
+  // The bound must fit the longest diagnostic message whole: the artifact-timeout error
+  // carries a ~300-char log tail at its end, so a shorter cap would cut the tail first.
+  error: String(error instanceof Error ? error.message : error).slice(0, 500),
 });
 
 test.describe("live models on a configured endpoint", () => {
@@ -305,10 +326,10 @@ test.describe("live models on a configured endpoint", () => {
   }
 
   /**
-   * Picks the adapter's model from the endpoint's own list: the first one whose Test probe
-   * answers with tool calls, priced where the price table knows it. At most four probes, so
-   * the adapter stays inside its share of the live-step budget; the recorded error says how
-   * many of the listed models were tried.
+   * Picks the adapter's model from the endpoint's own list (or the curated fallback when the
+   * endpoint has no list call): the first one whose Test probe answers with tool calls,
+   * priced where the price table knows it. At most four probes, so the adapter stays inside
+   * its share of the live-step budget; the recorded error says how many models were tried.
    */
   async function pickModel(page: Page, rowId: string, baseUrl: string, adapter: Adapter) {
     const candidates = (await listModels(baseUrl, adapter)).slice(0, 8);
@@ -402,14 +423,29 @@ test.describe("live models on a configured endpoint", () => {
       let artifact: ArtifactRow | null = null;
       for (;;) {
         if (await log.getByText("This reply failed").count()) {
-          throw new Error("the chat turn failed");
+          // The recorded row must say why the turn failed, not just that it did: carry
+          // the visible log excerpt so a binding failure is diagnosable from the report.
+          // The excerpt is model-generated text, so it goes through scrubKey first, and
+          // it takes the tail: the failure notice sits at the end of the Messages log,
+          // while the head is mostly our own prompt echo.
+          const excerpt = (scrubKey((await log.textContent().catch(() => "")) ?? "") ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(-300);
+          throw new Error(`the chat turn failed${excerpt ? `: ${excerpt}` : ""}`);
         }
         await decidePending(page).catch((error: unknown) => {
           throw new Error(`approving the task's tools: ${(error as Error).message}`);
         });
         artifact = await artifactSince(page, taskStart);
         if (artifact) break;
-        if (Date.now() > deadline) throw new Error("no artifact after 8 minutes");
+        if (Date.now() > deadline) {
+          const excerpt = (scrubKey((await log.textContent().catch(() => "")) ?? "") ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(-300);
+          throw new Error(`no artifact after 8 minutes${excerpt ? ` (log tail: ${excerpt})` : ""}`);
+        }
         await page.waitForTimeout(5_000);
       }
       const content = await page.request.get(`/api/artifacts/${artifact.id}/content`);

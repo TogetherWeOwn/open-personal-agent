@@ -341,18 +341,30 @@ function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnt
   const secrets = [liveKey, liveOpenAIBaseUrl, liveAnthropicBaseUrl].filter(
     (s) => typeof s === "string" && s.length >= 8,
   );
+  // A recorded error can carry model-generated text: keep every cell on one table
+  // row by collapsing whitespace and escaping pipes, so it cannot reshape the report.
+  // Backslashes go first: an input `\|` must render as literal backslash + literal
+  // pipe (`\\\|`), not as an escaped backslash ending the cell (`\\|`).
+  const oneLine = (value) =>
+    String(value).replace(/\s+/g, " ").replaceAll("\\", "\\\\").replaceAll("|", "\\|");
+  const redact = (value) =>
+    secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value));
   const scrub = (value) => {
     if (value === null || value === undefined) return "—";
-    return secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value));
+    return oneLine(redact(value));
   };
-  const cell = (value) => (value === null || value === undefined ? "—" : String(value));
+  const cell = (value) => (value === null || value === undefined ? "—" : oneLine(value));
   const rows = live.map(
     (a) =>
       `| ${a.adapter} | ${scrub(a.model)} | ${cell(a.testMs)} ms | ` +
       `${cell(a.inputTokens)} / ${cell(a.outputTokens)} | ` +
       (a.costMicroUsd === null ? "—" : `${a.costMicroUsd} uUSD (${a.cost})`) +
       ` | ${cell(a.artifactId)} | ` +
-      (a.ok ? "pass" : `**fail**: ${scrub(a.error ?? "unknown").slice(0, 120)}`) +
+      // The cell must fit a whole recorded error: the timeout row's diagnostic log tail
+      // sits at the end of the message, so a shorter cap would hide exactly that part.
+      // Slice before escaping: escaping doubles backslashes and pipes, so slicing the
+      // escaped text could cut the tail even when the recorded error fits the cap.
+      (a.ok ? "pass" : `**fail**: ${oneLine(redact(a.error ?? "unknown").slice(0, 500))}`) +
       " |",
   );
   return (
