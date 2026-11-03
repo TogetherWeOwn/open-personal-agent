@@ -238,18 +238,23 @@ describe("model settings", () => {
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
     const called = '{"tool_calls":[{"name":"report_ready","arguments":{}}]}';
+    const runs: { tools?: unknown }[] = [];
     const AI = {
-      run: async (_model: string, inputs: { tools?: unknown }) =>
-        inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]"),
+      run: async (_model: string, inputs: { tools?: unknown }) => {
+        runs.push(inputs);
+        return inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]");
+      },
     } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    expect(tested).toMatchObject({ ok: true, tools: true, toolProbe: "called", reply: "ready" });
-    // Both calls are billed, so the ledger has them. The first is priced: 25 × $0.293/M +
-    // 6 × $2.253/M. The probe reported no usage, so it is unpriced.
+    // The chat-only starter refuses the tool probe, so Test reports it honestly: no tool
+    // support, and the refused probe never reached the binding to be billed.
+    expect(tested).toMatchObject({ ok: true, tools: false, toolProbe: "rejected", reply: "ready" });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).not.toHaveProperty("tools");
+    // Only the text call ran, so only it is billed: 25 × $0.293/M + 6 × $2.253/M.
     const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai' ORDER BY rowid";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([
       { input_tokens: 25, output_tokens: 6, cost_micro_usd: 21 },
-      { input_tokens: 0, cost_micro_usd: null },
     ]);
     expect((await call("/onboarded", { method: "POST" })).status).toBe(204);
     expect(JSON.parse((await call("")).text).onboarded).toBe(true);

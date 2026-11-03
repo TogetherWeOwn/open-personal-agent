@@ -86,6 +86,15 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {
+      // A chat-only model must fail loudly when asked to call tools, so a miscaller gets an
+      // actionable error instead of a generic failed reply (mirrors `openai-chat`).
+      if (request.tools?.length && !TOOL_MODELS.has(request.model)) {
+        yield error(
+          "bad_request",
+          `${request.model} doesn't support tool calls. Chat answers still work; add a key for a tool-capable model to use tools.`,
+        );
+        return;
+      }
       let body: unknown;
       try {
         body = await ai.run(request.model, {
