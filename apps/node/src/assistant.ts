@@ -248,11 +248,12 @@ export class NodeAssistant {
   /**
    * The tools a turn may offer the model, with the policy inputs for them. Tests replace it
    * (a sync closure without parameters still satisfies the type); production composes the
-   * builtin registry plus the memory and task tools, with ports scoped to the calling user
+   * builtin registry plus the memory tools, with ports scoped to the calling user
    * and the policy input read from that user's stored overrides and grants — so Settings ›
-   * Apps & tools governs what the turn offers. The context names the turn: file and memory
-   * tools file under its conversation, and the taint thunk reads the loop's live taint, since
-   * a web, file or tool result mid-turn taints it.
+   * Apps & tools governs what the turn offers. The `task` tool is deliberately not offered
+   * (no runnable creation path yet: a queued row without instance or state never runs).
+   * The context names the turn: file and memory tools file under its conversation, and the
+   * taint thunk reads the loop's live taint, since a web, file or tool result mid-turn taints it.
    */
   resolveTools: (
     context: TurnContext,
@@ -707,24 +708,6 @@ export class NodeAssistant {
       },
     };
 
-    // The taint thunk reads the loop's live taint: `state` is the object the loop mutates
-    // when a web, file or tool result lands, and a turn whose taint can't be read counts as
-    // tainted. Fail-closed (`!== "trusted"`), as the memory tools' trust gate requires.
-    const { tools, policy } = await this.resolveTools({
-      conversationId,
-      turnId,
-      taint: () => state.taint.taint !== "trusted",
-    });
-    const host: LoopHost = {
-      provider: run.provider,
-      model: run.model,
-      tools,
-      policy,
-      budget,
-      now: Date.now,
-      newId: () => crypto.randomUUID(),
-    };
-
     // The reply's text: one segment per model call that spoke, joined as paragraphs.
     const segments = replySegments(state);
     let current = "";
@@ -781,9 +764,35 @@ export class NodeAssistant {
       if (settled) this.#events.trim(conversationId, turnId);
     };
 
-    const gen = runTurn(host, run.history, state, signal);
     let thinking = "";
     try {
+      // The taint thunk reads the loop's live taint: `state` is the object the loop mutates
+      // when a web, file or tool result lands, and a turn whose taint can't be read counts as
+      // tainted. Fail-closed (`!== "trusted"`), as the memory tools' trust gate requires.
+      // Resolved inside the guarded region: the default resolver awaits D1-backed policy
+      // reads, and a rejection must settle the reply (via `failSave`) and release the budget
+      // hold (via the `finally` below) rather than strand the turn as `streaming`.
+      let resolved: { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] };
+      try {
+        resolved = await this.resolveTools({
+          conversationId,
+          turnId,
+          taint: () => state.taint.taint !== "trusted",
+        });
+      } catch {
+        await failSave();
+        return;
+      }
+      const host: LoopHost = {
+        provider: run.provider,
+        model: run.model,
+        tools: resolved.tools,
+        policy: resolved.policy,
+        budget,
+        now: Date.now,
+        newId: () => crypto.randomUUID(),
+      };
+      const gen = runTurn(host, run.history, state, signal);
       for (;;) {
         const next = await gen.next();
         if (next.done) {
@@ -828,7 +837,7 @@ export class NodeAssistant {
             if (event.type === "approval.requested" && state.pending) {
               const rows = await bindBatch({
                 userId: this.#scope.userId,
-                tools,
+                tools: host.tools,
                 pending: state.pending,
                 context: { kind: "turn", id: turnId, conversationId },
               });

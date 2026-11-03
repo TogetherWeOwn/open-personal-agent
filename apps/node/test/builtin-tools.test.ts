@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The production tool wiring (M3-08): a chat turn offers the builtin registry plus the memory
-// and task tools — no test seam — with the policy input read from the user's stored overrides.
+// tools (`task` deliberately not offered: no runnable creation path yet) — no test seam —
+// with the policy input read from the user's stored overrides.
 // The mock model is scripted to call `web_fetch` (refused: the deployment's own address, so no
 // network is touched and the refusal keeps the turn trusted) then `create_artifact`, so the
 // turn completes with the artifact saved. A second turn shows Settings › Apps & tools governing
@@ -27,7 +28,7 @@ const SECRETS = {
   // The mock model is a server on this machine, so the guarded fetch must allow it.
   OPA_ALLOW_PRIVATE_MODEL_HOSTS: "1",
 };
-/** Every tool the production turn offers, in registry order. */
+/** Every tool the production turn offers, in registry order (`task` not offered yet). */
 const ALL_TOOLS = [
   "web_fetch",
   "search_history",
@@ -36,7 +37,6 @@ const ALL_TOOLS = [
   "remember",
   "recall",
   "forget",
-  "task",
 ];
 
 let mock: { url: string; close(): Promise<void>; requests: { tools: string[] }[] };
@@ -236,5 +236,59 @@ describe("the production tool wiring (M3-08)", () => {
     expect(results[0]).toMatchObject({ payload: { ok: false } });
     expect(JSON.stringify(results[0])).toContain("turned this tool off");
     expect(JSON.stringify(results[0])).not.toContain("own address");
+  });
+
+  it("settles the reply and releases the hold when tool resolution fails", async () => {
+    // Through the assistant's `resolveTools` seam: the production resolver awaits D1-backed
+    // policy reads, and a rejection must settle the reply as an error (not strand it as
+    // `streaming`) and release the first call's hold.
+    const { id: userId } = (await (await req("/api/me")).json()) as { id: string };
+    const assistant = app.assistantFor(userId);
+    const original = assistant.resolveTools;
+    assistant.resolveTools = async () => {
+      throw new Error("policy store down");
+    };
+    try {
+      const cookie = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+      const ws = new WebSocket(`${base.replace(/^http/, "ws")}/api/chat`, {
+        headers: { cookie, origin: PUBLIC },
+      });
+      await new Promise<void>((resolve, reject) => {
+        ws.on("open", () => resolve());
+        ws.on("unexpected-response", (_req, res) =>
+          reject(new Error(`upgrade rejected: ${res.statusCode}`)),
+        );
+        ws.on("error", reject);
+      });
+      const frames: HarnessEvent[] = [];
+      ws.on("message", (data) => frames.push(JSON.parse(String(data)) as HarnessEvent));
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "chat.send",
+            conversationId: "conv-tools-noresolve",
+            text: "fetch the notes",
+          }),
+        );
+        await vi.waitFor(() => expect(frames.some((f) => f.type === "turn.failed")).toBe(true), {
+          timeout: 15_000,
+        });
+      } finally {
+        ws.close();
+      }
+      const types = frames.map((f) => f.type);
+      expect(types).not.toContain("turn.completed");
+      const failed = frames.find((f) => f.type === "turn.failed");
+      expect(JSON.stringify(failed)).toContain("couldn't be saved");
+      const db = app.db as DatabaseSync;
+      const rows = db
+        .prepare("SELECT status FROM messages WHERE conversation_id = ? AND role = 'assistant'")
+        .all("conv-tools-noresolve") as { status: string }[];
+      expect(rows.map((r) => r.status)).toEqual(["error"]);
+      // The first call's hold went back uncharged: nothing is left held.
+      expect(assistant.limits.totals().heldMicroUsd).toBe(0);
+    } finally {
+      assistant.resolveTools = original;
+    }
   });
 });

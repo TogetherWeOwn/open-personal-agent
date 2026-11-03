@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// One turn's production tools (M3-08): the builtin registry plus the memory and task tools,
-// with ports scoped to the calling user and the policy input read from that user's stored
-// overrides and grants — so Settings › Apps & tools governs what a turn offers. Both chat
-// assistants (Node, Worker) and the task Workflow compose through here, so the offered set
-// can't drift between runtimes; only the runtime's fetch and own-host list differ per caller.
+// One turn's production tools (M3-08): the builtin registry plus the memory tools, with ports
+// scoped to the calling user and the policy input read from that user's stored overrides and
+// grants — so Settings › Apps & tools governs what a turn offers. The `task` tool is
+// deliberately not offered: filing a queued row without a Workflow instance or turn state
+// promises background work no runner ever claims (Node has no Workflow at all), so the tool
+// stays out until a runnable creation path exists per runtime. Both chat assistants (Node,
+// Worker) and the task Workflow compose through here, so the offered set can't drift between
+// runtimes; only the runtime's fetch and own-host list differ per caller.
 
 import type { MemorySource } from "@opa/db/memory";
 import { type MemoryToolUser, registerMemoryTools } from "@opa/db/memory-tools";
 import type { ArtifactSource, createRepository } from "@opa/db/repository";
-import { registerTaskTools } from "@opa/db/task-tools";
 import type { LoopHost, LoopTool } from "@opa/harness-builtin";
 import type { ToolRegistry } from "@opa/policy";
 import { builtinToolRegistry } from "@opa/tools-builtin";
@@ -100,7 +102,6 @@ export async function composeTurnTools(input: TurnToolsInput): Promise<{
     const tainted = input.taint();
     return { tainted, userAsserted: !tainted, source: memorySource };
   });
-  await registerTaskTools(registry, user.tasks, () => ({ conversationId }));
   const [overrides, grants] = await Promise.all([
     user.policy.overrides(),
     user.policy.grants(Date.now()),

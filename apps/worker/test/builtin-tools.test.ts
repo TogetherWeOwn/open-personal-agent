@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The production tool wiring (M3-08) on Workers: a chat turn offers the builtin registry plus
-// the memory and task tools — no test seam — with the policy input read from the user's stored
-// overrides. The scripted model calls `web_fetch` (refused: a private literal, so no fetch is
+// the memory tools (`task` deliberately not offered: no runnable creation path yet) — no test
+// seam — with the policy input read from the user's stored overrides. The scripted model calls `web_fetch` (refused: a private literal, so no fetch is
 // attempted and the refusal keeps the turn trusted) then `create_artifact`, so the turn
 // completes with the artifact saved. A second turn shows Settings › Apps & tools governing the
 // loop: with `web_fetch` set to `never`, the call is denied from the stored override and the
@@ -17,7 +17,7 @@ freshDatabase();
 afterEach(() => vi.restoreAllMocks());
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
-/** Every tool the production turn offers, in registry order. */
+/** Every tool the production turn offers, in registry order (`task` not offered yet). */
 const ALL_TOOLS = [
   "web_fetch",
   "search_history",
@@ -26,7 +26,6 @@ const ALL_TOOLS = [
   "remember",
   "recall",
   "forget",
-  "task",
 ];
 
 type Reply = { text?: string; calls?: [name: string, args: unknown][] };
@@ -175,5 +174,39 @@ describe("the production tool wiring (M3-08)", () => {
     expect(results[0]).toMatchObject({ payload: { ok: false } });
     expect(JSON.stringify(results[0])).toContain("turned this tool off");
     expect(JSON.stringify(results[0])).not.toContain("private, loopback or link-local");
+  });
+
+  it("settles the reply and releases the hold when tool resolution fails", async () => {
+    // Through the assistant's `resolveTools` seam: the production resolver awaits D1-backed
+    // policy reads, and a rejection must settle the reply as an error (not strand it as
+    // `streaming`) and release the first call's hold.
+    const { browser, owner } = await claim();
+    const offered: string[][] = [];
+    await useModel(owner, replyingWithOffered([{ text: "unused" }], offered));
+    await runInDurableObject(assistantOf(owner), (instance: Assistant) => {
+      instance.resolveTools = async () => {
+        throw new Error("policy store down");
+      };
+    });
+    const tab = await openTab(browser);
+    tab.send?.("conv-tools-noresolve", "fetch the notes");
+    await tab.until?.("turn.failed");
+
+    const events = tab.events ?? [];
+    const types = events.map((e) => e.type);
+    expect(types).not.toContain("turn.completed");
+    const failed = events.find((e) => e.type === "turn.failed");
+    expect(JSON.stringify(failed)).toContain("couldn't be saved");
+    // The reply settled as an error, not left `streaming`.
+    const { messages } = await (
+      await browser.req("/api/conversations/conv-tools-noresolve/messages")
+    ).json<{ messages: { content: string; status: string }[] }>();
+    expect(messages.filter((m) => m.status === "error")).toHaveLength(1);
+    // The first call's hold went back uncharged: nothing is left held.
+    const held = await runInDurableObject(
+      assistantOf(owner),
+      (instance: Assistant) => instance.limits.totals().heldMicroUsd,
+    );
+    expect(held).toBe(0);
   });
 });
