@@ -237,20 +237,24 @@ describe("model settings", () => {
     );
     expect(missing).toEqual({ status: 503, text: '{"error":"ai_unavailable"}' });
     const usage = '{"response":"","usage":{"prompt_tokens":25,"completion_tokens":6}}';
-    const called = '{"tool_calls":[{"name":"report_ready","arguments":{}}]}';
     const runs: { tools?: unknown }[] = [];
     const AI = {
       run: async (_model: string, inputs: { tools?: unknown }) => {
         runs.push(inputs);
-        return inputs.tools ? sse(called, "[DONE]") : sse('{"response":"ready"}', usage, "[DONE]");
+        // As the live starter does (starter-chat.test.ts): plain text answers, while a
+        // tools-offering request is refused. The probe must still reach the binding so its
+        // outcome is real evidence, not a local refusal (TWO-1960).
+        if (inputs.tools) throw new Error("`tools` is not supported for this model");
+        return sse('{"response":"ready"}', usage, "[DONE]");
       },
     } as unknown as Ai;
     const tested = JSON.parse((await call("/model/test", { method: "POST" }, { AI })).text);
-    // The chat-only starter refuses the tool probe, so Test reports it honestly: no tool
-    // support, and the refused probe never reached the binding to be billed.
-    expect(tested).toMatchObject({ ok: true, tools: false, toolProbe: "rejected", reply: "ready" });
-    expect(runs).toHaveLength(1);
+    // The probe reached the binding and the binding refused tools, so Test reports no tool
+    // support from real evidence; the refused probe ran no model, so it isn't billed.
+    expect(tested).toMatchObject({ ok: true, tools: false, toolProbe: "failed", reply: "ready" });
+    expect(runs).toHaveLength(2);
     expect(runs[0]).not.toHaveProperty("tools");
+    expect(runs[1]).toHaveProperty("tools");
     // Only the text call ran, so only it is billed: 25 × $0.293/M + 6 × $2.253/M.
     const ledger = "SELECT * FROM usage WHERE provider_id = 'workers-ai' ORDER BY rowid";
     expect((await env.DB.prepare(ledger).all()).results).toMatchObject([

@@ -86,15 +86,6 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
     },
 
     async *stream(request: ModelRequest): AsyncGenerator<ModelEvent> {
-      // A chat-only model must fail loudly when asked to call tools, so a miscaller gets an
-      // actionable error instead of a generic failed reply (mirrors `openai-chat`).
-      if (request.tools?.length && !TOOL_MODELS.has(request.model)) {
-        yield error(
-          "bad_request",
-          `${request.model} doesn't support tool calls. Chat answers still work; add a key for a tool-capable model to use tools.`,
-        );
-        return;
-      }
       let body: unknown;
       try {
         body = await ai.run(request.model, {
@@ -108,8 +99,9 @@ export function createWorkersAIProvider(ai: WorkersAIBinding): ModelProvider {
         const detail = e instanceof Error ? e.message.slice(0, 300) : "Workers AI failed";
         // A tools-offering request the binding refuses names the likely cause, so the turn
         // settles with an actionable message instead of a generic failed reply (TWO-1960).
-        // The loop only offers where `capabilities` reports tool support, so reaching here
-        // means the model refused despite advertising it.
+        // The loop only offers where `capabilities` reports tool support; the Test probe
+        // offers to gather evidence for any model. Either way the refusal came from the
+        // binding, so it is real evidence, not a local refusal.
         yield error(
           "upstream",
           request.tools?.length

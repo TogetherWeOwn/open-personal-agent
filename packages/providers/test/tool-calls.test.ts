@@ -221,15 +221,19 @@ describe("workers-ai-binding tool calls", () => {
     expect(p.capabilities(STARTER_MODEL).tools).toBe(false);
   });
 
-  it("refuses tools for the chat-only starter instead of failing the reply", async () => {
+  it("sends tools to the binding for an unlisted model, so the probe gathers evidence (TWO-1960)", async () => {
+    // The starter is chat-only and the loop never offers it tools, but a direct
+    // tools-bearing request (the M3-06 Test probe) must still reach the binding: a local
+    // refusal would make the probe circular and it could never produce evidence.
     const { p, inputs } = workersAi(workersAiToolCall);
     const events = await replay(
       p.stream({ model: STARTER_MODEL, messages: ask, tools: [weather] }),
     );
-    expect(events).toEqual([
-      `error bad_request: ${STARTER_MODEL} doesn't support tool calls. Chat answers still work; add a key for a tool-capable model to use tools.`,
-    ]);
-    expect(inputs).toEqual([]);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toEqual({ messages: ask, stream: true, tools: [wireTool] });
+    // The stub binding answers with a tool call, so the request reaches it and the evidence
+    // comes back from the binding instead of a local refusal.
+    expect(events[0]).toMatch(/ get_weather \{"city":"Lisbon"\}$/);
   });
 
   it("replays models that stream OpenAI-shaped calls", async () => {
