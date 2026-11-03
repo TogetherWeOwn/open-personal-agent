@@ -163,8 +163,11 @@ included amounts. The ones you are most likely to meet are:
   top model. The built-in Workers AI starter model has a small free daily allowance, then
   Cloudflare bills it per use.
 - **Storage above the allowance.** After about 5 GB of database or 10 GB of files.
-- **Later features you switch on.** Cloud computers, web search, AI Gateway logging and extra
-  browser hours are not in this release. Each will say what it costs before you turn it on.
+- **Browser time.** When your assistant browses the web for you, the first 10 hours a month are
+  included in Workers Paid; past that, Cloudflare bills $0.09 an hour. The Usage page shows your
+  browsing time against the included hours.
+- **Later features you switch on.** Cloud computers, web search and AI Gateway logging are not in
+  this release. Each will say what it costs before you turn it on.
 
 The app's **Usage** page shows today's and this month's model calls, with an estimate from published
 prices for each and, for the owner, the Workers AI free allowance used today. Your providers' bills
@@ -186,6 +189,7 @@ What each binding in `wrangler.jsonc` uses (CI checks that every binding has a r
 | `DB`              | D1                      | 25B rows read, 50M rows written, 5 GB stored  | $0.001/M read, $1.00/M written, $0.75/GB-month    |
 | `FILES`           | R2                      | 10 GB-month, 1M Class A and 10M Class B ops   | $0.015/GB-month, $4.50/M Class A, $0.36/M Class B |
 | `AI`              | Workers AI              | 10,000 neurons a day                          | $0.011 per 1,000 neurons                          |
+| `BROWSER`         | Browser Rendering       | 10 browser hours                              | $0.09 per browser hour                            |
 | `ASSISTANT`       | Durable Objects         | 1M requests, 400,000 GB-s, 5 GB SQLite stored | $0.15/M requests, $12.50/M GB-s, $0.20/GB-month   |
 | `TASK_WORKFLOW`   | Workflows               | 500,000 steps, 1 GB-month stored              | $0.80 per 100,000 steps, $0.20/GB-month           |
 | `EXPORT_WORKFLOW` | Workflows               | 500,000 steps, 1 GB-month stored              | $0.80 per 100,000 steps, $0.20/GB-month           |

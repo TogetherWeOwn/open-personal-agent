@@ -80,6 +80,14 @@ export interface LoopTool extends RegisteredTool {
     signal: AbortSignal,
     call?: { toolCallId: string; approved: boolean },
   ): Promise<ToolOutput>;
+  /**
+   * Releases whatever the tool holds open across calls (a live browser session). The loop
+   * calls it when a turn run ends for any reason — completion, an approval pause, a limit,
+   * cancellation, a failure — because the turn's tool instances are never called again
+   * afterwards, so nothing else would ever close (or meter) what they hold. Must be
+   * idempotent: a tool the model already closed disposes as a no-op.
+   */
+  dispose?(): Promise<void>;
 }
 
 /** A gated call as the turn keeps it. `stepUp`: approving needs a passkey (M3-07 AC4). */
@@ -244,8 +252,29 @@ const failed = (e: unknown): ToolOutput => ({
  * mutates `state` as it goes; the host persists it when the run returns. `history` is the context
  * before this turn, the user's message last. One `signal` per turn reaches the provider stream and
  * every tool (M3-03 AC6).
+ *
+ * When the run ends — however it ends, an approval pause and a consumer that stops reading
+ * included — every tool that holds something open is disposed (see `LoopTool.dispose`): a
+ * resumed or promoted turn composes fresh tool instances, so nothing held open here can be
+ * used again, and leaving it open would only leak it (a browser session bills until closed).
  */
 export async function* runTurn(
+  host: LoopHost,
+  history: readonly ModelMessage[],
+  state: TurnState,
+  signal: AbortSignal,
+): AsyncGenerator<LoopEvent, TurnOutcome> {
+  try {
+    return yield* runTurnSteps(host, history, state, signal);
+  } finally {
+    for (const manifest of host.tools.manifests()) {
+      const entry = host.tools.get(manifest.name);
+      if (entry?.tool.dispose) await entry.tool.dispose().catch(() => {});
+    }
+  }
+}
+
+async function* runTurnSteps(
   host: LoopHost,
   history: readonly ModelMessage[],
   state: TurnState,

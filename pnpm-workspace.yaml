@@ -21,3 +21,11 @@ strictDepBuilds: true
 # override once drizzle-kit drops @esbuild-kit. Verified: `drizzle-kit generate` produces no diff.
 overrides:
   "@esbuild-kit/core-utils>esbuild": 0.25.12
+  # @cloudflare/puppeteer 1.4.0 pins @puppeteer/browsers 2.2.4, whose closure carries two
+  # unpatched extract-zip highs (GHSA-jmr9-qjv8-65gv, GHSA-7pqw-9j4j-h8q3) and a basic-ftp high
+  # (GHSA-c475-qrg2-pj4r, via proxy-agent). @puppeteer/browsers 3.x drops extract-zip and
+  # proxy-agent entirely. Nothing from @puppeteer/browsers is bundled into the Worker (its only
+  # importers in @cloudflare/puppeteer are its node launchers, which the Workers build never
+  # includes — verified against dist/worker-meta.json), so this override changes no shipped
+  # code; remove it once @cloudflare/puppeteer resolves @puppeteer/browsers 3.x itself.
+  "@cloudflare/puppeteer>@puppeteer/browsers": 3.2.6

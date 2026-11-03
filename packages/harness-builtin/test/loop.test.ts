@@ -912,6 +912,25 @@ describe("promotion at a step boundary (M3-12 AC2)", () => {
     expect(seen.at(-1)).toBe("turn.cancelled");
   });
 
+  it("disposes tools that hold something open when the run ends, completion or approval pause", async () => {
+    // A finished turn: the tool is disposed after its last call.
+    const doneSpy = tool("fetch", "read");
+    const doneDispose = vi.fn(async () => {});
+    doneSpy.dispose = doneDispose;
+    const { provider: p1 } = scripted([{ calls: [["fetch", { q: "a" }]] }, { text: "done" }]);
+    await drain(host(p1, [doneSpy]), newTurn());
+    expect(doneDispose).toHaveBeenCalledTimes(1);
+
+    // An approval pause ends the run too: the resumed turn composes fresh tools.
+    const askSpy = tool("send", "consequential");
+    const askDispose = vi.fn(async () => {});
+    askSpy.dispose = askDispose;
+    const { provider: p2 } = scripted([{ calls: [["send", { q: "a" }]] }]);
+    const { outcome } = await drain(host(p2, [askSpy]), newTurn());
+    expect(outcome).toBe("awaiting_approval");
+    expect(askDispose).toHaveBeenCalledTimes(1);
+  });
+
   it("never promotes at an approval: the turn stops there instead (§8 decision 9)", async () => {
     const { provider } = scripted([{ calls: [["send", { q: "a" }]] }]);
     const promote = vi.fn((_: unknown) => false);

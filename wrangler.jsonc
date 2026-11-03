@@ -24,6 +24,9 @@
   "d1_databases": [{ "binding": "DB", "migrations_dir": "migrations" }],
   "r2_buckets": [{ "binding": "FILES" }],
   "ai": { "binding": "AI", "remote": true },
+  // Browser Rendering for the logged-out `browser` tool. No token rides here or in any URL:
+  // the binding is the whole credential.
+  "browser": { "binding": "BROWSER" },
   "durable_objects": {
     "bindings": [{ "name": "ASSISTANT", "class_name": "Assistant" }]
   },

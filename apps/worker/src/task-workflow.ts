@@ -41,6 +41,7 @@ import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
 import { resolveOwnHosts } from "@opa/server/deployment-hosts";
 import { composeTurnTools } from "@opa/server/turn-tools";
+import { browserSessionOpener } from "./browser-session";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
 import { type AssistantTaskRpc, createWorkflowTaskContext, stepperFor } from "./task-context";
@@ -239,6 +240,8 @@ export async function executeTask(
         user,
         fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
         ownHosts: await resolveOwnHosts(env),
+        // The `browser` tool, where this deployment has Browser Rendering bound.
+        ...(env.BROWSER ? { openBrowserSession: browserSessionOpener(env.BROWSER) } : {}),
         newId: () => crypto.randomUUID(),
         scope: { kind: "task", taskId: task.id, conversationId: task.conversationId },
         taint: () => taintBox.turn?.taint.taint !== "trusted",
@@ -482,6 +485,9 @@ async function driveLoop(
       ...(tool.estimateCost ? { estimateCost: (input) => tool.estimateCost?.(input) } : {}),
       // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
       ...(tool.author ? { author: tool.author } : {}),
+      // Turn-end disposal passes through the step wrapper, so a segment that ends (an
+      // approval pause included) still closes what its tools hold open.
+      ...(tool.dispose ? { dispose: () => tool.dispose?.() ?? Promise.resolve() } : {}),
       execute: async (input, _signal, call) => {
         toolSeq += 1;
         const under = call?.approved && batch ? { batchId: batch, id: call.toolCallId } : null;

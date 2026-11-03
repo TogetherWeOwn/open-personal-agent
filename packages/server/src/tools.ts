@@ -9,6 +9,7 @@ import { FORGET_MANIFEST, RECALL_MANIFEST, REMEMBER_MANIFEST } from "@opa/db/mem
 import { TASK_MANIFEST } from "@opa/db/task-tools";
 import { ToolRegistry } from "@opa/policy";
 import {
+  BROWSER_MANIFEST,
   CREATE_ARTIFACT_MANIFEST,
   READ_FILE_MANIFEST,
   SEARCH_HISTORY_MANIFEST,
@@ -19,6 +20,9 @@ export const builtinTools = new ToolRegistry();
 
 for (const manifest of [
   WEB_FETCH_MANIFEST,
+  // Listed like `task` below: a host with no browser (the Node root) never offers it, but a
+  // stored per-tool override survives, and Settings can name it honestly either way.
+  BROWSER_MANIFEST,
   SEARCH_HISTORY_MANIFEST,
   CREATE_ARTIFACT_MANIFEST,
   READ_FILE_MANIFEST,

@@ -105,6 +105,9 @@ async function seed() {
     model: "m",
     usage: { inputTokens: 1, outputTokens: 2, cachedInputTokens: 0 },
   });
+  // Browser sessions are their own ledger, but the archive must carry them too.
+  await alice.browserUsage.record({ id: "xb1", seconds: 600, conversationId: "ca" });
+  await bob.browserUsage.record({ id: "xb2", seconds: 900, conversationId: "cb" });
   await env.DB.prepare(
     "INSERT INTO audit_log (user_id, action, module, result) VALUES ('alice', 'exported', 'm', 'ok')",
   ).run();
@@ -161,6 +164,7 @@ describe("executeExport", () => {
       expect(names).toContain(`${type}.json`);
     }
     expect(names).toContain("messages/ca.json");
+    expect(names).toContain("browser_usage.json");
     expect(names).toContain("artifacts.json");
     expect(names).toContain("artifacts/files/tool-output.txt");
     expect(names).toContain("artifacts/task-outputs/offloaded.json");
@@ -169,6 +173,8 @@ describe("executeExport", () => {
     expect(names).toContain("attachments/xa2");
     // Bob's rows and files are nowhere in her archive.
     const text = new TextDecoder().decode(await zipBytes(id));
+    expect(text).toContain("xb1"); // her browser session rode along
+    expect(text).not.toContain("xb2"); // Bob's did not
     expect(text).not.toContain("xt2");
     expect(text).not.toContain("other.txt");
     expect(text).toContain("hello"); // attachment bytes rode along

@@ -83,6 +83,7 @@ import {
   type FiberRecoveryContext,
   type WSMessage,
 } from "agents";
+import { browserSessionOpener } from "./browser-session";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings, Env } from "./env";
 import { EventLog } from "./event-log";
@@ -240,6 +241,8 @@ export class Assistant extends Agent<Bindings> {
       user: this.#repo,
       fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
       ownHosts: await resolveOwnHosts(this.env),
+      // The `browser` tool, where this deployment has Browser Rendering bound.
+      ...(this.env.BROWSER ? { openBrowserSession: browserSessionOpener(this.env.BROWSER) } : {}),
       newId: () => crypto.randomUUID(),
       scope: {
         kind: "chat",

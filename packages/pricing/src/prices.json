@@ -12,6 +12,12 @@
     "verifiedAt": "2026-11-01",
     "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/"
   },
+  "browserRendering": {
+    "includedHoursPerMonth": 10,
+    "usdPerHour": 0.09,
+    "verifiedAt": "2026-11-03",
+    "source": "https://developers.cloudflare.com/browser-rendering/platform/pricing/"
+  },
   "cloudflare": {
     "d1IncludedBytes": 5000000000,
     "d1MaxBytes": 10000000000,

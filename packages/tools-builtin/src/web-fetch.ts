@@ -175,9 +175,15 @@ export type UrlCheck = { ok: true; url: URL } | { ok: false; error: string };
 /**
  * Whether the tool may fetch `raw` at all, checked before the first request and again on every
  * redirect target. `ownHosts` is the deployment's own hostname: fetching it is refused, so a
- * page (or an injected instruction) can't make the tool read the app itself.
+ * page (or an injected instruction) can't make the tool read the app itself. `tool` names the
+ * calling tool in refusals: the `browser` tool enforces this same policy on its navigations
+ * (M4-09 AC1) and speaks in its own name.
  */
-export function checkFetchUrl(raw: string, ownHosts: readonly string[]): UrlCheck {
+export function checkFetchUrl(
+  raw: string,
+  ownHosts: readonly string[],
+  tool = "web_fetch",
+): UrlCheck {
   let url: URL;
   try {
     url = new URL(raw);
@@ -185,23 +191,23 @@ export function checkFetchUrl(raw: string, ownHosts: readonly string[]): UrlChec
     return { ok: false, error: `"${raw}" is not a URL.` };
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return { ok: false, error: "web_fetch only reads http(s) URLs." };
+    return { ok: false, error: `${tool} only reads http(s) URLs.` };
   }
   if (url.username !== "" || url.password !== "") {
-    return { ok: false, error: "web_fetch won't fetch a URL with credentials in it." };
+    return { ok: false, error: `${tool} won't fetch a URL with credentials in it.` };
   }
   const host = bareHost(url.hostname);
   if (host === "" || host === "localhost" || host.endsWith(".localhost")) {
-    return { ok: false, error: "web_fetch won't fetch a local address." };
+    return { ok: false, error: `${tool} won't fetch a local address.` };
   }
   if (isPrivateIpLiteral(url.hostname)) {
     return {
       ok: false,
-      error: "web_fetch won't fetch a private, loopback or link-local address.",
+      error: `${tool} won't fetch a private, loopback or link-local address.`,
     };
   }
   if (ownHosts.some((own) => normOwnHost(own) === host)) {
-    return { ok: false, error: "web_fetch won't fetch this deployment's own address." };
+    return { ok: false, error: `${tool} won't fetch this deployment's own address.` };
   }
   return { ok: true, url };
 }
