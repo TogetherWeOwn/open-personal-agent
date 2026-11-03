@@ -96,8 +96,14 @@ export async function liveModels(url, deps, paths) {
   const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
   // The browser harness needs the live-model key but no Cloudflare token.
   const env = withoutPrefixes(deps.env, "CLOUDFLARE_");
-  // Scrub whole lines only, so a key split across output chunks is still caught.
-  const scrubbed = scrubbedOutput(deps.stdout, [deps.env.LIVE_MODEL_API_KEY]);
+  // Scrub whole lines only, so a key split across output chunks is still caught. The base
+  // URLs are secrets too (private host/path), so endpoint or app error text carrying them
+  // is redacted from the public log the same way.
+  const scrubbed = scrubbedOutput(deps.stdout, [
+    deps.env.LIVE_MODEL_API_KEY,
+    deps.env.LIVE_MODEL_OPENAI_BASE_URL,
+    deps.env.LIVE_MODEL_ANTHROPIC_BASE_URL,
+  ]);
   const res = await deps.run(
     process.execPath,
     [cli, "test", "--project", "live-models", "--reporter", "line", "--trace", "off"],
@@ -243,25 +249,33 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     },
   );
 
-  const report = renderReport(deps, {
-    ...{
-      prefix,
-      failure,
-      phases,
-      prompts,
-      snapshots,
-      teardown,
-      metrics,
-      live,
-      liveConfigured,
-      liveKey: vdeps.env.LIVE_MODEL_API_KEY ?? null,
-    },
-  });
-  const file = values.report ?? path.join(deps.root, ".wrangler", "opa-verify", `${prefix}.md`);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, report.replace("{{migration}}", migration?.name ?? "(not reached)"));
-  // The storage state holds live session cookies: remove it once the report is written.
-  fs.rmSync(livePaths.statePath, { force: true });
+  // The storage state holds live session cookies: it is removed in the finally below,
+  // so a report render/write failure cannot leave it on disk.
+  let report;
+  let file;
+  try {
+    report = renderReport(deps, {
+      ...{
+        prefix,
+        failure,
+        phases,
+        prompts,
+        snapshots,
+        teardown,
+        metrics,
+        live,
+        liveConfigured,
+        liveKey: vdeps.env.LIVE_MODEL_API_KEY ?? null,
+        liveOpenAIBaseUrl: vdeps.env.LIVE_MODEL_OPENAI_BASE_URL ?? null,
+        liveAnthropicBaseUrl: vdeps.env.LIVE_MODEL_ANTHROPIC_BASE_URL ?? null,
+      },
+    });
+    file = values.report ?? path.join(deps.root, ".wrangler", "opa-verify", `${prefix}.md`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, report.replace("{{migration}}", migration?.name ?? "(not reached)"));
+  } finally {
+    fs.rmSync(livePaths.statePath, { force: true });
+  }
   deps.stdout(`\n${fs.readFileSync(file, "utf8")}\nReport: ${file}\n`);
   if (failure) {
     // The caller prints the error to the same public log.
@@ -316,19 +330,21 @@ function budgets({ deploy, firstAnswer }) {
 }
 
 /** One row per adapter from the live step's results file, or why there is none. */
-function liveSection({ live, liveConfigured, liveKey }) {
+function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnthropicBaseUrl }) {
   if (!liveConfigured) {
     return "Skipped: no LIVE_MODEL_* secrets were set, so the endpoint-generic live step did not run.";
   }
   if (!live?.length) return "The step ran but recorded no per-adapter result; see the run's log.";
   // Defense in depth: the spec redacts the key before writing results, and the report redacts
-  // again in case an endpoint echoed it into a recorded error. Short keys are left alone: a
-  // tiny test key would match ordinary words.
-  const key = typeof liveKey === "string" && liveKey.length >= 8 ? liveKey : null;
-  const scrub = (value) =>
-    value === null || value === undefined
-      ? "—"
-      : String(key ? String(value).split(key).join("[redacted]") : value);
+  // again in case an endpoint echoed it (or a secret-placed base URL) into a recorded error.
+  // Short values are left alone: a tiny test fixture would match ordinary words.
+  const secrets = [liveKey, liveOpenAIBaseUrl, liveAnthropicBaseUrl].filter(
+    (s) => typeof s === "string" && s.length >= 8,
+  );
+  const scrub = (value) => {
+    if (value === null || value === undefined) return "—";
+    return secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value));
+  };
   const cell = (value) => (value === null || value === undefined ? "—" : String(value));
   const rows = live.map(
     (a) =>

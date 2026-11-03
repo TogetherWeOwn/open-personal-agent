@@ -151,9 +151,10 @@ function verifySetup({
       // A configured run records its per-adapter results; an unconfigured one records nothing.
       if (_deps.env.LIVE_MODEL_API_KEY) {
         fs.mkdirSync(path.dirname(paths.resultsPath), { recursive: true });
-        // An endpoint that echoes the key in a failed probe: the report must redact it.
+        // An endpoint that echoes the key and base URL in a failed probe: the report must
+        // redact both.
         const error = liveErrorKey
-          ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY}`
+          ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY} at ${_deps.env.LIVE_MODEL_OPENAI_BASE_URL}`
           : null;
         const rows = [
           {
@@ -214,7 +215,14 @@ function verifySetup({
   const deps = { env, root, fetch, stdout: (t) => out.push(t) };
   const report = path.join(root, "report.md");
   const run = () => verifyCloudflare(["--name", P, "--report", report], deps, steps);
-  return { root, calls, out, run, report: () => fs.readFileSync(report, "utf8") };
+  return {
+    root,
+    calls,
+    out,
+    run,
+    report: () => fs.readFileSync(report, "utf8"),
+    reportPath: report,
+  };
 }
 
 describe("verify:cloudflare", () => {
@@ -349,12 +357,16 @@ describe("verify:cloudflare", () => {
       env: {
         CLOUDFLARE_API_TOKEN: "cf-test-token",
         LIVE_MODEL_API_KEY: "sk-live-test-key",
+        LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1",
+        LIVE_MODEL_ANTHROPIC_BASE_URL: "https://anthropic.example.com",
       },
       run: async (_cmd, _args, { env, onOutput }) => {
         childEnv = env;
-        // The key straddles two spawn chunks: it still must not reach the log.
+        // The key straddles two spawn chunks: it still must not reach the log, and neither
+        // must a secret-placed base URL carried in endpoint error text.
         onOutput("probe sk-live-");
-        onOutput("test-key ok\n");
+        onOutput("test-key ok at https://models.exa");
+        onOutput("mple.com/v1 failed\n");
         return { code: 0 };
       },
       stdout: (t) => out.push(t),
@@ -367,13 +379,31 @@ describe("verify:cloudflare", () => {
     expect(Object.keys(childEnv).filter((k) => k.startsWith("CLOUDFLARE_"))).toEqual([]);
     expect(out.join("")).toContain("[redacted]");
     expect(out.join("")).not.toContain("sk-live-test-key");
+    expect(out.join("")).not.toContain("models.example.com");
   });
 
-  it("redacts the live-model key an endpoint echoes in a recorded error", async () => {
+  it("redacts the live-model key and base URL an endpoint echoes in a recorded error", async () => {
     const t = verifySetup({ live: true, liveErrorKey: true });
     await t.run();
     expect(t.report()).toContain("[redacted]");
     expect(t.report()).not.toContain("sk-live-secret-abcdef123456");
+    expect(t.report()).not.toContain("models.example.com");
+  });
+
+  it("removes the browser storage state even when the report write fails", async () => {
+    const t = verifySetup({ live: true });
+    const statePath = path.join(t.root, ".wrangler", "opa-verify", `${P}-state.json`);
+    const write = fs.writeFileSync.bind(fs);
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, ...rest) => {
+      if (String(file) === t.reportPath) throw new Error("bad report path");
+      return write(file, ...rest);
+    });
+    try {
+      await expect(t.run()).rejects.toThrow("bad report path");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(statePath)).toBe(false);
   });
 
   it("fails when the re-run is not up to date, and still tears down", async () => {
