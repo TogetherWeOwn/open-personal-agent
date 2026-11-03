@@ -685,6 +685,29 @@ describe("failures", () => {
   });
 });
 
+describe("tool offering (TWO-1960)", () => {
+  it("never offers tools to a chat-only model", async () => {
+    const { provider, requests } = scripted([{ text: "Hello!" }]);
+    const chatOnly = {
+      ...provider,
+      capabilities: () => ({ tools: false, usageInStream: true }),
+    };
+    const { events, outcome } = await drain(host(chatOnly, [tool("fetch", "read")]), newTurn());
+    expect(outcome).toBe("completed");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty("tools");
+    expect(types(events)).not.toContain("tool.called");
+  });
+
+  it("still offers the registry where the model reports tool support", async () => {
+    const { provider, requests } = scripted([{ text: "Hello!" }]);
+    const { outcome } = await drain(host(provider, [tool("fetch", "read")]), newTurn());
+    expect(outcome).toBe("completed");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toHaveProperty("tools");
+  });
+});
+
 describe("steer (M3-09 AC4)", () => {
   it("drains steers at the next step boundary without restarting the turn", async () => {
     const { provider, requests } = scripted([
