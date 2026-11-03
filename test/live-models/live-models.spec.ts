@@ -245,12 +245,18 @@ test.describe("live models on a configured endpoint", () => {
   test.skip(!CONFIGURED, "no LIVE_MODEL_* secrets: the endpoint-generic live step is skipped");
   // No serial mode: each adapter records its own result, so one adapter's failure must never
   // skip the others. The project already runs one worker, keeping the order.
-  // Model picks, probes and a three-fetch agent task per adapter.
-  test.setTimeout(900_000);
+  // Model picks, probes and a three-fetch agent task per adapter: 12 min each, so the four
+  // adapters finish inside ~48 min and the job timeout still leaves room for teardown and
+  // the report on every path.
+  test.setTimeout(720_000);
 
   test.beforeAll(() => {
     if (!storageState || !fs.existsSync(storageState)) {
-      throw new Error("the first run saved no session (OPA_STORAGE_STATE)");
+      const error = "the first run saved no session (OPA_STORAGE_STATE)";
+      // The tests never run on this path, so record each adapter's failure here: the run
+      // failed before any adapter could, and the report should say so per adapter.
+      for (const adapter of ADAPTERS) record(fail(adapter, error));
+      throw new Error(error);
     }
   });
 
@@ -288,11 +294,13 @@ test.describe("live models on a configured endpoint", () => {
 
   /**
    * Picks the adapter's model from the endpoint's own list: the first one whose Test probe
-   * answers with tool calls, priced where the price table knows it. At most four probes, so one
-   * slow model can't eat the phase.
+   * answers with tool calls, priced where the price table knows it. At most four probes, so
+   * the adapter stays inside its share of the live-step budget; the recorded error says how
+   * many of the listed models were tried.
    */
   async function pickModel(page: Page, rowId: string, baseUrl: string, adapter: Adapter) {
     const candidates = (await listModels(baseUrl, adapter)).slice(0, 8);
+    const tried = Math.min(4, candidates.length);
     let fallback: { model: string; test: TestResponse } | null = null;
     for (const model of candidates.slice(0, 4)) {
       const probed = await probe(page, rowId, model);
@@ -300,7 +308,11 @@ test.describe("live models on a configured endpoint", () => {
       if (probed.price) return { model, test: probed };
       fallback ??= { model, test: probed };
     }
-    if (!fallback) throw new Error("no listed model passed the Test probe with tool calls");
+    if (!fallback) {
+      throw new Error(
+        `no listed model passed the Test probe with tool calls (probed ${tried} of ${candidates.length} listed)`,
+      );
+    }
     return fallback;
   }
 
@@ -441,10 +453,17 @@ test.describe("live models on a configured endpoint", () => {
       ) {
         record({ ...fail(adapter, "no LIVE_MODEL_OPENAI_BASE_URL"), model: null });
       } else {
-        // Start the conversation-load wait before navigation so a fast response is not missed.
-        const conversationsOpen = socketOpen(page);
-        await page.goto("/");
-        await conversationsOpen;
+        try {
+          // Start the conversation-load wait before navigation so a fast response is not missed.
+          const conversationsOpen = socketOpen(page);
+          await page.goto("/");
+          await conversationsOpen;
+        } catch (error) {
+          // Navigation or the load wait can fail before runAdapter records a row. Record
+          // that adapter's failure here so the report keeps a per-adapter row for it too.
+          record(fail(adapter, error));
+          throw error;
+        }
         const result = await runAdapter(page, adapter);
         expect(result.ok, result.error ?? "the live run failed").toBe(true);
       }

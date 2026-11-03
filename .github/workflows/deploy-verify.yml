@@ -18,8 +18,11 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     environment: cf-verify
-    # The live-model step can add four probe-then-task runs; without its secrets it skips.
-    timeout-minutes: 60
+    # The live-model step can add four probe-then-task runs (up to ~12 min each, so up to
+    # ~48 min); without its secrets it skips. The budget leaves room for setup, the three
+    # deploys, the first run, teardown and the report upload on every path, so a slow run
+    # still tears down to zero instead of dying on the job timeout.
+    timeout-minutes: 90
     # The Cloudflare secrets are step-level: install and its lifecycle scripts never see them.
     env:
       TEARDOWN_PREFIX: ${{ inputs.teardown_prefix }}
