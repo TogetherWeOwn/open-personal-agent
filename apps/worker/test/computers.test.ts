@@ -353,30 +353,26 @@ describe("touch and scope (AC1)", () => {
     const feed = await repo.forUser(found.scope).computers.list();
     expect(feed.map((c) => c.id)).toEqual([computer.id]);
     expect(await repo.scopeForComputer("nope")).toBeNull();
-    await sweepComputers(env, undefined, NOW + HOUR);
+    // The sweep destroys through the wired driver, so the finished row leaves the feed.
+    await sweepComputers(env, driver, NOW + HOUR);
     expect(await repo.forUser(found.scope).computers.list()).toEqual([]);
   });
 });
 
-describe("the sweep without a provider (AC3)", () => {
-  it("destroys idle-expired computers and records the session and audit rows", async () => {
+describe("the sweep without a provider fails closed (AC3)", () => {
+  it("leaves an idle-expired computer live, counts it as an error, and writes no rows", async () => {
     await seedUser("u1");
     const row = await seedComputer("u1", "t1", { idleDeadline: NOW + 1, lastUsedAt: NOW });
     const summary = await sweepComputers(env, undefined, NOW + 2);
-    expect(summary).toMatchObject({ idle: 1, lifetime: 0, taskEnded: 0, orphans: 0, errors: 0 });
-    expect((await computerStore(env).get(row.id))?.endReason).toBe("idle");
-    expect(
-      await db
-        .prepare("SELECT end_reason FROM computer_sessions WHERE computer_id = ?")
-        .bind(row.id)
-        .first<string>("end_reason"),
-    ).toBe("idle");
-    const actions = await auditActions("u1");
-    expect(actions.map((a) => a.action)).toEqual(["computer.create", "computer.destroyed"]);
-    expect(JSON.parse(actions[1]?.detail ?? "{}")).toMatchObject({ reason: "idle" });
+    expect(summary).toMatchObject({ idle: 0, lifetime: 0, taskEnded: 0, orphans: 0, errors: 1 });
+    // The row stays live with no session, ledger or destroy-audit row: finishing it would
+    // strand a billing computer with no owner record.
+    expect((await computerStore(env).get(row.id))?.state).toBe("ready");
+    expect(await count("computer_sessions")).toBe(0);
+    expect((await auditActions("u1")).map((a) => a.action)).toEqual(["computer.create"]);
   });
 
-  it("enforces max lifetime even while the computer is in use", async () => {
+  it("leaves a lifetime-expired computer live even while it is in use", async () => {
     await seedUser("u1");
     const row = await seedComputer("u1", "t1", {
       lastUsedAt: NOW,
@@ -384,11 +380,12 @@ describe("the sweep without a provider (AC3)", () => {
       lifetimeDeadline: NOW + 1,
     });
     const summary = await sweepComputers(env, undefined, NOW + 2);
-    expect(summary.lifetime).toBe(1);
-    expect((await computerStore(env).get(row.id))?.endReason).toBe("lifetime");
+    expect(summary).toMatchObject({ lifetime: 0, errors: 1 });
+    expect((await computerStore(env).get(row.id))?.state).toBe("ready");
+    expect(await count("computer_sessions")).toBe(0);
   });
 
-  it("destroys a computer whose task was cancelled, and spares an unbound one", async () => {
+  it("leaves a computer whose task was cancelled live, and spares an unbound one", async () => {
     await seedUser("u1", ["t1"]);
     await seedUser("u2", ["t2"]);
     const bound = await seedComputer("u1", "t1");
@@ -399,9 +396,24 @@ describe("the sweep without a provider (AC3)", () => {
       .bind(NOW)
       .run();
     const summary = await sweepComputers(env, undefined, NOW + 1);
-    expect(summary.taskEnded).toBe(1);
-    expect((await computerStore(env).get(bound.id))?.endReason).toBe("task_ended");
+    expect(summary).toMatchObject({ taskEnded: 0, errors: 1 });
+    expect((await computerStore(env).get(bound.id))?.state).toBe("ready");
     expect((await computerStore(env).get(unbound.id))?.state).toBe("ready");
+  });
+
+  it("fails closed without a driver, then destroys the same row once one is wired", async () => {
+    await seedUser("u1");
+    const row = await seedComputer("u1", "t1", { idleDeadline: NOW + 1, lastUsedAt: NOW });
+    const closed = await sweepComputers(env, undefined, NOW + 2);
+    expect(closed).toMatchObject({ idle: 0, errors: 1 });
+    expect((await computerStore(env).get(row.id))?.state).toBe("ready");
+    expect(await count("computer_sessions")).toBe(0);
+    // With a driver wired, the existing sweep behaviour is unchanged.
+    const driver = fakeDriver();
+    const open = await sweepComputers(env, driver, NOW + 3);
+    expect(open).toMatchObject({ idle: 1, errors: 0 });
+    expect(driver.destroyed.map((d) => d.id)).toEqual([row.providerComputerId]);
+    expect((await computerStore(env).get(row.id))?.endReason).toBe("idle");
   });
 
   it("leaves a live computer alone and writes no audit rows for it", async () => {
