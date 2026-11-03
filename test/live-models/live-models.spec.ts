@@ -35,8 +35,8 @@ const banned = (id: string) => BANNED.has(id) || /terra/i.test(id);
 // silent pass.
 const CURATED_MODELS = [
   "@cf/openai/gpt-oss-20b",
-  "@cf/openai/gpt-oss-120b",
   "@cf/moonshotai/kimi-k2.5",
+  "@cf/openai/gpt-oss-120b",
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 ];
 
