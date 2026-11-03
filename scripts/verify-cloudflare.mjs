@@ -347,9 +347,11 @@ function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnt
   // pipe (`\\\|`), not as an escaped backslash ending the cell (`\\|`).
   const oneLine = (value) =>
     String(value).replace(/\s+/g, " ").replaceAll("\\", "\\\\").replaceAll("|", "\\|");
+  const redact = (value) =>
+    secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value));
   const scrub = (value) => {
     if (value === null || value === undefined) return "—";
-    return oneLine(secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value)));
+    return oneLine(redact(value));
   };
   const cell = (value) => (value === null || value === undefined ? "—" : oneLine(value));
   const rows = live.map(
@@ -360,7 +362,9 @@ function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnt
       ` | ${cell(a.artifactId)} | ` +
       // The cell must fit a whole recorded error: the timeout row's diagnostic log tail
       // sits at the end of the message, so a shorter cap would hide exactly that part.
-      (a.ok ? "pass" : `**fail**: ${scrub(a.error ?? "unknown").slice(0, 500)}`) +
+      // Slice before escaping: escaping doubles backslashes and pipes, so slicing the
+      // escaped text could cut the tail even when the recorded error fits the cap.
+      (a.ok ? "pass" : `**fail**: ${oneLine(redact(a.error ?? "unknown").slice(0, 500))}`) +
       " |",
   );
   return (

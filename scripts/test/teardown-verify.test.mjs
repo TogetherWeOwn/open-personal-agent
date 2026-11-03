@@ -111,6 +111,7 @@ function verifySetup({
   live = false,
   liveErrorKey = false,
   liveErrorPipe = false,
+  liveErrorBackslashes = false,
   liveFailsAfterRows = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
@@ -158,7 +159,9 @@ function verifySetup({
           ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY} at ${_deps.env.LIVE_MODEL_OPENAI_BASE_URL}`
           : liveErrorPipe
             ? "artifact timed out: log tail A \\| B"
-            : null;
+            : liveErrorBackslashes
+              ? `probe failed: ${"x".repeat(280)}${"\\".repeat(150)} TAIL-KEPT`
+              : null;
         const rows = [
           {
             adapter: "openai-chat",
@@ -171,7 +174,7 @@ function verifySetup({
             cost: "match",
             artifactId: "a1",
             artifactName: "live-check-openai-chat.md",
-            ok: !(liveErrorKey || liveErrorPipe),
+            ok: !(liveErrorKey || liveErrorPipe || liveErrorBackslashes),
             error,
           },
         ];
@@ -406,6 +409,19 @@ describe("verify:cloudflare", () => {
     // Only the 8 table delimiters are unescaped pipes; the literal `\|` in
     // the error text must not parse as a ninth delimiter.
     expect(row.match(/(?<!\\)\|/g)).toHaveLength(8);
+  });
+
+  it("keeps the diagnostic tail when escaping expands a recorded error", async () => {
+    const t = verifySetup({ live: true, liveErrorBackslashes: true });
+    await t.run();
+    const row = t
+      .report()
+      .split("\n")
+      .find((l) => l.includes("| openai-chat |"));
+    // The recorded error fits the 500-char cell cap, but escaping doubles its
+    // 150 backslashes: slicing the escaped text would cut the tail marker,
+    // so the cap applies before escaping and the tail survives.
+    expect(row).toContain("TAIL-KEPT");
   });
 
   it("removes the browser storage state even when the report write fails", async () => {
