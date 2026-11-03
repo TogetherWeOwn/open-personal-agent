@@ -56,9 +56,12 @@ describe("the route table", () => {
     );
   });
 
-  it("answers 403 on every protected route before the claim", async () => {
+  it("keeps every protected route closed before the claim", async () => {
     for (const route of protectedRoutes) {
-      expect([route, (await call(new Browser(), route)).status]).toEqual([route, 403]);
+      // Machine routes deny missing credentials before browser Origin/claim checks;
+      // session routes retain the deployment's claim-first denial.
+      const status = TOKEN_ROUTES.has(route) ? 401 : 403;
+      expect([route, (await call(new Browser(), route)).status]).toEqual([route, status]);
     }
   });
 
@@ -90,8 +93,8 @@ describe("the route table", () => {
   });
 
   it("holds every capability-token audience route, and each one is a real route", async () => {
-    // Empty in M4-00a: the audience routes land in M4-00b/00c, each adding its entry here with
-    // its expected audience. A token route must never overlap the session surface.
+    // Each audience route declares its exact partition. A token route must never overlap
+    // the session surface.
     for (const [route, aud] of TOKEN_ROUTES) {
       expect(["model_proxy", "artifact_upload", "tool_gateway"]).toContain(aud);
       expect(routes).toContain(route);
@@ -99,8 +102,7 @@ describe("the route table", () => {
     }
     // A bearer for a token route must open only that route: `matchRoute` cannot tell which
     // route Hono would serve, so a token pattern matching any other route's path would let
-    // the bearer open a session route (or shadow another token route). Vacuous in M4-00a —
-    // the table is empty — and binding on every route the M4-00b/00c cards add.
+    // the bearer open a session route (or shadow another token route).
     const methodOf = (route: string) => {
       const method = route.split(" ")[0];
       return method === "HEAD" ? "GET" : method;

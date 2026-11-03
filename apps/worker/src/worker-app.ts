@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Worker's app: the shared app plus the chat socket to the user's assistant (ADR 0002), named
 // from the session only; the SDK's `/agents/*` router isn't mounted. apps/node never loads it.
+
 import { createRepository } from "@opa/db/repository";
 import { createApp } from "@opa/server/app";
 import { type ApprovalForward, approvalRoutes } from "@opa/server/approvals";
 import { sameOrigin } from "@opa/server/security";
+import { readCapabilityToken } from "@opa/server/session";
 import { Hono } from "hono";
 import { SESSION_HEADER } from "./assistant";
 import type { AppEnv } from "./env";
 
 const workerRoutes = new Hono<AppEnv>();
+
+workerRoutes.post("/model-proxy/:providerId", async (c) => {
+  const token = readCapabilityToken(c.req.raw);
+  const assistant = token ? await createRepository(c.env).assistantForModelProxy(token) : null;
+  if (!assistant) return c.json({ error: "unauthenticated" }, 401);
+  return assistant.modelProxy(c.req.raw, c.req.param("providerId"));
+});
 
 workerRoutes.get("/chat", async (c) => {
   // A WebSocket upgrade is a GET and skips CORS, so a cross-site page could open one with the

@@ -120,12 +120,12 @@ export function createApp<P extends AppPorts = AppPorts>(extra?: Hono<AppEnv<P>>
     log.info("request", { ...fields, durationMs: Date.now() - start });
   });
   app.use(securityHeaders);
-  app.use(exactOrigin);
   app.use(publicRateLimit);
-  app.use(claimGuard);
-  // Token routes first: a verified token sets `c.var.capability`, which the session guard
-  // then honors. That credential anywhere else still answers 401 (M4-00a AC3).
+  // Verify machine credentials before exempting their routes from browser Origin checks.
+  // Session routes still check Origin before claim/session state is read.
   app.use(tokenGuard);
+  app.use(exactOrigin);
+  app.use(claimGuard);
   app.use(sessionGuard);
 
   app.route("/", shared);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // M4-00a AC3: the credential partition, from both sides. A scratch app runs the production
-// guard order — `claimGuard`, then `tokenGuardFor`, then `sessionGuard` — over two audience
+// guard order — token, Origin, claim, then session — over two audience
 // routes, the shape the M4-00b/00c routes will mount: a bearer for the route's expected
 // audience is the only credential that opens it, and a bearer presented to a session route —
 // or beside a session cookie — is a 401, never a session. Every denial is the same
@@ -14,6 +14,7 @@ import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import type { SqlDatabase } from "@opa/db/system";
 import { SESSION_COOKIE } from "@opa/server/auth";
+import { exactOrigin } from "@opa/server/security";
 import { sessionGuard, tokenGuardFor } from "@opa/server/session";
 import { claimGuard } from "@opa/server/setup";
 import { Hono } from "hono";
@@ -32,13 +33,14 @@ const TABLE = new Map<string, CapabilityAudience>([
 
 /**
  * A scratch app with the partition mounted behind the production guard order. It cannot go
- * through `createApp`: that wires the production (empty-in-00a) route table, whose session
+ * through `createApp`: that wires the production route table, whose session
  * guard would reject the scratch bearers before the scratch table ever sees them.
  */
 function scratch() {
   const probe = new Hono<AppEnv>();
-  probe.use(claimGuard);
   probe.use(tokenGuardFor(TABLE));
+  probe.use(exactOrigin);
+  probe.use(claimGuard);
   probe.use(sessionGuard);
   probe.get("/api/agent/upload", (c) => c.json({ ok: true, aud: c.var.capability?.aud ?? null }));
   probe.post("/api/agent/proxy", (c) => c.json({ ok: true, aud: c.var.capability?.aud ?? null }));

@@ -75,6 +75,9 @@ import {
   SPENDING_DEFAULTS,
   type SpendingSettings,
 } from "@opa/server/limits";
+import { ModelProxy } from "@opa/server/model-proxy";
+import { resolveProxyProvider } from "@opa/server/model-proxy-config";
+import { readCapabilityToken } from "@opa/server/session";
 import { composeTurnTools, type TurnContext } from "@opa/server/turn-tools";
 import {
   Agent,
@@ -302,6 +305,62 @@ export class Assistant extends Agent<Bindings> {
     // The queue is mirrored to storage on every change; a new instance settles whatever the
     // evicted one left waiting, so no admitted pair reads `streaming` forever (M3-09 AC4).
     this.ctx.blockConcurrencyWhile(() => this.#recoverQueues());
+  }
+
+  #proxy: ModelProxy | undefined;
+  resolveProxyProvider = resolveProxyProvider;
+  proxyFetch: typeof fetch = (...args) => fetch(...args);
+
+  async #proxyEngine(): Promise<ModelProxy> {
+    const env = await this.#composed;
+    this.#proxy ??= new ModelProxy({
+      userId: this.#scope.userId,
+      limits: this.limits,
+      journal: this.ctx.storage.kv,
+      atomic: (fn) => this.ctx.blockConcurrencyWhile(fn),
+      verify: (token) => systemStore(env).capability.verify({ token, expectedAud: "model_proxy" }),
+      resolve: (capability, providerId, model) =>
+        this.resolveProxyProvider(env, this.#scope, capability, providerId, model),
+      reserve: (call) => this.#repo.usage.recordProxy(call),
+      record: (call) => this.#repo.usage.recordProxy(call),
+      fetch: (...args) => this.proxyFetch(...args),
+    });
+    return this.#proxy;
+  }
+
+  /** Worker-only RPC: the DO's name and a freshly verified row, never a supplied scope, authorize admission. */
+  async modelProxy(request: Request, providerId: string): Promise<Response> {
+    const token = readCapabilityToken(request);
+    if (!token || request.headers.has("cookie"))
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    if (request.method !== "POST" || !request.body || !isId(providerId))
+      return Response.json({ error: "invalid_inference_request" }, { status: 400 });
+    const { bytes, more } = await readPrefix(request.body, 256 * 1024);
+    if (more) return Response.json({ error: "request_too_large" }, { status: 413 });
+    let envelope: { path?: unknown; body?: unknown } | null;
+    try {
+      envelope = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      envelope = null;
+    }
+    if (
+      !envelope ||
+      typeof envelope.path !== "string" ||
+      Object.keys(envelope).some((key) => key !== "path" && key !== "body")
+    )
+      return Response.json({ error: "invalid_inference_request" }, { status: 400 });
+    return (await this.#proxyEngine()).call(
+      token,
+      providerId,
+      envelope.path,
+      envelope.body,
+      request.signal,
+    );
+  }
+
+  /** Task cancellation has already committed the terminal row and epoch before notifying us. */
+  async abortModelProxyTask(taskId: string): Promise<void> {
+    await (await this.#proxyEngine()).cancelTask(taskId);
   }
 
   /** Liveness check for `/api/health`. */

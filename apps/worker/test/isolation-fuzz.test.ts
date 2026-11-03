@@ -18,7 +18,7 @@ import {
 } from "@opa/db/repository";
 import { credentialBinding } from "@opa/providers";
 import { resolveChatModel } from "@opa/server/chat-model";
-import { PUBLIC_ROUTES } from "@opa/server/session";
+import { PUBLIC_ROUTES, TOKEN_ROUTES } from "@opa/server/session";
 import { decrypt } from "@opa/vault";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { compose, type WorkerEnv } from "../src/compose";
@@ -154,7 +154,7 @@ function victimId(route: string, v: Seeded): string {
   if (route.includes("/artifacts/")) return v.artifact;
   if (route.includes("/attachments/")) return v.attachment;
   if (route.includes("/sessions/")) return v.spareSession;
-  if (route.includes("/providers/")) return v.provider;
+  if (route.includes("/providers/") || route.includes("/model-proxy/")) return v.provider;
   if (route.includes("/grants/")) return v.grant;
   if (route.includes("/tasks/")) return v.task;
   return v.memory; // a tool name: nothing of the victim's, so any ID will do
@@ -189,8 +189,11 @@ describe("R2 keys, DO names and Workflow ids (AC2)", () => {
           // Removing a passkey needs the account step-up the harness never performs, so the
           // guard answers 403 before any lookup: still nothing of A's, as the snapshot and
           // recorder assertions below hold (M3-19 AC2).
-          const allowed =
-            route === "PUT /api/settings/tools/:name"
+          // A browser cookie never opens a token route (401). Raw separators may instead
+          // leave the registered path entirely (400/404); storage assertions still apply.
+          const allowed = TOKEN_ROUTES.has(route)
+            ? [400, 401, 404]
+            : route === "PUT /api/settings/tools/:name"
               ? [200, 400, 404]
               : route === "DELETE /api/passkeys/:id"
                 ? [400, 403, 404]
