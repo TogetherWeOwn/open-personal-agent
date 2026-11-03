@@ -94,10 +94,45 @@ export function findDependencyViolations(manifests) {
   return problems;
 }
 
+/** Axis port modules (M4-01 AC5, §17 Provider separation): the model, harness and computer
+ * ports must not import each other. `index.ts` re-exporting all three is composition, not a
+ * cross-import, and stays allowed. */
+const AXIS_PORTS = new Set([
+  "packages/core/src/model-provider.ts",
+  "packages/core/src/harness-event.ts",
+  "packages/core/src/computer-provider.ts",
+]);
+
+/** Imports (types included) from one axis port module to another, relative or via the barrel. */
+export function findAxisCrossImports(files) {
+  const problems = [];
+  for (const { path, text } of files) {
+    if (!AXIS_PORTS.has(path)) continue;
+    for (const { 1: specifier, index } of text.matchAll(SPECIFIER)) {
+      let target = null;
+      if (specifier === "@opa/core" || specifier.startsWith("@opa/core/")) {
+        target = specifier; // the barrel re-exports the other axes
+      } else if (specifier.startsWith(".")) {
+        const resolved = normalize(join(dirname(path), specifier)).replace(/\.js$/, ".ts");
+        const candidate = resolved.endsWith(".ts") ? resolved : `${resolved}.ts`;
+        if (AXIS_PORTS.has(candidate) && candidate !== path) target = candidate;
+      }
+      if (target) {
+        const line = text.slice(0, index).split("\n").length;
+        problems.push(
+          `${path}:${line}: imports "${specifier}" (axis-separation: axis ports must not import each other)`,
+        );
+      }
+    }
+  }
+  return problems;
+}
+
 if (isMain(import.meta.url)) {
   const files = repoTextFiles();
   const manifests = files.filter(({ path }) => /(?:^|\/)package\.json$/.test(path));
   report("ports-rule", findPortViolations(files));
   report("app-to-app", findAppImports(files));
   report("dependency-guard", findDependencyViolations(manifests));
+  report("axis-separation", findAxisCrossImports(files));
 }

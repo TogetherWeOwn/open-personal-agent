@@ -3,7 +3,22 @@
 // `usage.updated`, `status`) and the M3 set with the names and payloads fixed by EL fix 6
 // (M3-03 AC8). The M3 events join under `v: 1` with no version bump: none is persisted yet.
 import type { ApprovalScope, PolicyRule, RiskClass, TaintSourceKind } from "@opa/policy";
-import type { ModelUsage } from "./model-provider";
+
+/**
+ * Token counts for one call, as reported on `usage.updated`. This intentionally mirrors
+ * `ModelUsage` field-for-field without importing the model axis: the three axis port modules
+ * (`model-provider.ts`, `harness-event.ts`, `computer-provider.ts`) must not import each other
+ * (axis-separation rule in `scripts/check-boundaries.mjs`), so each axis owns its wire types and
+ * they stay compatible structurally. If `ModelUsage` changes, update this with it.
+ */
+export interface HarnessUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  reasoningTokens: number;
+  /** Absent when the provider doesn't report cache writes apart from input. */
+  cacheWriteInputTokens?: number;
+}
 
 /**
  * Why a send was refused by a limit (M2-22): `slow_down` passes within a minute, `limit_reached`
@@ -91,7 +106,7 @@ export type HarnessEvent =
   | Envelope<"turn.dequeued", { messageId: string; conversationId: string }>
   | Envelope<"message.delta", { text: string }>
   | Envelope<"message.completed", { text: string }>
-  | Envelope<"usage.updated", { usage: ModelUsage; providerId: string; model: string }>
+  | Envelope<"usage.updated", { usage: HarnessUsage; providerId: string; model: string }>
   | Envelope<"status", { text: string }>
   | Envelope<"step.started", { stepId: string; label: string; toolCallId?: string }>
   | Envelope<
