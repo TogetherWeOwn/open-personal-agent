@@ -91,5 +91,8 @@ test("claim, onboard and get a first answer", async ({ browser }) => {
     // The web build's stand-in transport; a deployment must answer from the model.
     await expect(reply).not.toContainText("This is a placeholder reply");
   }
+  // The live-models project continues as this user; it brings its own secrets, if any.
+  if (process.env.OPA_STORAGE_STATE)
+    await context.storageState({ path: process.env.OPA_STORAGE_STATE });
   await context.close();
 });

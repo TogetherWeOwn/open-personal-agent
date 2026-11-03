@@ -402,7 +402,9 @@ export const usage = sqliteTable(
 /**
  * A user's saved model providers (M3-06). The key lives envelope-encrypted in `secrets` (ADR 0010
  * D4), bound to `provider_id` and `base_url`'s origin and path (ADR 0006 #5). The Workers AI starter
- * is a row too, with no URL and no key. `model` is the one saved and tested with it.
+ * is a row too, with no URL and no key. `model` is the one saved and tested with it. `api` is an
+ * explicit wire-API choice for a custom endpoint (chat, Responses or Messages); null keeps the
+ * origin preset, so existing rows behave as before.
  */
 export const modelProviders = sqliteTable(
   "model_providers",
@@ -413,6 +415,7 @@ export const modelProviders = sqliteTable(
     providerId: text("provider_id"),
     baseUrl: text("base_url"),
     model: text("model"),
+    api: text("api", { enum: ["openai-chat", "openai-responses", "anthropic-messages"] }),
     keySecretId: text("key_secret_id").references(() => secrets.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: integer("updated_at").notNull().default(now),

@@ -18,6 +18,10 @@ from the starter model on Workers AI, after a claim with a virtual passkey and o
 |---|---|---|---|
 {{budgets}}
 
+## Live models (endpoint-generic, optional)
+
+{{live}}
+
 ## Permission diff (token minted from `deploy/permissions.json`)
 
 | Entry | Permission | Outcome |
