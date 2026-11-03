@@ -89,8 +89,6 @@ export interface MintOptions {
   aud: string;
   /** Snapshotted at mint for `model_proxy`; verification intersects it with live config. */
   modelAllowlist?: readonly ModelCeiling[];
-  /** Overrides the per-audience default; still clamped to the ≤ 1 h ceiling. */
-  ttlMs?: number;
   /** The task's deadline and the computer's lifetime end, when the caller knows them. */
   taskDeadlineMs?: number;
   computerEndsAtMs?: number;
@@ -169,7 +167,6 @@ export async function mintCapabilityToken(
     computerProfile,
     aud,
     modelAllowlist,
-    ttlMs,
     taskDeadlineMs,
     computerEndsAtMs,
   } = options;
@@ -189,8 +186,9 @@ export async function mintCapabilityToken(
       );
     if (!valid) throw new MintRefusedError("invalid_allowlist");
   }
-  // TTLs are server-side constants: a caller override can only shorten, never exceed the ceiling.
-  const ttl = Math.min(ttlMs ?? AUDIENCE_TTL_MS[aud as CapabilityAudience], MAX_TTL_MS);
+  // TTLs are server-side constants (AC1c): the per-audience default, clamped to the ≤ 1 h
+  // ceiling. There is no caller-supplied TTL or expiry.
+  const ttl = Math.min(AUDIENCE_TTL_MS[aud as CapabilityAudience], MAX_TTL_MS);
   if (!(ttl > 0)) throw new MintRefusedError("invalid_ttl");
   const expiresAt = Math.min(
     now + ttl,

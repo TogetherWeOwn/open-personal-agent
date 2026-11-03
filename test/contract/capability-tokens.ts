@@ -135,13 +135,18 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
       expect(byComputer).toBe(now + 30_000);
     });
 
-    it("clamps a caller override to the one-hour ceiling, never above it", async () => {
+    it("keeps every TTL at or under the one-hour ceiling, with no caller override", async () => {
       const { mint } = await setup();
       const now = Date.now();
-      const { expiresAt } = await mint({ aud: "tool_gateway", ttlMs: 4 * 3_600_000, now });
-      expect(expiresAt).toBe(now + MAX_TTL_MS);
-      const { expiresAt: shorter } = await mint({ aud: "tool_gateway", ttlMs: 60_000, now });
-      expect(shorter).toBe(now + 60_000);
+      for (const aud of ["model_proxy", "artifact_upload", "tool_gateway"] as const) {
+        // `MintOptions` carries no TTL field: this object literal must stay a type error
+        // if a TTL override is ever reintroduced.
+        const over: Partial<MintOptions> & { aud: string } = { aud };
+        expect("ttlMs" in over).toBe(false);
+        const { expiresAt } = await mint({ aud, now });
+        expect(expiresAt).toBe(now + AUDIENCE_TTL_MS[aud]);
+        expect(expiresAt).toBeLessThanOrEqual(now + MAX_TTL_MS);
+      }
     });
 
     it("stores only the SHA-256, never the token value", async () => {
@@ -278,14 +283,18 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
     it("denies an expired token silently: past the TTL it simply stops", async () => {
       const { DB, mint } = await setup();
       const now = Date.now();
-      const { token } = await mint({ aud: "tool_gateway", ttlMs: 60_000, now });
+      const { token } = await mint({ aud: "tool_gateway", now });
       const before = (
         await DB.prepare(
           "SELECT count(*) AS n FROM audit_log WHERE action = 'capability_token.use_denied'",
         ).first<{ n: number }>()
       )?.n;
       expect(
-        await verifyCapabilityToken(DB, { token, expectedAud: "tool_gateway", now: now + 120_000 }),
+        await verifyCapabilityToken(DB, {
+          token,
+          expectedAud: "tool_gateway",
+          now: now + AUDIENCE_TTL_MS.tool_gateway + 1,
+        }),
       ).toBeNull();
       expect(
         (
