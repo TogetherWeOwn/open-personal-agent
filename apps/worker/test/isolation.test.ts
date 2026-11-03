@@ -79,6 +79,12 @@ const CASES: Record<string, Case> = {
   // The owner's loop cancels first (routes run sorted), so by Stop the task has ended: 409
   // still proves the row was found, since a foreign id answers 404 before the write.
   "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
+  // Clearing the computer override validates without a registry: another user's task is a 404.
+  "PUT /api/tasks/:id/computer": {
+    params: (v) => ({ id: v.task }),
+    body: () => ({ provider: null }),
+    own: 200,
+  },
   // The approval needs a step-up: the owner gets a challenge, and a decision without its assertion.
   "POST /api/approvals/:batchId/options": {
     params: (v) => ({ batchId: v.batch }),
