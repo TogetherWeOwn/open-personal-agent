@@ -176,6 +176,13 @@
       "when": 1793662797079,
       "tag": "0024_provider_api",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1793714024071,
+      "tag": "0025_deployment_hosts",
+      "breakpoints": true
     }
   ]
 }

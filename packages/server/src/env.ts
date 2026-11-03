@@ -60,10 +60,12 @@ export interface AppPorts extends DataPorts {
    */
   MODEL_PRIVATE_HOSTS?: boolean;
   /**
-   * The deployment's own hostnames, comma-separated (e.g. `agent.example,www.example.com`).
-   * `web_fetch` refuses them, so a page can't make the turn read the app itself; localhost,
-   * private literals and what the fetch port refuses are refused regardless. Unset means none
-   * are named. Node's root derives this from its public origin instead.
+   * The deployment's own hostnames, comma-separated (e.g. `agent.example,www.example.com`),
+   * as a manual override or addition. `web_fetch` refuses them, plus the serving hostnames
+   * the Worker records itself (workers.dev, custom domains), so a page can't make the turn
+   * read the app itself; localhost, private literals and what the fetch port refuses are
+   * refused regardless. Unset means only the recorded hostnames apply. Node's root derives
+   * this from its public origin instead and ignores the recorded set.
    */
   OPA_OWN_HOSTS?: string;
   /**

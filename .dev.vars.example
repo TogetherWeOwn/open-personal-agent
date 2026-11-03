@@ -27,3 +27,11 @@ OPA_SETUP_TOKEN=
 # Unset (or anything that isn't a whole number of bytes), the cap is 10 MB; it is never
 # more than 100 MB. The composer reads the cap in force from the server.
 # OPA_ATTACHMENT_MAX_BYTES=
+
+# Not a secret, and optional. Extra hostnames of your own deployment, comma-separated
+# (e.g. `agent.example,www.example.com`), that web_fetch must refuse, so a page can't make
+# a turn read the app itself. The Worker records the hostnames that actually serve it
+# (workers.dev, custom domains) on its own, so this is only for hostnames it can't observe;
+# unset, the recorded hostnames alone apply. Localhost, private and loopback addresses are
+# refused regardless.
+# OPA_OWN_HOSTS=

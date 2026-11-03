@@ -72,7 +72,8 @@ export async function as(
 
 /** Empties every table the harness writes; deleting the users cascades to their rows. */
 export async function wipe() {
-  const tables = "setup_state audit_log task_events task_steps webauthn_challenges users";
+  const tables =
+    "setup_state audit_log deployment_hosts task_events task_steps webauthn_challenges users";
   await db.batch(tables.split(" ").map((t) => db.prepare(`DELETE FROM ${t}`)));
 }
 

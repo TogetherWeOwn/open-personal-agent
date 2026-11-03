@@ -13,6 +13,7 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
+import { hostnameOf } from "./deployment-hosts";
 import type { AppEnv, Session } from "./env";
 import { sameOrigin } from "./security";
 
@@ -57,7 +58,12 @@ export async function currentSession(c: Context<AppEnv>): Promise<Session | null
   const store = systemStore(c.env);
   const row = await store.sessions.find(await auth.sha256(cookie), now, now - IDLE_MS);
   if (!row) return null;
-  if (now - row.last_seen_at > TOUCH_MS) await store.sessions.touch(row.id, now);
+  if (now - row.last_seen_at > TOUCH_MS) {
+    // Piggybacked on the hourly write: the hostname serving this deployment, so an added
+    // custom domain lands here soon after its first use. Best-effort: a failed touch just
+    // leaves `last_seen_at` stale until the next one, never fails the request.
+    await store.sessions.touch(row.id, now, hostnameOf(c.req.url) ?? undefined).catch(() => {});
+  }
   return { id: row.id, userId: row.user_id, scope: row.scope, stepUpAt: row.step_up_at };
 }
 

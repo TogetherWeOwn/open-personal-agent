@@ -5,7 +5,8 @@
 // attempted and the refusal keeps the turn trusted) then `create_artifact`, so the turn
 // completes with the artifact saved. A second turn shows Settings › Apps & tools governing the
 // loop: with `web_fetch` set to `never`, the call is denied from the stored override and the
-// tool never runs.
+// tool never runs. A third turn fetches the deployment's own hostname: refused from the
+// recorded serving hostnames, with no `OPA_OWN_HOSTS` set.
 import { runInDurableObject } from "cloudflare:test";
 import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -208,5 +209,39 @@ describe("the production tool wiring (M3-08)", () => {
       (instance: Assistant) => instance.limits.totals().heldMicroUsd,
     );
     expect(held).toBe(0);
+  });
+
+  it("refuses a fetch of the deployment's own hostname, with no env var set", async () => {
+    const { browser, owner } = await claim();
+    // Nothing configures the manual override; the claim recorded the serving hostname instead.
+    expect(env.OPA_OWN_HOSTS).toBeUndefined();
+    expect(await count("deployment_hosts", "hostname = 'opa.test'")).toBe(1);
+
+    const offered: string[][] = [];
+    await useModel(
+      owner,
+      replyingWithOffered(
+        [
+          { calls: [["web_fetch", { url: `${ORIGIN}/api/health` }]] },
+          { text: "I can't fetch our own address." },
+        ],
+        offered,
+      ),
+    );
+    const tab = await openTab(browser);
+    tab.send?.("conv-own-host", "fetch our own homepage");
+    await tab.until?.("turn.completed");
+
+    // The refusal names the deployment's own address, keeps the turn trusted, and attempts no
+    // fetch — the model just answers after it.
+    const events = tab.events ?? [];
+    const types = events.map((e) => e.type);
+    expect(types).not.toContain("turn.failed");
+    expect(types).not.toContain("approval.requested");
+    expect(events.filter((e) => e.type === "tool.called")).toHaveLength(1);
+    const results = events.filter((e) => e.type === "tool.result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ payload: { ok: false } });
+    expect(JSON.stringify(results[0])).toContain("own address");
   });
 });

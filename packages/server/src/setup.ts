@@ -8,6 +8,7 @@ import { systemStore } from "@opa/db/system";
 import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
+import { noteDeploymentHost } from "./deployment-hosts";
 import type { Env } from "./env";
 import { setupRequired } from "./health";
 
@@ -84,6 +85,10 @@ async function authorize(
   if (await setupRequired(c.env)) {
     return c.json({ error: "setup_required" }, 503);
   }
+  // The claim runs before any session exists, so this is where the deployment first learns the
+  // hostname serving it (workers.dev or a custom domain). Best-effort: recording never fails
+  // the setup it rides on.
+  await noteDeploymentHost(c.env, c.req.url).catch(() => {});
   const secret = c.env.OPA_SETUP_TOKEN ?? "";
   const weak = weakToken(secret);
   if (weak) return c.json({ error: weak }, 503);
