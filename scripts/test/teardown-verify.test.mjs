@@ -6,7 +6,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DeployError } from "../deploy-cloudflare.mjs";
 import { renderGuide } from "../generate-verify-guide.mjs";
 import { teardownCloudflare } from "../teardown-cloudflare.mjs";
-import { maskToken, newPrefix, verifyCloudflare } from "../verify-cloudflare.mjs";
+import {
+  firstRun,
+  liveModels,
+  maskToken,
+  newPrefix,
+  scrubbedOutput,
+  verifyCloudflare,
+} from "../verify-cloudflare.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "../..");
 const P = "opa-v-20261101-abc123";
@@ -119,25 +126,35 @@ function verifySetup({
       deploys++;
       if (deployMinutes) vi.setSystemTime(Date.now() + deployMinutes * 60_000);
       calls.push(`deploy ${fs.readdirSync(path.join(root, "migrations")).sort()}`);
-      // The live-model key never reaches deployment (or its build), only the live step.
-      if (deps.env.LIVE_MODEL_API_KEY) throw new Error("deploy saw LIVE_MODEL_API_KEY");
+      // No live-model value reaches deployment (or its build), only the live step.
+      const deployLeak = Object.keys(deps.env).find((k) => k.startsWith("LIVE_MODEL_"));
+      if (deployLeak) throw new Error(`deploy saw ${deployLeak}`);
       deps.stdout(`Using fallback value in non-interactive context: yes\n${url}\n`);
       if (link && deploys === 1) deps.tty(deps.env)?.(`Link: ${url}/setup#token=tok/+=\n`);
       if (fail) throw fail(url);
       return { changed: plan[deploys - 1], url };
     },
-    firstRun: async (base, token, _deps) => {
+    firstRun: async (base, token, _deps, statePath) => {
       calls.push(`first run ${base === url} ${token}`);
-      if (_deps?.env?.LIVE_MODEL_API_KEY) throw new Error("first run saw LIVE_MODEL_API_KEY");
+      // deployDeps must already carry no live-model values; the step itself also strips
+      // CLOUDFLARE_* before spawning Playwright (covered directly below).
+      const firstRunLeak = Object.keys(_deps?.env ?? {}).find((k) => k.startsWith("LIVE_MODEL_"));
+      if (firstRunLeak) throw new Error(`first run saw ${firstRunLeak}`);
+      // Playwright saves the claimed session here; the run deletes it with the report.
+      fs.mkdirSync(path.dirname(statePath), { recursive: true });
+      fs.writeFileSync(statePath, "{}");
     },
     liveModels: async (base, _deps, paths) => {
       calls.push(`live models ${base === url} key=${Boolean(_deps.env.LIVE_MODEL_API_KEY)}`);
+      // The live step legitimately receives vdeps (key included); it strips CLOUDFLARE_*
+      // itself before spawning Playwright (covered directly below).
       // A configured run records its per-adapter results; an unconfigured one records nothing.
       if (_deps.env.LIVE_MODEL_API_KEY) {
         fs.mkdirSync(path.dirname(paths.resultsPath), { recursive: true });
-        // An endpoint that echoes the key in a failed probe: the report must redact it.
+        // An endpoint that echoes the key and base URL in a failed probe: the report must
+        // redact both.
         const error = liveErrorKey
-          ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY}`
+          ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY} at ${_deps.env.LIVE_MODEL_OPENAI_BASE_URL}`
           : null;
         const rows = [
           {
@@ -181,18 +198,31 @@ function verifySetup({
       calls.push(`teardown ${argv.join(" ")}`) && { deleted: [], skipped: [] },
   };
   const fetch = async () => ({ status: 200, json: async () => ({ status: "ok" }) });
-  const env = live
-    ? {
-        LIVE_MODEL_API_KEY: liveErrorKey
-          ? "sk-live-secret-abcdef123456"
-          : "sk-live-test-key-000000000000",
-        LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1",
-      }
-    : {};
+  // CLOUDFLARE_* is always present, as in a real run: deploy needs it, and the
+  // Playwright steps must strip it before spawning (asserted on the steps directly).
+  const env = {
+    CLOUDFLARE_API_TOKEN: "cf-test-token",
+    ...(live
+      ? {
+          LIVE_MODEL_API_KEY: liveErrorKey
+            ? "sk-live-secret-abcdef123456"
+            : "sk-live-test-key-000000000000",
+          LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1",
+          LIVE_MODEL_ANTHROPIC_BASE_URL: "https://anthropic.example.com",
+        }
+      : {}),
+  };
   const deps = { env, root, fetch, stdout: (t) => out.push(t) };
   const report = path.join(root, "report.md");
   const run = () => verifyCloudflare(["--name", P, "--report", report], deps, steps);
-  return { root, calls, out, run, report: () => fs.readFileSync(report, "utf8") };
+  return {
+    root,
+    calls,
+    out,
+    run,
+    report: () => fs.readFileSync(report, "utf8"),
+    reportPath: report,
+  };
 }
 
 describe("verify:cloudflare", () => {
@@ -271,11 +301,109 @@ describe("verify:cloudflare", () => {
     expect((4 * perAdapterMs) / 60_000).toBeLessThanOrEqual(jobMinutes - 30);
   });
 
-  it("redacts the live-model key an endpoint echoes in a recorded error", async () => {
+  it("deletes the browser storage state once the report is written", async () => {
+    const t = verifySetup({ live: true });
+    await t.run();
+    expect(fs.existsSync(path.join(t.root, ".wrangler", "opa-verify", `${P}-state.json`))).toBe(
+      false,
+    );
+  });
+
+  it("scrubs a live-model key split across output chunks, line by line", () => {
+    const lines = [];
+    const scrubbed = scrubbedOutput((t) => lines.push(t), ["sk-live-secret"]);
+    scrubbed.onOutput("prefix sk-li");
+    scrubbed.onOutput("ve-secret rest\nsecond line\ntrailing sk-li");
+    scrubbed.flush();
+    expect(lines).toEqual(["prefix [redacted] rest\nsecond line\n", "trailing sk-li"]);
+    expect(lines.join("")).not.toContain("sk-live-secret");
+  });
+
+  it("keeps both secret families out of the first-run Playwright env", async () => {
+    const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-env-"));
+    let childEnv = null;
+    const deps = {
+      root,
+      env: {
+        CLOUDFLARE_API_TOKEN: "cf-test-token",
+        LIVE_MODEL_API_KEY: "sk-live-test-key",
+        LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1",
+        PATH: "/usr/bin",
+      },
+      run: async (_cmd, _args, { env }) => {
+        childEnv = env;
+        return { code: 0 };
+      },
+      stdout: () => {},
+    };
+    await firstRun("https://example.workers.dev", "tok/+=", deps, "/tmp/state.json");
+    expect(childEnv.CLOUDFLARE_API_TOKEN).toBeUndefined();
+    expect(
+      Object.keys(childEnv).filter(
+        (k) => k.startsWith("LIVE_MODEL_") || k.startsWith("CLOUDFLARE_"),
+      ),
+    ).toEqual([]);
+    expect(childEnv.BASE_URL).toBe("https://example.workers.dev");
+    expect(childEnv.OPA_SETUP_TOKEN).toBe("tok/+=");
+  });
+
+  it("keeps the Cloudflare token out of the live-step Playwright env, keeps the key", async () => {
+    const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-env-"));
+    const resultsPath = path.join(root, "live-models.json");
+    let childEnv = null;
+    const out = [];
+    const deps = {
+      root,
+      env: {
+        CLOUDFLARE_API_TOKEN: "cf-test-token",
+        LIVE_MODEL_API_KEY: "sk-live-test-key",
+        LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1",
+        LIVE_MODEL_ANTHROPIC_BASE_URL: "https://anthropic.example.com",
+      },
+      run: async (_cmd, _args, { env, onOutput }) => {
+        childEnv = env;
+        // The key straddles two spawn chunks: it still must not reach the log, and neither
+        // must a secret-placed base URL carried in endpoint error text.
+        onOutput("probe sk-live-");
+        onOutput("test-key ok at https://models.exa");
+        onOutput("mple.com/v1 failed\n");
+        return { code: 0 };
+      },
+      stdout: (t) => out.push(t),
+    };
+    await liveModels("https://example.workers.dev", deps, {
+      statePath: "/tmp/state.json",
+      resultsPath,
+    });
+    expect(childEnv.LIVE_MODEL_API_KEY).toBe("sk-live-test-key");
+    expect(Object.keys(childEnv).filter((k) => k.startsWith("CLOUDFLARE_"))).toEqual([]);
+    expect(out.join("")).toContain("[redacted]");
+    expect(out.join("")).not.toContain("sk-live-test-key");
+    expect(out.join("")).not.toContain("models.example.com");
+  });
+
+  it("redacts the live-model key and base URL an endpoint echoes in a recorded error", async () => {
     const t = verifySetup({ live: true, liveErrorKey: true });
     await t.run();
     expect(t.report()).toContain("[redacted]");
     expect(t.report()).not.toContain("sk-live-secret-abcdef123456");
+    expect(t.report()).not.toContain("models.example.com");
+  });
+
+  it("removes the browser storage state even when the report write fails", async () => {
+    const t = verifySetup({ live: true });
+    const statePath = path.join(t.root, ".wrangler", "opa-verify", `${P}-state.json`);
+    const write = fs.writeFileSync.bind(fs);
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, ...rest) => {
+      if (String(file) === t.reportPath) throw new Error("bad report path");
+      return write(file, ...rest);
+    });
+    try {
+      await expect(t.run()).rejects.toThrow("bad report path");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(statePath)).toBe(false);
   });
 
   it("fails when the re-run is not up to date, and still tears down", async () => {
