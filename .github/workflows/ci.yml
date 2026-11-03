@@ -93,7 +93,12 @@ jobs:
       - *checkout
       - uses: ./.github/actions/setup
       - run: pnpm build # the web app apps/node serves
+      # The docker-local suite proves the enforced path here: the runner's passwordless sudo
+      # lets the tests program the host firewall, so create() enforces instead of failing
+      # closed. Without this var the same tests assert the fail-closed leg only.
       - run: pnpm test:node # storage contract on the Node adapters; boot, migrations, health
+        env:
+          OPA_COMPUTER_FIREWALL_SUDO: "1"
       - run: pnpm vitest run --project worker apps/worker/test/parity.test.ts # same contract on D1/R2
 
   build-and-harness:

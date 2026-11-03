@@ -37,12 +37,12 @@ export const reconcilerParts = {
   exports: (env, now) => sweepExports(env, () => now),
   retention: (env, now) => runRetention(env, now),
   approvals: (env, now) => expireApprovals(env, now),
-  // The computer sweep (M4-02 AC3): no provider driver exists yet — M4-04 resolves one
-  // from the configured computer provider and passes it here — so this tick fails closed:
-  // rows past their idle/lifetime deadlines or with an ended task stay live and count as
-  // errors instead of being finished without a provider destroy, and the provider-listing
-  // orphan leg is skipped until then.
-  computers: (env, now) => sweepComputers(env, undefined, now),
+  // The computer sweep (M4-02 AC3 with the M4-02b fail-closed fix): the composition root
+  // sets `COMPUTER_DRIVER` when it configures a provider (M4-04/M4-05); with none, the
+  // driver is undefined and the tick fails closed — rows past their idle/lifetime
+  // deadlines or with an ended task stay live and count as errors instead of being
+  // finished without a provider destroy, and the provider-listing orphan leg is skipped.
+  computers: (env, now) => sweepComputers(env, env.COMPUTER_DRIVER, now),
 } satisfies Record<string, ReconcilerPart>;
 
 /** One promise per part, each settled once its part has; the Worker hands each to `waitUntil`. */

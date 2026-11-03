@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Node composition root (ADR 0011 #3): the shared app (`@opa/server`) over Node adapters for
 // its ports, so a self-hosted deployment runs the same routes, claim and migrations.
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -12,6 +13,8 @@ import { Hono } from "hono";
 import { NodeAssistant, nodeRoutes } from "./assistant";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
+import { asComputerDriver } from "./docker-local/driver";
+import { DockerLocalProvider } from "./docker-local/provider";
 import { modelFetch, pageFetch } from "./egress";
 import "./workers-globals";
 import { migrate } from "./migrate";
@@ -118,9 +121,25 @@ export function createNodeApp(options: NodeOptions): NodeApp {
       return assistant;
     },
   };
+  // The docker-local computer driver (M4-05 AC5): explicit opt-in (`OPA_COMPUTER_PROVIDER`
+  // `docker-local`), gated synchronously on the socket's presence. Deeper checks — daemon
+  // reachability, programmable firewall — run in `create()` fail-closed, and
+  // `probeAvailability()` reports the reason for Settings to grey out (M4-10a). On the
+  // Worker this module never loads, so docker-local is unavailable there by construction.
+  const socketPath = vars.OPA_DOCKER_SOCKET ?? "/var/run/docker.sock";
+  const computerDriver =
+    vars.OPA_COMPUTER_PROVIDER === "docker-local" && existsSync(socketPath)
+      ? asComputerDriver(
+          new DockerLocalProvider({
+            socketPath,
+            imageRef: vars.OPA_COMPUTER_IMAGE,
+          }),
+        )
+      : undefined;
   const raw: AppPorts & MasterKeys = {
     DB: sqliteD1(db),
     FILES: localBlobStore(join(dataDir, "files")),
+    ...(computerDriver ? { COMPUTER_DRIVER: computerDriver } : {}),
     ASSETS: { fetch: (request: Request) => assets.fetch(request) },
     ASSISTANT: {
       idFromName: (name: string) => name,

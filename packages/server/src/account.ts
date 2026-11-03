@@ -34,14 +34,27 @@ accountRoutes.delete("/", async (c) => {
   // Fail closed with a stable code: a purge the store cannot prove empty (or any object
   // delete that throws) refuses the delete instead of stranding the user's objects.
   //
-  // M4-02 AC5 seam: no computer provider is configured yet, so there is no driver to pass —
-  // `deleteUserData` destroys nothing and reports none. When M4-04 lands the configured
-  // provider's adapter, it is resolved from the env here and passed as `destroyComputer`,
-  // so the delete destroys the user's computers, disks and snapshots through the provider
-  // API (a provider failure then refuses with the same `delete_failed`).
+  // M4-02 AC5 seam: the composition root sets `COMPUTER_DRIVER` when it configures a
+  // provider (M4-04/M4-05); with none, `deleteUserData` destroys nothing and reports none.
+  // With one, the delete destroys the user's computers, disks and snapshots through the
+  // provider API (a provider failure then refuses with the same `delete_failed`).
+  const driver = c.env.COMPUTER_DRIVER;
   let result: DeletionResult | null;
   try {
-    result = await deleteUserData(c.env, userId);
+    result = await deleteUserData(
+      c.env,
+      userId,
+      Date.now(),
+      driver
+        ? {
+            destroyComputer: (target) =>
+              driver.destroy(target.providerComputerId, {
+                disks: target.disks,
+                snapshots: target.snapshots,
+              }),
+          }
+        : {},
+    );
   } catch {
     return c.json({ error: "delete_failed" }, 503);
   }

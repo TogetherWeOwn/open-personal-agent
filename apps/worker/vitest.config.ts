@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { availableParallelism } from "node:os";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineProject } from "vitest/config";
 
@@ -30,5 +31,10 @@ export default defineProject({
     name: "worker",
     include: ["test/**/*.test.ts"],
     testTimeout: 15_000, // a file's first test also loads the Worker bundle, Agents SDK included
+    // The pool's main-process module runner stalls when dozens of workerd boots contend for it.
+    // Cap large machines at eight parallel files; smaller runners keep their CPU-count default.
+    maxWorkers: Math.min(8, availableParallelism()),
+    // A different maxWorkers than `unit` needs a different group when `pnpm test` runs both.
+    sequence: { groupOrder: 1 },
   },
 });
