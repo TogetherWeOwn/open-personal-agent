@@ -26,7 +26,7 @@ import {
   runTurn,
   type TurnState,
 } from "@opa/harness-builtin";
-import { ToolRegistry } from "@opa/policy";
+import type { ToolRegistry } from "@opa/policy";
 import { resolveChatModel } from "@opa/server/chat-model";
 import {
   base64,
@@ -52,6 +52,7 @@ import {
 import type { AppEnv, Env } from "@opa/server/env";
 import { Limits } from "@opa/server/limits";
 import { sameOrigin } from "@opa/server/security";
+import { composeTurnTools, type TurnContext } from "@opa/server/turn-tools";
 import { Hono } from "hono";
 import type { WSContext } from "hono/ws";
 
@@ -230,6 +231,10 @@ interface TurnCheckpoint {
 export interface NodeAssistantDeps {
   db: DatabaseSync;
   getEnv: () => Promise<Env>;
+  /** The SSRF-guarded page fetch `web_fetch` uses (one per process, from `./egress`). */
+  pageFetch: typeof fetch;
+  /** The deployment's own hostnames, so a page can't make the turn read the app itself. */
+  ownHosts: readonly string[];
 }
 
 /**
@@ -241,17 +246,38 @@ export class NodeAssistant {
   /** Picks each turn's model. Tests replace it with a scripted provider. */
   resolveModel = resolveChatModel;
   /**
-   * The tools a turn may offer the model, with the policy inputs for them. Tests replace it;
-   * the builtin tools (M3-04 and later) register here. Until then a turn offers none.
+   * The tools a turn may offer the model, with the policy inputs for them. Tests replace it
+   * (a sync closure without parameters still satisfies the type); production composes the
+   * builtin registry plus the memory tools, with ports scoped to the calling user
+   * and the policy input read from that user's stored overrides and grants — so Settings ›
+   * Apps & tools governs what the turn offers. The `task` tool is deliberately not offered
+   * (no runnable creation path yet: a queued row without instance or state never runs).
+   * The context names the turn: file and memory tools file under its conversation, and the
+   * taint thunk reads the loop's live taint, since a web, file or tool result mid-turn taints it.
    */
-  resolveTools: () => { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] } = () => ({
-    tools: new ToolRegistry<LoopTool>(),
-    policy: () => ({}),
-  });
+  resolveTools: (
+    context: TurnContext,
+  ) =>
+    | { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }
+    | Promise<{ tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }> = async (context) =>
+    composeTurnTools({
+      user: await this.#repoFor(),
+      fetch: this.#pageFetch,
+      ownHosts: this.#ownHosts,
+      newId: () => crypto.randomUUID(),
+      scope: {
+        kind: "chat",
+        conversationId: context.conversationId,
+        ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
+      },
+      taint: context.taint,
+    });
 
   readonly #db: DatabaseSync;
   readonly #userId: string;
   readonly #getEnv: () => Promise<Env>;
+  readonly #pageFetch: typeof fetch;
+  readonly #ownHosts: readonly string[];
   readonly #scope: UserScope;
   /** Turn rate and daily spend, in this process's SQLite (M2-22). */
   readonly limits: Limits;
@@ -275,6 +301,8 @@ export class NodeAssistant {
     this.#db = deps.db;
     this.#userId = userId;
     this.#getEnv = deps.getEnv;
+    this.#pageFetch = deps.pageFetch;
+    this.#ownHosts = deps.ownHosts;
     this.#scope = scopeForAssistant(`u:${userId}`);
     this.limits = new Limits(new SqliteKv(deps.db, userId));
     this.#events = new NodeEventLog(deps.db, userId);
@@ -680,17 +708,6 @@ export class NodeAssistant {
       },
     };
 
-    const { tools, policy } = this.resolveTools();
-    const host: LoopHost = {
-      provider: run.provider,
-      model: run.model,
-      tools,
-      policy,
-      budget,
-      now: Date.now,
-      newId: () => crypto.randomUUID(),
-    };
-
     // The reply's text: one segment per model call that spoke, joined as paragraphs.
     const segments = replySegments(state);
     let current = "";
@@ -747,9 +764,35 @@ export class NodeAssistant {
       if (settled) this.#events.trim(conversationId, turnId);
     };
 
-    const gen = runTurn(host, run.history, state, signal);
     let thinking = "";
     try {
+      // The taint thunk reads the loop's live taint: `state` is the object the loop mutates
+      // when a web, file or tool result lands, and a turn whose taint can't be read counts as
+      // tainted. Fail-closed (`!== "trusted"`), as the memory tools' trust gate requires.
+      // Resolved inside the guarded region: the default resolver awaits D1-backed policy
+      // reads, and a rejection must settle the reply (via `failSave`) and release the budget
+      // hold (via the `finally` below) rather than strand the turn as `streaming`.
+      let resolved: { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] };
+      try {
+        resolved = await this.resolveTools({
+          conversationId,
+          turnId,
+          taint: () => state.taint.taint !== "trusted",
+        });
+      } catch {
+        await failSave();
+        return;
+      }
+      const host: LoopHost = {
+        provider: run.provider,
+        model: run.model,
+        tools: resolved.tools,
+        policy: resolved.policy,
+        budget,
+        now: Date.now,
+        newId: () => crypto.randomUUID(),
+      };
+      const gen = runTurn(host, run.history, state, signal);
       for (;;) {
         const next = await gen.next();
         if (next.done) {
@@ -794,7 +837,7 @@ export class NodeAssistant {
             if (event.type === "approval.requested" && state.pending) {
               const rows = await bindBatch({
                 userId: this.#scope.userId,
-                tools,
+                tools: host.tools,
                 pending: state.pending,
                 context: { kind: "turn", id: turnId, conversationId },
               });
