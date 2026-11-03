@@ -60,6 +60,11 @@ export const MAX_TTL_MS = 60 * 60_000;
 /** Computers with this profile are never issued a token, for any audience (AC2b). */
 export const SUBSCRIPTION_CLI_PROFILE = "subscription_cli";
 
+// Shared by mint's read/write and verification: a delayed sweep or stale control-plane
+// context cannot make an ended, unready or ineligible computer live again.
+const LIVE_COMPUTER = `computers.state = 'ready' AND computers.ended_at IS NULL
+  AND computers.profile <> '${SUBSCRIPTION_CLI_PROFILE}' AND computers.lifetime_deadline > ?`;
+
 /** Terminal task statuses: a token bound to one fails verification (AC2a). */
 const TASK_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "interrupted"] as const;
 
@@ -90,14 +95,11 @@ export interface MintOptions {
   userId: string;
   taskId: string;
   computerId: string;
-  /** The computer's profile, from the D1 row — never a caller-supplied flag (AC2b). */
-  computerProfile: string;
   aud: string;
   /** Snapshotted at mint for `model_proxy`; verification intersects it with live config. */
   modelAllowlist?: readonly ModelCeiling[];
-  /** The task's deadline and the computer's lifetime end, when the caller knows them. */
+  /** The task's deadline, when known; computer eligibility/lifetime always comes from its row. */
   taskDeadlineMs?: number;
-  computerEndsAtMs?: number;
   now?: number;
 }
 
@@ -167,19 +169,9 @@ export async function mintCapabilityToken(
   db: SqlDatabase,
   options: MintOptions,
 ): Promise<{ token: string; id: string; expiresAt: number }> {
-  const {
-    userId,
-    taskId,
-    computerId,
-    computerProfile,
-    aud,
-    modelAllowlist,
-    taskDeadlineMs,
-    computerEndsAtMs,
-  } = options;
+  const { userId, taskId, computerId, aud, modelAllowlist, taskDeadlineMs } = options;
   const now = options.now ?? Date.now();
   if (!AUDIENCES.has(aud)) throw new MintRefusedError("unknown_audience");
-  if (computerProfile === SUBSCRIPTION_CLI_PROFILE) throw new MintRefusedError("subscription_cli");
   if (modelAllowlist !== undefined) {
     const valid =
       Array.isArray(modelAllowlist) &&
@@ -197,28 +189,29 @@ export async function mintCapabilityToken(
   // ceiling. There is no caller-supplied TTL or expiry.
   const ttl = Math.min(AUDIENCE_TTL_MS[aud as CapabilityAudience], MAX_TTL_MS);
   if (!(ttl > 0)) throw new MintRefusedError("invalid_ttl");
+  const binding = await db
+    .prepare(
+      `SELECT tasks.token_epoch AS task_epoch, users.token_epoch AS user_epoch,
+              computers.lifetime_deadline AS lifetime_deadline
+       FROM tasks JOIN users ON users.id = tasks.user_id
+       JOIN computers ON computers.task_id = tasks.id AND computers.user_id = tasks.user_id
+       WHERE tasks.id = ? AND tasks.user_id = ? AND computers.id = ? AND ${LIVE_COMPUTER}`,
+    )
+    .bind(taskId, userId, computerId, now)
+    .first<{ task_epoch: number; user_epoch: number; lifetime_deadline: number }>();
+  if (!binding) throw new MintRefusedError("ineligible_computer_binding");
   const expiresAt = Math.min(
     now + ttl,
     taskDeadlineMs ?? Number.POSITIVE_INFINITY,
-    computerEndsAtMs ?? Number.POSITIVE_INFINITY,
+    binding.lifetime_deadline,
   );
   if (!(expiresAt > now)) throw new MintRefusedError("already_expired");
-  const binding = await db
-    .prepare(
-      `SELECT tasks.id AS task_id, tasks.token_epoch AS task_epoch,
-              users.token_epoch AS user_epoch
-       FROM tasks JOIN users ON users.id = tasks.user_id
-       WHERE tasks.id = ? AND tasks.user_id = ?`,
-    )
-    .bind(taskId, userId)
-    .first<{ task_id: string; task_epoch: number; user_epoch: number }>();
-  if (!binding) throw new MintRefusedError("unknown_task");
 
   const token = randomTokenValue();
   const tokenHash = await hashCapabilityToken(token);
   const id = crypto.randomUUID();
   const allowlistJson = modelAllowlist === undefined ? null : JSON.stringify([...modelAllowlist]);
-  await db.batch([
+  const results = await db.batch([
     // The handover: the predecessor dies as the successor is born (AC1c, T3 invariant).
     db
       .prepare(
@@ -238,7 +231,12 @@ export async function mintCapabilityToken(
         `INSERT INTO capability_tokens
            (id, token_hash, user_id, task_id, computer_id, aud, model_allowlist,
             task_epoch, user_epoch, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         FROM tasks JOIN users ON users.id = tasks.user_id
+         JOIN computers ON computers.task_id = tasks.id AND computers.user_id = tasks.user_id
+         WHERE tasks.id = ? AND tasks.user_id = ? AND computers.id = ? AND ${LIVE_COMPUTER}
+           AND computers.lifetime_deadline >= ?
+           AND tasks.token_epoch = ? AND users.token_epoch = ?`,
       )
       .bind(
         id,
@@ -251,14 +249,24 @@ export async function mintCapabilityToken(
         binding.task_epoch,
         binding.user_epoch,
         expiresAt,
+        taskId,
+        userId,
+        computerId,
+        now,
+        expiresAt,
+        binding.task_epoch,
+        binding.user_epoch,
       ),
     db
       .prepare(
         `INSERT INTO audit_log (user_id, action, module, result, target_id, detail)
-         VALUES (?, 'capability_token.mint', 'capability-token', 'ok', ?, ?)`,
+         SELECT ?, 'capability_token.mint', 'capability-token', 'ok', ?, ? WHERE changes() > 0`,
       )
       .bind(userId, id, JSON.stringify({ taskId, computerId, aud, expiresAt, at: now })),
   ]);
+  // The computer may have ended or changed binding after the read. The INSERT rechecks
+  // eligibility inside the same serialized batch as rotation; never return an unissued bearer.
+  if (results[2]?.meta.changes !== 1) throw new MintRefusedError("binding_changed");
   return { token, id, expiresAt };
 }
 
@@ -328,9 +336,10 @@ export async function verifyCapabilityToken(
         `SELECT tasks.token_epoch AS task_epoch, users.token_epoch AS user_epoch,
                 tasks.status AS task_status
          FROM tasks JOIN users ON users.id = tasks.user_id
-         WHERE tasks.id = ? AND tasks.user_id = ?`,
+         JOIN computers ON computers.task_id = tasks.id AND computers.user_id = tasks.user_id
+         WHERE tasks.id = ? AND tasks.user_id = ? AND computers.id = ? AND ${LIVE_COMPUTER}`,
       )
-      .bind(row.task_id, row.user_id)
+      .bind(row.task_id, row.user_id, row.computer_id, now)
       .first<{ task_epoch: number; user_epoch: number; task_status: string }>();
     if (!epochs) return null;
     if (epochs.task_epoch !== row.task_epoch || epochs.user_epoch !== row.user_epoch) {

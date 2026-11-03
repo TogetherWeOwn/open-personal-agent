@@ -2,6 +2,7 @@
 // R7 M2-2 (setup claim) and TWO-375 M2-12 (POST-only setup, recovery mode on rotation).
 
 import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
+import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { type SqlDatabase, systemStore } from "@opa/db/system";
 import {
@@ -225,8 +226,18 @@ describe("recovery after the token rotates", () => {
     const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
       userId: owner as string,
       taskId: "t-rec",
-      computerId: "comp-setup-rec",
-      computerProfile: "host",
+      computerId: (
+        await computerStore(env).create(
+          {
+            userId: owner as string,
+            taskId: "t-rec",
+            provider: "fake",
+            profile: "host",
+            providerComputerId: "comp-setup-rec",
+          },
+          Date.now(),
+        )
+      ).id,
       aud: "model_proxy",
     });
     const verify = () =>
@@ -290,8 +301,18 @@ describe("recovery after the token rotates", () => {
     const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
       userId: owner,
       taskId: "t-rec-fail",
-      computerId: "comp-setup-rec-fail",
-      computerProfile: "host",
+      computerId: (
+        await computerStore(env).create(
+          {
+            userId: owner,
+            taskId: "t-rec-fail",
+            provider: "fake",
+            profile: "host",
+            providerComputerId: "comp-setup-rec-fail",
+          },
+          Date.now(),
+        )
+      ).id,
       aud: "tool_gateway",
     });
     const store = systemStore(env);

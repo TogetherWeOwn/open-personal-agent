@@ -2,6 +2,7 @@
 // Redeeming a recovery code (M2-10b): single use, no oracle, rate limit, no lockout, audit.
 
 import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
+import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { type SqlDatabase, systemStore } from "@opa/db/system";
 import { hashRecoveryCode, newRecoveryCode, newSession, randomId } from "@opa/server/auth";
@@ -120,8 +121,18 @@ describe("a recovery code", () => {
     const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
       userId: owner,
       taskId: `t-${tag}`,
-      computerId: "comp-recover",
-      computerProfile: "host",
+      computerId: (
+        await computerStore(env).create(
+          {
+            userId: owner,
+            taskId: `t-${tag}`,
+            provider: "fake",
+            profile: "host",
+            providerComputerId: "comp-recover",
+          },
+          Date.now(),
+        )
+      ).id,
       aud: "model_proxy",
     });
     const verify = () =>
@@ -147,8 +158,18 @@ describe("a recovery code", () => {
     const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
       userId: owner,
       taskId: `t-${tag}`,
-      computerId: "comp-recover-fail",
-      computerProfile: "host",
+      computerId: (
+        await computerStore(env).create(
+          {
+            userId: owner,
+            taskId: `t-${tag}`,
+            provider: "fake",
+            profile: "host",
+            providerComputerId: "comp-recover-fail",
+          },
+          Date.now(),
+        )
+      ).id,
       aud: "model_proxy",
     });
     const store = systemStore(env);

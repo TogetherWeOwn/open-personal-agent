@@ -21,13 +21,12 @@ import {
   revokeUserTokens,
   verifyCapabilityToken,
 } from "../../packages/db/src/capability-tokens";
+import { computerStore } from "../../packages/db/src/computers";
 import { EXPORT_ITEM_TYPES } from "../../packages/db/src/export";
 import { createRepository, scopeFromSession } from "../../packages/db/src/repository";
 import type { SqlDatabase } from "../../packages/db/src/system";
 
 let ids = 0;
-
-const COMPUTER = "comp-1";
 
 /**
  * The capability-token mint/verify/revoke service against a migrated database: the opaque
@@ -64,21 +63,28 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
           mode: "background" as const,
         }),
       ).toBe(true);
-      const base = {
-        userId: a,
-        taskId,
-        computerId: COMPUTER,
-        computerProfile: "host",
-      } as const;
+      const store = computerStore({ DB: DB as never });
+      const computer = await store.create(
+        {
+          userId: a,
+          taskId,
+          provider: "fake",
+          profile: "host",
+          providerComputerId: tag,
+          maxLifetimeSeconds: 7_200,
+        },
+        Date.now(),
+      );
+      const base = { userId: a, taskId, computerId: computer.id } as const;
       const mint = (over: Partial<MintOptions> & { aud: string }) =>
         mintCapabilityToken(DB, { ...base, ...over } as MintOptions);
       const live = (token: string, expectedAud: string | null | undefined) =>
         verifyCapabilityToken(DB, { token, expectedAud });
-      return { DB, repo, alice, a, b, tag, taskId, base, mint, live };
+      return { DB, repo, alice, a, b, tag, taskId, base, mint, live, store, computer };
     }
 
     it("mints the canonical form and verifies it for the expected audience", async () => {
-      const { mint, live, a, taskId } = await setup();
+      const { mint, live, a, taskId, computer } = await setup();
       const before = Date.now();
       const { token, id, expiresAt } = await mint({ aud: "model_proxy" });
       expect(isCanonicalTokenFormat(token)).toBe(true);
@@ -88,7 +94,7 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
         tokenId: id,
         userId: a,
         taskId,
-        computerId: COMPUTER,
+        computerId: computer.id,
         aud: "model_proxy",
         expiresAt,
       });
@@ -131,19 +137,23 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
     });
 
     it("takes the minimum of TTL, task deadline and computer lifetime", async () => {
-      const { mint } = await setup();
+      const { DB, mint, computer } = await setup();
       const now = Date.now();
+      await DB.prepare("UPDATE computers SET lifetime_deadline = ? WHERE id = ?")
+        .bind(now + 120_000, computer.id)
+        .run();
       const { expiresAt: byDeadline } = await mint({
         aud: "tool_gateway",
         taskDeadlineMs: now + 60_000,
-        computerEndsAtMs: now + 120_000,
         now,
       });
       expect(byDeadline).toBe(now + 60_000);
+      await DB.prepare("UPDATE computers SET lifetime_deadline = ? WHERE id = ?")
+        .bind(now + 30_000, computer.id)
+        .run();
       const { expiresAt: byComputer } = await mint({
         aud: "tool_gateway",
         taskDeadlineMs: now + 120_000,
-        computerEndsAtMs: now + 30_000,
         now,
       });
       expect(byComputer).toBe(now + 30_000);
@@ -208,17 +218,17 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
     });
 
     it("refuses subscription_cli computers and undeclared audiences", async () => {
-      const { mint } = await setup();
-      await expect(
-        mint({ aud: "model_proxy", computerProfile: "subscription_cli" }),
-      ).rejects.toBeInstanceOf(MintRefusedError);
+      const { DB, mint, computer } = await setup();
+      await DB.prepare("UPDATE computers SET profile = 'subscription_cli' WHERE id = ?")
+        .bind(computer.id)
+        .run();
+      await expect(mint({ aud: "model_proxy" })).rejects.toBeInstanceOf(MintRefusedError);
       await expect(mint({ aud: "nope" })).rejects.toBeInstanceOf(MintRefusedError);
       await expect(
         mintCapabilityToken(await setup().then((s) => s.DB), {
           userId: "ghost",
           taskId: "ghost-task",
-          computerId: COMPUTER,
-          computerProfile: "host",
+          computerId: computer.id,
           aud: "model_proxy",
         }),
       ).rejects.toBeInstanceOf(MintRefusedError);
@@ -347,24 +357,11 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
     });
 
     it("denies on task end and epoch drift, keeps other tasks' tokens live", async () => {
-      const { DB, alice, mint, live, a, tag } = await setup();
+      const { DB, alice, mint, live, tag } = await setup();
       const first = await mint({ aud: "model_proxy" });
-      const task2 = `t2-${tag}`;
-      expect(
-        await alice.tasks.create({
-          id: task2,
-          conversationId: `ca-${tag}`,
-          kind: "turn",
-          mode: "background" as const,
-        }),
-      ).toBe(true);
-      const other = await mintCapabilityToken(DB, {
-        userId: a,
-        taskId: task2,
-        computerId: COMPUTER,
-        computerProfile: "host",
-        aud: "model_proxy",
-      });
+      const sibling = await setup();
+      const task2 = sibling.taskId;
+      const other = await sibling.mint({ aud: "model_proxy" });
       expect(await live(other.token, "model_proxy")).not.toBeNull();
       expect(await alice.tasks.cancel(`t-${tag}`)).toBe(true);
       // The cancelled task's row is revoked.
@@ -409,17 +406,253 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
       expect(await live(again.token, "tool_gateway")).not.toBeNull();
     });
 
-    it("revokes one computer without touching the task's others", async () => {
+    it("revokes one computer without touching another live computer", async () => {
       const { DB, mint, live, base } = await setup();
       const doomed = await mint({ aud: "tool_gateway" });
-      const spared = await mintCapabilityToken(DB, {
-        ...base,
-        computerId: "comp-2",
-        aud: "tool_gateway",
-      });
-      expect(await revokeComputerTokens(DB, COMPUTER, base.userId, "computer_stopped")).toBe(1);
+      const sibling = await setup();
+      const spared = await sibling.mint({ aud: "tool_gateway" });
+      expect(await revokeComputerTokens(DB, base.computerId, base.userId, "computer_stopped")).toBe(
+        1,
+      );
       expect(await live(doomed.token, "tool_gateway")).toBeNull();
       expect(await live(spared.token, "tool_gateway")).not.toBeNull();
+    });
+
+    it("finishes a computer through the real store, revokes all audiences and refuses reissuance", async () => {
+      const { DB, store, computer, mint, live, taskId } = await setup();
+      const sibling = await setup();
+      const spared = await sibling.mint({ aud: "tool_gateway" });
+      const tokens = await Promise.all(
+        ["model_proxy", "artifact_upload", "tool_gateway"].map(async (aud) => ({
+          aud,
+          ...(await mint({ aud })),
+        })),
+      );
+      for (const { token, aud } of tokens) expect(await live(token, aud)).not.toBeNull();
+      expect(await store.finish(computer.id, "idle", Date.now())).not.toBeNull();
+      for (const { token, aud } of tokens) expect(await live(token, aud)).toBeNull();
+      expect(await live(spared.token, "tool_gateway")).not.toBeNull();
+      await expect(mint({ aud: "tool_gateway" })).rejects.toBeInstanceOf(MintRefusedError);
+      expect(
+        await DB.prepare("SELECT status, token_epoch FROM tasks WHERE id = ?").bind(taskId).first(),
+      ).toMatchObject({ status: "queued", token_epoch: 0 });
+      expect(
+        (
+          await DB.prepare("SELECT revoked_at FROM capability_tokens WHERE computer_id = ?")
+            .bind(computer.id)
+            .all<{ revoked_at: number | null }>()
+        ).results.every((r) => r.revoked_at !== null),
+      ).toBe(true);
+      expect(
+        await DB.prepare(
+          "SELECT detail FROM audit_log WHERE action = 'capability_token.revoke_computer' AND target_id = ?",
+        )
+          .bind(computer.id)
+          .first(),
+      ).toMatchObject({ detail: expect.stringContaining('"revoked":3') });
+    });
+
+    it.each([false, true])(
+      "cleans tokens on an already-destroyed computer (ledger exists: %s)",
+      async (ledgerExists) => {
+        const { DB, store, computer, mint } = await setup();
+        const { id } = await mint({ aud: "tool_gateway" });
+        if (ledgerExists) await store.finish(computer.id, "idle", Date.now());
+        else
+          await DB.prepare(
+            "UPDATE computers SET state = 'destroyed', ended_at = ?, end_reason = 'idle' WHERE id = ?",
+          )
+            .bind(Date.now(), computer.id)
+            .run();
+        // A pre-integration row (or interrupted older finish) still needs cleanup, even if its ledger exists.
+        await DB.prepare(
+          "UPDATE capability_tokens SET revoked_at = NULL, revoked_reason = NULL WHERE id = ?",
+        )
+          .bind(id)
+          .run();
+        await store.finish(computer.id, "idle", Date.now());
+        expect(
+          await DB.prepare("SELECT revoked_reason FROM capability_tokens WHERE id = ?")
+            .bind(id)
+            .first(),
+        ).toMatchObject({ revoked_reason: "idle" });
+        expect(
+          (
+            await DB.prepare("SELECT id FROM computer_sessions WHERE computer_id = ?")
+              .bind(computer.id)
+              .all()
+          ).results,
+        ).toHaveLength(1);
+      },
+    );
+
+    it("heals an ended predecessor without revoking its live replacement on the same task", async () => {
+      const { DB, store, computer, mint, live, base } = await setup();
+      const doomed = await mint({ aud: "tool_gateway" });
+      // D5 permits one live computer per user. An older finish can leave an unrevoked
+      // predecessor while a replacement is already serving the very same live task.
+      await DB.prepare(
+        "UPDATE computers SET state = 'destroyed', ended_at = ?, end_reason = 'replaced' WHERE id = ?",
+      )
+        .bind(Date.now(), computer.id)
+        .run();
+      const replacement = await store.create(
+        {
+          userId: base.userId,
+          taskId: base.taskId,
+          provider: "fake",
+          profile: "host",
+          providerComputerId: "replacement",
+        },
+        Date.now(),
+      );
+      const spared = await mint({ aud: "tool_gateway", computerId: replacement.id });
+      expect(await store.finish(computer.id, "replaced", Date.now())).not.toBeNull();
+      expect(await live(doomed.token, "tool_gateway")).toBeNull();
+      expect(await live(spared.token, "tool_gateway")).not.toBeNull();
+      await expect(mint({ aud: "tool_gateway" })).rejects.toBeInstanceOf(MintRefusedError);
+      expect(
+        await DB.prepare("SELECT revoked_reason FROM capability_tokens WHERE id = ?")
+          .bind(doomed.id)
+          .first(),
+      ).toEqual({ revoked_reason: "replaced" });
+      expect(
+        await DB.prepare("SELECT token_epoch FROM tasks WHERE id = ?").bind(base.taskId).first(),
+      ).toEqual({ token_epoch: 0 });
+    });
+
+    it("rolls revocation back with a failed computer finish", async () => {
+      const { DB, store, computer, mint, live } = await setup();
+      const { token, id } = await mint({ aud: "tool_gateway" });
+      await DB.prepare(
+        "CREATE TRIGGER fail_computer_finish BEFORE INSERT ON computer_sessions BEGIN SELECT RAISE(ABORT, 'finish failed'); END",
+      ).run();
+      try {
+        await expect(store.finish(computer.id, "idle", Date.now())).rejects.toThrow();
+      } finally {
+        await DB.prepare("DROP TRIGGER fail_computer_finish").run();
+      }
+      expect((await store.get(computer.id))?.state).toBe("ready");
+      expect(await live(token, "tool_gateway")).not.toBeNull();
+      expect(
+        await DB.prepare("SELECT revoked_at FROM capability_tokens WHERE id = ?").bind(id).first(),
+      ).toEqual({ revoked_at: null });
+      expect(
+        (
+          await DB.prepare(
+            "SELECT id FROM audit_log WHERE action = 'capability_token.revoke_computer' AND target_id = ?",
+          )
+            .bind(computer.id)
+            .all()
+        ).results,
+      ).toHaveLength(0);
+    });
+
+    it.each([
+      ["creating", "UPDATE computers SET state = 'creating' WHERE id = ?"],
+      ["destroyed", "UPDATE computers SET state = 'destroyed' WHERE id = ?"],
+      ["ended", "UPDATE computers SET ended_at = 1 WHERE id = ?"],
+      ["subscription_cli", "UPDATE computers SET profile = 'subscription_cli' WHERE id = ?"],
+      ["expired", "UPDATE computers SET lifetime_deadline = 1 WHERE id = ?"],
+      ["unbound", "UPDATE computers SET task_id = NULL WHERE id = ?"],
+      ["missing", "DELETE FROM computers WHERE id = ?"],
+    ])(
+      "denies mint and verification against an authoritative %s computer",
+      async (_label, update) => {
+        const { DB, computer, base, mint, live } = await setup();
+        const { token } = await mint({ aud: "tool_gateway" });
+        await DB.prepare(update).bind(computer.id).run();
+        expect(await live(token, "tool_gateway")).toBeNull();
+        // Stale context from an old control-plane caller must not override the row.
+        await expect(
+          mintCapabilityToken(DB, {
+            ...base,
+            aud: "tool_gateway",
+            computerProfile: "host",
+            computerEndsAtMs: Date.now() + MAX_TTL_MS,
+          } as MintOptions),
+        ).rejects.toBeInstanceOf(MintRefusedError);
+      },
+    );
+
+    it("binds mint and verification to the computer's actual owner and task", async () => {
+      const { DB, computer, base, mint, live, alice, tag } = await setup();
+      const other = await setup();
+      await expect(
+        mint({ aud: "tool_gateway", computerId: other.computer.id }),
+      ).rejects.toBeInstanceOf(MintRefusedError);
+      const task2 = `t2-${tag}`;
+      expect(
+        await alice.tasks.create({
+          id: task2,
+          conversationId: `ca-${tag}`,
+          kind: "turn",
+          mode: "background",
+        }),
+      ).toBe(true);
+      await expect(mint({ aud: "tool_gateway", taskId: task2 })).rejects.toBeInstanceOf(
+        MintRefusedError,
+      );
+      const { token, id } = await mint({ aud: "tool_gateway" });
+      // The token owner guard does not guard computer_id; verification must do it itself.
+      await DB.prepare("UPDATE capability_tokens SET computer_id = ? WHERE id = ?")
+        .bind(other.computer.id, id)
+        .run();
+      expect(await live(token, "tool_gateway")).toBeNull();
+      await DB.prepare("UPDATE capability_tokens SET computer_id = ? WHERE id = ?")
+        .bind(computer.id, id)
+        .run();
+      await DB.prepare("UPDATE computers SET task_id = ? WHERE id = ?")
+        .bind(task2, base.computerId)
+        .run();
+      expect(await live(token, "tool_gateway")).toBeNull();
+    });
+
+    it("uses the row lifetime at mint and every verification, ignoring stale caller bounds", async () => {
+      const { DB, base, computer, mint, live } = await setup();
+      const now = Date.now();
+      const first = await mint({ aud: "tool_gateway", now });
+      await DB.prepare("UPDATE computers SET lifetime_deadline = ? WHERE id = ?")
+        .bind(now + 30_000, computer.id)
+        .run();
+      expect(
+        await verifyCapabilityToken(DB, {
+          token: first.token,
+          expectedAud: "tool_gateway",
+          now: now + 30_000,
+        }),
+      ).toBeNull();
+      const second = await mintCapabilityToken(DB, {
+        ...base,
+        aud: "tool_gateway",
+        now,
+        computerEndsAtMs: now + MAX_TTL_MS,
+      } as MintOptions);
+      expect(second.expiresAt).toBe(now + 30_000);
+      expect(await live(second.token, "tool_gateway")).not.toBeNull();
+    });
+
+    it("refuses issuance if the computer ends between the mint read and write", async () => {
+      const { DB, store, computer, base } = await setup();
+      const racing: SqlDatabase = {
+        prepare: (query) => DB.prepare(query),
+        batch: async (statements) => {
+          await store.finish(computer.id, "idle", Date.now());
+          return DB.batch(statements);
+        },
+      };
+      await expect(
+        mintCapabilityToken(racing, { ...base, aud: "tool_gateway" }),
+      ).rejects.toBeInstanceOf(MintRefusedError);
+      expect(
+        (
+          await DB.prepare(
+            "SELECT id FROM capability_tokens WHERE computer_id = ? AND revoked_at IS NULL",
+          )
+            .bind(computer.id)
+            .all()
+        ).results,
+      ).toHaveLength(0);
     });
 
     it("revokes only the removed provider's model_proxy tokens", async () => {
@@ -429,9 +662,8 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
         aud: "model_proxy",
         modelAllowlist: [{ providerId: "p1", model: "m" }],
       });
-      const p2 = await mintCapabilityToken(DB, {
-        ...base,
-        computerId: "comp-p2",
+      const sibling = await setup();
+      const p2 = await sibling.mint({
         aud: "model_proxy",
         modelAllowlist: [{ providerId: "p2", model: "m" }],
       });

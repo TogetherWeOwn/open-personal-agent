@@ -10,6 +10,7 @@ import {
   mintCapabilityToken,
   revokeTaskTokens,
 } from "@opa/db/capability-tokens";
+import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import type { SqlDatabase } from "@opa/db/system";
 import { SESSION_COOKIE } from "@opa/server/auth";
@@ -61,12 +62,21 @@ async function ownerWithTask() {
     kind: "turn",
     mode: "background",
   });
+  const computer = await computerStore(env).create(
+    {
+      userId: owner,
+      taskId: `t-${tag}`,
+      provider: "fake",
+      profile: "host",
+      providerComputerId: tag,
+    },
+    Date.now(),
+  );
   const mint = (aud: CapabilityAudience) =>
     mintCapabilityToken(db as unknown as SqlDatabase, {
       userId: owner,
       taskId: `t-${tag}`,
-      computerId: "comp-guard",
-      computerProfile: "host",
+      computerId: computer.id,
       aud,
     });
   return { owner, taskId: `t-${tag}`, mint, cookie: browser.cookies.get(SESSION_COOKIE) };
