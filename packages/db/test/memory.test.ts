@@ -34,6 +34,8 @@ describe("redactSecrets", () => {
       expect(redactSecrets(`before ${secret} after`), secret).toBe("before [redacted] after");
     }
     expect(redactSecrets("Bearer canary0123456789abcdef")).toBe("[redacted]");
+    // A task capability token (M4-00a): never stored, even beside other text.
+    expect(redactSecrets(`before ocap1_${"b".repeat(43)} after`)).toBe("before [redacted] after");
     expect(redactSecrets("my password is hunter2!")).toBe("my password is [redacted]");
     expect(redactSecrets("API key: abc123")).toBe("API key: [redacted]");
   });

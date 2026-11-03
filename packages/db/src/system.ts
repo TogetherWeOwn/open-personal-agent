@@ -2,6 +2,18 @@
 // The system-level store (ADR 0010 D3): the deployment's identity tables, read before any user
 // scope exists. Setup state, WebAuthn challenges, passkeys, sessions and their audit rows. Every
 // multi-row change is one D1 batch, so it commits or rolls back as a whole.
+import {
+  type CapabilityAudience,
+  type CapabilityScope,
+  type MintOptions,
+  mintCapabilityToken,
+  revokeComputerTokens,
+  revokeProviderTokens,
+  revokeTaskTokens,
+  revokeUserTokens,
+  type VerifyOptions,
+  verifyCapabilityToken,
+} from "./capability-tokens";
 import { scopeFromSession } from "./repository";
 
 /** The parts of a D1 database used here; the Node root supplies its own. */
@@ -671,6 +683,9 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       },
       /** Sign out everywhere: every session of this user. */
       revokeAll: async (userId: string, now: number) => {
+        // The user's capability tokens die here too, through the one revocation code path:
+        // a signed-out-everywhere computer keeps nothing it can still spend (M4-00a AC2a).
+        await revokeUserTokens(db, userId, "sign_out_everywhere", now);
         await db.batch([
           db
             .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
@@ -680,7 +695,33 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         ]);
       },
     },
+    /**
+     * Task capability tokens (M4-00a): mint, verify and revoke over this same store, so every
+     * check reads the live row. The audience routes that consume these tokens land in M4-00b
+     * (`model_proxy`) and M4-00c (`artifact_upload`, `tool_gateway`); the guards call
+     * `capability.verify` with the route table's expected audience.
+     */
+    capability: {
+      /** Mints one token for one audience; the value is returned once, never stored. */
+      mint: (options: MintOptions) => mintCapabilityToken(db, options),
+      /** Verifies a bearer for the route's expected audience, or `null` on any failure. */
+      verify: (options: VerifyOptions) => verifyCapabilityToken(db, options),
+      /** Task cancel or end: the task's tokens die now, and the epoch bump covers a miss. */
+      revokeTask: (taskId: string, userId: string, reason: string, now = Date.now()) =>
+        revokeTaskTokens(db, taskId, userId, reason, now),
+      /** Computer stop or destroy: only that computer's tokens die. */
+      revokeComputer: (computerId: string, userId: string, reason: string, now = Date.now()) =>
+        revokeComputerTokens(db, computerId, userId, reason, now),
+      /** Sign-out-everywhere or account deletion: every token of the user dies, epoch and all. */
+      revokeUser: (userId: string, reason: string, now = Date.now()) =>
+        revokeUserTokens(db, userId, reason, now),
+      /** Provider-credential removal: the user's `model_proxy` tokens naming it die. */
+      revokeProvider: (userId: string, providerId: string, now = Date.now()) =>
+        revokeProviderTokens(db, userId, providerId, now),
+    },
   };
 }
+
+export type { CapabilityAudience, CapabilityScope, MintOptions, VerifyOptions };
 
 export type SystemStore = ReturnType<typeof systemStore>;

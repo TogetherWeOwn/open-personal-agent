@@ -19,7 +19,7 @@ import { publicRateLimit } from "./rate-limit";
 import { recover } from "./recover";
 import { retentionSettings } from "./retention";
 import { exactOrigin, securityHeaders } from "./security";
-import { authRoutes, currentSession, sessionGuard, sessionRoutes } from "./session";
+import { authRoutes, currentSession, sessionGuard, sessionRoutes, tokenGuard } from "./session";
 import { claimGuard, setup, setupPageState } from "./setup";
 import { alreadySetUpPage, finishSetupPage, weakSetupTokenPage } from "./setup-page";
 import { spendingRoutes } from "./spending";
@@ -121,6 +121,9 @@ export function createApp<P extends AppPorts = AppPorts>(extra?: Hono<AppEnv<P>>
   app.use(exactOrigin);
   app.use(publicRateLimit);
   app.use(claimGuard);
+  // Token routes first: a verified token sets `c.var.capability`, which the session guard
+  // then honors. That credential anywhere else still answers 401 (M4-00a AC3).
+  app.use(tokenGuard);
   app.use(sessionGuard);
 
   app.route("/", shared);

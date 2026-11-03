@@ -6,6 +6,7 @@ import type { JsonValue, TaskBudget } from "@opa/core";
 import { afterAll, describe, expect, it } from "vitest";
 import { unstable_readConfig } from "wrangler";
 import { createRepository, scopeFromSession } from "../../../packages/db/src/repository";
+import { capabilityTokenContract } from "../../../test/contract/capability-tokens";
 import {
   blobStoreContract,
   databaseContract,
@@ -39,6 +40,11 @@ const migrated = async () => {
   return db();
 };
 
+capabilityTokenContract(
+  "SQLite",
+  async () =>
+    (await migrated()) as unknown as import("../../../packages/db/src/system").SqlDatabase,
+);
 databaseContract("SQLite", db);
 blobStoreContract("local files", () => localBlobStore(join(dir, "files")));
 usageLedgerContract("SQLite", migrated);

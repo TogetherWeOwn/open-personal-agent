@@ -3,7 +3,7 @@
 
 import { createApp } from "@opa/server/app";
 import { SESSION_COOKIE } from "@opa/server/auth";
-import { PUBLIC_ROUTES } from "@opa/server/session";
+import { PUBLIC_ROUTES, TOKEN_ROUTES } from "@opa/server/session";
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import type { AppEnv } from "../src/env";
@@ -87,6 +87,16 @@ describe("the route table", () => {
     expect((await probe()).status).toBe(403); // the claim guard
     await claim();
     expect((await probe()).status).toBe(401); // the session guard
+  });
+
+  it("holds every capability-token audience route, and each one is a real route", async () => {
+    // Empty in M4-00a: the audience routes land in M4-00b/00c, each adding its entry here with
+    // its expected audience. A token route must never overlap the session surface.
+    for (const [route, aud] of TOKEN_ROUTES) {
+      expect(["model_proxy", "artifact_upload", "tool_gateway"]).toContain(aud);
+      expect(routes).toContain(route);
+      expect(PUBLIC_ROUTES.has(route)).toBe(false);
+    }
   });
 
   it("answers no public route with 401", async () => {

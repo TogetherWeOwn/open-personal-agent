@@ -4,9 +4,10 @@ import { type AnyD1Database, type DrizzleD1Database, drizzle } from "drizzle-orm
 import * as schema from "./schema";
 
 export * from "./schema";
+export * from "./capability-tokens";
 
 /** The schema version this build expects: the version the newest migration records. */
-export const SCHEMA_VERSION = 25;
+export const SCHEMA_VERSION = 26;
 
 /** With D1 itself as `drizzle()` returns it, for a batch drizzle can't build (raw statements). */
 export type Db = DrizzleD1Database<typeof schema> & { $client: AnyD1Database };

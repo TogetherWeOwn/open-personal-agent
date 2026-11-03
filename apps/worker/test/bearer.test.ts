@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// M3-21 AC9 (m3-spec §8 decision 1): in M3 the session cookie is the only way to authenticate.
-// A request with `Authorization: Bearer` and no session gets 401 on every protected route, even
-// when the bearer is a live session's own token, and the header changes nothing on a public one.
-// Personal API tokens are M5's.
+// M3-21 AC9 (m3-spec §8 decision 1): the session cookie is the only way to authenticate on a
+// session route. A request with `Authorization: Bearer` and no session gets 401 on every one,
+// even when the bearer is a live session's own token, and the header changes nothing on a
+// public one. Personal API tokens are M5's. M4-00a AC3 partitions credentials further: routes
+// in `TOKEN_ROUTES` take a capability bearer instead of a cookie, and are excluded here —
+// `capability-guard.test.ts` covers their partition from both sides.
 import { SESSION_COOKIE } from "@opa/server/auth";
-import { PUBLIC_ROUTES } from "@opa/server/session";
+import { PUBLIC_ROUTES, TOKEN_ROUTES } from "@opa/server/session";
 import { describe, expect, it } from "vitest";
 import { workerApp as app } from "../src/worker-app";
 import { claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
@@ -35,7 +37,8 @@ describe("a bearer token", () => {
     const { browser } = await claim();
     const cookie = browser.cookies.get(SESSION_COOKIE) as string;
     const row = (await db.prepare("SELECT id FROM sessions").first<string>("id")) as string;
-    const protectedRoutes = routes.filter((r) => !PUBLIC_ROUTES.has(r));
+    // Token routes take a bearer by design, verified against their expected audience.
+    const protectedRoutes = routes.filter((r) => !PUBLIC_ROUTES.has(r) && !TOKEN_ROUTES.has(r));
     expect(protectedRoutes.length).toBeGreaterThan(10);
     for (const token of [cookie, row, "opa_pat_0123456789abcdef"]) {
       for (const route of protectedRoutes) {
@@ -61,11 +64,13 @@ describe("a bearer token", () => {
     }
   });
 
-  it("is read by no route: the app code never names the header", () => {
+  it("is read by the bearer guard alone: no route names the header", () => {
     const files = Object.keys(sources);
     expect(files.some((f) => f.endsWith("server/src/session.ts"))).toBe(true);
     expect(files.some((f) => f.endsWith("src/worker-app.ts"))).toBe(true);
     const readers = files.filter((f) => /authorization|bearer/i.test(sources[f] as string));
-    expect(readers).toEqual([]);
+    // `session.ts` owns both guards: `tokenGuard` reads the bearer on token routes, and
+    // `sessionGuard` rejects one on session routes. Nothing else may touch the header.
+    expect(readers).toEqual([files.find((f) => f.endsWith("server/src/session.ts"))]);
   });
 });

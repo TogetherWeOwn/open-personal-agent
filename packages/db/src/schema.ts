@@ -35,6 +35,12 @@ export const users = sqliteTable("users", {
   role: text("role", { enum: ["owner", "member"] }).notNull(),
   createdAt: createdAt(),
   updatedAt: integer("updated_at").notNull().default(now),
+  /**
+   * Capability-token epoch (M4-00a AC1c): bumped on sign-out-everywhere and account
+   * lock/removal. A token minted under an older user epoch fails verification, so a
+   * missed row-by-row revocation still kills every token of the user.
+   */
+  tokenEpoch: integer("token_epoch").notNull().default(0),
 });
 
 /** Single row (`id = 1`). Holds `sha256(OPA_SETUP_TOKEN)` as it was at claim time (ADR 0010 D2). */
@@ -88,6 +94,47 @@ export const sessions = sqliteTable(
     stepUpAt: integer("step_up_at"),
   },
   (t) => [index("sessions_user_idx").on(t.userId, t.expiresAt)],
+);
+
+/**
+ * Capability tokens (M4-00a AC1–AC3, m4-spec §5 Wave 0): opaque bearer tokens for the three
+ * computer audiences, minted per task by the control plane. The token value is never stored —
+ * only its SHA-256 (the session pattern) — and never appears in logs, events or exports.
+ * Audience endpoints land in M4-00b/M4-00c; this card owns mint, verify and revoke.
+ */
+export const capabilityTokens = sqliteTable(
+  "capability_tokens",
+  {
+    /** Random row id: what audit rows reference, never the token value or its hash. */
+    id: text("id").primaryKey(),
+    tokenHash: text("token_hash").notNull().unique(),
+    userId: userId(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    /**
+     * The internal computer id (the D1 `computers` row id, never the provider-side id).
+     * No foreign key: the `computers` table lands with M4-01/M4-02.
+     */
+    computerId: text("computer_id").notNull(),
+    aud: text("aud", { enum: ["model_proxy", "artifact_upload", "tool_gateway"] }).notNull(),
+    /**
+     * The (`provider_id`, `model`) ceiling snapshotted at mint, as JSON (AC1; `model_proxy`
+     * only, null otherwise). Verification intersects it with the live configuration.
+     */
+    modelAllowlist: text("model_allowlist"),
+    /** The task and user epochs at mint; an epoch bump fails the token (AC1c). */
+    taskEpoch: integer("task_epoch").notNull().default(0),
+    userEpoch: integer("user_epoch").notNull().default(0),
+    expiresAt: integer("expires_at").notNull(),
+    createdAt: createdAt(),
+    revokedAt: integer("revoked_at"),
+    revokedReason: text("revoked_reason"),
+  },
+  (t) => [
+    index("capability_tokens_task_idx").on(t.taskId, t.aud, t.computerId),
+    index("capability_tokens_user_idx").on(t.userId, t.createdAt),
+  ],
 );
 
 /** WebAuthn credentials; `id` is the base64url credential ID. */
@@ -506,6 +553,12 @@ export const tasks = sqliteTable(
     finishedAt: integer("finished_at"),
     /** When the retention sweep removed the tool outputs from `state` (M3-18 AC1). */
     outputsRemovedAt: integer("outputs_removed_at"),
+    /**
+     * Capability-token epoch (M4-00a AC1c): bumped on task cancel/end and rotation. A
+     * token minted under an older task epoch fails verification, so a missed row-by-row
+     * revocation still kills every token of the task.
+     */
+    tokenEpoch: integer("token_epoch").notNull().default(0),
   },
   (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
 );

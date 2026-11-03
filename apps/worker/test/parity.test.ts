@@ -3,6 +3,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
 import type { JsonValue, TaskStepper } from "@opa/core";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
+import { capabilityTokenContract } from "../../../test/contract/capability-tokens";
 import {
   blobStoreContract,
   databaseContract,
@@ -43,6 +44,10 @@ memoryGateContract("D1", async () => {
 memoryRecallContract("D1", async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   return env.DB;
+});
+capabilityTokenContract("D1", async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  return env.DB as unknown as import("@opa/db/system").SqlDatabase;
 });
 taskStoreContract(
   "D1",

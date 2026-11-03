@@ -23,6 +23,7 @@ describe("allowlist logger", () => {
   it("redacts secret-shaped strings", () => {
     for (const secret of [
       "Bearer abc",
+      `ocap1_${"a".repeat(43)}`, // a task capability token (M4-00a): never logged
       "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
       "sk-proj-abcdefghijkl",
       "opa-canary-0123456789abcdef0123456789abcdef",
