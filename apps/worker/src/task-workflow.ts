@@ -485,6 +485,9 @@ async function driveLoop(
       ...(tool.estimateCost ? { estimateCost: (input) => tool.estimateCost?.(input) } : {}),
       // Who wrote the description: a third party's taints the turn that offers it (R7 §5.9).
       ...(tool.author ? { author: tool.author } : {}),
+      // Turn-end disposal passes through the step wrapper, so a segment that ends (an
+      // approval pause included) still closes what its tools hold open.
+      ...(tool.dispose ? { dispose: () => tool.dispose?.() ?? Promise.resolve() } : {}),
       execute: async (input, _signal, call) => {
         toolSeq += 1;
         const under = call?.approved && batch ? { batchId: batch, id: call.toolCallId } : null;

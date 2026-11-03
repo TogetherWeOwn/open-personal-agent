@@ -301,6 +301,19 @@ describe("browser (M4-09)", () => {
     expect(fake.sessions).toHaveLength(2);
   });
 
+  it("dispose closes and meters a session the turn never closed, exactly once", async () => {
+    const fake = fakeBrowser();
+    const tool = browserTool(fake.ports);
+    await tool.execute({ action: "open", url: "https://archive.example/1" }, signal());
+    fake.advance(42_000);
+    // The turn answered without `close`; the loop's turn-end disposal is what runs this.
+    await tool.dispose?.();
+    expect(fake.sessions[0]?.closed).toBe(true);
+    expect(fake.metered).toEqual([42]);
+    await tool.dispose?.(); // idempotent: a second disposal meters nothing more
+    expect(fake.metered).toEqual([42]);
+  });
+
   it("binds approvals to the canonical host, from the URL or the live session", async () => {
     const fake = fakeBrowser();
     const tool = browserTool(fake.ports);
@@ -321,6 +334,8 @@ describe("browser (M4-09)", () => {
     for (const banned of ["profile", "cookie", "storage", "authenticated"]) {
       expect(schema).not.toContain(banned);
     }
+    // The caller is told typed text is entrusted to the page's site, which can send it on.
+    expect(BROWSER_MANIFEST.description).toContain("never type secrets or personal data");
   });
 
   it("registers only when the host supplies browser ports (honest absence on Node)", () => {

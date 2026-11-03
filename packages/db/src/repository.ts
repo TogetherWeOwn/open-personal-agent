@@ -567,6 +567,19 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             .from(usage)
             .where(gte(usage.createdAt, since))
         )[0]?.n ?? 0,
+      /**
+       * Metered browser seconds all users used since `since`: one total, no rows. The
+       * included Browser Rendering hours are the Cloudflare account's, not each user's, so
+       * splitting one user's seconds against them would hide billable overage whenever
+       * several users browse; Usage splits this total for the owner (M4-09 AC3).
+       */
+      browserSeconds: async (since: number) =>
+        (
+          await db
+            .select({ n: sql<number>`coalesce(sum(${browserUsage.seconds}), 0)`.mapWith(Number) })
+            .from(browserUsage)
+            .where(gte(browserUsage.createdAt, since))
+        )[0]?.n ?? 0,
       /** Adds to a ledger meter's UTC day (M3-16 AC3): one upsert, no read. */
       addToMeter: async (meter: "workflow_steps" | "do_ms", amount: number, at: number) => {
         await db
@@ -2047,6 +2060,13 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               })
               .onConflictDoNothing({ target: browserUsage.id });
           },
+          /** Every browser-session row, oldest first, for the data export. */
+          list: () =>
+            db
+              .select()
+              .from(browserUsage)
+              .where(eq(browserUsage.userId, userId))
+              .orderBy(browserUsage.createdAt),
           /** This user's metered browser seconds since `since` (Usage's month line). */
           secondsSince: async (since: number): Promise<number> => {
             const [row] = await db

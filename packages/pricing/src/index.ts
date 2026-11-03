@@ -75,8 +75,9 @@ export const browserRendering: {
 
 /**
  * A month's metered browser seconds split at the included allowance, with the billed part's
- * estimated cost in micro-USD. Rounds up like `estimate`, so time past the allowance never
- * shows as free.
+ * estimated cost in micro-USD. The seconds must be the **deployment's** total: the allowance
+ * is the Cloudflare account's, so splitting one user's seconds would hand every user their
+ * own included hours. Rounds up like `estimate`, so time past the allowance never shows free.
  */
 export function browserCost(seconds: number) {
   const includedSeconds = browserRendering.includedHoursPerMonth * 3600;

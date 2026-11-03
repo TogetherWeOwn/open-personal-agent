@@ -163,11 +163,15 @@ function browserTime(seconds: number) {
 }
 
 /**
- * Your own browser time this month against the included hours. Past them Cloudflare bills the
- * extra hours; the estimate here uses the same dated price the server split with.
+ * Browser time this month against the included hours. The meter is the deployment's total —
+ * the included hours are the Cloudflare account's, shared by everyone on it — and only the
+ * owner gets it; a member sees their own time with no allowance of their own implied. Past
+ * the included hours Cloudflare bills the extra; the estimate uses the same dated price
+ * the server split with.
  */
 function BrowserUsage({ data }: { data: UsageData }) {
   const b = data.browser;
+  const a = b.allowance;
   const included = b.includedHoursPerMonth * 3600;
   return (
     <section aria-labelledby="browser-heading" className="flex flex-col gap-3">
@@ -175,28 +179,38 @@ function BrowserUsage({ data }: { data: UsageData }) {
         Browser
       </Heading>
       <div className="flex flex-col gap-1 rounded-xl border border-border bg-surface-raised p-3">
-        <Meter
-          value={Math.min(b.includedSeconds, included)}
-          maxValue={included}
-          valueLabel={`${browserTime(b.seconds)} of ${b.includedHoursPerMonth} hours included this month`}
-          className="flex flex-col gap-1"
-        >
-          <span className="flex flex-wrap items-baseline justify-between gap-x-3">
-            <Label className="font-medium">Browsing time</Label>
-            <span className="tabular-nums">
-              {browserTime(b.seconds)} of {b.includedHoursPerMonth}h included this month
+        {a ? (
+          <Meter
+            value={Math.min(a.includedSeconds, included)}
+            maxValue={included}
+            valueLabel={`${browserTime(a.seconds)} of ${b.includedHoursPerMonth} hours included this month`}
+            className="flex flex-col gap-1"
+          >
+            <span className="flex flex-wrap items-baseline justify-between gap-x-3">
+              <Label className="font-medium">Browsing time</Label>
+              <span className="tabular-nums">
+                {browserTime(a.seconds)} of {b.includedHoursPerMonth}h included this month
+              </span>
             </span>
+            <div className="h-2 overflow-hidden rounded-full bg-surface-sunken">
+              <div
+                className="h-full bg-accent"
+                style={{ width: `${Math.min(100, (a.includedSeconds / included) * 100)}%` }}
+              />
+            </div>
+          </Meter>
+        ) : (
+          <span className="flex flex-wrap items-baseline justify-between gap-x-3">
+            <span className="font-medium">Your browsing time</span>
+            <span className="tabular-nums">{browserTime(b.seconds)} this month</span>
           </span>
-          <div className="h-2 overflow-hidden rounded-full bg-surface-sunken">
-            <div
-              className="h-full bg-accent"
-              style={{ width: `${Math.min(100, (b.includedSeconds / included) * 100)}%` }}
-            />
-          </div>
-        </Meter>
+        )}
         <p className="text-sm text-text-muted tabular-nums">
-          {b.billedSeconds > 0
-            ? `Past the included hours: ${browserTime(b.billedSeconds)}, about ${money(b.costMicroUsd, data.currency)} at $${b.usdPerHour.toFixed(2)} an hour, billed by Cloudflare.`
+          {a
+            ? `Your browsing: ${browserTime(b.seconds)} this month. `
+            : `The ${b.includedHoursPerMonth}h included each month are shared across this deployment; the owner sees the total and any overage. `}
+          {a && a.billedSeconds > 0
+            ? `Past the included hours: ${browserTime(a.billedSeconds)}, about ${money(a.costMicroUsd, data.currency)} at $${b.usdPerHour.toFixed(2)} an hour, billed by Cloudflare.`
             : `Past the included hours, Cloudflare bills $${b.usdPerHour.toFixed(2)} an hour.`}{" "}
           Price as of {dateWords(b.priceVerifiedAt)}.{b.stale && <Stale date={b.priceVerifiedAt} />}
         </p>

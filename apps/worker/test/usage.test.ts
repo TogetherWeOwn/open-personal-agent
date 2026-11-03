@@ -48,9 +48,12 @@ type UsageBody = {
   metersVerifiedAt: string | null;
   browser: {
     seconds: number;
-    includedSeconds: number;
-    billedSeconds: number;
-    costMicroUsd: number;
+    allowance: {
+      seconds: number;
+      includedSeconds: number;
+      billedSeconds: number;
+      costMicroUsd: number;
+    } | null;
     includedHoursPerMonth: number;
     usdPerHour: number;
     priceVerifiedAt: string;
@@ -181,21 +184,26 @@ describe("usage ledger", () => {
     ]);
   });
 
-  it("shows the caller's own browser time against the included hours, nobody else's", async () => {
+  it("splits the deployment's browser time against the included hours, never one user's", async () => {
     const { browser, owner } = await claim();
     const insert = db.prepare("INSERT INTO browser_usage (id, user_id, seconds) VALUES (?, ?, ?)");
     await db.batch([
       db.prepare("INSERT INTO users (id, display_name, role) VALUES ('b-other', 'O', 'member')"),
-      // 10.5 h of the owner's browsing, 2 h of someone else's.
-      insert.bind("b1", owner, 37_800),
-      insert.bind("b2", "b-other", 7_200),
+      // 8 h of the owner's browsing, 5 h of someone else's: neither user alone passes the
+      // 10 included hours, but the account's 13 h bill for 3 of them.
+      insert.bind("b1", owner, 28_800),
+      insert.bind("b2", "b-other", 18_000),
     ]);
     const body = await (await browser.req("/api/usage")).json<UsageBody>();
     expect(body.browser).toMatchObject({
-      seconds: 37_800,
-      includedSeconds: 36_000, // 10 h included
-      billedSeconds: 1_800,
-      costMicroUsd: 45_000, // half an hour at $0.09/h
+      // The caller's own line stays their own seconds, nobody else's.
+      seconds: 28_800,
+      allowance: {
+        seconds: 46_800, // the deployment's 13 h
+        includedSeconds: 36_000, // 10 h included, once, for the account
+        billedSeconds: 10_800, // 3 h past them
+        costMicroUsd: 270_000, // 3 h at $0.09/h
+      },
       includedHoursPerMonth: 10,
       usdPerHour: 0.09,
     });

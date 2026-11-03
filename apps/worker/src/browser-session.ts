@@ -34,13 +34,21 @@ interface PuppeteerPage {
   click(selector: string): Promise<void>;
   type(selector: string, text: string): Promise<void>;
   keyboard: { press(key: string): Promise<void> };
-  evaluate(pageFunction: string, arg: string): Promise<boolean>;
+  // A function, never a string: puppeteer evaluates a string as page source (a function
+  // expression in a string is only created, never called, and its argument never bound).
+  evaluate(pageFunction: (text: string) => boolean, arg: string): Promise<boolean>;
   screenshot(options?: Record<string, unknown>): Promise<Uint8Array>;
   close(): Promise<void>;
 }
 
+/** A target the browser created: a page this session opened, or one a page spawned. */
+interface PuppeteerTarget {
+  page(): Promise<PuppeteerPage | null>;
+}
+
 interface PuppeteerContext {
   newPage(): Promise<PuppeteerPage>;
+  on(event: "targetcreated", listener: (target: PuppeteerTarget) => void): void;
   close(): Promise<void>;
 }
 
@@ -89,14 +97,20 @@ class WorkerBrowserSession implements BrowserSession {
     return { url: this.#page.url(), html: await this.#page.content() };
   }
 
+  /**
+   * Starts watching for the navigation an action may cause. The watch starts **before** the
+   * action: one registered after a fast click has already navigated waits in vain (and every
+   * action pays the settle delay below).
+   */
+  #navigation(signal: AbortSignal): Promise<unknown> {
+    return this.#page
+      .waitForNavigation({ waitUntil: "load", timeout: NAV_TIMEOUT_MS, signal })
+      .catch(() => {});
+  }
+
   /** A click or Enter may navigate (the guard decides where to); give it a moment, then read. */
-  async #settled(signal: AbortSignal): Promise<BrowserPage> {
-    await Promise.race([
-      this.#page
-        .waitForNavigation({ waitUntil: "load", timeout: NAV_TIMEOUT_MS, signal })
-        .catch(() => {}),
-      new Promise((r) => setTimeout(r, SETTLE_MS)),
-    ]);
+  async #settled(navigation: Promise<unknown>): Promise<BrowserPage> {
+    await Promise.race([navigation, new Promise((r) => setTimeout(r, SETTLE_MS))]);
     return this.#snapshot();
   }
 
@@ -121,26 +135,37 @@ class WorkerBrowserSession implements BrowserSession {
 
   async click(target: { selector?: string; text?: string }, signal: AbortSignal) {
     try {
+      const navigation = this.#navigation(signal);
       if (target.selector) {
         await this.#page.click(target.selector);
       } else if (target.text) {
         // Click the first link or button whose visible text matches, as a person would look
-        // for it. The text travels as an argument, never string-built into page code.
-        const found = await this.#page.evaluate(
-          `(text) => {
-            const want = text.trim().toLowerCase();
-            for (const el of document.querySelectorAll("a, button, [role='link'], [role='button']")) {
-              if ((el.textContent ?? "").trim().toLowerCase() === want) { el.click(); return true; }
+        // for it. The function is self-contained (puppeteer serializes it into the page) and
+        // the text travels as an argument, never string-built into page code.
+        const found = await this.#page.evaluate((text: string) => {
+          const doc = (
+            globalThis as unknown as {
+              document: {
+                querySelectorAll(
+                  selector: string,
+                ): Iterable<{ textContent: string | null; click(): void }>;
+              };
             }
-            return false;
-          }`,
-          target.text,
-        );
+          ).document;
+          const want = text.trim().toLowerCase();
+          for (const el of doc.querySelectorAll("a, button, [role='link'], [role='button']")) {
+            if ((el.textContent ?? "").trim().toLowerCase() === want) {
+              el.click();
+              return true;
+            }
+          }
+          return false;
+        }, target.text);
         if (!found) throw new Error(`no link or button reads "${target.text}"`);
       } else {
         throw new Error("click needs a selector or text");
       }
-      return await this.#settled(signal);
+      return await this.#settled(navigation);
     } catch (error) {
       translate(error);
     }
@@ -149,8 +174,10 @@ class WorkerBrowserSession implements BrowserSession {
   async type(selector: string, text: string, submit: boolean, signal: AbortSignal) {
     try {
       await this.#page.type(selector, text);
-      if (submit) await this.#page.keyboard.press("Enter");
-      return submit ? await this.#settled(signal) : await this.#snapshot();
+      if (!submit) return await this.#snapshot();
+      const navigation = this.#navigation(signal);
+      await this.#page.keyboard.press("Enter");
+      return await this.#settled(navigation);
     } catch (error) {
       translate(error);
     }
@@ -194,8 +221,9 @@ export function browserSessionOpener(
 ): (guard: BrowserGuard) => Promise<BrowserSession> {
   return async (guard) => {
     const browser = await launch(binding);
+    let context: PuppeteerContext | undefined;
     try {
-      const context = await browser.createBrowserContext();
+      context = await browser.createBrowserContext();
       const page = await context.newPage();
       // Interception goes on before anything navigates, and stays on for the session's life:
       // the guard is the tool's, consulted fresh for every request.
@@ -212,8 +240,22 @@ export function browserSessionOpener(
         }
       });
       await page.setRequestInterception(true);
+      // A page the visited page spawns (`window.open`, `target=_blank`) is a new target with
+      // no interception on it, so no request it made would pass the guard. This session is
+      // one page by design (tabs are out of scope): close anything spawned, so "every
+      // request is guard-checked" stays true of the whole context. Registered only after
+      // the session's own page exists, and that page is never the one closed.
+      context.on("targetcreated", (target) => {
+        void target
+          .page()
+          .then((spawned) => (spawned && spawned !== page ? spawned.close() : undefined))
+          .catch(() => {});
+      });
       return new WorkerBrowserSession(page, context, browser);
     } catch (error) {
+      // Close whatever setup managed to create, each independently (as `close` does): a
+      // browser that refuses to close must not strand the fresh context with no handle left.
+      await context?.close().catch(() => {});
       await browser.close().catch(() => {});
       throw error;
     }

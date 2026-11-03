@@ -154,12 +154,10 @@ const breakdowns = {
   day: days,
 };
 
-/** Two and a quarter hours of browsing, inside the 10 included hours. */
+/** Two and a quarter hours of browsing, inside the 10 included hours (the deployment split). */
 const browser = {
   seconds: 8_100,
-  includedSeconds: 8_100,
-  billedSeconds: 0,
-  costMicroUsd: 0,
+  allowance: { seconds: 8_100, includedSeconds: 8_100, billedSeconds: 0, costMicroUsd: 0 },
   includedHoursPerMonth: 10,
   usdPerHour: 0.09,
   priceVerifiedAt: "2026-11-03",
@@ -299,13 +297,22 @@ test("browser time shows against the included hours, and its overage is priced",
     browser: {
       ...browser,
       seconds: 37_800,
-      includedSeconds: 36_000,
-      billedSeconds: 1_800,
-      costMicroUsd: 45_000,
+      allowance: {
+        seconds: 37_800,
+        includedSeconds: 36_000,
+        billedSeconds: 1_800,
+        costMicroUsd: 45_000,
+      },
     },
   });
   await expect(region).toContainText("10h 30m of 10h included this month");
   await expect(region).toContainText("Past the included hours: 30m, about $0.05");
+  // A member gets no deployment split: their own time only, with the shared hours named
+  // as shared — never an included-hours allowance of their own.
+  await open(page, { ...body(period, period), browser: { ...browser, allowance: null } });
+  await expect(region).toContainText("Your browsing time");
+  await expect(region).toContainText("shared across this deployment");
+  await expect(region).not.toContainText("of 10h included this month");
 });
 
 test("a member sees no allowance meters, and half the budget shows the quiet line", async ({
@@ -377,7 +384,7 @@ test("an unknown cost is never shown or exported as zero", async ({ page }) => {
 test("nothing used yet still shows the plan; a member has no meter", async ({ page }) => {
   await open(page, {
     ...body(empty, empty, null),
-    browser: { ...browser, seconds: 0, includedSeconds: 0 },
+    browser: { ...browser, seconds: 0, allowance: null },
   });
   await expect(page.getByRole("meter")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Nothing used yet this month" })).toBeVisible();

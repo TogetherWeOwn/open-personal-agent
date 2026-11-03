@@ -43,11 +43,16 @@ class FakePage {
   typed: [string, string][] = [];
   pressed: string[] = [];
   clicked: string[] = [];
-  evaluateResult = true;
+  /** Call order across the page surface, for the navigation-waiter ordering test. */
+  events: string[] = [];
+  /** Link/button elements a text click searches, played as the page's document. */
+  elements: { text: string; clicked: boolean }[] = [{ text: "Next", clicked: false }];
+  closed = false;
   failContent: Error | null = null;
   keyboard = {
     press: async (key: string) => {
       this.pressed.push(key);
+      this.events.push("press");
     },
   };
   mainFrame() {
@@ -70,6 +75,7 @@ class FakePage {
     return null;
   }
   async waitForNavigation() {
+    this.events.push("wait");
     return null;
   }
   async content() {
@@ -81,27 +87,79 @@ class FakePage {
   }
   async click(selector: string) {
     this.clicked.push(selector);
+    this.events.push("click");
   }
   async type(selector: string, text: string) {
     this.typed.push([selector, text]);
   }
-  async evaluate(_fn: string, _arg: string) {
-    return this.evaluateResult;
+  /**
+   * Plays puppeteer's contract honestly: a **function** is invoked in the page with its
+   * argument; a string would be evaluated as source and never called — the adapter must
+   * not send one. The fake document the function reads is this page's `elements`.
+   */
+  async evaluate(fn: unknown, arg: string) {
+    this.events.push("evaluate");
+    if (typeof fn !== "function") return false;
+    const g = globalThis as unknown as { document?: unknown };
+    const previous = g.document;
+    g.document = {
+      querySelectorAll: () =>
+        this.elements.map((el) => ({
+          textContent: el.text,
+          click: () => {
+            el.clicked = true;
+          },
+        })),
+    };
+    try {
+      return (fn as (text: string) => boolean)(arg);
+    } finally {
+      g.document = previous;
+    }
   }
   async screenshot() {
     return new Uint8Array([137, 80, 78, 71]);
   }
-  async close() {}
+  async close() {
+    this.closed = true;
+  }
 }
 
-function fakeLaunch(page: FakePage, log: string[] = []): LaunchBrowser {
+/** The fake context: the session page plus the `targetcreated` listener, exposed to tests. */
+class FakeContext {
+  targetListener: ((target: { page(): Promise<FakePage | null> }) => void) | null = null;
+  constructor(
+    private page: FakePage | null,
+    private log: string[],
+    private pageError: Error | null = null,
+  ) {}
+  async newPage() {
+    if (this.pageError) throw this.pageError;
+    return this.page as never;
+  }
+  on(_event: "targetcreated", listener: (target: { page(): Promise<FakePage | null> }) => void) {
+    this.targetListener = listener;
+  }
+  /** A page the visited page spawned (`window.open`, `target=_blank`). */
+  spawn(spawned: FakePage | null) {
+    this.targetListener?.({ page: async () => spawned });
+  }
+  async close() {
+    this.log.push("context");
+  }
+}
+
+function fakeLaunch(
+  page: FakePage,
+  log: string[] = [],
+  contexts: FakeContext[] = [],
+): LaunchBrowser {
   return async () => ({
-    createBrowserContext: async () => ({
-      newPage: async () => page as never,
-      close: async () => {
-        log.push("context");
-      },
-    }),
+    createBrowserContext: async () => {
+      const context = new FakeContext(page, log);
+      contexts.push(context);
+      return context as never;
+    },
     close: async () => {
       log.push("browser");
     },
@@ -155,12 +213,39 @@ describe("browser session adapter (M4-09)", () => {
     const page = new FakePage();
     const session = await browserSessionOpener({}, fakeLaunch(page))(guard([]));
     await session.click({ text: "Next" }, signal);
+    // The function puppeteer receives actually ran in the page and clicked the element:
+    // the fake only invokes functions, exactly like the real `evaluate`.
+    expect(page.elements).toEqual([{ text: "Next", clicked: true }]);
     await session.type("#q", "hello", true, signal);
     expect(page.typed).toEqual([["#q", "hello"]]);
     expect(page.pressed).toEqual(["Enter"]);
     expect(await session.screenshot(signal)).toEqual(new Uint8Array([137, 80, 78, 71]));
-    page.evaluateResult = false;
     await expect(session.click({ text: "Missing" }, signal)).rejects.toThrow(/no link or button/);
+    await session.close();
+  });
+
+  it("starts the navigation watch before the click and the Enter that may cause it", async () => {
+    const page = new FakePage();
+    const session = await browserSessionOpener({}, fakeLaunch(page))(guard([]));
+    await session.click({ selector: "#go" }, signal);
+    await session.type("#q", "hello", true, signal);
+    expect(page.events.indexOf("wait")).toBeLessThan(page.events.indexOf("click"));
+    expect(page.events.lastIndexOf("wait")).toBeLessThan(page.events.indexOf("press"));
+    await session.close();
+  });
+
+  it("closes pages the visited page spawns, so no target runs without the guard", async () => {
+    const page = new FakePage();
+    const contexts: FakeContext[] = [];
+    const session = await browserSessionOpener({}, fakeLaunch(page, [], contexts))(guard([]));
+    const spawned = new FakePage();
+    contexts[0]?.spawn(spawned);
+    contexts[0]?.spawn(page); // the session's own page is never the one closed
+    contexts[0]?.spawn(null); // a non-page target has nothing to close
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spawned.closed).toBe(true);
+    expect(page.closed).toBe(false);
     await session.close();
   });
 
@@ -192,5 +277,18 @@ describe("browser session adapter (M4-09)", () => {
     });
     await expect(browserSessionOpener({}, launch)(guard([]))).rejects.toThrow(/no capacity/);
     expect(log).toEqual(["browser"]);
+  });
+
+  it("closes a created context when setup fails after it, even if the browser won't close", async () => {
+    const log: string[] = [];
+    const launch: LaunchBrowser = async () => ({
+      createBrowserContext: async () => new FakeContext(null, log, new Error("no page")) as never,
+      close: async () => {
+        log.push("browser");
+        throw new Error("browser wedged");
+      },
+    });
+    await expect(browserSessionOpener({}, launch)(guard([]))).rejects.toThrow(/no page/);
+    expect(log).toEqual(["context", "browser"]);
   });
 });

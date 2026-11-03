@@ -234,6 +234,16 @@ usageRoutes.get("/", async (c) => {
     freeNeuronsUsed: Math.min(allowance.neuronsUsedHere, allowance.neuronsPerDay),
     billedNeurons: Math.max(allowance.neuronsUsedHere - allowance.neuronsPerDay, 0),
   };
+  // The browser tool's included-hours split (M4-09 AC3), on the deployment's total browser
+  // seconds: the included hours are the account's, so splitting the caller's own seconds
+  // against them would hand every user a fresh allowance and hide billable overage. The
+  // owner's only, like the allowances above; a member keeps their own seconds below.
+  const browserAllowance =
+    profile?.role === "owner"
+      ? await repo.deployment
+          .browserSeconds(month)
+          .then((seconds) => ({ seconds, ...browserCost(seconds) }))
+      : null;
   c.header("Cache-Control", "no-store");
   return c.json({
     currency: "USD",
@@ -250,11 +260,11 @@ usageRoutes.get("/", async (c) => {
     meters,
     // The date the included amounts were checked, which every meter's line gives (AC3).
     metersVerifiedAt: meters && cloudflareAllowances.verifiedAt,
-    // The calling user's own browser time this month, with the included-hours split worked out
-    // here so the page does no arithmetic (the browser tool's AC3 included-hours line).
+    // The calling user's own browser time this month, plus the owner-only deployment split
+    // above: a member gets their own seconds and no claim about an allowance of their own.
     browser: {
       seconds: browserSeconds,
-      ...browserCost(browserSeconds),
+      allowance: browserAllowance,
       includedHoursPerMonth: browserRendering.includedHoursPerMonth,
       usdPerHour: browserRendering.usdPerHour,
       priceVerifiedAt: browserRendering.verifiedAt,
