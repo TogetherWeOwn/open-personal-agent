@@ -5,12 +5,8 @@
 import { computerStore } from "@opa/db/computers";
 import { deleteUserData } from "@opa/db/deletion";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import {
-  borrowComputer,
-  type ComputerDriver,
-  sweepComputers,
-  touchComputer,
-} from "@opa/server/computers";
+import type { ComputerDriver } from "@opa/server/computer-driver";
+import { borrowComputer, sweepComputers, touchComputer } from "@opa/server/computers";
 import { describe, expect, it } from "vitest";
 import { count, db, env, freshDatabase } from "./helpers/app";
 

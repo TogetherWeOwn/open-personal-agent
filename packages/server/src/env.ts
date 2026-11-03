@@ -6,7 +6,7 @@ import type { DataBindings, UserScope } from "@opa/db/repository";
 import type { systemStore } from "@opa/db/system";
 import type { WorkersAIBinding } from "@opa/providers";
 import type { Vault } from "@opa/vault";
-import type { ComputerDriver } from "./computers";
+import type { ComputerDriver } from "./computer-driver";
 
 /** The user's assistant as the app reaches it: `/api/health` pings one. */
 export interface AssistantStub {

@@ -6,7 +6,7 @@
 // bridge stays inside the provider.
 import type { ComputerProvider, ComputerProviderError } from "@opa/core";
 import { createComputerSpec } from "@opa/core";
-import type { ComputerDriver } from "@opa/server/computers";
+import type { ComputerDriver } from "@opa/server/computer-driver";
 
 /**
  * Wraps a docker-local provider as the lifecycle's driver. `create` builds the M4-01 spec

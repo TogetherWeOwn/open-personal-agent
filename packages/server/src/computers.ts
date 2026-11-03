@@ -6,12 +6,12 @@
 // the task, DO and browser vanish (the reconciler sweep), and destroys through the provider
 // API on account deletion.
 //
-// The provider seam is a structural subset of the M4-01 `ComputerProvider` port
-// (`create`/`destroy`/`list`): no M4-01 import, so this card compiles and lands before it. When
-// M4-01 lands, its adapter satisfies `ComputerDriver` as written, and this module re-points to
-// the port type without changing behaviour. This module never handles capability tokens
-// (M4-00 §4.0): it moves the computer's lifetime, never a credential — no session cookie, model
-// key or wider-audience token ever enters a computer through here.
+// The provider seam lives in `./computer-driver` (a leaf both this module and `env.ts` point
+// at, so neither imports the other): a structural subset of the M4-01 `ComputerProvider`
+// port with no M4-01 import, so this card compiles and lands before it. This module never
+// handles capability tokens (M4-00 §4.0): it moves the computer's lifetime, never a
+// credential — no session cookie, model key or wider-audience token ever enters a computer
+// through here.
 import {
   COMPUTER_CONCURRENCY_CAP,
   COMPUTER_IDLE_TAIL_MS,
@@ -21,35 +21,8 @@ import {
 } from "@opa/db/computers";
 import { createRepository, TASK_TERMINAL_STATUSES, type UserScope } from "@opa/db/repository";
 import { log } from "@opa/log";
+import type { ComputerDriver, ComputerProvision } from "./computer-driver";
 import type { AppPorts } from "./env";
-
-/** What the lifecycle asks a provider to make: the M4-01 `create` surface, structurally. */
-export interface ComputerProvision {
-  providerComputerId: string;
-  disks?: string[];
-  snapshots?: string[];
-}
-
-/**
- * What the lifecycle asks a provider to do: the M4-01 port's `create`/`destroy`/`list`,
- * structurally. `list` names every provider-side computer the deployment holds, so the sweep
- * can destroy what no D1 row claims (COST-6). `destroy` reports the provider resources it
- * removed, for the deletion report.
- */
-export interface ComputerDriver {
-  create(spec: {
-    provider: string;
-    profile: string;
-    taskId: string | null;
-    idleTimeoutSeconds: number;
-    maxLifetimeSeconds: number;
-  }): Promise<ComputerProvision>;
-  destroy(
-    providerComputerId: string,
-    resources: { disks: string[]; snapshots: string[] },
-  ): Promise<{ disks?: string[]; snapshots?: string[] }>;
-  list(): Promise<{ providerComputerId: string }[]>;
-}
 
 /** What a borrow names: the task it serves and the kind of computer it needs. */
 export interface BorrowSpec {
