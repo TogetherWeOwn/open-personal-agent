@@ -109,6 +109,17 @@ async function api(page: Page, method: "GET" | "POST" | "PUT", path: string, bod
 async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> {
   // The base URL already holds the version path (for example `https://host/v1`), as the
   // provider adapters treat it: append `/models`, never another `/v1`.
+  const root = baseUrl.replace(/\/+$/, "");
+  // Defense in depth: the key must never follow a redirect (fetch strips Authorization
+  // cross-origin, but not x-api-key) or leave HTTPS, whatever the operator configured.
+  // The server-side provider validation (https-only, no query/hash) runs first via addProvider.
+  let scheme: string | null = null;
+  try {
+    scheme = new URL(root).protocol;
+  } catch {
+    scheme = null;
+  }
+  if (scheme !== "https:") throw new Error("the endpoint URL must use https");
   const headers: Record<string, string> =
     adapter === "anthropic-messages"
       ? {
@@ -117,8 +128,9 @@ async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> 
           "anthropic-version": "2023-06-01",
         }
       : { authorization: `Bearer ${API_KEY}` };
-  const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/models`, {
+  const res = await fetch(`${root}/models`, {
     headers,
+    redirect: "error",
   });
   if (!res.ok) throw new Error(`GET /models: HTTP ${res.status}`);
   const body = (await res.json()) as { data?: { id?: unknown }[] } | { id?: unknown }[];

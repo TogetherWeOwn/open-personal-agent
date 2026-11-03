@@ -33,16 +33,47 @@ export function maskToken(text, token) {
   );
 }
 
+/** Env without the given prefixes: secrets cross only into the step that needs them. */
+function withoutPrefixes(env, ...prefixes) {
+  return Object.fromEntries(
+    Object.entries(env).filter(([k]) => !prefixes.some((p) => k.startsWith(p))),
+  );
+}
+
+/**
+ * Line-buffered output scrub: a secret split across spawn chunks still cannot reach the log,
+ * because only whole lines (plus the final flush) are scrubbed and printed.
+ */
+export function scrubbedOutput(stdout, secrets) {
+  const scrub = (text) => secrets.reduce((t, s) => (s ? t.replaceAll(s, "[redacted]") : t), text);
+  let pending = "";
+  return {
+    onOutput: (chunk) => {
+      pending += chunk;
+      const end = pending.lastIndexOf("\n") + 1;
+      if (end) stdout(scrub(pending.slice(0, end)));
+      pending = pending.slice(end);
+    },
+    flush: () => {
+      if (pending) stdout(scrub(pending));
+      pending = "";
+    },
+  };
+}
+
 /** test/first-run in Playwright on the deployment. The setup token reaches it only in its env. */
-async function firstRun(url, setupToken, deps, statePath) {
+export async function firstRun(url, setupToken, deps, statePath) {
   const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
+  // The browser harness needs neither secret family: no live-model values and no Cloudflare
+  // token reach it or its Chromium child.
+  const env = withoutPrefixes(deps.env, "LIVE_MODEL_", "CLOUDFLARE_");
   const res = await deps.run(
     process.execPath,
     [cli, "test", "--project", "first-run", "--reporter", "line", "--trace", "off"],
     {
       cwd: deps.root,
       env: {
-        ...deps.env,
+        ...env,
         BASE_URL: url,
         OPA_SETUP_TOKEN: setupToken,
         OPA_STORAGE_STATE: statePath,
@@ -58,27 +89,30 @@ async function firstRun(url, setupToken, deps, statePath) {
  * step-level LIVE_MODEL_* secrets the project skips itself and this passes with no results; the
  * report says so. The endpoint key never reaches the log: output is scrubbed like a secret.
  */
-async function liveModels(url, deps, paths) {
+export async function liveModels(url, deps, paths) {
   // One run, one results file: drop a stale file so retried adapters never inherit old rows
   // (the spec merges rows already on disk, for workers restarted after a failure).
   fs.rmSync(paths.resultsPath, { force: true });
   const cli = path.join(deps.root, "node_modules", "@playwright", "test", "cli.js");
-  const key = deps.env.LIVE_MODEL_API_KEY;
-  const scrub = (text) => (key ? text.replaceAll(key, "[redacted]") : text);
+  // The browser harness needs the live-model key but no Cloudflare token.
+  const env = withoutPrefixes(deps.env, "CLOUDFLARE_");
+  // Scrub whole lines only, so a key split across output chunks is still caught.
+  const scrubbed = scrubbedOutput(deps.stdout, [deps.env.LIVE_MODEL_API_KEY]);
   const res = await deps.run(
     process.execPath,
     [cli, "test", "--project", "live-models", "--reporter", "line", "--trace", "off"],
     {
       cwd: deps.root,
       env: {
-        ...deps.env,
+        ...env,
         BASE_URL: url,
         OPA_STORAGE_STATE: paths.statePath,
         LIVE_MODELS_JSON: paths.resultsPath,
       },
-      onOutput: (text) => deps.stdout(scrub(text)),
+      onOutput: scrubbed.onOutput,
     },
   );
+  scrubbed.flush();
   if (res.code !== 0) throw new DeployError(`the live-model step failed (${res.code})`);
 }
 
@@ -132,9 +166,9 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
       row.seconds = (Date.now() - row.start) / 1000;
     }
   };
-  // The live-model key reaches only the live step: deployment (and its build) never sees it.
-  const { LIVE_MODEL_API_KEY: _liveKey, ...deployEnv } = vdeps.env;
-  const deployDeps = { ...vdeps, env: deployEnv };
+  // No live-model value reaches deployment (or its build): only the live step sees them.
+  // The base URLs are secrets too and may carry a private host or path.
+  const deployDeps = { ...vdeps, env: withoutPrefixes(vdeps.env, "LIVE_MODEL_") };
   const deploy = (label, expect) =>
     phase(label, async () => {
       const result = await steps.deploy(["--name", prefix], deployDeps);
@@ -226,6 +260,8 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
   const file = values.report ?? path.join(deps.root, ".wrangler", "opa-verify", `${prefix}.md`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, report.replace("{{migration}}", migration?.name ?? "(not reached)"));
+  // The storage state holds live session cookies: remove it once the report is written.
+  fs.rmSync(livePaths.statePath, { force: true });
   deps.stdout(`\n${fs.readFileSync(file, "utf8")}\nReport: ${file}\n`);
   if (failure) {
     // The caller prints the error to the same public log.
