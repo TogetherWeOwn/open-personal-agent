@@ -8,6 +8,7 @@
 // what happened from D1 and never from the event (M3-12 AC3).
 import { createRepository, isId, TASK_LIMIT_KINDS, type TaskLimitKind } from "@opa/db/repository";
 import { type Context, Hono } from "hono";
+import { resolveComputerProvider } from "./computer-settings";
 import type { AppEnv } from "./env";
 
 type Ctx = Context<AppEnv>;
@@ -204,6 +205,42 @@ taskRoutes.post("/:id/continue", async (c) => {
     return c.json({ error: "ended" }, 409);
   }
   return c.json({ status: "running" });
+});
+
+/**
+ * Sets the task's computer provider override (M4-10 AC1), from the composer or the task card;
+ * `null` clears it back to the Settings default the router otherwise reads (M4-07 AC4). Like
+ * the other task writes it is scoped to the caller's rows — another user's task is a 404 that
+ * changes nothing — and the provider id is validated against the live registry before it is
+ * stored. A task op, not a settings change, so it writes no audit row, as with cancel/stop.
+ */
+taskRoutes.put("/:id/computer", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("provider" in body)) {
+    return c.json({ error: "invalid_body" }, 400);
+  }
+  const provider =
+    body.provider === null
+      ? null
+      : typeof body.provider === "string" &&
+          body.provider.trim() !== "" &&
+          body.provider.length <= 128
+        ? body.provider.trim()
+        : null;
+  if (body.provider !== null && provider === null)
+    return c.json({ error: "invalid_provider" }, 400);
+  if (provider !== null) {
+    try {
+      resolveComputerProvider(provider);
+    } catch {
+      return c.json({ error: "unknown_provider" }, 409);
+    }
+  }
+  const user = createRepository(c.env).forUser(c.var.session.scope);
+  const id = c.req.param("id");
+  if (!isId(id) || !(await user.tasks.get(id))) return c.json({ error: "not_found" }, 404);
+  await user.tasks.setComputerProvider(id, provider);
+  return c.json({ computerProvider: provider });
 });
 
 /** Stop: the task is cancelled; the woken run sees it at its next step and ends. */

@@ -124,6 +124,7 @@ export async function stageExportItem(
     }
     case "settings":
       await put("settings.json", (await user.settings.get()) ?? null);
+      await put("computer_settings.json", await user.settings.computer());
       return;
     case "usage":
       await put("usage.json", await user.usage.list());

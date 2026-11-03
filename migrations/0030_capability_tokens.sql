@@ -23,4 +23,4 @@ ALTER TABLE `tasks` ADD `token_epoch` integer DEFAULT 0 NOT NULL;--> statement-b
 ALTER TABLE `users` ADD `token_epoch` integer DEFAULT 0 NOT NULL;
 --> statement-breakpoint
 -- Hand-added: record the schema version this migration brings the database to.
-INSERT INTO `schema_version` (`version`) VALUES (29);
+INSERT INTO `schema_version` (`version`) VALUES (30);

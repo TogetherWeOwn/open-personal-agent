@@ -584,6 +584,12 @@ export const tasks = sqliteTable(
      * revocation still kills every token of the task.
      */
     tokenEpoch: integer("token_epoch").notNull().default(0),
+    /**
+     * The task's computer provider override (M4-10 AC1), set from the composer or the task
+     * card; null means the router uses the Settings default (M4-07 AC4 reads this column).
+     * Names a deployment provider id, validated when it is written.
+     */
+    computerProvider: text("computer_provider"),
   },
   (t) => [index("tasks_user_idx").on(t.userId, t.createdAt)],
 );
@@ -796,8 +802,42 @@ export const userSettings = sqliteTable("user_settings", {
   setupSkipped: text("setup_skipped", { mode: "json" }).$type<string[]>(),
   /** The checklist's Hide: it leaves the chat's empty state, never Settings › Assistant. */
   setupHidden: integer("setup_hidden", { mode: "boolean" }).notNull().default(false),
+  /**
+   * Settings › Computers (M4-10 AC1): the default computer provider, the persistence and size
+   * defaults, and the two required limits — the idle timeout (default 5 min) and the max
+   * lifetime (default 1 h). Null default provider or size means none chosen yet. Internet
+   * stays off by default: `computerInternetAllowed` only matters to on-off providers, and the
+   * allowlist below governs allowlist providers; an empty list means no egress.
+   */
+  computerDefaultProvider: text("computer_default_provider"),
+  computerPersistence: text("computer_persistence", { enum: ["ephemeral", "persistent"] })
+    .notNull()
+    .default("ephemeral"),
+  computerSize: text("computer_size"),
+  computerIdleTimeoutSeconds: integer("computer_idle_timeout_seconds").notNull().default(300),
+  computerMaxLifetimeSeconds: integer("computer_max_lifetime_seconds").notNull().default(3600),
+  computerInternetAllowed: integer("computer_internet_allowed", { mode: "boolean" })
+    .notNull()
+    .default(false),
   updatedAt: integer("updated_at").notNull().default(now),
 });
+
+/**
+ * Settings › Computers › the allowlist (M4-10 AC1): the websites the user's standard computers
+ * may reach, one row per host, empty by default (internet off). Edits are accepted only from an
+ * authenticated, untainted settings action — never from a model or tool call. The subscription
+ * computer keeps its own list elsewhere (M4-14), never this one.
+ */
+export const computerEgressHosts = sqliteTable(
+  "computer_egress_hosts",
+  {
+    userId: userId(),
+    /** Lowercase hostname or IP literal, validated before it is stored. */
+    host: text("host").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.host] })],
+);
 
 /**
  * The user's per-tool decision override (M3-02 AC2, EL fix 9). No row means the SEC-4 default for

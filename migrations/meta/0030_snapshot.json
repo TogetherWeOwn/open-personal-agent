@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9783c4c1-41d2-4f02-8ebc-5c437bef6ffd",
-  "prevId": "b0a1d687-88e3-4be6-ab3e-5379ffdd1819",
+  "id": "b0a1d687-88e3-4be6-ab3e-5379ffdd1819",
+  "prevId": "c27ae813-9134-4c52-8056-2f56917f10ef",
   "tables": {
     "approvals": {
       "name": "approvals",
@@ -576,6 +576,140 @@
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "browser_usage": {
+      "name": "browser_usage",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "seconds": {
+          "name": "seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {
+        "browser_usage_user_idx": {
+          "name": "browser_usage_user_idx",
+          "columns": ["user_id", "created_at"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "browser_usage_user_id_users_id_fk": {
+          "name": "browser_usage_user_id_users_id_fk",
+          "tableFrom": "browser_usage",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "browser_usage_conversation_id_conversations_id_fk": {
+          "name": "browser_usage_conversation_id_conversations_id_fk",
+          "tableFrom": "browser_usage",
+          "tableTo": "conversations",
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "browser_usage_task_id_tasks_id_fk": {
+          "name": "browser_usage_task_id_tasks_id_fk",
+          "tableFrom": "browser_usage",
+          "tableTo": "tasks",
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "computer_egress_hosts": {
+      "name": "computer_egress_hosts",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "host": {
+          "name": "host",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(unixepoch('subsec') * 1000)"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "computer_egress_hosts_user_id_users_id_fk": {
+          "name": "computer_egress_hosts_user_id_users_id_fk",
+          "tableFrom": "computer_egress_hosts",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "computer_egress_hosts_user_id_host_pk": {
+          "columns": ["user_id", "host"],
+          "name": "computer_egress_hosts_user_id_host_pk"
+        }
+      },
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
@@ -2343,6 +2477,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "computer_provider": {
+          "name": "computer_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "token_epoch": {
           "name": "token_epoch",
           "type": "integer",
@@ -2914,6 +3055,52 @@
           "autoincrement": false,
           "default": false
         },
+        "computer_default_provider": {
+          "name": "computer_default_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "computer_persistence": {
+          "name": "computer_persistence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'ephemeral'"
+        },
+        "computer_size": {
+          "name": "computer_size",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "computer_idle_timeout_seconds": {
+          "name": "computer_idle_timeout_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 300
+        },
+        "computer_max_lifetime_seconds": {
+          "name": "computer_max_lifetime_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 3600
+        },
+        "computer_internet_allowed": {
+          "name": "computer_internet_allowed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
         "updated_at": {
           "name": "updated_at",
           "type": "integer",
@@ -3066,93 +3253,6 @@
         }
       },
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "browser_usage": {
-      "name": "browser_usage",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "conversation_id": {
-          "name": "conversation_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "seconds": {
-          "name": "seconds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(unixepoch('subsec') * 1000)"
-        }
-      },
-      "indexes": {
-        "browser_usage_user_idx": {
-          "name": "browser_usage_user_idx",
-          "columns": ["user_id", "created_at"],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "browser_usage_user_id_users_id_fk": {
-          "name": "browser_usage_user_id_users_id_fk",
-          "tableFrom": "browser_usage",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "browser_usage_conversation_id_conversations_id_fk": {
-          "name": "browser_usage_conversation_id_conversations_id_fk",
-          "tableFrom": "browser_usage",
-          "tableTo": "conversations",
-          "columnsFrom": ["conversation_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "browser_usage_task_id_tasks_id_fk": {
-          "name": "browser_usage_task_id_tasks_id_fk",
-          "tableFrom": "browser_usage",
-          "tableTo": "tasks",
-          "columnsFrom": ["task_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}

@@ -36,6 +36,7 @@ import {
   attachments,
   auditLog,
   browserUsage,
+  computerEgressHosts,
   computers,
   conversations,
   dataExports,
@@ -196,6 +197,30 @@ const auditValues = (userId: string, row: AuditRow) => ({
   result: row.result ?? "ok",
   detail: row.detail ? JSON.stringify(row.detail) : null,
 });
+
+/**
+ * Settings › Computers (M4-10 AC1): the default provider, the persistence and size defaults,
+ * the two required limits in seconds, the on-off internet switch, and the allowlist hosts.
+ */
+export interface ComputerSettings {
+  defaultProvider: string | null;
+  persistence: "ephemeral" | "persistent";
+  sizeId: string | null;
+  idleTimeoutSeconds: number;
+  maxLifetimeSeconds: number;
+  internetAllowed: boolean;
+  egressHosts: string[];
+}
+
+/** The computer scalars a settings write may change; every field is optional. */
+export interface ComputerSettingsUpdate {
+  defaultProvider?: string | null;
+  persistence?: "ephemeral" | "persistent";
+  sizeId?: string | null;
+  idleTimeoutSeconds?: number;
+  maxLifetimeSeconds?: number;
+  internetAllowed?: boolean;
+}
 
 /** An override change as the audit log records it (M3-02 AC7): the tool, both values, its risk. */
 export interface OverrideChange {
@@ -386,6 +411,8 @@ export interface TaskListItem {
   /** Calls with no price on file; their cost is missing from `costMicroUsd` (as Usage does). */
   unpricedCalls: number;
   calls: number;
+  /** The task's computer provider override (M4-10 AC1); null means the Settings default. */
+  computerProvider: string | null;
   createdAt: number;
   /** A paused task's last write is its pause, so the view can freeze its elapsed clock there. */
   updatedAt: number;
@@ -2230,6 +2257,90 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               ? db.batch([...save, memory.redate()])
               : db.batch(save));
           },
+          /**
+           * Settings › Computers (M4-10 AC1): the default provider, the persistence and size
+           * defaults, the two required limits and the internet switch, with the allowlist. A
+           * missing row reads as the defaults, so a fresh account's page renders before
+           * anything is saved.
+           */
+          computer: async (): Promise<ComputerSettings> => {
+            const [row, hosts] = await Promise.all([
+              db
+                .select({
+                  defaultProvider: userSettings.computerDefaultProvider,
+                  persistence: userSettings.computerPersistence,
+                  sizeId: userSettings.computerSize,
+                  idleTimeoutSeconds: userSettings.computerIdleTimeoutSeconds,
+                  maxLifetimeSeconds: userSettings.computerMaxLifetimeSeconds,
+                  internetAllowed: userSettings.computerInternetAllowed,
+                })
+                .from(userSettings)
+                .where(eq(userSettings.userId, userId))
+                .limit(1),
+              db
+                .select({ host: computerEgressHosts.host })
+                .from(computerEgressHosts)
+                .where(eq(computerEgressHosts.userId, userId))
+                .orderBy(computerEgressHosts.host),
+            ]);
+            const settings = row[0];
+            return {
+              defaultProvider: settings?.defaultProvider ?? null,
+              persistence: settings?.persistence ?? "ephemeral",
+              sizeId: settings?.sizeId ?? null,
+              idleTimeoutSeconds: settings?.idleTimeoutSeconds ?? 300,
+              maxLifetimeSeconds: settings?.maxLifetimeSeconds ?? 3600,
+              internetAllowed: settings?.internetAllowed ?? false,
+              egressHosts: hosts.map((h) => h.host),
+            };
+          },
+          /**
+           * Saves the computer scalars with the change's audit row in the same batch — a
+           * change the log can't record isn't made, as with the other settings saves. Only
+           * the given fields are written.
+           */
+          saveComputer: async (values: ComputerSettingsUpdate, audit?: AuditRow) => {
+            // The update speaks the short settings names; the table owns the `computer_*`
+            // columns. Map explicitly: an unmapped key would slip past the insert silently
+            // (drizzle builds the column list from the table, never the values object).
+            const set: Partial<typeof userSettings.$inferInsert> = { updatedAt: Date.now() };
+            if (values.defaultProvider !== undefined) {
+              set.computerDefaultProvider = values.defaultProvider;
+            }
+            if (values.persistence !== undefined) set.computerPersistence = values.persistence;
+            if (values.sizeId !== undefined) set.computerSize = values.sizeId;
+            if (values.idleTimeoutSeconds !== undefined) {
+              set.computerIdleTimeoutSeconds = values.idleTimeoutSeconds;
+            }
+            if (values.maxLifetimeSeconds !== undefined) {
+              set.computerMaxLifetimeSeconds = values.maxLifetimeSeconds;
+            }
+            if (values.internetAllowed !== undefined) {
+              set.computerInternetAllowed = values.internetAllowed;
+            }
+            await db.batch([
+              db
+                .insert(userSettings)
+                .values({ ...set, userId })
+                .onConflictDoUpdate({ target: userSettings.userId, set }),
+              ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
+            ]);
+          },
+          /**
+           * Replaces the egress allowlist with the change's audit row in the same batch: the
+           * editor saves the whole list, so one write is the whole change. Hosts arrive
+           * normalized and validated; an empty list means no egress (internet off).
+           */
+          saveEgressHosts: async (hosts: string[], audit?: AuditRow) => {
+            const now = Date.now();
+            await db.batch([
+              db.delete(computerEgressHosts).where(eq(computerEgressHosts.userId, userId)),
+              ...hosts.map((host) =>
+                db.insert(computerEgressHosts).values({ userId, host, createdAt: now }),
+              ),
+              ...(audit ? [db.insert(auditLog).values(auditValues(userId, audit))] : []),
+            ]);
+          },
         },
         /** The per-tool overrides and standing grants the policy engine reads (M3-02). */
         policy: {
@@ -2702,6 +2813,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 costMicroUsd: cost.costMicroUsd,
                 unpriced: cost.unpriced,
                 calls: cost.calls,
+                computerProvider: tasks.computerProvider,
                 createdAt: tasks.createdAt,
                 updatedAt: tasks.updatedAt,
                 startedAt: tasks.startedAt,
@@ -2754,6 +2866,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   "unpriced",
                 ),
                 calls: count(usage.id).as("calls"),
+                computerProvider: tasks.computerProvider,
                 createdAt: tasks.createdAt,
                 updatedAt: tasks.updatedAt,
                 startedAt: tasks.startedAt,
@@ -2927,6 +3040,19 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             if (cancelled) await revokeTaskTokens(rawDb, id, userId, "task_cancelled", now);
             return cancelled;
           },
+          /**
+           * Sets the task's computer provider override (M4-10 AC1): `null` clears it back to
+           * the Settings default. `false` when the task is missing or someone else's; the
+           * provider id itself is validated by the caller against the live registry.
+           */
+          setComputerProvider: async (id: string, provider: string | null) =>
+            (
+              await db
+                .update(tasks)
+                .set({ computerProvider: provider, updatedAt: Date.now() })
+                .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+                .returning({ id: tasks.id })
+            ).length > 0,
         },
         /**
          * Data exports (M3-20 AC1). The R2 keys are derived, never stored: the final ZIP at
