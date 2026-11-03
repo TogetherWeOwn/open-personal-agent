@@ -114,6 +114,21 @@ describe("boundaries", () => {
     expect(
       axis("packages/core/src/model-provider.ts", 'import "./computer-provider";'),
     ).toHaveLength(1);
+    // Via the barrel through relative paths: every spelling resolving to index.ts flags.
+    for (const spec of [
+      "./index",
+      "./index.ts",
+      "./index.js",
+      ".",
+      "./",
+      "../src",
+      "../src/index.ts",
+    ]) {
+      expect(
+        axis("packages/core/src/computer-provider.ts", `import { x } from "${spec}";`),
+        spec,
+      ).toHaveLength(1);
+    }
     // Via the barrel: the index re-exports the other axes.
     expect(
       axis("packages/core/src/computer-provider.ts", 'import { x } from "@opa/core";'),

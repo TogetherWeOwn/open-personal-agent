@@ -107,6 +107,12 @@ export function createFakeComputerProvider(
     async create(spec): Promise<ComputerHandle> {
       // Re-checks the raw object first: a hand-rolled spec without the timeouts fails (AC2).
       assertComputerSpec(spec);
+      if (!capabilities.profiles.includes(spec.profile)) {
+        throw new ComputerProviderError(
+          `provider "${id}" does not offer the "${spec.profile}" profile`,
+          "unsupported",
+        );
+      }
       counter += 1;
       const createdAt = new Date();
       const handle: ComputerHandle = {
@@ -177,6 +183,12 @@ export function createFakeComputerProvider(
     async getFile(handle: ComputerHandle, path: string): Promise<Uint8Array> {
       if (!capabilities.surfaces.files) throw unsupported(id, "files");
       const computer = live(handle);
+      if (computer.handle.state !== "running") {
+        throw new ComputerProviderError(
+          `computer "${handle.providerComputerId}" is ${computer.handle.state}`,
+          "gone",
+        );
+      }
       const data = computer.files.get(path);
       if (!data) {
         throw new ComputerProviderError(`file "${path}" not found`, "not_found");
@@ -189,9 +201,20 @@ export function createFakeComputerProvider(
     ): Promise<{ name: string; data: Uint8Array }> {
       if (!capabilities.surfaces.files) throw unsupported(id, "files");
       // Artifact export is the pull-into-Outputs path: same bytes as the file, display name only.
-      const data = await this.getFile(handle, path);
+      // Mirrors getFile's lifecycle checks (stopped reads as `gone`) without relying on `this`.
+      const computer = live(handle);
+      if (computer.handle.state !== "running") {
+        throw new ComputerProviderError(
+          `computer "${handle.providerComputerId}" is ${computer.handle.state}`,
+          "gone",
+        );
+      }
+      const stored = computer.files.get(path);
+      if (!stored) {
+        throw new ComputerProviderError(`file "${path}" not found`, "not_found");
+      }
       const name = path.split("/").pop() ?? path;
-      return { name, data };
+      return { name, data: new Uint8Array(stored) };
     },
     async stop(handle: ComputerHandle): Promise<void> {
       const computer = live(handle);

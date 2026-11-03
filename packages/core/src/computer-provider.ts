@@ -15,11 +15,15 @@ export type ComputerProviderErrorCode =
   | "aborted";
 
 /**
- * Every computer failure rejects (or terminates the exec stream) with this. `not_found` names a
+ * Every computer failure reports with this. Pre-stream validation and lifecycle failures
+ * (unknown or stopped/destroyed computer, undeclared surface, malformed spec/argv) throw
+ * synchronously before `exec` returns its iterable; failures after the stream starts terminate
+ * it with an `{type: "error"}` event instead. `not_found` names a
  * computer id the provider has never seen; `gone` names one it destroyed or stopped out from
  * under the caller. `unsupported` names a surface the provider's capabilities declare absent.
  * `invalid_spec` names a malformed `ComputerSpec`. `provider` names an adapter-side failure.
- * `aborted` names a caller-cancelled exec (`ExecRequest.signal`).
+ * `aborted` names a caller-cancelled exec (`ExecRequest.signal`), delivered as a terminal
+ * stream event.
  */
 export class ComputerProviderError extends Error {
   readonly code: ComputerProviderErrorCode;
@@ -63,6 +67,13 @@ const DEFAULT_IDLE_TIMEOUT_SECONDS = 300;
 
 /** Max-lifetime default (M4-01 AC2): a computer lives at most one hour. */
 const DEFAULT_MAX_LIFETIME_SECONDS = 3600;
+
+/**
+ * Timeout ceiling (M4-01): one year in seconds. `assertComputerSpec` rejects larger values so
+ * deadline arithmetic (`createdAt + timeout * 1000`) stays inside the `Date` range and every
+ * failure reports as `invalid_spec` instead of escaping as a `RangeError`.
+ */
+const MAX_TIMEOUT_SECONDS = 365 * 24 * 3600;
 
 function isComputerProfile(value: unknown): value is ComputerProfile {
   return typeof value === "string" && (COMPUTER_PROFILES as readonly string[]).includes(value);
@@ -123,11 +134,11 @@ export function assertComputerSpec(spec: unknown): asserts spec is ComputerSpec 
   }
   for (const field of ["idleTimeoutSeconds", "maxLifetimeSeconds"] as const) {
     const value = candidate[field];
-    if (typeof value !== "number" || !Number.isInteger(value) || !Number.isFinite(value)) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
       throw invalidSpec(`${field} must be a finite integer`);
     }
-    if (value <= 0) {
-      throw invalidSpec(`${field} must be > 0`);
+    if (value <= 0 || value > MAX_TIMEOUT_SECONDS) {
+      throw invalidSpec(`${field} must be > 0 and ≤ ${MAX_TIMEOUT_SECONDS}`);
     }
   }
   const idle = candidate.idleTimeoutSeconds as number;
@@ -286,6 +297,11 @@ export interface ComputerProvider {
   /** Stable provider id, mirroring `ModelProvider.id`. */
   readonly id: string;
   create(spec: ComputerSpec): Promise<ComputerHandle>;
+  /**
+   * May throw synchronously for validation, lifecycle, or unsupported-surface failures
+   * (before the iterable is returned). Failures after iteration starts are terminal
+   * `{type: "error"}` events, never a second throw.
+   */
   exec(handle: ComputerHandle, request: ExecRequest): AsyncIterable<ExecEvent>;
   putFile(handle: ComputerHandle, path: string, data: Uint8Array): Promise<void>;
   getFile(handle: ComputerHandle, path: string): Promise<Uint8Array>;

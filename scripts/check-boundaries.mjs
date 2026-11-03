@@ -114,8 +114,11 @@ export function findAxisCrossImports(files) {
         target = specifier; // the barrel re-exports the other axes
       } else if (specifier.startsWith(".")) {
         const resolved = normalize(join(dirname(path), specifier)).replace(/\.js$/, ".ts");
-        const candidate = resolved.endsWith(".ts") ? resolved : `${resolved}.ts`;
-        if (AXIS_PORTS.has(candidate) && candidate !== path) target = candidate;
+        const cleaned = resolved.replace(/\/$/, "");
+        const candidate = cleaned.endsWith(".ts") ? cleaned : `${cleaned}.ts`;
+        const barrel = "packages/core/src/index.ts";
+        if (candidate === barrel || `${cleaned}/index.ts` === barrel) target = specifier;
+        else if (AXIS_PORTS.has(candidate) && candidate !== path) target = candidate;
       }
       if (target) {
         const line = text.slice(0, index).split("\n").length;

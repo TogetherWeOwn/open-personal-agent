@@ -76,6 +76,19 @@ describe("createComputerSpec", () => {
       { profile: "standard", sizeId: "" },
       { profile: "standard", egressHosts: [""] },
       { profile: "standard", egressHosts: "example.com" },
+      // Deadline arithmetic must stay inside the Date range: no unsafe integers, no huge values.
+      { profile: "standard", idleTimeoutSeconds: 1e300, maxLifetimeSeconds: 1e300 },
+      { profile: "standard", idleTimeoutSeconds: 300, maxLifetimeSeconds: 1e300 },
+      {
+        profile: "standard",
+        idleTimeoutSeconds: 300,
+        maxLifetimeSeconds: 365 * 24 * 3600 + 1,
+      },
+      {
+        profile: "standard",
+        idleTimeoutSeconds: Number.MAX_SAFE_INTEGER + 1,
+        maxLifetimeSeconds: Number.MAX_SAFE_INTEGER + 1,
+      },
     ];
     for (const input of bad) {
       expect(
@@ -199,6 +212,27 @@ describe("fake computer lifecycle", () => {
     await rejectsWithCode(fake.getFile(handle, "/tmp/x.txt"), "gone");
   });
 
+  it("rejects profiles outside its declared capabilities with unsupported", async () => {
+    const fake = createFakeComputerProvider({ profiles: ["standard"] });
+    await rejectsWithCode(
+      fake.create(createComputerSpec({ profile: "persistent" })),
+      "unsupported",
+    );
+    // A declared profile still creates.
+    const handle = await fake.create(createComputerSpec({ profile: "standard" }));
+    expect(handle.profile).toBe("standard");
+  });
+
+  it("rejects file reads on stopped computers as gone", async () => {
+    const fake = createFakeComputerProvider();
+    const handle = await fake.create(createComputerSpec({ profile: "standard" }));
+    await fake.putFile(handle, "/tmp/stopped.txt", new TextEncoder().encode("bytes"));
+    await fake.stop(handle);
+    await rejectsWithCode(fake.getFile(handle, "/tmp/stopped.txt"), "gone");
+    await rejectsWithCode(fake.exportArtifact(handle, "/tmp/stopped.txt"), "gone");
+    await rejectsWithCode(fake.putFile(handle, "/tmp/stopped.txt", new Uint8Array([1])), "gone");
+  });
+
   it("reports not_found for computers it never saw", async () => {
     const fake = createFakeComputerProvider();
     const ghost = {
@@ -283,5 +317,46 @@ describe("checkComputerProvider", () => {
     await expect(checkComputerProvider(broken)).rejects.toThrowError(
       /computer conformance \(broken\): step "create" failed: boom/,
     );
+  });
+
+  it("destroys the computer when a post-create step fails", async () => {
+    const inner = createFakeComputerProvider({ id: "leaky" });
+    let destroyed = 0;
+    const failing: ComputerProvider = {
+      ...inner,
+      exec: (_handle, _request) => {
+        throw new ComputerProviderError("exec boom", "provider");
+      },
+      destroy: async (handle) => {
+        destroyed += 1;
+        await inner.destroy(handle);
+      },
+    };
+    await expect(checkComputerProvider(failing)).rejects.toThrowError(
+      /computer conformance \(leaky\): step "exec stream" failed/,
+    );
+    expect(destroyed).toBeGreaterThanOrEqual(1);
+    expect(await inner.list()).toEqual([]);
+  });
+
+  it("destroys the computer when a create-step assertion fails after create", async () => {
+    const inner = createFakeComputerProvider({ id: "half-created" });
+    let destroyed = 0;
+    const badHandle: ComputerProvider = {
+      ...inner,
+      create: async (spec) => {
+        const handle = await inner.create(spec);
+        return { ...handle, state: "stopped" as const };
+      },
+      destroy: async (handle) => {
+        destroyed += 1;
+        await inner.destroy(handle);
+      },
+    };
+    await expect(checkComputerProvider(badHandle)).rejects.toThrowError(
+      /computer conformance \(half-created\): step "create" failed/,
+    );
+    expect(destroyed).toBeGreaterThanOrEqual(1);
+    expect(await inner.list()).toEqual([]);
   });
 });
