@@ -195,7 +195,9 @@ describe("the production tool wiring (M3-08)", () => {
     expect(types.indexOf("tool.called")).toBeLessThan(types.indexOf("turn.completed"));
     const [first, second] = frames.filter((f) => f.type === "tool.called");
     expect(first).toMatchObject({ payload: { tool: "web_fetch", risk: "read" } });
-    expect(second).toMatchObject({ payload: { tool: "create_artifact", risk: "write_reversible" } });
+    expect(second).toMatchObject({
+      payload: { tool: "create_artifact", risk: "write_reversible" },
+    });
     const [firstResult, secondResult] = frames.filter((f) => f.type === "tool.result");
     expect(firstResult).toMatchObject({ payload: { ok: false } });
     expect(JSON.stringify(firstResult)).toContain("own address");
@@ -217,8 +219,9 @@ describe("the production tool wiring (M3-08)", () => {
 
   it("denies a call Settings forbids without running it", async () => {
     // Tightening needs no passkey step-up; the listing shows the stored override back.
-    expect(await (await req("/api/settings/tools/web_fetch", { override: "never" })).json())
-      .toMatchObject({ name: "web_fetch", override: "never" });
+    expect(
+      await (await req("/api/settings/tools/web_fetch", { override: "never" })).json(),
+    ).toMatchObject({ name: "web_fetch", override: "never" });
     // The loop still offers the registry, but decides the call from the stored override: the
     // denial names the user's choice, not the guard's refusal, so the tool never ran.
     const frames = await send("conv-tools-forbidden", "fetch the notes again");

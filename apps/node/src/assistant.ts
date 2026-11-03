@@ -26,7 +26,7 @@ import {
   runTurn,
   type TurnState,
 } from "@opa/harness-builtin";
-import { ToolRegistry } from "@opa/policy";
+import type { ToolRegistry } from "@opa/policy";
 import { resolveChatModel } from "@opa/server/chat-model";
 import {
   base64,

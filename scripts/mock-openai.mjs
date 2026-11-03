@@ -48,7 +48,9 @@ export function startMockOpenAI({ port = 8788, host = "127.0.0.1", script = null
     }
     const last = body.messages.findLast((m) => m?.role === "user")?.content ?? "";
     const tools = Array.isArray(body.tools) ? body.tools : [];
-    requests.push({ tools: tools.map((t) => t?.function?.name).filter((n) => typeof n === "string") });
+    requests.push({
+      tools: tools.map((t) => t?.function?.name).filter((n) => typeof n === "string"),
+    });
     // Only a tool result after the latest user message means the current turn already
     // called a tool: an earlier turn's result stays in the history, and must not block
     // a later user message from calling a tool again.

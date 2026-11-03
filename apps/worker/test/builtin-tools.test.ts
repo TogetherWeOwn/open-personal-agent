@@ -11,7 +11,7 @@ import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { workerApp } from "../src/worker-app";
-import { Browser, claim, count, env, freshDatabase, ORIGIN, SOCKET_WAIT } from "./helpers/app";
+import { type Browser, claim, count, env, freshDatabase, ORIGIN, SOCKET_WAIT } from "./helpers/app";
 
 freshDatabase();
 afterEach(() => vi.restoreAllMocks());
@@ -35,10 +35,7 @@ type Reply = { text?: string; calls?: [name: string, args: unknown][] };
  * A model that answers each call with the next reply (the last one repeats), recording the
  * tools each call offered. Deliberately no `useTools`: the turn offers the production registry.
  */
-function replyingWithOffered(
-  replies: Reply[],
-  offered: string[][],
-): ModelProvider {
+function replyingWithOffered(replies: Reply[], offered: string[][]): ModelProvider {
   let ids = 0;
   let at = 0;
   return {
@@ -102,9 +99,7 @@ describe("the production tool wiring (M3-08)", () => {
         [
           { calls: [["web_fetch", { url: "http://127.0.0.1/notes" }]] },
           {
-            calls: [
-              ["create_artifact", { name: "fetch-notes.md", content: "# notes\n\nsaved\n" }],
-            ],
+            calls: [["create_artifact", { name: "fetch-notes.md", content: "# notes\n\nsaved\n" }]],
           },
           { text: "Saved the notes." },
         ],
@@ -129,7 +124,9 @@ describe("the production tool wiring (M3-08)", () => {
     expect(types.filter((t) => t === "tool.result")).toHaveLength(2);
     const [first, second] = events.filter((e) => e.type === "tool.called");
     expect(first).toMatchObject({ payload: { tool: "web_fetch", risk: "read" } });
-    expect(second).toMatchObject({ payload: { tool: "create_artifact", risk: "write_reversible" } });
+    expect(second).toMatchObject({
+      payload: { tool: "create_artifact", risk: "write_reversible" },
+    });
     const [firstResult, secondResult] = events.filter((e) => e.type === "tool.result");
     expect(firstResult).toMatchObject({ payload: { ok: false } });
     expect(JSON.stringify(firstResult)).toContain("private, loopback or link-local");

@@ -37,10 +37,9 @@ import {
   TURN_LIMITS,
   type TurnState,
 } from "@opa/harness-builtin";
-import { ToolRegistry } from "@opa/policy";
+import type { ToolRegistry } from "@opa/policy";
 import type { AllowanceWarnings } from "@opa/server/allowances";
 import { resolveChatModel } from "@opa/server/chat-model";
-import { composeTurnTools, parseOwnHosts, type TurnContext } from "@opa/server/turn-tools";
 import {
   base64,
   type CallUsage,
@@ -75,6 +74,7 @@ import {
   SPENDING_DEFAULTS,
   type SpendingSettings,
 } from "@opa/server/limits";
+import { composeTurnTools, parseOwnHosts, type TurnContext } from "@opa/server/turn-tools";
 import {
   Agent,
   type Connection,

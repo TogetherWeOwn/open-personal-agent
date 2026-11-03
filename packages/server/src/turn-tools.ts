@@ -4,14 +4,14 @@
 // overrides and grants — so Settings › Apps & tools governs what a turn offers. Both chat
 // assistants (Node, Worker) and the task Workflow compose through here, so the offered set
 // can't drift between runtimes; only the runtime's fetch and own-host list differ per caller.
-import { registerMemoryTools, type MemoryToolUser } from "@opa/db/memory-tools";
+
 import type { MemorySource } from "@opa/db/memory";
-import { createRepository } from "@opa/db/repository";
+import { type MemoryToolUser, registerMemoryTools } from "@opa/db/memory-tools";
+import type { ArtifactSource, createRepository } from "@opa/db/repository";
 import { registerTaskTools } from "@opa/db/task-tools";
 import type { LoopHost, LoopTool } from "@opa/harness-builtin";
+import type { ToolRegistry } from "@opa/policy";
 import { builtinToolRegistry } from "@opa/tools-builtin";
-import { ToolRegistry } from "@opa/policy";
-import type { ArtifactSource } from "@opa/db/repository";
 
 /** The calling user's scoped repository slice, as `createRepository(env).forUser(scope)`. */
 export type TurnUser = ReturnType<ReturnType<typeof createRepository>["forUser"]>;
@@ -96,14 +96,10 @@ export async function composeTurnTools(input: TurnToolsInput): Promise<{
   // the user's own message, so it saves (A-Me1); tainted, outside content may have induced it,
   // so the trust gate only ever proposes (A-Me2) — read live, since a fetch mid-turn taints it.
   const memorySource: MemorySource = { source: "chat", conversationId };
-  await registerMemoryTools(
-    registry,
-    user as MemoryToolUser,
-    () => {
-      const tainted = input.taint();
-      return { tainted, userAsserted: !tainted, source: memorySource };
-    },
-  );
+  await registerMemoryTools(registry, user as MemoryToolUser, () => {
+    const tainted = input.taint();
+    return { tainted, userAsserted: !tainted, source: memorySource };
+  });
   await registerTaskTools(registry, user.tasks, () => ({ conversationId }));
   const [overrides, grants] = await Promise.all([
     user.policy.overrides(),
