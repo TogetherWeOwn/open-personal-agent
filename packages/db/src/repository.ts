@@ -1382,6 +1382,25 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                 .limit(1)
             )[0],
           /**
+           * Every stopped turn waiting to resume, oldest first. The table holds only these,
+           * so this stays small; a restart sweep uses it to spare their replies and re-queue
+           * decided approval batches the in-memory queue lost.
+           */
+          list: async (): Promise<SavedTurn[]> =>
+            db
+              .select({
+                turnId: turnStates.turnId,
+                conversationId: turnStates.conversationId,
+                replyId: turnStates.replyId,
+                providerId: turnStates.providerId,
+                model: turnStates.model,
+                status: turnStates.status,
+                state: turnStates.state,
+              })
+              .from(turnStates)
+              .where(eq(turnStates.userId, userId))
+              .orderBy(turnStates.updatedAt),
+          /**
            * Settles a stopped turn where it is and opens a new reply at the end of the chat, for
            * a late approval (M3-07 AC14): the old reply keeps its text, its saved state goes,
            * and a thread line names the original request before the new, streaming reply.

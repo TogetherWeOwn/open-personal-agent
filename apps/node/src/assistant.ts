@@ -11,12 +11,14 @@ import {
   type AttachmentRow,
   createRepository,
   isId,
+  type SavedTurn,
   scopeForAssistant,
   type TurnStatus,
   type UserScope,
 } from "@opa/db/repository";
 import { systemStore } from "@opa/db/system";
 import {
+  applyStoredDecisions,
   type Budget,
   bindBatch,
   type LoopEvent,
@@ -27,6 +29,7 @@ import {
   type TurnState,
 } from "@opa/harness-builtin";
 import type { ToolRegistry } from "@opa/policy";
+import { type ApprovalForward, approvalRoutes } from "@opa/server/approvals";
 import { resolveChatModel } from "@opa/server/chat-model";
 import {
   base64,
@@ -34,6 +37,7 @@ import {
   type Emit,
   type FrameSender,
   fileTokenEstimate,
+  LABEL_CHARS,
   MAX_ATTACHMENT_TEXT,
   MAX_TEXT,
   MODEL_ERRORS,
@@ -41,7 +45,9 @@ import {
   messageFileTokens,
   modelBytes,
   parse,
+  parseTurnState,
   pickUsage,
+  type ResumeResult,
   readPrefix,
   reject,
   replySegments,
@@ -237,6 +243,21 @@ export interface NodeAssistantDeps {
   ownHosts: readonly string[];
 }
 
+/** A resumed batch, for the loop's approval hooks. */
+interface ApprovalRun {
+  batchId: string;
+  /** Approved calls the stored rows already refuse, by tool call ID, with why. */
+  refused: Map<string, string>;
+}
+
+/** What the model reads for an approved call that can't run as bound. */
+const REFUSED: Record<string, string> = {
+  binding_mismatch: "The approval doesn't match this call, so it didn't run.",
+  tool_changed: "The tool changed after it was approved, so the call didn't run.",
+  tool_missing: "The tool is no longer available, so the call didn't run.",
+  already_claimed: "This approval was already used, so the call didn't run again.",
+};
+
 /**
  * The user's in-process assistant (ADR 0002): one per user, named `u:<userId>` like the DO.
  * Tabs connect over the same `/api/chat` socket protocol (`chat.send`, `turn.cancel`,
@@ -288,6 +309,8 @@ export class NodeAssistant {
   /** Live frames each replaying tab hasn't been sent yet, by connection ID (see `#endReplay`). */
   readonly #held = new Map<number, HeldFrame[]>();
   #running: AbortController | null = null;
+  /** Decided batches that arrived while a turn runs: they resume when it settles, in order. */
+  readonly #resumeQueue: string[] = [];
   /** The turn slot's current run, so shutdown can wait for it to settle. */
   #turnPromise: Promise<void> | null = null;
   /** Set once the process starts shutting down: no new turn may start. */
@@ -439,12 +462,36 @@ export class NodeAssistant {
   }
 
   /**
-   * Releases the claim on the turn slot. (PR2 drains the resume queue here, once batches can
-   * queue behind a running turn.)
+   * Releases a claim on the turn slot, then resumes whatever queued behind it: a decided batch
+   * waits on that, since a send arriving mid-run is refused while one runs.
    */
   #release(running: AbortController): void {
     if (this.#running !== running) return;
     this.#running = null;
+    // While shutting down no new drive may start: the decided batches stay in D1, and the
+    // next start's recovery re-queues them. A drive started here would outlive `shutdown`'s
+    // wait and write to the database after it closes.
+    if (!this.#closing) void this.#drainResumes();
+  }
+
+  /**
+   * Resumes decided batches that arrived while a turn ran, in order. A resume that fails goes
+   * back to the front, and the next turn's end retries it, rather than spin on it here.
+   *
+   * No re-entrancy guard: `resumeBatch` claims `#running` synchronously before its first await,
+   * and this method's synchronous prefix (through that claim) runs atomically inside `#release`,
+   * so a second drain can never start while one runs.
+   */
+  async #drainResumes(): Promise<void> {
+    while (!this.#running) {
+      const next = this.#resumeQueue.shift();
+      if (next === undefined) return;
+      const result = await this.resumeBatch(next).catch(() => "failed" as const);
+      if (result === "failed") {
+        if (!this.#resumeQueue.includes(next)) this.#resumeQueue.unshift(next);
+        return;
+      }
+    }
   }
 
   /**
@@ -469,9 +516,11 @@ export class NodeAssistant {
    * `interrupted` (keeping their text, as `interrupt` does). Those holds settle at their full
    * reservation: with no checkpoint, the model may already have been called and billed, as the
    * worker's `onFiberRecovered` settles a written turn whose `callUsage` is null. Settling
-   * twice charges once, so this costs nothing more if the turn already settled. Stopped turns
-   * (approval, limit) keep both for their resume, as the worker's `onFiberRecovered` keeps
-   * them: their `turn_states` row names the reply to spare.
+   * twice charges once, so this costs nothing more if the turn already settled. A parked
+   * approval keeps its reply for its resume instead, as the worker's `onFiberRecovered` keeps
+   * a cleanly stopped turn: its `turn_states` row names the reply to spare. (`limit_reached`
+   * keeps today's behavior until Node grows a Continue path: its reply still settles
+   * interrupted for a Retry.)
    */
   async #recover(): Promise<void> {
     const repo = await this.#repo;
@@ -492,6 +541,25 @@ export class NodeAssistant {
       // reservation, and a hold that already settled charges nothing more.
       for (const hold of holds) this.limits.settle(hold, "", "", null);
     }
+    // A restart drops the in-memory resume queue, and a parked approval holds no budget (its
+    // stop settled the call's hold; `#drive` only releases an unspent first reservation), so
+    // neither the pass above nor the queue remembers it. Spare every parked approval's reply
+    // and re-queue its batch when nothing in it still waits on the user: it resumes when the
+    // next turn ends, as if the decision had landed mid-turn. An undecided batch stays parked
+    // for the Inbox to decide; a missing or foreign batch is for `resumeBatch` to call gone.
+    for (const saved of await repo.turns.list()) {
+      if (saved.status !== "awaiting_approval") continue;
+      stopped.add(saved.replyId);
+      if (this.#closing) continue;
+      const batchId = parseTurnState(saved.state)?.pending?.batchId;
+      if (!batchId || this.#resumeQueue.includes(batchId)) continue;
+      const rows = await repo.approvals.batch(batchId);
+      if (rows.length === 0 || rows[0]?.turnId !== saved.turnId) continue;
+      const now = Date.now();
+      if (rows.every((row) => row.status !== "pending" || row.expiresAt <= now)) {
+        this.#resumeQueue.push(batchId);
+      }
+    }
     for (const conv of await repo.listConversations()) {
       for (const m of (await repo.chat.listMessages(conv.id)) ?? []) {
         if (m.role === "assistant" && m.status === "streaming" && !stopped.has(m.id)) {
@@ -499,6 +567,269 @@ export class NodeAssistant {
         }
       }
     }
+  }
+
+  /**
+   * Resumes a turn stopped at an approval once its batch is decided. The decisions are read
+   * from the batch's rows in D1, never taken from the caller: the approvals route writes them
+   * there first, after its checks and any step-up. Server routes reach this through the scoped
+   * repository's `assistantFor`: the assistant is named from the caller's session and every
+   * read here is scope-filtered, so a batch ID can only ever address this user's turns.
+   *
+   * `waiting` while an item is still undecided; `queued` while another turn runs (the batch
+   * resumes when it ends); `gone` when no stopped turn waits on the batch (a task's batch, a
+   * turn already resumed, a missing batch) or no model is available.
+   */
+  async resumeBatch(batchId: string): Promise<ResumeResult> {
+    // While shutting down no new drive may start (see `#release`): the decisions are already
+    // in D1, so the next start's recovery resumes them.
+    if (this.#closing) return "queued";
+    // Claimed before the first await, so two calls for one batch (a double-clicked Approve,
+    // two tabs, a retried request) don't both load the same `awaiting_approval` row.
+    if (this.#running) {
+      if (!this.#resumeQueue.includes(batchId)) this.#resumeQueue.push(batchId);
+      return "queued";
+    }
+    const running = new AbortController();
+    this.#running = running;
+    let started = false;
+    try {
+      const repo = await this.#repo;
+      const rows = await repo.approvals.batch(batchId);
+      const turnId = rows[0]?.turnId;
+      if (!turnId) return "gone";
+      const saved = await repo.turns.load(turnId);
+      if (saved?.status !== "awaiting_approval") return "gone";
+      const state = parseTurnState(saved.state);
+      if (!state) {
+        await this.#dropCorrupt(saved);
+        return "gone";
+      }
+      if (state.pending?.batchId !== batchId) return "gone";
+      const { tools } = await this.resolveTools({
+        conversationId: saved.conversationId,
+        turnId: saved.turnId,
+        taint: () => state.taint.taint !== "trusted",
+      });
+      const applied = await applyStoredDecisions(
+        state,
+        rows,
+        {
+          userId: this.#scope.userId,
+          context: { kind: "turn", id: turnId, conversationId: saved.conversationId },
+          tools,
+        },
+        Date.now(),
+      );
+      if (applied.waiting) return "waiting";
+      started = await this.#resume(saved, state, running, {
+        batchId,
+        refused: applied.refused,
+      });
+      return started ? "resumed" : "gone";
+    } finally {
+      // The drive owns the claim once it starts; every other exit releases it here.
+      // (`#resume` releases the claim itself on its re-stop path, where it returns `true`
+      // without starting a drive.)
+      if (!started) this.#release(running);
+    }
+  }
+
+  /**
+   * Runs a saved turn again from its D1 state: a fresh model pick, history and first hold.
+   * `running` is the caller's claim, held since before the first await; the drive owns it once
+   * it starts, and every path that starts no drive releases it.
+   */
+  async #resume(
+    stopped: SavedTurn,
+    state: TurnState,
+    running: AbortController,
+    approvals: ApprovalRun,
+  ): Promise<boolean> {
+    // The conversation's own model, its pin if it has one, as the turn's start picked it.
+    const picked = await this.resolveModel(await this.#getEnv(), this.#scope, "chat", {
+      conversationId: stopped.conversationId,
+    });
+    if ("error" in picked) return false; // the saved turn stays for a retry once a model is set
+    const { provider, model } = picked;
+    const repo = await this.#repo;
+    const caps = provider.capabilities(model);
+    const readable = (row: AttachmentRow) =>
+      row.kind === "text" || (row.kind === "image" ? caps.imageInput : caps.pdfInput) === true;
+    // History is D1's, as at the turn's start, files included, minus the still-streaming reply
+    // (its text so far is inside `state`, where the loop left it).
+    const historyOf = async (replyId: string) =>
+      this.#modelHistory(
+        ((await repo.chat.listMessages(stopped.conversationId)) ?? []).filter(
+          (m) => m.id !== replyId,
+        ),
+        readable,
+        TURN_FILE_BYTES,
+      );
+    const first = await historyOf(stopped.replyId);
+    let history = first.messages;
+    const providerId = picked.billingId ?? provider.id;
+    const firstHold = `${stopped.turnId}:0`;
+    const chars = messageChars([...history, ...state.messages]);
+    const reservation = this.limits.reserve(firstHold, providerId, model, chars, first.fileTokens);
+    if (!reservation) {
+      // Stops again at today's limit. No drive starts, so the caller's claim is released here.
+      // A batch's decisions stay in its rows, so it stays waiting on them: resuming it again
+      // (the approvals route does on a retry) re-reads them.
+      const restopped = await repo.turns.save({
+        ...stopped,
+        providerId,
+        model,
+        status: "awaiting_approval",
+        state: JSON.stringify(state),
+      });
+      if (!restopped) throw new Error("the turn's conversation is gone");
+      this.#emitter(stopped.conversationId, stopped.turnId)("limit.reached", {
+        kind: "daily",
+        detail: "Today's spending limit",
+      });
+      this.#release(running);
+      return true;
+    }
+    // A late approval moves the turn to the end of the chat, once it is sure to run.
+    let saved = stopped;
+    try {
+      const late = await this.#late(stopped, state);
+      if (late) {
+        saved = late;
+        ({ messages: history } = await historyOf(late.replyId));
+      }
+    } catch (err) {
+      this.limits.release(firstHold); // no call was made
+      throw err;
+    }
+    const cp: TurnCheckpoint = {
+      conversationId: saved.conversationId,
+      turnId: saved.turnId,
+      replyId: saved.replyId,
+      providerId,
+      model,
+      // The text so far, as D1 holds it, so a recovery before the drive starts keeps it.
+      reply: replySegments(state).join("\n\n"),
+      wrote: true,
+      holds: [firstHold],
+      callStarted: false,
+      callRecorded: false,
+      callUsage: null,
+      resumed: true,
+    };
+    this.#checkpoints.set(saved.turnId, cp);
+    await this.#sweepTabs();
+    const done = this.#drive({
+      checkpoint: cp,
+      stash: (data) => {
+        this.#checkpoints.set(data.turnId, data);
+      },
+      provider,
+      model,
+      firstHold: { id: firstHold, maxOutputTokens: reservation.maxOutputTokens },
+      history,
+      state,
+      signal: running.signal,
+      approvals,
+    }).finally(() => this.#release(running));
+    this.#turnPromise = done;
+    done.catch(() => {});
+    return true;
+  }
+
+  /**
+   * A late approval appends; it never re-plans. If the conversation moved on since the turn
+   * stopped, the stopped turn is settled where it is and the approved calls run in a new turn
+   * at the end of the chat: a new reply after a thread line naming the original request, and
+   * a model context that ends with that request's label, the calls and their results — so the
+   * model continues from the end of the conversation. `null` when nothing newer exists: the
+   * turn resumes in place.
+   */
+  async #late(saved: SavedTurn, state: TurnState): Promise<SavedTurn | null> {
+    const repo = await this.#repo;
+    const thread = (await repo.chat.listMessages(saved.conversationId)) ?? [];
+    const at = thread.findIndex((m) => m.id === saved.replyId);
+    if (at < 0 || at === thread.length - 1) return null;
+    const asked = thread.slice(0, at).findLast((m) => m.role === "user")?.content ?? "";
+    const quote = asked.length > LABEL_CHARS ? `${asked.slice(0, LABEL_CHARS)}…` : asked;
+    const tools = [...new Set(state.pending?.items.map((i) => i.tool))].join(", ");
+    // The gated calls' assistant message and what follows it: the calls the user decided on,
+    // with any results already recorded beside them. Its text is in the old reply already.
+    const from = state.messages.findLastIndex((m) => m.role === "assistant");
+    const calls = state.messages
+      .slice(Math.max(from, 0))
+      .map((m) => (m.role === "assistant" ? { ...m, content: "" } : m));
+    state.messages = [
+      {
+        role: "user",
+        content:
+          `[Approved later] I approved ${tools} from my earlier request "${quote}". ` +
+          "Its result follows. Continue from here; don't redo that earlier request.",
+      },
+      ...calls,
+    ];
+    const next: SavedTurn = { ...saved, turnId: crypto.randomUUID(), replyId: crypto.randomUUID() };
+    const old = thread[at];
+    await repo.turns.supersede({
+      old: { turnId: saved.turnId, replyId: saved.replyId, reply: old?.content ?? "" },
+      conversationId: saved.conversationId,
+      replyId: next.replyId,
+      line: { id: crypto.randomUUID(), content: `Approved later: ${tools}, from "${quote}"` },
+    });
+    // The old turn is settled; tabs showing it learn so before the new one starts.
+    this.#emitter(saved.conversationId, saved.turnId)("turn.completed", {});
+    this.#events.trim(saved.conversationId, saved.turnId);
+    this.#emitter(saved.conversationId, next.turnId)("turn.started", { messageId: next.replyId });
+    return next;
+  }
+
+  /** A saved turn whose state no longer parses settles interrupted, so it can't resume again. */
+  async #dropCorrupt(saved: SavedTurn): Promise<void> {
+    const repo = await this.#repo;
+    const stored = (await repo.chat.listMessages(saved.conversationId).catch(() => null)) ?? [];
+    const reply = stored.find((m) => m.id === saved.replyId)?.content ?? "";
+    const settled = await repo.chat.settle({ replyId: saved.replyId, reply }, "interrupted").then(
+      () => true,
+      () => false,
+    );
+    await repo.turns.remove(saved.turnId).catch(() => {});
+    this.#emitter(saved.conversationId, saved.turnId)("turn.interrupted", { message: "Retry?" });
+    if (settled) this.#events.trim(saved.conversationId, saved.turnId);
+  }
+
+  /**
+   * The loop's view of a resumed batch's rows. `claim` refuses a call whose row didn't open as
+   * bound or whose tool changed since, then moves the row from `approved` to `executing` —
+   * only one run ever gets it, and only before it expires. `finish` records how the call ended.
+   */
+  #approvalHooks(run: ApprovalRun): NonNullable<LoopHost["approvals"]> {
+    const id = (toolCallId: string) => `appr_${toolCallId}`;
+    return {
+      claim: async (toolCallId) => {
+        const approvals = (await this.#repo).approvals;
+        const refused = run.refused.get(toolCallId);
+        if (refused) {
+          // A row an earlier run claimed (left `executing` by a restart) may have acted: it
+          // ends failed with an unknown outcome. Any other refusal ends an `approved` row
+          // denied.
+          const outcome =
+            refused === "already_claimed"
+              ? ({ status: "failed", reason: "outcome_unknown" } as const)
+              : ({ status: "denied", reason: refused } as const);
+          await approvals.finish(run.batchId, id(toolCallId), outcome);
+          return REFUSED[refused] ?? (REFUSED.binding_mismatch as string);
+        }
+        // The row's envelope was opened and checked when the batch was read; `canonical` is
+        // never rewritten, so the claim only has to win the row before its expiry.
+        const row = await approvals.claim(run.batchId, id(toolCallId), Date.now());
+        return row ? null : "The approval is no longer valid, so the call didn't run.";
+      },
+      finish: (toolCallId, outcome) =>
+        this.#repo
+          .then((repo) => repo.approvals.finish(run.batchId, id(toolCallId), outcome))
+          .then(() => {}),
+    };
   }
 
   /**
@@ -666,6 +997,8 @@ export class NodeAssistant {
     history: ModelMessage[];
     state: TurnState;
     signal: AbortSignal;
+    /** A resumed batch: its decided calls run through the rows' claims, not a new stop. */
+    approvals?: ApprovalRun;
   }): Promise<void> {
     const { checkpoint: cp, stash, state, signal } = run;
     const { conversationId, turnId, replyId } = cp;
@@ -791,6 +1124,8 @@ export class NodeAssistant {
         budget,
         now: Date.now,
         newId: () => crypto.randomUUID(),
+        // A resumed batch: its decided calls run through the rows' claims, not a new stop.
+        ...(run.approvals ? { approvals: this.#approvalHooks(run.approvals) } : {}),
       };
       const gen = runTurn(host, run.history, state, signal);
       for (;;) {
@@ -799,7 +1134,8 @@ export class NodeAssistant {
           if (!persisted && next.value === "limit_reached") {
             await persistStop(next.value).catch(failSave);
           } else if (!persisted && next.value === "awaiting_approval") {
-            // No approvals on Node yet (PR2 resumes them): the turn stops here, saved to D1.
+            // A resumed batch stopping again (or a fresh stop): saved to D1 under the new
+            // batch's rows, which the approvals route reads its decisions from.
             await persistStop(next.value).catch(failSave);
           }
           return;
@@ -1039,9 +1375,20 @@ export class NodeAssistant {
   }
 }
 
-/** The extra routes only Node serves: the chat socket to the user's assistant (ADR 0002). */
+/**
+ * The extra routes only Node serves: the chat socket to the user's assistant (ADR 0002), and the
+ * shared approval routes forwarding to it. The assistant is named from the session only. Node
+ * has no task workflow, so a task's batch (never created here) is gone.
+ */
 export function nodeRoutes(assistantFor: (userId: string) => NodeAssistant): Hono<AppEnv> {
   const routes = new Hono<AppEnv>();
+
+  const forward: ApprovalForward = async (c, rows) => {
+    const [first] = rows;
+    if (!first?.turnId) return "gone";
+    return assistantFor(c.var.session.scope.userId).resumeBatch(first.batchId);
+  };
+  routes.route("/approvals", approvalRoutes(forward));
 
   routes.get("/chat", async (c, next) => {
     // A WebSocket upgrade is a GET and skips CORS, so a cross-site page could open one with the
