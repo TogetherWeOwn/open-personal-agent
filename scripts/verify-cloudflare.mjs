@@ -343,7 +343,10 @@ function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnt
   );
   // A recorded error can carry model-generated text: keep every cell on one table
   // row by collapsing whitespace and escaping pipes, so it cannot reshape the report.
-  const oneLine = (value) => String(value).replace(/\s+/g, " ").replaceAll("|", "\\|");
+  // Backslashes go first: an input `\|` must render as literal backslash + literal
+  // pipe (`\\\|`), not as an escaped backslash ending the cell (`\\|`).
+  const oneLine = (value) =>
+    String(value).replace(/\s+/g, " ").replaceAll("\\", "\\\\").replaceAll("|", "\\|");
   const scrub = (value) => {
     if (value === null || value === undefined) return "—";
     return oneLine(secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value)));

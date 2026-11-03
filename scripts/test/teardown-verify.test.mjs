@@ -110,6 +110,7 @@ function verifySetup({
   fail = null,
   live = false,
   liveErrorKey = false,
+  liveErrorPipe = false,
   liveFailsAfterRows = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
@@ -155,7 +156,9 @@ function verifySetup({
         // redact both.
         const error = liveErrorKey
           ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY} at ${_deps.env.LIVE_MODEL_OPENAI_BASE_URL}`
-          : null;
+          : liveErrorPipe
+            ? "artifact timed out: log tail A \\| B"
+            : null;
         const rows = [
           {
             adapter: "openai-chat",
@@ -168,7 +171,7 @@ function verifySetup({
             cost: "match",
             artifactId: "a1",
             artifactName: "live-check-openai-chat.md",
-            ok: !liveErrorKey,
+            ok: !(liveErrorKey || liveErrorPipe),
             error,
           },
         ];
@@ -388,6 +391,21 @@ describe("verify:cloudflare", () => {
     expect(t.report()).toContain("[redacted]");
     expect(t.report()).not.toContain("sk-live-secret-abcdef123456");
     expect(t.report()).not.toContain("models.example.com");
+  });
+
+  it("keeps an escaped pipe in a recorded error inside its report cell", async () => {
+    const t = verifySetup({ live: true, liveErrorPipe: true });
+    await t.run();
+    const row = t
+      .report()
+      .split("\n")
+      .find((l) => l.includes("| openai-chat |"));
+    // The backslash itself is escaped before the pipe, so Markdown still sees
+    // an escaped pipe (odd backslashes) rather than a cell delimiter.
+    expect(row).toContain("A \\\\\\| B");
+    // Only the 8 table delimiters are unescaped pipes; the literal `\|` in
+    // the error text must not parse as a ninth delimiter.
+    expect(row.match(/(?<!\\)\|/g)).toHaveLength(8);
   });
 
   it("removes the browser storage state even when the report write fails", async () => {
