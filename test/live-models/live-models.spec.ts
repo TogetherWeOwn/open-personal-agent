@@ -24,13 +24,15 @@ const BANNED = new Set(["gpt-5.6-terra", "gpt-6-sol"]);
 const banned = (id: string) => BANNED.has(id) || /terra/i.test(id);
 
 // Cloudflare's `/ai/v1` base has no `GET /models` (405): when listing is unavailable the run
-// probes this small curated list instead — the priced starter first, then the spec's GPT-OSS
-// picks. Every entry is in the provider's tool-capable set; unpriced ones record `unpriced`
-// with token counts per the spec, never a silent pass.
+// probes this small curated list instead. Order is task-capable first: the priced starter probes
+// OK with tool calls but never completes the compare-and-save task (it fills example-domain text
+// until the artifact cap), while the path's Responses route only serves the GPT-OSS entries and
+// only without streaming. Every entry is in the provider's tool-capable set; unpriced ones record
+// `unpriced` with token counts per the spec, never a silent pass.
 const CURATED_MODELS = [
-  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "@cf/openai/gpt-oss-120b",
   "@cf/openai/gpt-oss-20b",
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 ];
 
 // Three small stable pages for the compare-and-save task.
@@ -115,8 +117,15 @@ async function api(page: Page, method: "GET" | "POST" | "PUT", path: string, bod
   return { status: res.status(), json };
 }
 
-/** The endpoint's model ids from its own list call, in its order, without the banned ones. */
-async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> {
+/**
+ * The endpoint's model ids from its own list call, in its order, without the banned ones —
+ * plus whether they came from the curated fallback (which is already task-capable-ordered,
+ * so the pick keeps that order instead of preferring a priced entry).
+ */
+async function listModels(
+  baseUrl: string,
+  adapter: Adapter,
+): Promise<{ ids: string[]; curated: boolean }> {
   // The base URL already holds the version path (for example `https://host/v1`), as the
   // provider adapters treat it: append `/models`, never another `/v1`.
   const root = baseUrl.replace(/\/+$/, "");
@@ -149,7 +158,7 @@ async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> 
     const picked = CURATED_MODELS.filter((id) => !banned(id));
     if (!picked.length) throw new Error("the curated list has no usable model");
     console.log(`live-models: ${adapter} GET /models HTTP ${res.status}, using curated list`);
-    return picked;
+    return { ids: picked, curated: true };
   }
   if (!res.ok) throw new Error(`GET /models: HTTP ${res.status}`);
   const body = (await res.json()) as { data?: { id?: unknown }[] } | { id?: unknown }[];
@@ -157,7 +166,7 @@ async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> 
   const ids = data.map((m) => m?.id).filter((id): id is string => typeof id === "string");
   const picked = ids.filter((id) => !banned(id));
   if (!picked.length) throw new Error("the endpoint listed no usable model");
-  return picked;
+  return { ids: picked, curated: false };
 }
 
 interface TestResponse {
@@ -328,22 +337,35 @@ test.describe("live models on a configured endpoint", () => {
   /**
    * Picks the adapter's model from the endpoint's own list (or the curated fallback when the
    * endpoint has no list call): the first one whose Test probe answers with tool calls,
-   * priced where the price table knows it. At most four probes, so the adapter stays inside
-   * its share of the live-step budget; the recorded error says how many models were tried.
+   * priced where the price table knows it. The curated fallback is already task-capable-ordered,
+   * so there the first pass wins outright — preferring its priced entry repeats the observed
+   * failure (probe OK, artifact task never completes). At most four probes, so the adapter stays
+   * inside its share of the live-step budget; the recorded error says how many models were tried
+   * and why each probe failed, so a missing wire path (for example no `/responses` route) is
+   * diagnosable from the report instead of reading as three model failures.
    */
   async function pickModel(page: Page, rowId: string, baseUrl: string, adapter: Adapter) {
-    const candidates = (await listModels(baseUrl, adapter)).slice(0, 8);
+    const { ids, curated } = await listModels(baseUrl, adapter);
+    const candidates = ids.slice(0, 8);
     const tried = Math.min(4, candidates.length);
+    const reasons: string[] = [];
     let fallback: { model: string; test: TestResponse } | null = null;
     for (const model of candidates.slice(0, 4)) {
       const probed = await probe(page, rowId, model);
-      if (!probed.ok || !probed.tools || probed.toolProbe !== "called") continue;
-      if (probed.price) return { model, test: probed };
+      if (!probed.ok || !probed.tools || probed.toolProbe !== "called") {
+        const why = !probed.ok
+          ? (probed.error?.message ?? probed.error?.code ?? "probe failed")
+          : `answered without tool calls (${probed.toolProbe})`;
+        if (!reasons.includes(why)) reasons.push(why);
+        continue;
+      }
+      if (curated || probed.price) return { model, test: probed };
       fallback ??= { model, test: probed };
     }
     if (!fallback) {
+      const detail = reasons.length ? `; probe failures: ${reasons.join(" | ").slice(0, 200)}` : "";
       throw new Error(
-        `no listed model passed the Test probe with tool calls (probed ${tried} of ${candidates.length} listed)`,
+        `no listed model passed the Test probe with tool calls (probed ${tried} of ${candidates.length} listed${detail})`,
       );
     }
     return fallback;
