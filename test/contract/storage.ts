@@ -577,6 +577,26 @@ export function memoryGateContract(name: string, migrated: () => Promise<D1Datab
       expect(JSON.stringify(all.results)).not.toContain(key);
     });
 
+    it("redacts embedded capability tokens before memory storage and recall", async () => {
+      const { memory, DB, userId } = await user();
+      const token = `ocap1_${"b".repeat(42)}g`;
+      const id = saved(
+        await memory.create(screen, `Credential token_${token}`, "fact", {
+          source: "chat",
+          ref: `ref_${token}`,
+          excerpt: `x${token}`,
+        }),
+      );
+      expect(await memory.get(id)).toMatchObject({
+        text: "Credential token_[redacted]",
+        sourceRef: "ref_[redacted]",
+        sourceExcerpt: "x[redacted]",
+      });
+      expect((await memory.search("Credential"))[0]?.text).toBe("Credential token_[redacted]");
+      const rows = await DB.prepare("SELECT * FROM memories WHERE user_id = ?").bind(userId).all();
+      expect(JSON.stringify(rows.results)).not.toContain(token);
+    });
+
     it("misses another user's memories and proposals by raw ID on every operation", async () => {
       const a = await user();
       const b = await user();

@@ -453,6 +453,30 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
     });
 
     it.each([false, true])(
+      "does not duplicate revocation audits on repeated or racing finishes (token exists: %s)",
+      async (hasToken) => {
+        const { DB, store, computer, mint } = await setup();
+        if (hasToken) await mint({ aud: "tool_gateway" });
+        await Promise.all([
+          store.finish(computer.id, "idle", Date.now()),
+          store.finish(computer.id, "idle", Date.now()),
+        ]);
+        expect(await store.finish(computer.id, "idle", Date.now())).toBeNull();
+        expect(await store.finish(computer.id, "idle", Date.now())).toBeNull();
+        const audits = await DB.prepare(
+          "SELECT result, detail FROM audit_log WHERE action = 'capability_token.revoke_computer' AND target_id = ?",
+        )
+          .bind(computer.id)
+          .all<{ result: string; detail: string }>();
+        expect(audits.results).toHaveLength(hasToken ? 1 : 0);
+        if (hasToken) {
+          expect(audits.results[0]?.result).toBe("ok");
+          expect(JSON.parse(audits.results[0]?.detail ?? "{}")).toMatchObject({ revoked: 1 });
+        }
+      },
+    );
+
+    it.each([false, true])(
       "cleans tokens on an already-destroyed computer (ledger exists: %s)",
       async (ledgerExists) => {
         const { DB, store, computer, mint } = await setup();
@@ -483,6 +507,16 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
               .all()
           ).results,
         ).toHaveLength(1);
+        expect(await store.finish(computer.id, "idle", Date.now())).toBeNull();
+        expect(
+          (
+            await DB.prepare(
+              "SELECT id FROM audit_log WHERE action = 'capability_token.revoke_computer' AND target_id = ?",
+            )
+              .bind(computer.id)
+              .all()
+          ).results,
+        ).toHaveLength(ledgerExists ? 2 : 1);
       },
     );
 

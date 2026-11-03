@@ -40,6 +40,11 @@ describe("redactSecrets", () => {
     expect(redactSecrets("API key: abc123")).toBe("API key: [redacted]");
   });
 
+  it.each(["token_", "x", "7", "_"])("redacts capability tokens after %s", (prefix) => {
+    const token = `ocap1_${"b".repeat(42)}g`;
+    expect(redactSecrets(`${prefix}${token} after`)).toBe(`${prefix}[redacted] after`);
+  });
+
   it("leaves ordinary text and numbers alone", () => {
     for (const text of [
       "I'm vegetarian",

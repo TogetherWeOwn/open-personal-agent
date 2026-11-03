@@ -127,6 +127,7 @@ export function computerStore(bindings: Pick<DataBindings<unknown, unknown>, "DB
         action: "capability_token.revoke_computer",
         reason: endReason,
         now,
+        onlyIfRevoked: true,
       }),
     ];
     if (row.state === "destroyed") {

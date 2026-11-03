@@ -451,6 +451,7 @@ export function revokeTokenStatements(
  * inside their own batch. It runs immediately after the token UPDATE, so `changes()` still
  * names that UPDATE (the mint-rotate precedent) and the row carries the revoked count
  * atomically — `json_object` keeps the detail shape identical to the standalone audit.
+ * `onlyIfRevoked` keeps idempotent lifecycle retries from recording no-op revocations.
  */
 export function revokeTokenAuditStatement(
   db: SqlDatabase,
@@ -460,14 +461,16 @@ export function revokeTokenAuditStatement(
     action: string;
     reason: string;
     now: number;
+    onlyIfRevoked?: boolean;
   },
 ): SqlStatement {
   return db
     .prepare(
       `INSERT INTO audit_log (user_id, action, module, result, target_id, detail)
-       VALUES (?, ?, 'capability-token',
-               CASE WHEN changes() > 0 THEN 'ok' ELSE 'skipped' END, ?,
-               json_object('reason', ?, 'revoked', changes(), 'at', ?))`,
+       SELECT ?, ?, 'capability-token',
+              CASE WHEN changes() > 0 THEN 'ok' ELSE 'skipped' END, ?,
+              json_object('reason', ?, 'revoked', changes(), 'at', ?)
+       ${options.onlyIfRevoked ? "WHERE changes() > 0" : ""}`,
     )
     .bind(options.userId, options.action, options.targetId, options.reason, options.now);
 }
