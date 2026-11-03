@@ -165,6 +165,7 @@ describe("executeExport", () => {
     }
     expect(names).toContain("messages/ca.json");
     expect(names).toContain("browser_usage.json");
+    expect(names).toContain("computer_settings.json");
     expect(names).toContain("artifacts.json");
     expect(names).toContain("artifacts/files/tool-output.txt");
     expect(names).toContain("artifacts/task-outputs/offloaded.json");

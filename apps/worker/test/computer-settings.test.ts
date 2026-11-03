@@ -10,6 +10,7 @@ import {
   createComputerSpec,
   createFakeComputerProvider,
 } from "@opa/core";
+import { stageExportItem } from "@opa/db/export";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { normalizeHost, runComputerTest } from "@opa/server/computer-settings";
 import { describe, expect, it } from "vitest";
@@ -167,6 +168,94 @@ describe("computer settings", () => {
     expect((await putAllowlist(browser, { hosts: "pypi.org" })).status).toBe(400);
   });
 
+  it("skips writes and audits for identical, reordered and normalized allowlists", async () => {
+    const { browser } = await claim();
+    expect((await putAllowlist(browser, { hosts: [] })).status).toBe(200);
+    expect(await auditRows("settings.computer_allowlist")).toHaveLength(0);
+    expect((await putAllowlist(browser, { hosts: ["example.com", "pypi.org"] })).status).toBe(200);
+    // A rewrite would replace this timestamp, even if the host contents stayed identical.
+    await db.prepare("UPDATE computer_egress_hosts SET created_at = 1").run();
+    for (const hosts of [
+      ["example.com", "pypi.org"],
+      ["pypi.org", "example.com"],
+      [" PyPI.ORG. ", "EXAMPLE.com", "example.com"],
+    ]) {
+      const response = await putAllowlist(browser, { hosts });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ hosts: ["example.com", "pypi.org"] });
+    }
+    expect(await auditRows("settings.computer_allowlist")).toHaveLength(1);
+    const rows = await db.prepare("SELECT created_at FROM computer_egress_hosts").all();
+    expect(rows.results).toEqual([{ created_at: 1 }, { created_at: 1 }]);
+    expect((await putAllowlist(browser, { hosts: ["example.com"] })).status).toBe(200);
+    expect((await putAllowlist(browser, { hosts: [] })).status).toBe(200);
+    const audits = await auditRows("settings.computer_allowlist");
+    expect(audits).toHaveLength(3);
+    expect(JSON.parse(audits[1]?.detail ?? "{}")).toEqual({
+      hosts: { from: ["example.com", "pypi.org"], to: ["example.com"] },
+    });
+    expect(JSON.parse(audits[2]?.detail ?? "{}")).toEqual({
+      hosts: { from: ["example.com"], to: [] },
+    });
+  });
+
+  it.each(["2001::db8::1", ":::", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "gggg::1"])(
+    "rejects malformed IPv6 %s without persisting or auditing it",
+    async (host) => {
+      const { browser } = await claim();
+      expect((await putAllowlist(browser, { hosts: [host] })).status).toBe(400);
+      expect(await auditRows("settings.computer_allowlist")).toHaveLength(0);
+      expect(await count("computer_egress_hosts")).toBe(0);
+    },
+  );
+
+  it.each(["::", "::1", "2001:db8::1", "1:2:3:4:5:6:7:8", "::ffff:c000:280"])(
+    "persists valid IPv6 %s",
+    async (host) => {
+      const { browser } = await claim();
+      const response = await putAllowlist(browser, { hosts: [host] });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ hosts: [host] });
+    },
+  );
+
+  it.each([false, true])("exports scoped computer settings (populated: %s)", async (populated) => {
+    const { owner } = await claim();
+    const repo = createRepository(env);
+    const user = repo.forUser(scopeFromSession({ userId: owner }));
+    await db
+      .prepare("INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member')")
+      .run();
+    const other = repo.forUser(scopeFromSession({ userId: "other" }));
+    await other.settings.saveComputer({ defaultProvider: "other-provider", sizeId: "other-size" });
+    await other.settings.saveEgressHosts(["other.example.com"]);
+    if (populated) {
+      await user.settings.saveComputer({
+        defaultProvider: "test-provider",
+        persistence: "persistent",
+        sizeId: "custom-size",
+        idleTimeoutSeconds: 600,
+        maxLifetimeSeconds: 7200,
+        internetAllowed: true,
+      });
+      await user.settings.saveEgressHosts(["example.com"]);
+    }
+    await stageExportItem(user, "computer-export", "settings");
+    const files = await user.exports.listPrefix(user.exports.stagedPrefix("computer-export"));
+    const contents = new Map<string, unknown>();
+    for (const file of files) {
+      const object = await user.exports.getObject(file.key);
+      contents.set(file.key.split("/").at(-1) ?? "", await new Response(object?.body).json());
+    }
+    expect(contents.get("settings.json")).toEqual((await user.settings.get()) ?? null);
+    expect(contents.get("computer_settings.json")).toEqual(await user.settings.computer());
+    expect(JSON.stringify([...contents])).not.toContain("other-provider");
+    expect(JSON.stringify([...contents])).not.toContain("other.example.com");
+    expect(await other.exports.listPrefix(other.exports.stagedPrefix("computer-export"))).toEqual(
+      [],
+    );
+  });
+
   it("caps the allowlist", async () => {
     const { browser } = await claim();
     const hosts = Array.from({ length: 201 }, (_, i) => `host${i}.example.com`);
@@ -220,15 +309,25 @@ describe("normalizeHost", () => {
     ["  example.com  ", "example.com"],
     ["192.168.1.10", "192.168.1.10"],
     ["host.docker.internal", "host.docker.internal"],
+    ["2001:0DB8:0000:0000:0000:0000:0000:0001", "2001:db8::1"],
+    ["::ffff:192.0.2.128", "::ffff:c000:280"],
   ])("accepts %j as %j", (input, expected) => {
     expect(normalizeHost(input)).toBe(expected);
   });
-  it.each([["https://pypi.org"], ["pypi.org/path"], ["*.pypi.org"], [""], ["a".repeat(254)], [5]])(
-    "rejects %j",
-    (input) => {
-      expect(normalizeHost(input)).toBe(null);
-    },
-  );
+  it.each([
+    ["https://pypi.org"],
+    ["pypi.org/path"],
+    ["*.pypi.org"],
+    [""],
+    ["a".repeat(254)],
+    [5],
+    ["[::1]"],
+    ["::1."],
+    ["fe80::1%eth0"],
+    ["::ffff:192.0.2.999"],
+  ])("rejects %j", (input) => {
+    expect(normalizeHost(input)).toBe(null);
+  });
 });
 
 describe("runComputerTest", () => {
@@ -344,6 +443,60 @@ describe("runComputerTest", () => {
     expect(report.ok).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(await inner.list()).toEqual([]);
+  });
+
+  it("bounds stalled exec and iterator cancellation, then destroys the computer", async () => {
+    const inner = createFakeComputerProvider();
+    let cancelled = false;
+    const provider: ComputerProvider = {
+      ...inner,
+      exec: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => new Promise(() => {}),
+          return: () => {
+            cancelled = true;
+            return new Promise(() => {});
+          },
+        }),
+      }),
+    };
+    const report = await Promise.race([
+      runComputerTest(provider, spec(), { timeoutMs: 5 }),
+      new Promise((resolve) => setTimeout(() => resolve("still pending"), 200)),
+    ]);
+    expect(report).toMatchObject({ ok: false, error: { code: "timeout" }, destroyed: true });
+    expect(cancelled).toBe(true);
+    expect(await inner.list()).toEqual([]);
+  });
+
+  it.each([false, true])("bounds stalled destroy after exec failure: %s", async (execFails) => {
+    const inner = createFakeComputerProvider();
+    let attempts = 0;
+    const provider: ComputerProvider = {
+      ...inner,
+      ...(execFails
+        ? {
+            exec: () => {
+              throw new ComputerProviderError("boom", "provider");
+            },
+          }
+        : {}),
+      destroy: () => {
+        attempts += 1;
+        return new Promise(() => {});
+      },
+    };
+    try {
+      const report = await Promise.race([
+        runComputerTest(provider, spec(), { timeoutMs: 5 }),
+        new Promise((resolve) => setTimeout(() => resolve("still pending"), 200)),
+      ]);
+      expect(report).toMatchObject({ ok: !execFails, destroyed: false });
+      expect(attempts).toBe(1);
+      expect(await inner.list()).toHaveLength(1);
+    } finally {
+      for (const handle of await inner.list()) await inner.destroy(handle);
+    }
   });
 
   it("maps a hand-rolled spec failure to its port code", async () => {

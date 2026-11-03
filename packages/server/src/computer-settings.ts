@@ -98,13 +98,22 @@ class TestTimeout extends Error {
   readonly code = "timeout";
 }
 
-const timeout = (ms: number, what: string): Promise<never> =>
-  new Promise((_, reject) => {
-    setTimeout(() => reject(new TestTimeout(`${what} timed out after ${ms / 1000} seconds`)), ms);
-  });
-
-const withTimeout = <T>(work: Promise<T>, ms: number, what: string): Promise<T> =>
-  Promise.race([work, timeout(ms, what)]);
+async function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new TestTimeout(`${what} timed out after ${ms / 1000} seconds`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Provider errors cross to the browser truncated: adapters must keep secrets out of them. */
 const safeError = (error: unknown): { code: string; message: string } => {
@@ -116,20 +125,43 @@ const safeError = (error: unknown): { code: string; message: string } => {
 };
 
 /** Drains one exec stream: the stdout, throwing on the terminal error or a non-zero exit. */
-async function collectExec(events: AsyncIterable<ExecEvent>, argv: string[]): Promise<string> {
+async function collectExec(
+  events: AsyncIterable<ExecEvent>,
+  argv: string[],
+  timeoutMs: number,
+): Promise<string> {
+  const iterator = events[Symbol.asyncIterator]();
+  const deadline = Date.now() + timeoutMs;
+  let finished = false;
   let stdout = "";
-  for await (const event of events) {
-    if (event.type === "stdout") stdout += event.text;
-    else if (event.type === "error") {
-      throw new ComputerProviderError(`echo failed: ${event.message.slice(0, 300)}`, event.code);
-    } else if (event.type === "exit" && event.code !== 0) {
-      throw new ComputerProviderError(
-        `echo exited with code ${event.code} (argv ${argv.join(" ")})`,
-        "provider",
-      );
+  try {
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new TestTimeout("Running echo timed out");
+      const next = await withTimeout(iterator.next(), remaining, "Running echo");
+      if (next.done) {
+        finished = true;
+        return stdout;
+      }
+      const event = next.value;
+      if (event.type === "stdout") stdout += event.text;
+      else if (event.type === "error") {
+        throw new ComputerProviderError(`echo failed: ${event.message.slice(0, 300)}`, event.code);
+      } else if (event.type === "exit" && event.code !== 0) {
+        throw new ComputerProviderError(
+          `echo exited with code ${event.code} (argv ${argv.join(" ")})`,
+          "provider",
+        );
+      }
     }
+  } finally {
+    // An adapter may ignore abort, and return() may queue behind its stuck next(). Neither
+    // may prevent the caller from reaching destroy. Observe rejection without awaiting it.
+    if (!finished)
+      void Promise.resolve()
+        .then(() => iterator.return?.())
+        .catch(() => {});
   }
-  return stdout;
 }
 
 /**
@@ -152,7 +184,7 @@ export async function runComputerTest(
   const destroy = async () => {
     if (!handle) return;
     try {
-      await provider.destroy(handle);
+      await withTimeout(provider.destroy(handle), timeoutMs, "Destroying the test computer");
       destroyed = true;
     } catch (error) {
       log.error("computer-settings.test.cleanup", {
@@ -181,6 +213,7 @@ export async function runComputerTest(
     const stdout = await collectExec(
       provider.exec(handle, { argv: ["echo", TEST_MARKER], signal }),
       ["echo", TEST_MARKER],
+      timeoutMs,
     );
     if (!stdout.includes(TEST_MARKER)) {
       throw new ComputerProviderError("echo did not return the test marker", "provider");
@@ -350,16 +383,26 @@ computerSettings.put("/", async (c) => {
 });
 
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
-const IPV6 = /^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$/i;
 const DNS =
   /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])$/;
 
 /** Lowercases and validates one allowlist entry: a DNS name or IP literal, never a URL. */
 export function normalizeHost(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const host = value.trim().toLowerCase().replace(/\.+$/, "");
+  const input = value.trim().toLowerCase();
+  if (input.includes(":")) {
+    // The platform URL parser implements IPv6's compression and embedded-IPv4 rules.
+    // Restrict the input to a bare literal before wrapping it; no URL syntax or zone ids.
+    if (!/^[0-9a-f:.]+$/.test(input)) return null;
+    try {
+      return new URL(`http://[${input}]/`).hostname.slice(1, -1);
+    } catch {
+      return null;
+    }
+  }
+  const host = input.replace(/\.+$/, "");
   if (host === "" || host.length > 253) return null;
-  if (IPV4.test(host) || IPV6.test(host)) return host;
+  if (IPV4.test(host)) return host;
   return DNS.test(host) ? host : null;
 }
 
@@ -379,12 +422,14 @@ computerSettings.put("/allowlist", async (c) => {
   if (hosts.length > MAX_HOSTS) return c.json({ error: "too_many_hosts", max: MAX_HOSTS }, 400);
   hosts.sort();
   const settings = await store.computer();
-  const detail = changes({ hosts: settings.egressHosts }, { hosts });
-  if (detail) {
+  const unchanged =
+    hosts.length === settings.egressHosts.length &&
+    hosts.every((host, i) => host === settings.egressHosts[i]);
+  if (!unchanged) {
     await store.saveEgressHosts(hosts, {
       action: "settings.computer_allowlist",
       module: "settings",
-      detail,
+      detail: { hosts: { from: settings.egressHosts, to: hosts } },
     });
   }
   return c.json({ hosts });
