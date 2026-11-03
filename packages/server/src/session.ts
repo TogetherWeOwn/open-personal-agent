@@ -13,7 +13,7 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as auth from "./auth";
-import { hostnameOf } from "./deployment-hosts";
+import { hostnameOf, noteDeploymentHost } from "./deployment-hosts";
 import type { AppEnv, Session } from "./env";
 import { sameOrigin } from "./security";
 
@@ -121,6 +121,10 @@ authRoutes.post("/login", async (c) => {
     session: session.row,
     now: Date.now(),
   });
+  // A new serving domain is first used by a login (cookies never cross hosts), so record it
+  // here: the hourly touch would otherwise leave that domain fetchable for up to an hour.
+  // Best-effort, never fails the login.
+  await noteDeploymentHost(c.env, c.req.url).catch(() => {});
   const maxAge = auth.SESSION_ABSOLUTE_MS / 1000;
   setCookie(c, auth.SESSION_COOKIE, session.cookie, { ...auth.COOKIE_OPTIONS, maxAge });
   c.header("Cache-Control", "no-store");

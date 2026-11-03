@@ -176,7 +176,7 @@ describe("deployment hostnames", () => {
     expect(await store.deploymentHosts.list()).toEqual(["agent.example", "other.example"]);
   });
 
-  it("touches the session and records the serving hostname in one batch", async () => {
+  it("touches the session and records the serving hostname", async () => {
     await login();
     const id = (await db.prepare("SELECT id FROM sessions").first<string>("id")) as string;
     const store = systemStore(env);
@@ -188,6 +188,15 @@ describe("deployment hostnames", () => {
         .first<number>("last_seen_at"),
     ).toBe(5000);
     expect(await count("deployment_hosts", "hostname = 'agent.example'")).toBe(1);
+  });
+
+  it("records the serving hostname on login, so a new domain is refused from first use", async () => {
+    const { key } = await claim();
+    await db.prepare("DELETE FROM deployment_hosts").run();
+    const br = new Browser();
+    expect((await br.login(key)).status).toBe(200);
+    // The session is fresh, so no hourly touch ran: this row came from the login itself.
+    expect(await count("deployment_hosts", "hostname = 'opa.test'")).toBe(1);
   });
 
   it("touches without a hostname in the single statement it was", async () => {

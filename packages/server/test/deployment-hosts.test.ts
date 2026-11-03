@@ -2,7 +2,7 @@
 // The deployment's own hostnames on Workers: parsing the request URL's host, recording it,
 // and resolving the refusal list as `OPA_OWN_HOSTS` first plus the recorded set, so a store
 // failure degrades to the env var alone instead of failing the turn.
-import type { SqlDatabase } from "@opa/db/system";
+import { type SqlDatabase, systemStore } from "@opa/db/system";
 import { describe, expect, it } from "vitest";
 import { hostnameOf, noteDeploymentHost, resolveOwnHosts } from "../src/deployment-hosts";
 
@@ -91,5 +91,44 @@ describe("resolveOwnHosts", () => {
       "fallback.example",
     ]);
     await expect(resolveOwnHosts(envOf(db))).resolves.toEqual([]);
+  });
+});
+
+describe("sessions.touch hostname decoupling", () => {
+  /** A D1 whose hostname write rejects (a table missing mid-deploy) while the touch succeeds. */
+  function failingRecordDb() {
+    const ran: string[] = [];
+    const statement = (sql: string) => ({
+      bind(..._values: unknown[]) {
+        return this;
+      },
+      async run() {
+        ran.push(sql);
+        if (sql.includes("deployment_hosts")) throw new Error("no such table");
+        return { meta: { changes: 1 } };
+      },
+      async first() {
+        return null;
+      },
+      async all() {
+        return { results: [] };
+      },
+    });
+    const db = {
+      prepare: (sql: string) => statement(sql),
+      async batch() {
+        return [];
+      },
+    } as unknown as SqlDatabase;
+    return { db, ran };
+  }
+
+  it("still advances last_seen_at when the hostname write fails", async () => {
+    const { db, ran } = failingRecordDb();
+    await systemStore({ DB: db }).sessions.touch("s1", 7000, "new.example");
+    expect(ran).toEqual([
+      expect.stringContaining("UPDATE sessions"),
+      expect.stringContaining("deployment_hosts"),
+    ]);
   });
 });

@@ -573,10 +573,12 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           .bind(id, userId, now, now - SESSION_IDLE_MS)
           .first()) !== null,
       /**
-       * Notes the session's recent use, and — in the same batch — the hostname serving this
-       * deployment, which the session's request arrived on. The touch runs at most hourly per
-       * session, so an added custom domain lands here soon after its first use; without a
-       * hostname this stays the single statement it was.
+       * Notes the session's recent use, then — as its own best-effort write — the hostname
+       * serving this deployment, which the session's request arrived on. The touch runs at most
+       * hourly per session, so an added custom domain lands here soon after its first use;
+       * without a hostname this stays the single statement it was. Sequential on purpose: one
+       * D1 batch would roll the touch back with a failed hostname write (a table missing
+       * mid-deploy), silently stalling the session's idle deadline while the caller swallows it.
        */
       touch: async (id: string, now: number, hostname?: string) => {
         const update = db
@@ -586,7 +588,10 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           await update.run();
           return;
         }
-        await db.batch([update, recordDeploymentHost(hostname, now)]);
+        await update.run();
+        await recordDeploymentHost(hostname, now)
+          .run()
+          .catch(() => {});
       },
       /** Records the login: the passkey's counter, the new session, the old one revoked. */
       login: async (l: {
