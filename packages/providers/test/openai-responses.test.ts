@@ -48,7 +48,14 @@ function provider(
     calls.push({ url, init });
     return respond(n);
   }) as typeof globalThis.fetch;
-  const p = createOpenAIResponsesProvider({ providerId, baseUrl, apiKey: KEY, fetch, compat });
+  const p = createOpenAIResponsesProvider({
+    providerId,
+    baseUrl,
+    apiKey: KEY,
+    fetch,
+    // Exact optional types: absent, never explicitly undefined.
+    ...(compat ? { compat } : {}),
+  });
   const body = (i = 0) => JSON.parse(String(calls[i]?.init.body));
   return { p, calls, body };
 }
