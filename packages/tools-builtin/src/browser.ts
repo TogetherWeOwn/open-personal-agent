@@ -330,13 +330,37 @@ export function browserTool(ports: BrowserPorts): LoopTool {
               openedAt = now();
             }
             // Approved before navigating: the guard lets the main frame reach exactly this.
+            // Tentative until the navigation lands, though: if it fails, the session page is
+            // still on the previously approved host, and `approved` (so `target()` and the
+            // guard) must keep binding that page, not the host we failed to reach (TWO-2122).
+            const previous = approved;
             approved = hostPortOf(first.url);
             blocked = [];
-            const page = await session.navigate(first.url.href, signal);
+            let page: BrowserPage;
+            try {
+              page = await session.navigate(first.url.href, signal);
+            } catch (error) {
+              approved = previous;
+              throw error;
+            }
             lastUsedAt = now();
             armTimers();
-            // Where the page actually landed stays the approved host (the guard saw to that);
-            // a same-host scheme/port change keeps the approval, as `web_fetch` redirects do.
+            // Re-derive from where the page actually is: the adapter's failure fallback
+            // returns a snapshot of the previous page instead of throwing, and the guard
+            // bounds the main frame to the tentative host, so a parseable http(s) page URL
+            // is either the host just approved or the one before it. An unparseable or
+            // non-http(s) URL keeps the tentative approval.
+            try {
+              const landed = new URL(page.url);
+              if (
+                (landed.protocol === "http:" || landed.protocol === "https:") &&
+                landed.hostname
+              ) {
+                approved = hostPortOf(landed);
+              }
+            } catch {
+              // Keep the tentative approval; `pageOutput` labels with it too.
+            }
             return pageOutput(page, blockedNote());
           }
           case "click":

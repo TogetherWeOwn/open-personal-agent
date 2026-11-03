@@ -44,7 +44,14 @@ class FakeSession implements BrowserSession {
   current = "about:blank";
   closed = false;
   gone = false;
-  constructor(private guard: BrowserGuard) {}
+  /** The next `navigate` rejects, leaving the page where it was (a transport-level failure). */
+  failNextNavigate = false;
+  /**
+   * The next `navigate` returns the current page untouched, as the Worker adapter does when
+   * `goto` reports `ERR_`/`net::`/timeout: it snapshots the previous page instead of failing.
+   */
+  snapshotNextNavigate = false;
+  constructor(readonly guard: BrowserGuard) {}
 
   private page(): BrowserPage {
     if (this.gone) {
@@ -63,6 +70,14 @@ class FakeSession implements BrowserSession {
   }
 
   async navigate(url: string): Promise<BrowserPage> {
+    if (this.failNextNavigate) {
+      this.failNextNavigate = false;
+      throw new Error("net::ERR_NAME_NOT_RESOLVED");
+    }
+    if (this.snapshotNextNavigate) {
+      this.snapshotNextNavigate = false;
+      return this.page();
+    }
     this.go(url);
     return this.page();
   }
@@ -312,6 +327,48 @@ describe("browser (M4-09)", () => {
     expect(fake.metered).toEqual([42]);
     await tool.dispose?.(); // idempotent: a second disposal meters nothing more
     expect(fake.metered).toEqual([42]);
+  });
+
+  it("keeps the old host approved when an open to a new host fails (TWO-2122)", async () => {
+    const fake = fakeBrowser();
+    const tool = browserTool(fake.ports);
+    await tool.execute({ action: "open", url: "https://archive.example/1" }, signal());
+    const session = fake.sessions[0];
+    if (session) session.failNextNavigate = true;
+    const failed = await tool.execute(
+      { action: "open", url: "https://elsewhere.example/landing" },
+      signal(),
+    );
+    expect(failed.ok).toBe(false);
+    // The page never left archive.example, so approvals and the guard still bind it — not the
+    // host the failed open aimed at.
+    expect(tool.target?.({ action: "click", text: "Next" })).toBe("archive.example");
+    expect(session?.guard.mayNavigate("https://archive.example/2")).toBe(true);
+    expect(session?.guard.mayNavigate("https://elsewhere.example/landing")).toBe(false);
+    const click = await tool.execute({ action: "click", text: "Next" }, signal());
+    expect(click.ok).toBe(true);
+    expect(click.content).toContain("Second page.");
+  });
+
+  it("keeps the old host approved when a failed open returns the previous page (TWO-2122)", async () => {
+    const fake = fakeBrowser();
+    const tool = browserTool(fake.ports);
+    await tool.execute({ action: "open", url: "https://archive.example/1" }, signal());
+    const session = fake.sessions[0];
+    if (session) session.snapshotNextNavigate = true;
+    // The adapter's ERR_/timeout fallback: the open "succeeds" with a snapshot of page one.
+    const out = await tool.execute(
+      { action: "open", url: "https://elsewhere.example/landing" },
+      signal(),
+    );
+    expect(out.ok).toBe(true);
+    expect(out.content).toContain("URL: https://archive.example/1");
+    expect(tool.target?.({ action: "click", text: "Next" })).toBe("archive.example");
+    expect(session?.guard.mayNavigate("https://archive.example/2")).toBe(true);
+    expect(session?.guard.mayNavigate("https://elsewhere.example/landing")).toBe(false);
+    const click = await tool.execute({ action: "click", text: "Next" }, signal());
+    expect(click.ok).toBe(true);
+    expect(click.content).toContain("Second page.");
   });
 
   it("binds approvals to the canonical host, from the URL or the live session", async () => {
