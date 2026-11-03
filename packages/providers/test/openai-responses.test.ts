@@ -328,6 +328,33 @@ describe("openai-responses non-streaming endpoints (M4-20)", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("never retries a 4xx whose message merely contains `stream`", async () => {
+    // "Upstream ..." contains "stream" and a 400 maps to code `bad_request`, but the message is
+    // not an explicit streaming rejection, so it stands with one request made.
+    const { p, calls } = provider(() =>
+      Response.json({ error: { message: "Upstream connect error" } }, { status: 400 }),
+    );
+    expect(await replay(p.stream({ model: MODEL, messages: ask }))).toEqual([
+      "error bad_request: Upstream connect error",
+    ]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("never retries a pre-output SSE error that merely contains `stream`", async () => {
+    // `server_error` is unmapped, so it arrives as code `upstream` with no HTTP status to
+    // narrow it: neither the code nor the message is an explicit streaming rejection, so the
+    // error stands with one request made, even though nothing was produced yet.
+    const rejection = event("error", {
+      code: "server_error",
+      message: "Upstream connect error",
+    });
+    const { p, calls } = provider(() => new Response(byteStream(rejection, 3)));
+    expect(await replay(p.stream({ model: MODEL, messages: ask }))).toEqual([
+      "error upstream: Upstream connect error",
+    ]);
+    expect(calls).toHaveLength(1);
+  });
+
   it("never retries the adapter's own malformed-stream error", async () => {
     const { p, calls } = provider(() => new Response(byteStream("data: not-json\n\n")));
     expect(await replay(p.stream({ model: MODEL, messages: ask }))).toEqual([

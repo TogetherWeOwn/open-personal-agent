@@ -171,6 +171,9 @@ const CODES: Readonly<Record<string, ModelErrorCode>> = {
   invalid_api_key: "auth",
   invalid_prompt: "bad_request",
   context_length_exceeded: "bad_request",
+  // An explicitly unsupported parameter (for example `stream`) is the client's mistake, not an
+  // upstream failure: it must never land in the `upstream` bucket, whose errors never retry.
+  unsupported_parameter: "bad_request",
 };
 
 const usageOf = (u: NonNullable<RawResponse["usage"]>): ModelUsage => ({
@@ -188,18 +191,22 @@ interface ReplayContext {
 }
 
 /**
- * An error that blames streaming, and nothing else. Auth, quota, network and cancellation are
- * never retried; a malformed stream means the endpoint *is* streaming, and its first request
- * may already have generated output, so only a rejection names `stream`. Callers narrow
- * further: the HTTP leg only trusts 4xx (a 5xx may already have run server-side), and the SSE
- * leg only trusts provider-originated `error` events, never this adapter's own synthesized
- * ones (which carry no status and code `bad_response`).
+ * An error that explicitly rejects streaming, and nothing else. Auth, quota, network,
+ * cancellation and `upstream` failures are never retried: an upstream failure does not prove
+ * the `stream: true` request was rejected before generation, so retrying it could generate or
+ * bill twice. The message must name `stream` as a word (never the substring inside
+ * "Upstream") alongside an explicit refusal ("not supported", "does not support",
+ * "unsupported"); near-misses like "Upstream connect error" or "the stream broke" stand.
+ * Callers narrow further: the HTTP leg only trusts 4xx (a 5xx may already have run
+ * server-side), and the SSE leg only trusts provider-originated `error` events, never this
+ * adapter's own synthesized ones (which carry no status and code `bad_response`).
  */
 function isStreamRejection(event: ModelEvent): boolean {
   return (
     event.type === "error" &&
-    (event.code === "bad_request" || event.code === "upstream") &&
-    /stream/i.test(event.message)
+    event.code === "bad_request" &&
+    /\bstream/i.test(event.message) &&
+    /not supported|does not support|unsupported/i.test(event.message)
   );
 }
 
