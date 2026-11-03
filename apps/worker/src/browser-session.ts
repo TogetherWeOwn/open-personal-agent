@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Worker's `BrowserSession` adapter (M4-09): Cloudflare Browser Rendering driven over CDP by
 // `@cloudflare/puppeteer`. This is the only place a browser exists; the `browser` tool owns all
-// policy and hands this adapter a guard, consulted through request interception before the
-// browser acts — a refused main-frame navigation is aborted (and reported back through the
-// guard), a refused request is aborted, everything else continues. Every session is a fresh,
-// isolated browser context: no cookies, storage or profile are shared with — or survive into —
-// any other session (logged-out only), and there is no profile knob here to swap.
+// policy and hands this adapter a guard, consulted through request interception on the
+// session page before the browser acts — a refused main-frame navigation is aborted (and
+// reported back through the guard), a refused request is aborted, everything else continues.
+// Every session is a fresh, isolated browser context: no cookies, storage or profile are
+// shared with — or survive into — any other session (logged-out only), and there is no
+// profile knob here to swap.
 //
 // The puppeteer objects are typed structurally below, so tests drive the interception decisions
 // against a fake page without launching a browser; the real library is imported lazily, only
@@ -226,7 +227,7 @@ export function browserSessionOpener(
       context = await browser.createBrowserContext();
       const page = await context.newPage();
       // Interception goes on before anything navigates, and stays on for the session's life:
-      // the guard is the tool's, consulted fresh for every request.
+      // the guard is the tool's, consulted fresh for every request on this page.
       page.on("request", (request) => {
         if (request.isInterceptResolutionHandled()) return;
         const url = request.url();
@@ -241,10 +242,14 @@ export function browserSessionOpener(
       });
       await page.setRequestInterception(true);
       // A page the visited page spawns (`window.open`, `target=_blank`) is a new target with
-      // no interception on it, so no request it made would pass the guard. This session is
-      // one page by design (tabs are out of scope): close anything spawned, so "every
-      // request is guard-checked" stays true of the whole context. Registered only after
-      // the session's own page exists, and that page is never the one closed.
+      // no interception on it, and its initial navigation can start before the close below
+      // lands — interception cannot be installed on it first. This session is one page by
+      // design (tabs are out of scope): close anything spawned as soon as it appears, which
+      // bounds a spawned page to at most that initial navigation request; its content is
+      // never read, and it can make no further requests once closed. "Every request is
+      // guard-checked" therefore holds for the session page, not for that one racing
+      // request. Registered only after the session's own page exists, and that page is
+      // never the one closed.
       context.on("targetcreated", (target) => {
         void target
           .page()

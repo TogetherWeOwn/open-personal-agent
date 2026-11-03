@@ -9,11 +9,14 @@
 //
 // The security shape is `web_fetch`'s, enforced twice. Every `open` URL passes `checkFetchUrl`
 // (scheme, embedded credentials, localhost, private literals, the deployment's own hosts)
-// before a session is touched. Page-driven navigation is gated by the guard the tool hands the
-// adapter: the main frame may navigate only to the host (and port) the loop approved for the
-// current `open`, and any request — subresources included — to the deployment's own hosts or a
-// private literal is refused. A blocked main-frame navigation is reported like a `web_fetch`
-// cross-host redirect: the tool names the URL, and reaching it takes a fresh `open` call with
+// before a session is touched. Page-driven navigation on the session page is gated by the
+// guard the tool hands the adapter: the main frame may navigate only to the host (and port)
+// the loop approved for the current `open`, and any request from that page — subresources
+// included — to the deployment's own hosts or a private literal is refused. (A page the
+// visited page spawns is closed by the adapter as soon as it appears; that bounds it to at
+// most its initial navigation request, whose content is never read — see the adapter.) A
+// blocked main-frame navigation is reported like a `web_fetch` cross-host redirect: the tool
+// names the URL, and reaching it takes a fresh `open` call with
 // its own decision. Subresources to other hosts are allowed, as on any real page; the browser
 // holds no user data beyond what a `type` action put on the approved host's own page, and that
 // call is itself decided per host. Everything the tool returns is page content, so it joins the
@@ -27,8 +30,9 @@ export type BrowserPage = { url: string; html: string };
 
 /**
  * The navigation guard the tool hands the adapter at session open. The adapter consults it
- * before the browser acts (request interception): `mayNavigate` for a main-frame navigation,
- * `mayRequest` for every other request, and reports each refused main-frame navigation through
+ * before the browser acts on the session page (request interception): `mayNavigate` for a
+ * main-frame navigation, `mayRequest` for every other request from that page, and reports
+ * each refused main-frame navigation through
  * `noteBlocked` so the tool can name it. The tool updates what the guard approves on each
  * `open`, so one long-lived guard serves the whole session.
  */

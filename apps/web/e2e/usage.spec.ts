@@ -315,6 +315,32 @@ test("browser time shows against the included hours, and its overage is priced",
   await expect(region).not.toContainText("of 10h included this month");
 });
 
+test("the owner sees member browsing even when they have not browsed themselves", async ({
+  page,
+}) => {
+  // Owner: 0s of their own; the deployment total is 11h, an hour past the included 10h.
+  // The section and the page's used state gate on the allowance total for the owner too,
+  // so neither the browsing nor its overage is hidden (and browsing alone is not "empty").
+  await open(page, {
+    ...body(empty, empty),
+    browser: {
+      ...browser,
+      seconds: 0,
+      allowance: {
+        seconds: 39_600,
+        includedSeconds: 36_000,
+        billedSeconds: 3_600,
+        costMicroUsd: 90_000,
+      },
+    },
+  });
+  const region = page.getByRole("region", { name: "Browser" });
+  await expect(region).toContainText("11h 0m of 10h included this month");
+  await expect(region).toContainText("Your browsing: None this month.");
+  await expect(region).toContainText("Past the included hours: 1h 0m, about $0.09");
+  await expect(page.getByRole("heading", { name: "Nothing used yet this month" })).toHaveCount(0);
+});
+
 test("a member sees no allowance meters, and half the budget shows the quiet line", async ({
   page,
 }) => {

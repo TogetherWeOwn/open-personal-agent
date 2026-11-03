@@ -273,8 +273,13 @@ export function Usage() {
   useEffect(load, [load]);
 
   const aiUsed = data && (data.month.groups.length > 0 || data.today.groups.length > 0);
+  // The owner also sees browsing through the deployment total (`allowance`, owner-only):
+  // members may have browsed when the owner has not. A member gets no allowance, so their
+  // gate stays their own seconds.
+  const browsingUsed =
+    data && (data.browser.seconds > 0 || (data.browser.allowance?.seconds ?? 0) > 0);
   // Browsing alone still means something was used; the breakdowns below are AI-only either way.
-  const used = aiUsed || (data && data.browser.seconds > 0);
+  const used = aiUsed || browsingUsed;
   return (
     <Page title="Usage">
       {failed && (
@@ -304,7 +309,7 @@ export function Usage() {
         ))}
       {data && <Categories categories={data.categories} currency={data.currency} />}
       {/* Only once there is browsing to show: a deployment with no browser never grows the section. */}
-      {data && data.browser.seconds > 0 && <BrowserUsage data={data} />}
+      {data && browsingUsed && <BrowserUsage data={data} />}
       {/* The neuron line stands even when the other meters can't be read. */}
       {(data?.meters || data?.allowance) && (
         <Meters
