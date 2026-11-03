@@ -341,11 +341,14 @@ function liveSection({ live, liveConfigured, liveKey, liveOpenAIBaseUrl, liveAnt
   const secrets = [liveKey, liveOpenAIBaseUrl, liveAnthropicBaseUrl].filter(
     (s) => typeof s === "string" && s.length >= 8,
   );
+  // A recorded error can carry model-generated text: keep every cell on one table
+  // row by collapsing whitespace and escaping pipes, so it cannot reshape the report.
+  const oneLine = (value) => String(value).replace(/\s+/g, " ").replaceAll("|", "\\|");
   const scrub = (value) => {
     if (value === null || value === undefined) return "—";
-    return secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value));
+    return oneLine(secrets.reduce((t, s) => String(t).split(s).join("[redacted]"), String(value)));
   };
-  const cell = (value) => (value === null || value === undefined ? "—" : String(value));
+  const cell = (value) => (value === null || value === undefined ? "—" : oneLine(value));
   const rows = live.map(
     (a) =>
       `| ${a.adapter} | ${scrub(a.model)} | ${cell(a.testMs)} ms | ` +

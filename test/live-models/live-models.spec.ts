@@ -425,10 +425,13 @@ test.describe("live models on a configured endpoint", () => {
         if (await log.getByText("This reply failed").count()) {
           // The recorded row must say why the turn failed, not just that it did: carry
           // the visible log excerpt so a binding failure is diagnosable from the report.
-          const excerpt = ((await log.textContent().catch(() => "")) ?? "")
+          // The excerpt is model-generated text, so it goes through scrubKey first, and
+          // it takes the tail: the failure notice sits at the end of the Messages log,
+          // while the head is mostly our own prompt echo.
+          const excerpt = (scrubKey((await log.textContent().catch(() => "")) ?? "") ?? "")
             .replace(/\s+/g, " ")
             .trim()
-            .slice(0, 300);
+            .slice(-300);
           throw new Error(`the chat turn failed${excerpt ? `: ${excerpt}` : ""}`);
         }
         await decidePending(page).catch((error: unknown) => {
@@ -437,7 +440,7 @@ test.describe("live models on a configured endpoint", () => {
         artifact = await artifactSince(page, taskStart);
         if (artifact) break;
         if (Date.now() > deadline) {
-          const excerpt = ((await log.textContent().catch(() => "")) ?? "")
+          const excerpt = (scrubKey((await log.textContent().catch(() => "")) ?? "") ?? "")
             .replace(/\s+/g, " ")
             .trim()
             .slice(-300);
