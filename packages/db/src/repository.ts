@@ -24,9 +24,9 @@ import {
 import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
-import type { ComputerRow } from "./computers";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
 import { revokeProviderTokens, revokeTaskTokens } from "./capability-tokens";
+import type { ComputerRow } from "./computers";
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
 import { RETENTION_DEFAULTS, type RetentionSettings, toSettings } from "./retention";
