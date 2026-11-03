@@ -204,6 +204,13 @@
       "when": 1793727273015,
       "tag": "0028_browser_usage",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1793735732010,
+      "tag": "0029_computer_settings",
+      "breakpoints": true
     }
   ]
 }

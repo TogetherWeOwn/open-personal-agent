@@ -9,6 +9,7 @@ import { artifactRoutes } from "./artifacts";
 import { assistantSettings } from "./assistant";
 import { attachmentRoutes } from "./attachments";
 import { chatRoutes } from "./chat";
+import { computerSettings } from "./computer-settings";
 import type { AppEnv, AppPorts } from "./env";
 import { exportRoutes } from "./exports";
 import { checkHealth, setupRequired } from "./health";
@@ -61,6 +62,7 @@ shared.route("/api/settings/spending", spendingRoutes);
 shared.route("/api/settings", settings);
 shared.route("/api/settings", toolSettings);
 shared.route("/api/settings", retentionSettings);
+shared.route("/api/settings/computers", computerSettings);
 
 // The SPA's setup page reads the token from the URL fragment and POSTs it to the routes below.
 shared.get("/setup", async (c) => {
