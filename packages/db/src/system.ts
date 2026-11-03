@@ -10,6 +10,8 @@ import {
   revokeComputerTokens,
   revokeProviderTokens,
   revokeTaskTokens,
+  revokeTokenAuditStatement,
+  revokeTokenStatements,
   revokeUserTokens,
   type VerifyOptions,
   verifyCapabilityToken,
@@ -204,13 +206,19 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
       },
       /**
        * Replaces the owner's credentials and ends every session. Data stays untouched, but
-       * credentials do not: the owner's capability tokens die first through the one
-       * revocation code path (M4-00a AC2a) — recovery must not leave task bearers valid.
-       * Tokens-first is the fail-closed order: if the batch below then fails, the retry
-       * converges (the batch rolls back whole), and never the reverse.
+       * credentials do not: the owner's capability tokens die in this same batch through the
+       * one revocation code path (M4-00a AC2a) — recovery must not leave task bearers valid,
+       * and a failed recovery (a spent setup token rolls back at `requireChange`) must not
+       * kill live task tokens either. Atomicity is the fail-closed order: the batch commits
+       * or rolls back whole, so there is no gap a bearer could cross.
        */
       recover: async (o: OwnerCredentials) => {
-        await revokeUserTokens(db, o.userId, "account_recovery", o.now);
+        const [revokeTokens, ...bumpEpoch] = revokeTokenStatements(db, {
+          userId: o.userId,
+          reason: "account_recovery",
+          bumpUserEpoch: true,
+          now: o.now,
+        });
         await db.batch([
           db
             .prepare(
@@ -225,6 +233,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           db.prepare("UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL").bind(o.now),
           ...expireApprovals(o.userId, o.now, "setup_recovery"),
           ...credentials(o, "recovery"),
+          // The audit runs immediately after the token UPDATE, so `changes()` still names it.
+          revokeTokens,
+          revokeTokenAuditStatement(db, {
+            userId: o.userId,
+            targetId: o.userId,
+            action: "capability_token.revoke_user",
+            reason: "account_recovery",
+            now: o.now,
+          }),
+          ...bumpEpoch,
         ]);
       },
     },
@@ -302,9 +320,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
         now: number;
       }) => {
         const userId = r.session.userId;
-        // As with setup recovery above: the old credentials' task bearers die before the
-        // batch replaces them, so a redeemed code evicts everything the old set could spend.
-        await revokeUserTokens(db, userId, "account_recovery", r.now);
+        // As with setup recovery above: the old credentials' task bearers die in this same
+        // batch, so a redeemed code evicts everything the old set could spend — while a spent
+        // code (this UPDATE changes nothing, `requireChange` rolls back) leaves live task
+        // tokens alone. Atomicity is the fail-closed order: no gap a bearer could cross.
+        const [revokeTokens, ...bumpEpoch] = revokeTokenStatements(db, {
+          userId,
+          reason: "account_recovery",
+          bumpUserEpoch: true,
+          now: r.now,
+        });
         await db.batch([
           db
             .prepare(
@@ -326,6 +351,16 @@ export function systemStore({ DB: db }: { DB: SqlDatabase }) {
           insertSession(r.session),
           ...expireApprovals(userId, r.now, "recovery_code"),
           audit(userId, "recovery.code", "auth", "redeemed"),
+          // The audit runs immediately after the token UPDATE, so `changes()` still names it.
+          revokeTokens,
+          revokeTokenAuditStatement(db, {
+            userId,
+            targetId: userId,
+            action: "capability_token.revoke_user",
+            reason: "account_recovery",
+            now: r.now,
+          }),
+          ...bumpEpoch,
         ]);
       },
       /**

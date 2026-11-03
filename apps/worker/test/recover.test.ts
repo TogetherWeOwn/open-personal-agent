@@ -3,7 +3,8 @@
 
 import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import type { SqlDatabase } from "@opa/db/system";
+import { type SqlDatabase, systemStore } from "@opa/db/system";
+import { hashRecoveryCode, newRecoveryCode, newSession, randomId } from "@opa/server/auth";
 import { ADDRESS_LIMIT } from "@opa/server/recover";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
@@ -130,6 +131,64 @@ describe("a recovery code", () => {
     // Recovery evicts everything the old set could spend: the user epoch moved, so the
     // bearer fails even though its row is unexpired and its task still runs.
     expect(await verify()).toBeNull();
+  });
+
+  it("a failed redemption leaves live task tokens alone", async () => {
+    const { owner } = await claim();
+    const tag = `recover-fail-${Date.now()}`;
+    const scoped = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await scoped.chat.open(`c-${tag}`, "G");
+    await scoped.tasks.create({
+      id: `t-${tag}`,
+      conversationId: `c-${tag}`,
+      kind: "turn",
+      mode: "background",
+    });
+    const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
+      userId: owner,
+      taskId: `t-${tag}`,
+      computerId: "comp-recover-fail",
+      computerProfile: "host",
+      aud: "model_proxy",
+    });
+    const store = systemStore(env);
+    const verify = () =>
+      verifyCapabilityToken(db as unknown as SqlDatabase, { token, expectedAud: "model_proxy" });
+    expect(await verify()).not.toBeNull();
+    const epochBefore = (
+      await db
+        .prepare("SELECT token_epoch FROM users WHERE id = ?")
+        .bind(owner)
+        .first<{ token_epoch: number }>()
+    )?.token_epoch;
+    // The revocation folds into the redemption batch, so a spent code — rejected here at
+    // `requireChange`, which rolls the batch back — must not kill the live bearer.
+    const spent = {
+      codeId: "no-such-code",
+      passkey: {
+        id: randomId(),
+        webauthnUserId: "w",
+        publicKey: new Uint8Array([1]),
+        counter: 0,
+        transports: "",
+        deviceType: "",
+        backedUp: false,
+      },
+      recoveryCodes: [{ id: randomId(), hash: await hashRecoveryCode(newRecoveryCode()) }],
+      session: (await newSession(owner)).row,
+      now: Date.now(),
+    };
+    await expect(store.recovery.redeem(spent)).rejects.toThrow();
+    expect(await verify()).not.toBeNull();
+    expect(
+      (
+        await db
+          .prepare("SELECT token_epoch FROM users WHERE id = ?")
+          .bind(owner)
+          .first<{ token_epoch: number }>()
+      )?.token_epoch,
+    ).toBe(epochBefore);
+    expect(await count("audit_log", "action = 'capability_token.revoke_user'")).toBe(0);
   });
 
   it("wins once when two browsers race with two different codes", async () => {

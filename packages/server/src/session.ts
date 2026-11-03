@@ -42,6 +42,9 @@ const TOUCH_MS = 60 * 60_000;
  * Empty in M4-00a: the audience routes that consume these tokens land in M4-00b
  * (`model_proxy`) and M4-00c (`artifact_upload`, `tool_gateway`). Each of those adds its
  * route here with its expected audience, plus an M3-21a isolation case for the new `:id` route.
+ * A token pattern must not match any other route's path: `matchRoute` cannot tell which route
+ * Hono would serve, so an overlap would let a bearer open a session route. `routes.test.ts`
+ * enforces this for every entry.
  */
 export const TOKEN_ROUTES: ReadonlyMap<string, CapabilityAudience> = new Map([]);
 

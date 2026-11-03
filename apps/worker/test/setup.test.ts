@@ -3,12 +3,14 @@
 
 import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import type { SqlDatabase } from "@opa/db/system";
+import { type SqlDatabase, systemStore } from "@opa/db/system";
 import {
   base64url,
   CHALLENGE_COOKIE,
   hashRecoveryCode,
   newRecoveryCode,
+  newSession,
+  randomId,
   SESSION_COOKIE,
   sha256,
 } from "@opa/server/auth";
@@ -272,6 +274,65 @@ describe("recovery after the token rotates", () => {
     // Recovery is single-use for this token.
     expect((await br.options(ROTATED)).status).toBe(403);
     expect((await br.req("/setup")).status).toBe(403);
+  });
+
+  it("a failed recovery leaves live task tokens alone", async () => {
+    expect((await new Browser().setup(TOKEN)).status).toBe(200);
+    const owner = (await db.prepare("SELECT id FROM users").first<string>("id")) as string;
+    const scoped = createRepository(env).forUser(scopeFromSession({ userId: owner }));
+    await scoped.chat.open("c-rec-fail", "G");
+    await scoped.tasks.create({
+      id: "t-rec-fail",
+      conversationId: "c-rec-fail",
+      kind: "turn",
+      mode: "background",
+    });
+    const { token } = await mintCapabilityToken(db as unknown as SqlDatabase, {
+      userId: owner,
+      taskId: "t-rec-fail",
+      computerId: "comp-setup-rec-fail",
+      computerProfile: "host",
+      aud: "tool_gateway",
+    });
+    const store = systemStore(env);
+    const verify = () =>
+      verifyCapabilityToken(db as unknown as SqlDatabase, { token, expectedAud: "tool_gateway" });
+    expect(await verify()).not.toBeNull();
+    const epochBefore = (
+      await db
+        .prepare("SELECT token_epoch FROM users WHERE id = ?")
+        .bind(owner)
+        .first<{ token_epoch: number }>()
+    )?.token_epoch;
+    // The revocation folds into the recovery batch, so a spent setup token — rejected here at
+    // `requireChange`, which rolls the batch back — must not kill the live bearer.
+    const spent = {
+      userId: owner,
+      tokenHash: await sha256(TOKEN),
+      passkey: {
+        id: randomId(),
+        webauthnUserId: "w",
+        publicKey: new Uint8Array([1]),
+        counter: 0,
+        transports: "",
+        deviceType: "",
+        backedUp: false,
+      },
+      recoveryCodes: [{ id: randomId(), hash: await hashRecoveryCode(newRecoveryCode()) }],
+      session: (await newSession(owner)).row,
+      now: Date.now(),
+    };
+    await expect(store.setup.recover(spent)).rejects.toThrow();
+    expect(await verify()).not.toBeNull();
+    expect(
+      (
+        await db
+          .prepare("SELECT token_epoch FROM users WHERE id = ?")
+          .bind(owner)
+          .first<{ token_epoch: number }>()
+      )?.token_epoch,
+    ).toBe(epochBefore);
+    expect(await count("audit_log", "action = 'capability_token.revoke_user'")).toBe(0);
   });
 
   it("never reopens for a token that was already used", async () => {

@@ -10,7 +10,7 @@
 // live token per (task, audience, computer), revocation through one code path, and no token
 // value or hash in any log, event, step state or export. No JWT, PASETO, MAC'd or derived
 // formats: a different design needs a fresh crypto review first.
-import type { SqlDatabase } from "./system";
+import type { SqlDatabase, SqlStatement } from "./system";
 
 /** The three computer audiences. No multi-audience token, no `aud` array (AC1b). */
 export const CAPABILITY_AUDIENCES = ["model_proxy", "artifact_upload", "tool_gateway"] as const;
@@ -362,14 +362,13 @@ export async function verifyCapabilityToken(
   }
 }
 
-export interface RevokeOptions {
+export interface RevokeStatementsOptions {
   userId?: string;
   taskId?: string;
   computerId?: string;
   /** For `model_proxy` tokens naming a removed provider (AC2a, sign-off N2). */
   providerId?: string;
   reason: string;
-  auditAction: string;
   /** Bump the task epoch so a missed row still kills the task's tokens. */
   bumpTaskEpoch?: boolean;
   /** Bump the user epoch so a missed row still kills the user's tokens. */
@@ -377,17 +376,22 @@ export interface RevokeOptions {
   now?: number;
 }
 
+export interface RevokeOptions extends RevokeStatementsOptions {
+  auditAction: string;
+}
+
 /**
- * The one revocation code path (AC2a): every trigger — task cancel/end, computer stop/destroy,
- * sign-out-everywhere, account deletion, profile-condition loss, rotation and
- * provider-credential removal — revokes rows and bumps epochs here, atomically in one batch.
- * Returns the revoked row count. Audit rows name the scope and the count, never a token value.
+ * The one revocation code path (AC2a) as batch statements: the row revocation plus the epoch
+ * bumps, without the audit row. `revokeCapabilityTokens` runs these and audits the count
+ * afterwards; callers that must commit the revocation atomically with their own writes spread
+ * them into their own batch instead — account recovery does this, so a failed recovery rolls
+ * the revocation back with it and never kills live task tokens.
  */
-export async function revokeCapabilityTokens(
+export function revokeTokenStatements(
   db: SqlDatabase,
-  options: RevokeOptions,
-): Promise<number> {
-  const { userId, taskId, computerId, providerId, reason, auditAction } = options;
+  options: RevokeStatementsOptions,
+): [SqlStatement, ...SqlStatement[]] {
+  const { userId, taskId, computerId, providerId, reason } = options;
   const now = options.now ?? Date.now();
   const filters: string[] = ["revoked_at IS NULL"];
   const params: unknown[] = [];
@@ -412,7 +416,7 @@ export async function revokeCapabilityTokens(
     );
     params.push(providerId);
   }
-  const statements = [
+  const statements: [SqlStatement, ...SqlStatement[]] = [
     db
       .prepare(
         `UPDATE capability_tokens SET revoked_at = ?, revoked_reason = ? WHERE ${filters.join(" AND ")}`,
@@ -430,7 +434,48 @@ export async function revokeCapabilityTokens(
       db.prepare("UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?").bind(userId),
     );
   }
-  const [update] = await db.batch(statements);
+  return statements;
+}
+
+/**
+ * The revocation audit as a batch statement, for callers that commit `revokeTokenStatements`
+ * inside their own batch. It runs immediately after the token UPDATE, so `changes()` still
+ * names that UPDATE (the mint-rotate precedent) and the row carries the revoked count
+ * atomically — `json_object` keeps the detail shape identical to the standalone audit.
+ */
+export function revokeTokenAuditStatement(
+  db: SqlDatabase,
+  options: {
+    userId: string | null;
+    targetId: string | null;
+    action: string;
+    reason: string;
+    now: number;
+  },
+): SqlStatement {
+  return db
+    .prepare(
+      `INSERT INTO audit_log (user_id, action, module, result, target_id, detail)
+       VALUES (?, ?, 'capability-token',
+               CASE WHEN changes() > 0 THEN 'ok' ELSE 'skipped' END, ?,
+               json_object('reason', ?, 'revoked', changes(), 'at', ?))`,
+    )
+    .bind(options.userId, options.action, options.targetId, options.reason, options.now);
+}
+
+/**
+ * The one revocation code path (AC2a): every trigger — task cancel/end, computer stop/destroy,
+ * sign-out-everywhere, account deletion, profile-condition loss, rotation and
+ * provider-credential removal — revokes rows and bumps epochs here, atomically in one batch.
+ * Returns the revoked row count. Audit rows name the scope and the count, never a token value.
+ */
+export async function revokeCapabilityTokens(
+  db: SqlDatabase,
+  options: RevokeOptions,
+): Promise<number> {
+  const { userId, taskId, computerId, reason, auditAction } = options;
+  const now = options.now ?? Date.now();
+  const [update] = await db.batch(revokeTokenStatements(db, options));
   const revoked = update?.meta.changes ?? 0;
   await db
     .prepare(

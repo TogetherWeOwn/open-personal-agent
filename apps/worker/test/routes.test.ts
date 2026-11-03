@@ -97,6 +97,30 @@ describe("the route table", () => {
       expect(routes).toContain(route);
       expect(PUBLIC_ROUTES.has(route)).toBe(false);
     }
+    // A bearer for a token route must open only that route: `matchRoute` cannot tell which
+    // route Hono would serve, so a token pattern matching any other route's path would let
+    // the bearer open a session route (or shadow another token route). Vacuous in M4-00a —
+    // the table is empty — and binding on every route the M4-00b/00c cards add.
+    const methodOf = (route: string) => {
+      const method = route.split(" ")[0];
+      return method === "HEAD" ? "GET" : method;
+    };
+    const pathOf = (route: string) => route.split(" ").slice(1).join(" ");
+    const overlaps = (pattern: string, other: string) => {
+      if (methodOf(pattern) !== methodOf(other)) return false;
+      const p = pathOf(pattern).split("/");
+      const o = pathOf(other).split("/");
+      return (
+        p.length === o.length &&
+        p.every((seg, i) => seg.startsWith(":") || o[i]?.startsWith(":") || seg === o[i])
+      );
+    };
+    const violations: string[] = [];
+    for (const [tokenRoute] of TOKEN_ROUTES)
+      for (const other of routes)
+        if (other !== tokenRoute && overlaps(tokenRoute, other))
+          violations.push(`${tokenRoute} overlaps ${other}`);
+    expect(violations).toEqual([]);
   });
 
   it("answers no public route with 401", async () => {
