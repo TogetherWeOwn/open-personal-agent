@@ -218,7 +218,14 @@ async function destroyUntracked(driver: ComputerDriver, created: ComputerProvisi
   }
 }
 
-/** Destroy through the provider where one is configured, then finish the row. */
+/**
+ * Destroy through the provider, then finish the row. Fail-closed with no driver: there is
+ * no way to destroy the provider-side computer, so finishing the D1 row would strand a
+ * billing computer with no owner record (M4-02 AC3, COST-6). Leave the row live and report
+ * the miss instead — the sweep counts it in `errors` and the next tick retries once a
+ * driver is wired. Borrowers always pass a driver (it is a required parameter there), so
+ * this path only triggers from the sweep.
+ */
 async function destroyLive(
   store: ReturnType<typeof computerStore>,
   driver: ComputerDriver | undefined,
@@ -226,15 +233,14 @@ async function destroyLive(
   reason: ComputerEndReason,
   now: number,
 ): Promise<boolean> {
-  if (driver) {
-    const resources = computerResourcesOf(row);
-    try {
-      await driver.destroy(row.providerComputerId, resources);
-    } catch {
-      // Leave the row live for the next tick, as the export sweep leaves a row whose
-      // objects would not delete: a moved row must never orphan a billing computer.
-      return false;
-    }
+  if (!driver) return false;
+  const resources = computerResourcesOf(row);
+  try {
+    await driver.destroy(row.providerComputerId, resources);
+  } catch {
+    // Leave the row live for the next tick, as the export sweep leaves a row whose
+    // objects would not delete: a moved row must never orphan a billing computer.
+    return false;
   }
   return (await store.finish(row.id, reason, now)) !== null;
 }

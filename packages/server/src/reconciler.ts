@@ -37,10 +37,11 @@ export const reconcilerParts = {
   exports: (env, now) => sweepExports(env, () => now),
   retention: (env, now) => runRetention(env, now),
   approvals: (env, now) => expireApprovals(env, now),
-  // The computer orphan sweep (M4-02 AC3): idle and lifetime deadlines and task binding are
-  // enforced from D1 even with no provider configured. No provider driver exists yet — M4-04
-  // resolves one from the configured computer provider and passes it here — so this tick
-  // skips the provider-listing leg until then.
+  // The computer sweep (M4-02 AC3): no provider driver exists yet — M4-04 resolves one
+  // from the configured computer provider and passes it here — so this tick fails closed:
+  // rows past their idle/lifetime deadlines or with an ended task stay live and count as
+  // errors instead of being finished without a provider destroy, and the provider-listing
+  // orphan leg is skipped until then.
   computers: (env, now) => sweepComputers(env, undefined, now),
 } satisfies Record<string, ReconcilerPart>;
 
