@@ -6,7 +6,7 @@
 // credential binding domain separation. Suites needing sshd or sftp-server skip where absent.
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -710,9 +710,16 @@ async function startSshd(): Promise<SshdFixture> {
       break;
     } catch {
       if (Date.now() > deadline || child?.exitCode !== null) {
-        const log = existsSync(logPath) ? ` (log suppressed)` : "";
+        const log = existsSync(logPath)
+          ? readFileSync(logPath, "utf8")
+              .replaceAll(host.privatePem, "[redacted]")
+              .replaceAll(key.privatePem, "[redacted]")
+              .replaceAll(dir, "<fixture>")
+              .slice(-4096)
+          : "no startup log";
+        const exitCode = child?.exitCode;
         await stop();
-        throw new Error(`test sshd did not start${log}`);
+        throw new Error(`test sshd did not start (exit ${exitCode}): ${log}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
