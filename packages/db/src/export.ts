@@ -127,6 +127,9 @@ export async function stageExportItem(
       return;
     case "usage":
       await put("usage.json", await user.usage.list());
+      // Browser sessions are their own ledger (not model calls), but they are still the
+      // user's usage history: the archive would otherwise omit every browsed minute.
+      await put("browser_usage.json", await user.browserUsage.list());
       return;
     case "audit":
       await put("audit.json", await user.audit.list());

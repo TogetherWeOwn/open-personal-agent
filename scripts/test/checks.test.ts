@@ -342,6 +342,7 @@ describe("docs-cost-lint", () => {
         "AI",
         "ASSETS",
         "ASSISTANT",
+        "BROWSER",
         "DB",
         "EXPORT_WORKFLOW",
         "FILES",

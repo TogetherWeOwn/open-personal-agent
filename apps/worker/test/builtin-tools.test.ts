@@ -18,12 +18,17 @@ freshDatabase();
 afterEach(() => vi.restoreAllMocks());
 
 const USAGE = { inputTokens: 12, outputTokens: 3, cachedInputTokens: 0, reasoningTokens: 0 };
-/** Every tool the production turn offers, in registry order (`task` not offered yet). */
+/**
+ * Every tool the production turn offers, in registry order (`task` not offered yet). `browser`
+ * is offered here because the test Worker's wrangler config binds Browser Rendering; its
+ * session only ever launches if the tool is called.
+ */
 const ALL_TOOLS = [
   "web_fetch",
   "search_history",
   "create_artifact",
   "read_file",
+  "browser",
   "remember",
   "recall",
   "forget",

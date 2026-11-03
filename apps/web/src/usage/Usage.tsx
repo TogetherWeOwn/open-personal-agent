@@ -154,6 +154,71 @@ function CategoryFigures({ category: k, currency }: { category: Category; curren
   );
 }
 
+/** Seconds of browsing as words a person reads: "2h 5m", "5m", "under a minute". */
+function browserTime(seconds: number) {
+  if (seconds < 60) return seconds === 0 ? "None" : "Under a minute";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/**
+ * Browser time this month against the included hours. The meter is the deployment's total —
+ * the included hours are the Cloudflare account's, shared by everyone on it — and only the
+ * owner gets it; a member sees their own time with no allowance of their own implied. Past
+ * the included hours Cloudflare bills the extra; the estimate uses the same dated price
+ * the server split with.
+ */
+function BrowserUsage({ data }: { data: UsageData }) {
+  const b = data.browser;
+  const a = b.allowance;
+  const included = b.includedHoursPerMonth * 3600;
+  return (
+    <section aria-labelledby="browser-heading" className="flex flex-col gap-3">
+      <Heading id="browser-heading" level={2} className="text-xl font-semibold">
+        Browser
+      </Heading>
+      <div className="flex flex-col gap-1 rounded-xl border border-border bg-surface-raised p-3">
+        {a ? (
+          <Meter
+            value={Math.min(a.includedSeconds, included)}
+            maxValue={included}
+            valueLabel={`${browserTime(a.seconds)} of ${b.includedHoursPerMonth} hours included this month`}
+            className="flex flex-col gap-1"
+          >
+            <span className="flex flex-wrap items-baseline justify-between gap-x-3">
+              <Label className="font-medium">Browsing time</Label>
+              <span className="tabular-nums">
+                {browserTime(a.seconds)} of {b.includedHoursPerMonth}h included this month
+              </span>
+            </span>
+            <div className="h-2 overflow-hidden rounded-full bg-surface-sunken">
+              <div
+                className="h-full bg-accent"
+                style={{ width: `${Math.min(100, (a.includedSeconds / included) * 100)}%` }}
+              />
+            </div>
+          </Meter>
+        ) : (
+          <span className="flex flex-wrap items-baseline justify-between gap-x-3">
+            <span className="font-medium">Your browsing time</span>
+            <span className="tabular-nums">{browserTime(b.seconds)} this month</span>
+          </span>
+        )}
+        <p className="text-sm text-text-muted tabular-nums">
+          {a
+            ? `Your browsing: ${browserTime(b.seconds)} this month. `
+            : `The ${b.includedHoursPerMonth}h included each month are shared across this deployment; the owner sees the total and any overage. `}
+          {a && a.billedSeconds > 0
+            ? `Past the included hours: ${browserTime(a.billedSeconds)}, about ${money(a.costMicroUsd, data.currency)} at $${b.usdPerHour.toFixed(2)} an hour, billed by Cloudflare.`
+            : `Past the included hours, Cloudflare bills $${b.usdPerHour.toFixed(2)} an hour.`}{" "}
+          Price as of {dateWords(b.priceVerifiedAt)}.{b.stale && <Stale date={b.priceVerifiedAt} />}
+        </p>
+      </div>
+    </section>
+  );
+}
+
 function Categories({ categories, currency }: { categories: Category[]; currency: string }) {
   return (
     <section aria-labelledby="categories-heading" className="flex flex-col gap-3">
@@ -207,7 +272,14 @@ export function Usage() {
   }, []);
   useEffect(load, [load]);
 
-  const used = data && (data.month.groups.length > 0 || data.today.groups.length > 0);
+  const aiUsed = data && (data.month.groups.length > 0 || data.today.groups.length > 0);
+  // The owner also sees browsing through the deployment total (`allowance`, owner-only):
+  // members may have browsed when the owner has not. A member gets no allowance, so their
+  // gate stays their own seconds.
+  const browsingUsed =
+    data && (data.browser.seconds > 0 || (data.browser.allowance?.seconds ?? 0) > 0);
+  // Browsing alone still means something was used; the breakdowns below are AI-only either way.
+  const used = aiUsed || browsingUsed;
   return (
     <Page title="Usage">
       {failed && (
@@ -236,6 +308,8 @@ export function Usage() {
           </EmptyState>
         ))}
       {data && <Categories categories={data.categories} currency={data.currency} />}
+      {/* Only once there is browsing to show: a deployment with no browser never grows the section. */}
+      {data && browsingUsed && <BrowserUsage data={data} />}
       {/* The neuron line stands even when the other meters can't be read. */}
       {(data?.meters || data?.allowance) && (
         <Meters
@@ -244,7 +318,7 @@ export function Usage() {
           verifiedAt={data.metersVerifiedAt}
         />
       )}
-      {data && used && <Breakdown data={data} />}
+      {data && aiUsed && <Breakdown data={data} />}
     </Page>
   );
 }

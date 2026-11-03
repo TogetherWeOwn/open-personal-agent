@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   billingProviderId,
+  browserCost,
+  browserRendering,
   estimate,
   findPrice,
   isStale,
@@ -72,5 +74,24 @@ describe("price table", () => {
     const now = Date.parse("2026-11-01T12:00:00Z");
     expect(isStale("2026-08-03", now)).toBe(false);
     expect(isStale("2026-08-02", now)).toBe(true);
+  });
+
+  it("dates the Browser Rendering price and splits seconds at the included hours (M4-09 AC3)", () => {
+    expect(browserRendering).toEqual({
+      includedHoursPerMonth: 10,
+      usdPerHour: 0.09,
+      verifiedAt: "2026-11-03",
+      source: "https://developers.cloudflare.com/browser-rendering/platform/pricing/",
+    });
+    expect(browserCost(0)).toEqual({ includedSeconds: 0, billedSeconds: 0, costMicroUsd: 0 });
+    expect(browserCost(3600)).toEqual({ includedSeconds: 3600, billedSeconds: 0, costMicroUsd: 0 });
+    // Eleven hours: ten included, one billed at $0.09.
+    expect(browserCost(11 * 3600)).toEqual({
+      includedSeconds: 10 * 3600,
+      billedSeconds: 3600,
+      costMicroUsd: 90_000,
+    });
+    // A single second past the allowance is never shown as free.
+    expect(browserCost(10 * 3600 + 1).costMicroUsd).toBeGreaterThanOrEqual(1);
   });
 });
