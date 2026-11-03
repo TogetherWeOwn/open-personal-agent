@@ -244,7 +244,8 @@ function openConnection(entry: SshVmProviderEntry, privateKey: string): Promise<
         username: entry.username,
         privateKey,
         readyTimeout: READY_TIMEOUT_MS,
-        hostVerifier: (key: Buffer) => entry.hostKeyPins.some((pin) => pin === hostKeyPin(key)),
+        hostVerifier: (key: Buffer) =>
+          entry.hostKeyPins.some((pin) => pin.replace(/=+$/, "") === hostKeyPin(key)),
       });
     } catch (error) {
       fail(`cannot connect to ${target}: ${errorDetail(error)}`);
@@ -323,7 +324,19 @@ async function writeMetadata(
     });
   } catch (error) {
     // A process crash can leave a temporary file, but never destroys the previous record.
-    await new Promise<void>((resolve) => sftp.unlink(temporary, () => resolve()));
+    await new Promise<void>((resolve) => {
+      // ssh2 can buffer requests forever after channel close. Cleanup must not hide the error.
+      const finish = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 1000);
+      try {
+        sftp.unlink(temporary, finish);
+      } catch {
+        finish();
+      }
+    });
     throw error;
   }
 }
@@ -539,8 +552,18 @@ export function createSshVmProvider(
   ): Promise<ComputerHandle | null> => {
     const dir = await computerDir(sftp, providerComputerId);
     let raw: Buffer;
+    let archived = false;
     try {
-      raw = await sftpReadFile(sftp, `${dir}/${METADATA_NAME}`);
+      try {
+        raw = await sftpReadFile(sftp, `${dir}/${METADATA_NAME}`);
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+        raw = await sftpReadFile(
+          sftp,
+          `${await workspaceBase(sftp)}/.destroyed/${providerComputerId}/${METADATA_NAME}`,
+        );
+        archived = true;
+      }
     } catch (error) {
       if (isNotFound(error)) return null;
       throw providerError(
@@ -557,7 +580,9 @@ export function createSshVmProvider(
       ) {
         throw new Error("metadata shape");
       }
-      return parsed as ComputerHandle;
+      return archived
+        ? { ...(parsed as ComputerHandle), state: "destroyed" }
+        : (parsed as ComputerHandle);
     } catch {
       throw providerError(`computer "${providerComputerId}" metadata is corrupt`, "provider");
     }
@@ -987,9 +1012,27 @@ export function createSshVmProvider(
           }
           if (stored.state !== "destroyed") {
             await removeRuntime(conn, handle.providerComputerId);
-            // Keep a durable tombstone; interrupted cleanup leaves the old recovery record.
+            // Moving the whole directory atomically makes destruction irreversible: a stale
+            // stop can no longer publish into the old path, even from another provider/process.
+            // Archive separately so list() never walks or reads historical tombstone records.
             const dir = await computerDir(sftp, stored.providerComputerId);
-            await writeMetadata(sftp, `${dir}/${METADATA_NAME}`, { ...stored, state: "destroyed" });
+            const archive = `${await workspaceBase(sftp)}/.destroyed`;
+            await mkdirParents(sftp, archive);
+            try {
+              await new Promise<void>((resolve, reject) => {
+                sftp.ext_openssh_rename(dir, `${archive}/${stored.providerComputerId}`, (error) =>
+                  error ? reject(error) : resolve(),
+                );
+              });
+            } catch (error) {
+              // Another destroy may have completed the same atomic move.
+              if ((await readHandle(sftp, stored.providerComputerId))?.state !== "destroyed") {
+                throw providerError(
+                  `cannot archive destroyed computer: ${errorDetail(error)}`,
+                  "provider",
+                );
+              }
+            }
           }
           destroyed.add(handle.providerComputerId);
         } finally {

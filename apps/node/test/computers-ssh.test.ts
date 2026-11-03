@@ -409,6 +409,198 @@ function scriptEntry(
 }
 
 describe.skipIf(SFTP_SERVER === undefined)("SSH failure recovery", () => {
+  it.each(["=", "=="])(
+    "accepts validated host pins with %s padding",
+    async (padding) => {
+      const host = makeKeyPair();
+      const key = makeKeyPair();
+      const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-padded-pin-"));
+      const server = await startScriptServer({
+        hostKeyPem: host.privatePem,
+        acceptPublicKey: true,
+        onExec: () => {},
+      });
+      try {
+        const entry = scriptEntry(server, host.publicKey, { baseDir });
+        entry.hostKeyPins = [`${hostPin(host.publicKey)}${padding}`];
+        const provider = createSshVmProvider(entry, async () => key.privatePem);
+        await expect(provider.list()).resolves.toEqual([]);
+      } finally {
+        await server.close();
+        rmSync(baseDir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  it("does not resurrect a destroyed computer when a stale stop publishes later", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-stop-destroy-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      onExec: () => {},
+    });
+    let release = (): void => {};
+    let paused = (): void => {};
+    const atPublication = new Promise<void>((resolve) => {
+      paused = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holdStop = false;
+    const original = Client.prototype.sftp;
+    const spy = vi.spyOn(Client.prototype, "sftp").mockImplementation(function (
+      this: Client,
+      callback,
+    ) {
+      return original.call(this, (error, sftp) => {
+        if (!error) {
+          const rename = sftp.ext_openssh_rename.bind(sftp);
+          sftp.ext_openssh_rename = (from, to, done) => {
+            if (holdStop && to.endsWith("/.computer.json")) {
+              holdStop = false;
+              paused();
+              void gate.then(() => rename(from, to, done));
+            } else rename(from, to, done);
+          };
+        }
+        callback(error, sftp);
+      });
+    });
+    let stopping: Promise<unknown> | undefined;
+    try {
+      const entry = scriptEntry(server, host.publicKey, { baseDir });
+      const first = createSshVmProvider(entry, async () => key.privatePem);
+      const second = createSshVmProvider(entry, async () => key.privatePem);
+      const handle = await first.create(createComputerSpec({ profile: "standard" }));
+      holdStop = true;
+      stopping = first.stop(handle).catch((error: unknown) => error);
+      await atPublication;
+      await second.destroy(handle);
+      release();
+      await stopping;
+      const restarted = createSshVmProvider(entry, async () => key.privatePem);
+      expect(await restarted.list()).toEqual([]);
+      await expect(restarted.stop(handle)).rejects.toMatchObject({ code: "gone" });
+      await expect(restarted.destroy(handle)).resolves.toBeUndefined();
+    } finally {
+      release();
+      await stopping;
+      spy.mockRestore();
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("bounds metadata cleanup when a disconnected SFTP channel never calls back", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-cleanup-timeout-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      onExec: () => {},
+    });
+    let disconnectWrite = false;
+    let active: Client | undefined;
+    const original = Client.prototype.sftp;
+    const spy = vi.spyOn(Client.prototype, "sftp").mockImplementation(function (
+      this: Client,
+      callback,
+    ) {
+      return original.call(this, (error, sftp) => {
+        if (!error && disconnectWrite) {
+          active = this;
+          // Close the real channel before failing the write; use ssh2's real unlink behavior.
+          sftp.writeFile = ((
+            _path: string,
+            _data: Buffer,
+            done: (error?: Error | null) => void,
+          ) => {
+            sftp.once("close", () => done(new Error("disconnected metadata write")));
+            this.destroy();
+          }) as SFTPWrapper["writeFile"];
+        }
+        callback(error, sftp);
+      });
+    });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const provider = createSshVmProvider(
+        scriptEntry(server, host.publicKey, { baseDir }),
+        async () => key.privatePem,
+      );
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      disconnectWrite = true;
+      const outcome = await Promise.race([
+        provider.stop(handle).catch((error: unknown) => error),
+        new Promise<string>((resolve) => {
+          deadline = setTimeout(() => resolve("hung metadata cleanup"), 3000);
+        }),
+      ]);
+      expect(outcome).toMatchObject({
+        code: "provider",
+        message: expect.stringContaining("disconnected metadata write"),
+      });
+    } finally {
+      clearTimeout(deadline);
+      active?.destroy();
+      spy.mockRestore();
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("does not read historical tombstone records during listing", async () => {
+    const host = makeKeyPair();
+    const key = makeKeyPair();
+    const baseDir = mkdtempSync(join(tmpdir(), "ssh-vm-list-history-"));
+    const server = await startScriptServer({
+      hostKeyPem: host.privatePem,
+      acceptPublicKey: true,
+      emulateDocker: true,
+      onExec: () => {},
+    });
+    const reads: string[] = [];
+    const original = Client.prototype.sftp;
+    const spy = vi.spyOn(Client.prototype, "sftp").mockImplementation(function (
+      this: Client,
+      callback,
+    ) {
+      return original.call(this, (error, sftp) => {
+        if (!error) {
+          const read = sftp.readFile.bind(sftp);
+          sftp.readFile = ((
+            path: string,
+            done: (error: Error | undefined, data: Buffer) => void,
+          ) => {
+            reads.push(path);
+            return read(path, done);
+          }) as SFTPWrapper["readFile"];
+        }
+        callback(error, sftp);
+      });
+    });
+    try {
+      const entry = scriptEntry(server, host.publicKey, { baseDir });
+      const provider = createSshVmProvider(entry, async () => key.privatePem);
+      const handle = await provider.create(createComputerSpec({ profile: "standard" }));
+      await provider.destroy(handle);
+      reads.length = 0;
+      expect(await createSshVmProvider(entry, async () => key.privatePem).list()).toEqual([]);
+      expect(reads).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await server.close();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("ignores writable directories in the SSH account PATH", async () => {
     const host = makeKeyPair();
     const key = makeKeyPair();

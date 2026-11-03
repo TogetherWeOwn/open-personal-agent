@@ -55,7 +55,8 @@ fails closed; it never falls back to executing task code in the VM's login shell
 
 A `SshVmProviderEntry` supplies `id`, `host`, `username`, `hostKeyPins`,
 `credentialSecretId`, and optional `port` and `baseDir`. Verify each SHA256 host-key
-fingerprint out of band; empty pins and trust-on-first-use are not supported.
+fingerprint out of band; empty pins and trust-on-first-use are not supported. OpenSSH's
+unpadded form and the entry validator's accepted trailing base64 padding compare equally.
 
 Store the private key in the vault with purpose `ssh_private_key` and the exact
 `sshCredentialBinding(entry)` AAD binding. `loadSshPrivateKey` decrypts only that purpose
@@ -84,12 +85,18 @@ grants the same guest account access; file operations do not grant a wider host 
   POSIX rename extension. Interrupted writes retain the previous valid record. The
   initial stopped record is published before any container or volume is allocated;
   interruption before publication can leave only an unused directory/temporary file.
-- `destroy()` removes the container and named volume, then atomically persists a small
-  `destroyed` metadata tombstone. It is excluded from listings, keeps destroy idempotent
-  across restarts, and distinguishes destroyed IDs from never-created IDs. Tombstones
-  are retained without an automatic expiry. Interrupted cleanup keeps the old record
-  for retry. A failed create likewise retains a stopped recovery record if resource
-  cleanup cannot finish.
+- Failed metadata writes attempt temporary-file cleanup for at most one second, then
+  report the original error even when the closed SFTP channel never calls back. A
+  leftover temporary file contains only metadata, never the SSH credential.
+- `destroy()` removes the container and named volume, then atomically moves the metadata
+  directory into `baseDir/.destroyed/<computer-id>`. That location is the durable
+  tombstone: a concurrent stop cannot republish into the removed active directory,
+  including from a different provider instance or process. Listing reads only active
+  records, not the archived history. Tombstones keep destroy idempotent across restarts
+  and distinguish destroyed IDs from never-created IDs; they have no automatic expiry.
+  Interrupted resource cleanup or a failed archive move leaves the active recovery
+  record for retry. A failed create likewise retains a stopped recovery record if
+  resource cleanup cannot finish.
 - Exec timeout, AbortSignal cancellation and early iterator return clean up the exec's
   process group without stopping other execs or the computer. This is process cleanup,
   not a security boundary against guest code deliberately creating another session.
