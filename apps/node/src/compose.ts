@@ -12,7 +12,7 @@ import { Hono } from "hono";
 import { NodeAssistant, nodeRoutes } from "./assistant";
 import { localBlobStore } from "./blobs";
 import { openSqlite, sqliteD1 } from "./d1";
-import { modelFetch } from "./egress";
+import { modelFetch, pageFetch } from "./egress";
 import "./workers-globals";
 import { migrate } from "./migrate";
 import { memoryRateLimit } from "./rate-limit";
@@ -88,11 +88,22 @@ export function createNodeApp(options: NodeOptions): NodeApp {
   // Set before the shutdown snapshot: an assistant created while the drain runs starts already
   // closing, so no new turn can outlive the database close.
   let closing = false;
+  // One guarded page fetch for every assistant: `web_fetch`'s port, with no private-host
+  // allowance (the operator's model-host allowance names servers they run; a page the model
+  // picks is never one of them). The deployment's own hostname, so a page can't make a turn
+  // read the app itself; the tool and the fetch refuse localhost and private literals anyway.
+  const fetchPage = pageFetch();
+  const ownHosts = origin ? [new URL(origin).hostname] : [];
   const { assistantFor } = {
     assistantFor(userId: string): NodeAssistant {
       let assistant = assistants.get(userId);
       if (!assistant) {
-        assistant = new NodeAssistant(userId, { db, getEnv: () => env });
+        assistant = new NodeAssistant(userId, {
+          db,
+          getEnv: () => env,
+          pageFetch: fetchPage,
+          ownHosts,
+        });
         assistants.set(userId, assistant);
         if (closing) {
           // Born mid-drain, after the shutdown snapshot: refuse new turns at once. It holds no

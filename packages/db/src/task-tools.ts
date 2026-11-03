@@ -5,21 +5,13 @@
 // M3-12b. The host scopes the service to the calling user first, so the tool holds no user id
 // of its own to get wrong, and hands over the conversation the promotion continues.
 //
-// NOTE (M3-08 AC5): as with memory-tools.ts, the built-in registry has not landed, so the
-// `LoopTool` surface is stubbed here structurally. The shapes mirror the M3-08/M3-03 interface
-// (`manifest` with `riskClass`/`destinations`/`scopes`, output with `ok`/`content`/`context`),
-// so registering for real is a type-only swap.
+// NOTE (M3-08): the manifest is `@opa/policy`'s, so the tool registers in a
+// `ToolRegistry<LoopTool>`; the `execute` surface below stays structural (two parameters), which
+// a three-parameter `LoopTool.execute` accepts.
 import type { ToolManifest } from "@opa/policy";
 
-/** The `LoopTool` manifest fields the registry reads (M3-02 AC1). */
-export interface TaskToolManifest {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  riskClass: "read" | "write_reversible" | "consequential" | "irreversible";
-  destinations: readonly { id: string; kind: string; dataEgress: boolean }[];
-  scopes: readonly string[];
-}
+/** The `LoopTool` manifest the registry reads (M3-02 AC1). */
+export type TaskToolManifest = ToolManifest;
 
 /** What a result adds to the context. A queued row joins as system text. */
 export type TaskToolContextEvent = { kind: "system" };

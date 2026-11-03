@@ -40,6 +40,7 @@ import {
 import { ToolRegistry } from "@opa/policy";
 import type { AllowanceWarnings } from "@opa/server/allowances";
 import { resolveChatModel } from "@opa/server/chat-model";
+import { composeTurnTools, parseOwnHosts, type TurnContext } from "@opa/server/turn-tools";
 import {
   base64,
   type CallUsage,
@@ -217,13 +218,33 @@ export class Assistant extends Agent<Bindings> {
   /** Picks each turn's model. Tests replace it with a scripted provider. */
   resolveModel = resolveChatModel;
   /**
-   * The tools a turn may offer the model, with the policy inputs for them. Tests replace it;
-   * the builtin tools (M3-04 and later) register here. Until then a turn offers none.
+   * The tools a turn may offer the model, with the policy inputs for them. Tests replace it
+   * (a sync closure without parameters still satisfies the type); production composes the
+   * builtin registry plus the memory and task tools, with ports scoped to the calling user
+   * and the policy input read from that user's stored overrides and grants — so Settings ›
+   * Apps & tools governs what the turn offers. The context names the turn: file and memory
+   * tools file under its conversation, and the taint thunk reads the loop's live taint, since
+   * a web, file or tool result mid-turn taints it. The page fetch is the runtime's, which
+   * can't reach a private network; the own hosts come from `OPA_OWN_HOSTS`, so a page can't
+   * make the turn read the deployment itself.
    */
-  resolveTools: () => { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] } = () => ({
-    tools: new ToolRegistry<LoopTool>(),
-    policy: () => ({}),
-  });
+  resolveTools: (
+    context: TurnContext,
+  ) =>
+    | { tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }
+    | Promise<{ tools: ToolRegistry<LoopTool>; policy: LoopHost["policy"] }> = (context) =>
+    composeTurnTools({
+      user: this.#repo,
+      fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+      ownHosts: parseOwnHosts(this.env.OPA_OWN_HOSTS),
+      newId: () => crypto.randomUUID(),
+      scope: {
+        kind: "chat",
+        conversationId: context.conversationId,
+        ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
+      },
+      taint: context.taint,
+    });
   /** Where promoted turns run (M3-12 AC2). Tests replace it to drive the run themselves. */
   taskWorkflows: () => Pick<Workflow, "create" | "get"> = () => this.env.TASK_WORKFLOW;
   /** How long a run goes before it moves to a task at its next step boundary. */
@@ -1206,7 +1227,11 @@ export class Assistant extends Agent<Bindings> {
         return "gone";
       }
       if (state.pending?.batchId !== batchId) return "gone";
-      const { tools } = this.resolveTools();
+      const { tools } = await this.resolveTools({
+        conversationId: saved.conversationId,
+        turnId: saved.turnId,
+        taint: () => state.taint.taint !== "trusted",
+      });
       const context = { kind: "turn", id: turnId, conversationId: saved.conversationId } as const;
       const applied = await applyStoredDecisions(
         state,
@@ -1713,7 +1738,14 @@ export class Assistant extends Agent<Bindings> {
       },
     };
 
-    const { tools, policy } = this.resolveTools();
+    // The taint thunk reads the loop's live taint: `state` is the object the loop mutates
+    // when a web, file or tool result lands, and a turn whose taint can't be read counts as
+    // tainted. Fail-closed (`!== "trusted"`), as the memory tools' trust gate requires.
+    const { tools, policy } = await this.resolveTools({
+      conversationId,
+      turnId,
+      taint: () => state.taint.taint !== "trusted",
+    });
     const host: LoopHost = {
       provider: run.provider,
       model: run.model,

@@ -39,6 +39,7 @@ import {
 } from "@opa/harness-builtin";
 import { ToolRegistry } from "@opa/policy";
 import { type ChatModelError, type ModelPick, resolveChatModel } from "@opa/server/chat-model";
+import { composeTurnTools, parseOwnHosts } from "@opa/server/turn-tools";
 import { compose, type WorkerEnv, withoutMasterKeys } from "./compose";
 import type { Bindings } from "./env";
 import { type AssistantTaskRpc, createWorkflowTaskContext, stepperFor } from "./task-context";
@@ -79,7 +80,11 @@ type ScopedUser = ReturnType<ReturnType<typeof createRepository>["forUser"]>;
 export class TaskWorkflow extends WorkflowEntrypoint<Bindings, TaskParams> {
   /** Picks each task's model. Tests replace it with a scripted provider. */
   resolveModel = resolveChatModel;
-  /** The tools a task's loop may call; the builtin set joins with M3-08/M3-12b. */
+  /**
+   * The tools a task's loop may call. Tests set it to drive the run themselves; empty (the
+   * production default) composes the builtin registry plus the memory and task tools, scoped
+   * to the task's user and conversation, with the stored overrides and grants as the policy.
+   */
   taskTools: readonly LoopTool[] = [];
   /** The env with the vault: `compose` stays the only reader of the master keys. */
   readonly #composed: Promise<Awaited<ReturnType<typeof compose>>>;
@@ -214,6 +219,31 @@ export async function executeTask(
     if (picked.apiKey) secrets.push(picked.apiKey);
     const budgetMicroUsd = initial.budgetMicroUsd;
     await ctx.step("task:budget", async () => await ctx.budget.start(budgetMicroUsd));
+    // The task's tools: a non-empty seam replaces them (tests drive the run themselves);
+    // otherwise the run composes the production set, with the policy input read from the
+    // task's user's stored overrides and grants. Composed once per run, outside the steps
+    // like the model pick above; the steps below memoize what ran, so a Settings change
+    // lands on the next run, never mid-run. The taint box carries each cycle's turn to the
+    // memory tools' trust gate: the loop mutates the turn in place, so the thunk reads it
+    // live, and a turn that can't be read counts as tainted (fail-closed).
+    const taintBox: { turn: TurnState | null } = { turn: null };
+    let loopTools: readonly LoopTool[];
+    let loopPolicy: LoopHost["policy"];
+    if (deps.taskTools.length > 0) {
+      loopTools = deps.taskTools;
+      loopPolicy = () => ({});
+    } else {
+      const composed = await composeTurnTools({
+        user,
+        fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+        ownHosts: parseOwnHosts(env.OPA_OWN_HOSTS),
+        newId: () => crypto.randomUUID(),
+        scope: { kind: "task", taskId: task.id, conversationId: task.conversationId },
+        taint: () => taintBox.turn?.taint.taint !== "trusted",
+      });
+      loopTools = composed.list;
+      loopPolicy = composed.policy;
+    }
     const outcome = await driveLoop(
       ctx,
       user,
@@ -224,7 +254,7 @@ export async function executeTask(
         ...(replyId ? { replyId } : {}),
       },
       picked,
-      deps.taskTools,
+      { tools: loopTools, policy: loopPolicy, taint: taintBox },
       now,
       paused,
       end,
@@ -359,7 +389,12 @@ async function driveLoop(
     billingId?: string;
     used?: () => Promise<void>;
   },
-  taskTools: readonly LoopTool[],
+  composed: {
+    tools: readonly LoopTool[];
+    policy: LoopHost["policy"];
+    /** Carries each cycle's turn to the memory tools' trust gate (set before `runTurn`). */
+    taint: { turn: TurnState | null };
+  },
   now: () => number,
   paused: { ms: number },
   end: { event: TaskProgressEvent | null },
@@ -437,7 +472,7 @@ async function driveLoop(
   let batch: string | null = null;
   const unknown = new Set<string>();
   const registry = new ToolRegistry<LoopTool>();
-  for (const tool of taskTools) {
+  for (const tool of composed.tools) {
     registry.register({
       manifest: tool.manifest,
       // Called through the tool, not copied off it: a class's hook keeps its `this`.
@@ -485,7 +520,7 @@ async function driveLoop(
     provider,
     model: picked.model,
     tools: registry,
-    policy: () => ({}), // stored overrides and grants join the read with the tools (M3-08)
+    policy: composed.policy,
     taskId,
     now,
     // A counter, so a replay names the same steps the same way; prefixed so ids stay unique
@@ -580,6 +615,7 @@ async function driveLoop(
     // The `limit.reached` kind the loop stopped on: saved to the turn state for Continue,
     // and returned for the row's "Paused: limit" label (M3-13 AC1).
     let limit: { kind: LimitKind; detail: string } | undefined;
+    composed.taint.turn = turn;
     const gen = runTurn(host, state.history, turn, new AbortController().signal);
     let outcome: Awaited<ReturnType<typeof gen.next>>["value"];
     let asked: LoopEvent | null = null;
