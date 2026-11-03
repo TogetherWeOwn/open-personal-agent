@@ -129,9 +129,12 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
       row.seconds = (Date.now() - row.start) / 1000;
     }
   };
+  // The live-model key reaches only the live step: deployment (and its build) never sees it.
+  const { LIVE_MODEL_API_KEY: _liveKey, ...deployEnv } = vdeps.env;
+  const deployDeps = { ...vdeps, env: deployEnv };
   const deploy = (label, expect) =>
     phase(label, async () => {
-      const result = await steps.deploy(["--name", prefix], vdeps);
+      const result = await steps.deploy(["--name", prefix], deployDeps);
       const { changed } = result;
       if (expect.some((c) => !changed.includes(c)) || (!expect.length && changed.length)) {
         throw new DeployError(`${label}: expected [${expect}], changed [${result.changed}]`);
@@ -141,7 +144,7 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
   // Open item: without IDs in the config, does every re-deploy re-bind the same D1 and R2?
   const snapshots = [];
   const snapshot = async (label) => {
-    const found = await steps.inventory(vdeps, prefix);
+    const found = await steps.inventory(deployDeps, prefix);
     const ids = (kind) => found.filter((r) => r.kind === kind).map((r) => r.item.uuid ?? r.name);
     snapshots.push({ label, d1: ids("d1"), r2: ids("r2") });
   };
@@ -166,7 +169,7 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     await snapshot("after the fresh deploy");
     await phase("Claim, onboard, first answer", async () => {
       if (!setupToken) throw new DeployError("the fresh deploy printed no setup link");
-      await steps.firstRun(url, setupToken, vdeps, livePaths.statePath);
+      await steps.firstRun(url, setupToken, deployDeps, livePaths.statePath);
     });
     metrics.firstAnswer = { minutes: (Date.now() - start) / 60_000 };
     await phase("Live models on a configured endpoint", async () => {
@@ -191,13 +194,26 @@ export async function verifyCloudflare(argv, deps = defaultDeps(), steps = STEPS
     if (migration) fs.rmSync(migration.file, { force: true });
   }
   const args = ["--name", prefix, "--confirm", prefix];
-  const teardown = await phase("Teardown", () => steps.teardown(args, vdeps)).catch((error) => {
-    failure ??= error;
-    return null;
-  });
+  const teardown = await phase("Teardown", () => steps.teardown(args, deployDeps)).catch(
+    (error) => {
+      failure ??= error;
+      return null;
+    },
+  );
 
   const report = renderReport(deps, {
-    ...{ prefix, failure, phases, prompts, snapshots, teardown, metrics, live, liveConfigured },
+    ...{
+      prefix,
+      failure,
+      phases,
+      prompts,
+      snapshots,
+      teardown,
+      metrics,
+      live,
+      liveConfigured,
+      liveKey: vdeps.env.LIVE_MODEL_API_KEY ?? null,
+    },
   });
   const file = values.report ?? path.join(deps.root, ".wrangler", "opa-verify", `${prefix}.md`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -256,19 +272,27 @@ function budgets({ deploy, firstAnswer }) {
 }
 
 /** One row per adapter from the live step's results file, or why there is none. */
-function liveSection({ live, liveConfigured }) {
+function liveSection({ live, liveConfigured, liveKey }) {
   if (!liveConfigured) {
     return "Skipped: no LIVE_MODEL_* secrets were set, so the endpoint-generic live step did not run.";
   }
   if (!live?.length) return "The step ran but recorded no per-adapter result; see the run's log.";
+  // Defense in depth: the spec redacts the key before writing results, and the report redacts
+  // again in case an endpoint echoed it into a recorded error. Short keys are left alone: a
+  // tiny test key would match ordinary words.
+  const key = typeof liveKey === "string" && liveKey.length >= 8 ? liveKey : null;
+  const scrub = (value) =>
+    value === null || value === undefined
+      ? "—"
+      : String(key ? String(value).split(key).join("[redacted]") : value);
   const cell = (value) => (value === null || value === undefined ? "—" : String(value));
   const rows = live.map(
     (a) =>
-      `| ${a.adapter} | ${cell(a.model)} | ${cell(a.testMs)} ms | ` +
+      `| ${a.adapter} | ${scrub(a.model)} | ${cell(a.testMs)} ms | ` +
       `${cell(a.inputTokens)} / ${cell(a.outputTokens)} | ` +
       (a.costMicroUsd === null ? "—" : `${a.costMicroUsd} uUSD (${a.cost})`) +
       ` | ${cell(a.artifactId)} | ` +
-      (a.ok ? "pass" : `**fail**: ${(a.error ?? "unknown").slice(0, 120)}`) +
+      (a.ok ? "pass" : `**fail**: ${scrub(a.error ?? "unknown").slice(0, 120)}`) +
       " |",
   );
   return (

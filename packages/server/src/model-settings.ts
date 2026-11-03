@@ -81,7 +81,10 @@ function providerAudit(
   before?: Provider,
 ): AuditRow | undefined {
   const fields = { providerId: values.providerId ?? null, baseUrl: values.baseUrl ?? null };
-  const edits = before ? changes(before, { ...fields, model: values.model }) : null;
+  // The wire API is a consequential settings change too: an api-only edit must leave an
+  // Activity row. An absent value keeps the saved choice, so it compares as no change.
+  const api = values.api ?? before?.api ?? null;
+  const edits = before ? changes(before, { ...fields, api, model: values.model }) : null;
   const targetId = before?.id ?? null;
   if (typeof body.apiKey !== "string") {
     return edits

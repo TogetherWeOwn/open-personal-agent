@@ -102,6 +102,7 @@ function verifySetup({
   deployMinutes = 0,
   fail = null,
   live = false,
+  liveErrorKey = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(tmpdir(), "opa-verify-"));
   fs.cpSync(path.join(REPO, "deploy"), path.join(root, "deploy"), { recursive: true });
@@ -117,17 +118,26 @@ function verifySetup({
       deploys++;
       if (deployMinutes) vi.setSystemTime(Date.now() + deployMinutes * 60_000);
       calls.push(`deploy ${fs.readdirSync(path.join(root, "migrations")).sort()}`);
+      // The live-model key never reaches deployment (or its build), only the live step.
+      if (deps.env.LIVE_MODEL_API_KEY) throw new Error("deploy saw LIVE_MODEL_API_KEY");
       deps.stdout(`Using fallback value in non-interactive context: yes\n${url}\n`);
       if (link && deploys === 1) deps.tty(deps.env)?.(`Link: ${url}/setup#token=tok/+=\n`);
       if (fail) throw fail(url);
       return { changed: plan[deploys - 1], url };
     },
-    firstRun: async (base, token) => calls.push(`first run ${base === url} ${token}`),
+    firstRun: async (base, token, _deps) => {
+      calls.push(`first run ${base === url} ${token}`);
+      if (_deps?.env?.LIVE_MODEL_API_KEY) throw new Error("first run saw LIVE_MODEL_API_KEY");
+    },
     liveModels: async (base, _deps, paths) => {
-      calls.push(`live models ${base === url}`);
+      calls.push(`live models ${base === url} key=${Boolean(_deps.env.LIVE_MODEL_API_KEY)}`);
       // A configured run records its per-adapter results; an unconfigured one records nothing.
       if (_deps.env.LIVE_MODEL_API_KEY) {
         fs.mkdirSync(path.dirname(paths.resultsPath), { recursive: true });
+        // An endpoint that echoes the key in a failed probe: the report must redact it.
+        const error = liveErrorKey
+          ? `the Test probe failed: bad key ${_deps.env.LIVE_MODEL_API_KEY}`
+          : null;
         fs.writeFileSync(
           paths.resultsPath,
           JSON.stringify([
@@ -142,8 +152,8 @@ function verifySetup({
               cost: "match",
               artifactId: "a1",
               artifactName: "live-check-openai-chat.md",
-              ok: true,
-              error: null,
+              ok: !liveErrorKey,
+              error,
             },
           ]),
         );
@@ -154,7 +164,12 @@ function verifySetup({
   };
   const fetch = async () => ({ status: 200, json: async () => ({ status: "ok" }) });
   const env = live
-    ? { LIVE_MODEL_API_KEY: "k", LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1" }
+    ? {
+        LIVE_MODEL_API_KEY: liveErrorKey
+          ? "sk-live-secret-abcdef123456"
+          : "sk-live-test-key-000000000000",
+        LIVE_MODEL_OPENAI_BASE_URL: "https://models.example.com/v1",
+      }
     : {};
   const deps = { env, root, fetch, stdout: (t) => out.push(t) };
   const report = path.join(root, "report.md");
@@ -172,7 +187,7 @@ describe("verify:cloudflare", () => {
     expect(t.calls).toEqual([
       `deploy ${base}`,
       "first run true tok/+=",
-      "live models true",
+      "live models true key=false",
       `deploy ${base}`,
       `deploy ${base},${mig}`,
       `teardown --name ${P} --confirm ${P}`,
@@ -198,10 +213,18 @@ describe("verify:cloudflare", () => {
     const t = verifySetup({ live: true });
     await t.run();
     const report = t.report();
+    expect(t.calls).toContain("live models true key=true");
     expect(report).toContain("Result: **PASS**");
     expect(report).toMatch(
       /\| openai-chat \| m \| 412 ms \| 100 \/ 30 \| 40 uUSD \(match\) \| a1 \| pass \|/,
     );
+  });
+
+  it("redacts the live-model key an endpoint echoes in a recorded error", async () => {
+    const t = verifySetup({ live: true, liveErrorKey: true });
+    await t.run();
+    expect(t.report()).toContain("[redacted]");
+    expect(t.report()).not.toContain("sk-live-secret-abcdef123456");
   });
 
   it("fails when the re-run is not up to date, and still tears down", async () => {

@@ -45,7 +45,14 @@ interface AdapterResult {
 
 const results = new Map<Adapter, AdapterResult>();
 
+/** The endpoint key never reaches the report: an endpoint that echoes it fails redacted. */
+const scrubKey = (value: string | null) =>
+  value !== null && API_KEY && API_KEY.length >= 8
+    ? value.split(API_KEY).join("[redacted]")
+    : value;
+
 function record(result: AdapterResult) {
+  result = { ...result, model: scrubKey(result.model), error: scrubKey(result.error) };
   results.set(result.adapter, result);
   fs.mkdirSync("test-results", { recursive: true });
   fs.writeFileSync(RESULTS, `${JSON.stringify([...results.values()], null, 2)}\n`);
@@ -59,9 +66,15 @@ function record(result: AdapterResult) {
 
 /** The deployment's own API, with the claimed session's cookies. */
 async function api(page: Page, method: "GET" | "POST" | "PUT", path: string, body?: unknown) {
+  // Writes pass the exact-origin guard, which needs this deployment's Origin (browser fetch
+  // sends it; page.request does not).
+  const origin = new URL(page.url()).origin;
   const res = await page.request.fetch(path, {
     method,
-    headers: body ? { "content-type": "application/json" } : {},
+    headers: {
+      ...(body ? { "content-type": "application/json" } : {}),
+      ...(method === "GET" ? {} : { origin }),
+    },
     data: body ? JSON.stringify(body) : undefined,
   });
   const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
@@ -69,11 +82,21 @@ async function api(page: Page, method: "GET" | "POST" | "PUT", path: string, bod
 }
 
 /** The endpoint's model ids from its own list call, in its order, without the banned ones. */
-async function listModels(baseUrl: string): Promise<string[]> {
-  const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/models`, {
-    headers: { authorization: `Bearer ${API_KEY}` },
+async function listModels(baseUrl: string, adapter: Adapter): Promise<string[]> {
+  // The base URL already holds the version path (for example `https://host/v1`), as the
+  // provider adapters treat it: append `/models`, never another `/v1`.
+  const headers: Record<string, string> =
+    adapter === "anthropic-messages"
+      ? {
+          authorization: `Bearer ${API_KEY}`,
+          "x-api-key": API_KEY ?? "",
+          "anthropic-version": "2023-06-01",
+        }
+      : { authorization: `Bearer ${API_KEY}` };
+  const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/models`, {
+    headers,
   });
-  if (!res.ok) throw new Error(`GET /v1/models: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`GET /models: HTTP ${res.status}`);
   const body = (await res.json()) as { data?: { id?: unknown }[] } | { id?: unknown }[];
   const data = Array.isArray(body) ? body : (body.data ?? []);
   const ids = data.map((m) => m?.id).filter((id): id is string => typeof id === "string");
@@ -120,9 +143,12 @@ interface UsageLine {
 async function usageByModel(page: Page, model: string) {
   const { status, json } = await api(page, "GET", "/api/usage");
   if (status !== 200 || !json) throw new Error(`GET /api/usage: HTTP ${status}`);
-  const groups = ((json.breakdowns as { groups?: { lines?: UsageLine[] }[] }).groups ?? []).flatMap(
-    (g) => g.lines ?? [],
-  );
+  // Per-model lines live under `month.groups`; `breakdowns` holds conversation/task/day rows.
+  const groups = (
+    ((json.month as { groups?: { lines?: UsageLine[] }[] }).groups ?? []) as {
+      lines?: UsageLine[];
+    }[]
+  ).flatMap((g) => g.lines ?? []);
   const lines = groups.filter((l) => l.model === model);
   return {
     inputTokens: lines.reduce((s, l) => s + l.inputTokens, 0),
@@ -193,7 +219,8 @@ const fail = (adapter: Adapter, error: unknown): AdapterResult => ({
 
 test.describe("live models on a configured endpoint", () => {
   test.skip(!CONFIGURED, "no LIVE_MODEL_* secrets: the endpoint-generic live step is skipped");
-  test.describe.configure({ mode: "serial" });
+  // No serial mode: each adapter records its own result, so one adapter's failure must never
+  // skip the others. The project already runs one worker, keeping the order.
   // Model picks, probes and a three-fetch agent task per adapter.
   test.setTimeout(900_000);
 
@@ -240,8 +267,8 @@ test.describe("live models on a configured endpoint", () => {
    * answers with tool calls, priced where the price table knows it. At most four probes, so one
    * slow model can't eat the phase.
    */
-  async function pickModel(page: Page, rowId: string, baseUrl: string) {
-    const candidates = (await listModels(baseUrl)).slice(0, 8);
+  async function pickModel(page: Page, rowId: string, baseUrl: string, adapter: Adapter) {
+    const candidates = (await listModels(baseUrl, adapter)).slice(0, 8);
     let fallback: { model: string; test: TestResponse } | null = null;
     for (const model of candidates.slice(0, 4)) {
       const probed = await probe(page, rowId, model);
@@ -291,7 +318,7 @@ test.describe("live models on a configured endpoint", () => {
         if (!baseUrl) throw new Error("the adapter's base URL is not set");
         const added = await addProvider(page, adapter, baseUrl, "live-placeholder");
         rowId = added.id;
-        const { model, test: probed } = await pickModel(page, rowId, baseUrl);
+        const { model, test: probed } = await pickModel(page, rowId, baseUrl, adapter);
         // The edit keeps the endpoint and its key; only the model changes.
         const saved = await api(page, "PUT", `/api/settings/providers/${rowId}`, {
           kind: "openai-chat",
@@ -313,8 +340,8 @@ test.describe("live models on a configured endpoint", () => {
       if (roles.status !== 200) throw new Error(`setting the Chat role: HTTP ${roles.status}`);
 
       const taskStart = Date.now();
+      // New chat is local state only and fires no /api/conversations request: no wait here.
       await page.getByRole("button", { name: "New chat" }).click();
-      await socketOpen(page);
       await page
         .getByRole("textbox", { name: "Message" })
         .fill(
@@ -390,8 +417,10 @@ test.describe("live models on a configured endpoint", () => {
       ) {
         record({ ...fail(adapter, "no LIVE_MODEL_OPENAI_BASE_URL"), model: null });
       } else {
+        // Start the conversation-load wait before navigation so a fast response is not missed.
+        const conversationsOpen = socketOpen(page);
         await page.goto("/");
-        await socketOpen(page);
+        await conversationsOpen;
         const result = await runAdapter(page, adapter);
         expect(result.ok, result.error ?? "the live run failed").toBe(true);
       }
