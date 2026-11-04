@@ -121,6 +121,39 @@ describe("envelope encryption (M2-8, M2-8+)", () => {
     await expect(put(vault, { id: "" })).rejects.toThrow("invalid_input");
     await expect(get(vault, { purpose: "other" })).rejects.toThrow("invalid_input");
   });
+
+  it("stores an ssh private key under its own purpose, separated from api keys (M4-06 AC1)", async () => {
+    const sshBinding = "ssh:lab-vm|vm.example.com:22|opa";
+    await encrypt(vault, { userId: "u1" } as UserScope, {
+      secretId: "ssh-lab-vm",
+      purpose: "ssh_private_key",
+      binding: sshBinding,
+      plaintext: "-----BEGIN OPENSSH PRIVATE KEY-----\ncanary\n-----END OPENSSH PRIVATE KEY-----",
+      caller,
+    });
+    await expect(
+      decrypt(vault, { userId: "u1" } as UserScope, {
+        secretId: "ssh-lab-vm",
+        purpose: "ssh_private_key",
+        binding: sshBinding,
+        caller,
+      }),
+    ).resolves.toContain("BEGIN OPENSSH PRIVATE KEY");
+    // Another purpose, another entry's binding, or another user never opens it.
+    for (const ask of [
+      { purpose: "model_api_key", binding: sshBinding },
+      { purpose: "ssh_private_key", binding: "ssh:other|vm.example.com:22|opa" },
+    ]) {
+      await expect(
+        decrypt(vault, { userId: "u1" } as UserScope, {
+          secretId: "ssh-lab-vm",
+          purpose: ask.purpose as Purpose,
+          binding: ask.binding,
+          caller,
+        }),
+      ).rejects.toMatchObject(FAILED);
+    }
+  });
 });
 
 describe("D4.1 key hygiene", () => {

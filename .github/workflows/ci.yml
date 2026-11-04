@@ -93,7 +93,24 @@ jobs:
       - *checkout
       - uses: ./.github/actions/setup
       - run: pnpm build # the web app apps/node serves
+      - name: Prepare the shared computer image for SSH conformance
+        run: |
+          test -x /usr/sbin/sshd
+          docker info > /dev/null
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync } from 'node:fs';
+          const pins = JSON.parse(readFileSync('computers/image/pins.json', 'utf8'));
+          execFileSync('docker', [
+            'build', '-f', 'computers/image/Dockerfile',
+            '--build-arg', `BASE_DIGEST=${pins.baseDigest}`,
+            '--build-arg', `GIT_VERSION=${pins.packages.git}`,
+            '-t', `opa-computer:${pins.baseDigest.slice(7, 19)}`, 'computers/image',
+          ], { stdio: 'inherit' });
+          JS
       - run: pnpm test:node # storage contract on the Node adapters; boot, migrations, health
+        env:
+          OPA_SSH_VM_TEST_REQUIRED: "1"
       - run: pnpm vitest run --project worker apps/worker/test/parity.test.ts # same contract on D1/R2
 
   build-and-harness:
