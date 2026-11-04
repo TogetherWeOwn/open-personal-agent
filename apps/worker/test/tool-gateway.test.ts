@@ -279,6 +279,49 @@ it("preserves the executed outcome when artifact notification fails", async () =
   expect(await fixture.user.artifacts.list()).toHaveLength(1);
 });
 
+it.each(["auto", "ask"])(
+  "keeps an executed %s call uncertain when saving its successful outcome fails",
+  async (policy) => {
+    const fixture = await gatewayOwner();
+    const args = { name: "answer.txt", content: "hello" };
+    let batchId: string | undefined;
+    if (policy === "auto") {
+      await db
+        .prepare(
+          "INSERT INTO tool_overrides (user_id, tool, decision) VALUES (?, 'create_artifact', 'auto')",
+        )
+        .bind(fixture.owner)
+        .run();
+    } else {
+      expect((await fixture.call("alias", "create_artifact", args)).status).toBe(202);
+      batchId = (await decideArtifact(fixture)).batchId;
+    }
+    await db
+      .prepare(
+        `CREATE TRIGGER fail_gateway_result BEFORE UPDATE ON capability_calls
+        WHEN NEW.status = 'completed' AND NEW.status_code = 200
+        BEGIN SELECT RAISE(ABORT, 'result write unavailable'); END`,
+      )
+      .run();
+    try {
+      const response = await fixture.call("write", "create_artifact", args);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: "outcome_unknown" });
+      expect(await fixture.user.artifacts.list()).toHaveLength(1);
+      if (batchId)
+        expect(await fixture.user.approvals.batch(batchId)).toMatchObject([{ status: "executed" }]);
+    } finally {
+      await db.prepare("DROP TRIGGER fail_gateway_result").run();
+    }
+    for (const key of policy === "auto" ? ["write"] : ["write", "alias"]) {
+      const retry = await fixture.call(key, "create_artifact", args);
+      expect(retry.status).toBe(409);
+      expect(await retry.json()).toMatchObject({ error: "outcome_unknown" });
+    }
+    expect(await fixture.user.artifacts.list()).toHaveLength(1);
+  },
+);
+
 it("keeps the original pending approval binding when policy changes to auto", async () => {
   const fixture = await gatewayOwner();
   const args = { name: "answer.txt", content: "hello" };

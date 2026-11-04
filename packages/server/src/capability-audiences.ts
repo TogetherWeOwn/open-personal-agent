@@ -224,10 +224,17 @@ capabilityAudiences.post(
     )
       return finish(403, { error: "approval_unavailable" });
     try {
-      const result = await entry.tool.execute(executeInput, AbortSignal.timeout(30_000), {
-        toolCallId: call.id,
-        approved: approvalId !== undefined,
-      });
+      let result: Awaited<ReturnType<typeof entry.tool.execute>>;
+      try {
+        result = await entry.tool.execute(executeInput, AbortSignal.timeout(30_000), {
+          toolCallId: call.id,
+          approved: approvalId !== undefined,
+        });
+      } catch {
+        if (approvalId)
+          await user.approvals.finish(batchId, approvalId, { status: "failed" }).catch(() => {});
+        return await finish(500, { error: "tool_failed" });
+      }
       if (approvalId)
         await user.approvals.finish(batchId, approvalId, {
           status: result.ok ? "executed" : "failed",
@@ -241,16 +248,19 @@ capabilityAudiences.post(
       };
       // Store the outcome before delivery/notification; a lost response never reruns the tool.
       await store.finish(call, 200, response);
-      if (result.ok && result.artifact)
-        await (user.assistant() as unknown as ArtifactNotifier).artifactCreated(
-          result.artifact.artifactId,
-        );
+      try {
+        if (result.ok && result.artifact)
+          await (user.assistant() as unknown as ArtifactNotifier).artifactCreated(
+            result.artifact.artifactId,
+          );
+      } catch {
+        // Notification cannot change the durably saved tool outcome.
+      }
       call = (await store.load(call.id)) ?? call;
       return replay();
     } catch {
-      if (approvalId)
-        await user.approvals.finish(batchId, approvalId, { status: "failed" }).catch(() => {});
-      return finish(500, { error: "tool_failed" });
+      // A post-dispatch bookkeeping failure is not evidence that the tool failed.
+      return unknown();
     } finally {
       await entry.tool.dispose?.().catch(() => {});
     }

@@ -411,6 +411,53 @@ describe("Node capability audience routes (SQLite and local files)", () => {
     expect(await user().artifacts.list()).toEqual([]);
   });
 
+  it.each(["auto", "ask"])(
+    "keeps an executed %s call uncertain when saving its successful outcome fails",
+    async (policy) => {
+      const args = { name: "answer.txt", content: "hello" };
+      let batchId: string | undefined;
+      if (policy === "auto") {
+        app.db
+          .prepare(
+            "INSERT INTO tool_overrides (user_id, tool, decision) VALUES (?, 'create_artifact', 'auto')",
+          )
+          .run(owner);
+      } else {
+        const pending = await call("write", "create_artifact", args);
+        expect(pending.status).toBe(202);
+        batchId = ((await pending.json()) as { batchId: string }).batchId;
+        expect((await call("alias", "create_artifact", args)).status).toBe(202);
+        const [row] = await user().approvals.batch(batchId);
+        expect(
+          (
+            await session(`/api/approvals/${batchId}`, {
+              decisions: [{ approvalId: row?.approvalId, decision: "approve", scope: "once" }],
+            })
+          ).status,
+        ).toBe(200);
+      }
+      app.db.exec(`CREATE TRIGGER fail_gateway_result BEFORE UPDATE ON capability_calls
+        WHEN NEW.status = 'completed' AND NEW.status_code = 200
+        BEGIN SELECT RAISE(ABORT, 'result write unavailable'); END`);
+      try {
+        const response = await call("write", "create_artifact", args);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ error: "outcome_unknown" });
+        expect(await user().artifacts.list()).toHaveLength(1);
+        if (batchId)
+          expect(await user().approvals.batch(batchId)).toMatchObject([{ status: "executed" }]);
+      } finally {
+        app.db.exec("DROP TRIGGER fail_gateway_result");
+      }
+      for (const key of policy === "auto" ? ["write"] : ["write", "alias"]) {
+        const retry = await call(key, "create_artifact", args);
+        expect(retry.status).toBe(409);
+        expect(await retry.json()).toMatchObject({ error: "outcome_unknown" });
+      }
+      expect(await user().artifacts.list()).toHaveLength(1);
+    },
+  );
+
   it("replays a completed large gateway call after auto changes to ask", async () => {
     app.db
       .prepare(
