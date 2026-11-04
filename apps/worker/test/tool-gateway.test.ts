@@ -13,7 +13,7 @@ import { claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
 freshDatabase();
 
-async function gatewayOwner() {
+async function gatewayOwner(requestEnv = env) {
   const { browser, owner } = await claim();
   const user = createRepository(env).forUser(scopeFromSession({ userId: owner }));
   await user.chat.open("gateway-chat", "Gateway");
@@ -71,7 +71,7 @@ async function gatewayOwner() {
           ...extra,
         }),
       },
-      env,
+      requestEnv,
     );
   return { browser, owner, user, computer, call, minted };
 }
@@ -131,6 +131,38 @@ it("never reports an approval card that was not durably created before a crash",
   const retry = await call("crash", "create_artifact", args);
   expect(retry.status).toBe(409);
   expect(await retry.json()).toMatchObject({ error: "outcome_unknown" });
+  expect(await user.artifacts.list()).toEqual([]);
+});
+
+it("lets a fresh key recover from a stranded preparation without reviving the old key", async () => {
+  const { call, user } = await gatewayOwner();
+  const args = { name: "answer.txt", content: "hello" };
+  const original = await call("stranded", "create_artifact", args);
+  expect(original.status).toBe(202);
+  const old = await original.json<{ callId: string }>();
+  await db.batch([
+    db.prepare("DELETE FROM approvals"),
+    db.prepare("UPDATE capability_calls SET status = 'preparing'"),
+  ]);
+  expect((await call("in-flight", "create_artifact", args)).status).toBe(409);
+  await db
+    .prepare("UPDATE capability_calls SET created_at = ?")
+    .bind(Date.now() - 61_000)
+    .run();
+  const recovered = await call("fresh", "create_artifact", args);
+  expect(recovered.status).toBe(202);
+  const pending = await recovered.json<{ callId: string; batchId: string }>();
+  expect(pending.callId).not.toBe(old.callId);
+  expect(await user.approvals.batch(pending.batchId)).toMatchObject([{ status: "pending" }]);
+  await db
+    .prepare("UPDATE capability_calls SET created_at = ?")
+    .bind(Date.now() - 61_000)
+    .run();
+  const alias = await call("pending-alias", "create_artifact", args);
+  expect(alias.status).toBe(202);
+  expect(await alias.json()).toMatchObject({ callId: pending.callId, batchId: pending.batchId });
+  for (const key of ["stranded", "in-flight"])
+    expect((await call(key, "create_artifact", args)).status).toBe(409);
   expect(await user.artifacts.list()).toEqual([]);
 });
 
@@ -221,6 +253,57 @@ it("claims a real approval only once across simultaneous approved retries", asyn
   const replay = await fixture.call("write", "create_artifact", args);
   expect(replay.status).toBe(200);
   expect(await fixture.user.artifacts.list()).toHaveLength(1);
+});
+
+it("preserves the executed outcome when artifact notification fails", async () => {
+  const fixture = await gatewayOwner({
+    ...env,
+    ASSISTANT: {
+      idFromName: (name: string) => env.ASSISTANT.idFromName(name),
+      get: () => ({
+        artifactCreated: async () => {
+          throw new Error("notification unavailable");
+        },
+      }),
+    } as unknown as typeof env.ASSISTANT,
+  });
+  const { args, batchId } = await decideArtifact(fixture);
+  const response = await fixture.call("write", "create_artifact", args);
+  expect(response.status).toBe(200);
+  const result = await response.json();
+  expect(result).toMatchObject({ ok: true, taint: "untrusted" });
+  expect(await fixture.user.approvals.batch(batchId)).toMatchObject([{ status: "executed" }]);
+  const retry = await fixture.call("write", "create_artifact", args);
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toEqual(result);
+  expect(await fixture.user.artifacts.list()).toHaveLength(1);
+});
+
+it("keeps the original pending approval binding when policy changes to auto", async () => {
+  const fixture = await gatewayOwner();
+  const args = { name: "answer.txt", content: "hello" };
+  const response = await fixture.call("write", "create_artifact", args);
+  expect(response.status).toBe(202);
+  const { batchId } = await response.json<{ batchId: string }>();
+  await db
+    .prepare(
+      "INSERT INTO tool_overrides (user_id, tool, decision) VALUES (?, 'create_artifact', 'auto')",
+    )
+    .bind(fixture.owner)
+    .run();
+  expect((await fixture.call("write", "create_artifact", args)).status).toBe(202);
+  expect(await fixture.user.artifacts.list()).toEqual([]);
+  const row = (await fixture.user.approvals.batch(batchId))[0];
+  expect(row?.status).toBe("pending");
+  expect(
+    (
+      await fixture.browser.req(`/api/approvals/${batchId}`, {
+        body: { decisions: [{ approvalId: row?.approvalId, decision: "deny", scope: "once" }] },
+      })
+    ).status,
+  ).toBe(200);
+  expect((await fixture.call("write", "create_artifact", args)).status).toBe(403);
+  expect(await fixture.user.artifacts.list()).toEqual([]);
 });
 
 it("does not execute denied approvals", async () => {

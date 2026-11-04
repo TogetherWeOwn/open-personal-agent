@@ -99,7 +99,8 @@ export function gatewayCalls(db: SqlDatabase, scope: CapabilityScope) {
         SELECT ?, ct.user_id, ct.task_id, ct.id, ct.computer_id, ?, ?,
           coalesce((SELECT id FROM capability_calls WHERE task_id = ct.task_id AND computer_id = ct.computer_id
             AND token_id = ct.id AND user_id = ct.user_id
-            AND request_hash = ? AND master_id = id AND status IN ('new', 'preparing', 'pending') LIMIT 1), ?), 'new', ?
+            AND request_hash = ? AND master_id = id
+            AND (status = 'pending' OR (status IN ('new', 'preparing') AND created_at > ?)) LIMIT 1), ?), 'new', ?
         ${LIVE_CAPABILITY}
         AND (SELECT count(*) FROM capability_calls WHERE token_id = ct.id) < 60
         AND (SELECT count(*) FROM capability_calls WHERE token_id = ct.id AND created_at > ?) < 10
@@ -110,6 +111,7 @@ export function gatewayCalls(db: SqlDatabase, scope: CapabilityScope) {
           clientKey,
           requestHash,
           requestHash,
+          now - 30_000,
           id,
           now,
           ...capabilityParams(scope, now),

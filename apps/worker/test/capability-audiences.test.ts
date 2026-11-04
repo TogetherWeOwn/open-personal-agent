@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
+
+import { runInDurableObject } from "cloudflare:test";
 import { mintCapabilityToken } from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import type { SqlDatabase } from "@opa/db/system";
 import { expect, it, vi } from "vitest";
+import type { Assistant } from "../src/assistant";
+import { EventLog } from "../src/event-log";
 import { workerApp } from "../src/worker-app";
 import { claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
@@ -45,6 +49,43 @@ it("announces the saved Output to connected tabs without borrowing the Workflow 
     ws.close();
   }
 });
+
+it.each([
+  { turnId: null, taskId: "upload-task", retained: 0 },
+  { turnId: null, taskId: null, retained: 0 },
+  { turnId: "live-turn", taskId: "upload-task", retained: 2 },
+])(
+  "retains only turn-associated notification frames ($turnId, $taskId)",
+  async ({ turnId, taskId, retained }) => {
+    const { owner, user } = await uploadOwner();
+    await user.artifacts.save({
+      id: "notified-artifact",
+      name: "answer.txt",
+      mediaType: "text/plain",
+      content: "hello",
+      source: { conversationId: "upload-chat", taskId, turnId },
+    });
+    const frameKey = turnId ?? taskId ?? "notified-artifact";
+    const frames = await runInDurableObject(
+      env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${owner}`)),
+      async (instance: Assistant, state) => {
+        const log = new EventLog(state.storage.sql);
+        log.append("upload-chat", "unrelated-turn", () => "unrelated");
+        await instance.artifactCreated("notified-artifact");
+        await instance.artifactCreated("notified-artifact");
+        return {
+          retained: log.replay("upload-chat", frameKey, 0),
+          unrelated: log.replay("upload-chat", "unrelated-turn", 0),
+          next: JSON.parse(log.append("upload-chat", "next-turn", (seq) => JSON.stringify({ seq })))
+            .seq,
+        };
+      },
+    );
+    expect(frames.retained).toHaveLength(retained);
+    expect(frames.unrelated).toEqual(["unrelated"]);
+    expect(frames.next).toBe(4);
+  },
+);
 
 it("returns the published artifact when its notification fails", async () => {
   const { token, user, browser } = await uploadOwner();

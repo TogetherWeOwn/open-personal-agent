@@ -336,17 +336,14 @@ export class NodeAssistant {
     const artifact = await (await this.#repo).artifacts.get(artifactId);
     if (!artifact?.conversationId) return;
     await this.#sweepTabs();
-    this.#send(
-      artifact.conversationId,
-      artifact.turnId ?? artifact.taskId ?? artifact.id,
-      "artifact.created",
-      {
-        artifactId: artifact.id,
-        name: artifact.name,
-        type: artifact.mediaType,
-        bytes: artifact.sizeBytes,
-      },
-    );
+    const frameKey = artifact.turnId ?? artifact.taskId ?? artifact.id;
+    this.#send(artifact.conversationId, frameKey, "artifact.created", {
+      artifactId: artifact.id,
+      name: artifact.name,
+      type: artifact.mediaType,
+      bytes: artifact.sizeBytes,
+    });
+    if (!artifact.turnId) this.#events.trim(artifact.conversationId, frameKey);
   }
 
   /** Liveness check for `/api/health`. */

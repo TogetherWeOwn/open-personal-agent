@@ -295,6 +295,40 @@ describe("NodeAssistant shutdown", () => {
 });
 
 describe("NodeAssistant", () => {
+  it.each([
+    { turnId: null, retained: 0 },
+    { turnId: "live-artifact-turn", retained: 2 },
+  ])(
+    "retains only turn-associated artifact notifications ($turnId)",
+    async ({ turnId, retained }) => {
+      const { userId, sessionId, assistant } = setup();
+      const conversationId = `artifact-chat-${userId}`;
+      const artifactId = `artifact-${userId}`;
+      app.db
+        .prepare("INSERT INTO conversations (id, user_id) VALUES (?, ?)")
+        .run(conversationId, userId);
+      app.db
+        .prepare(`INSERT INTO artifacts
+      (id, user_id, conversation_id, turn_id, name, media_type, size_bytes)
+      VALUES (?, ?, ?, ?, 'answer.txt', 'text/plain', 5)`)
+        .run(artifactId, userId, conversationId, turnId);
+      const log = new NodeEventLog(app.db, userId);
+      log.append(conversationId, "unrelated-turn", () => "unrelated");
+      const tab = socket();
+      const conn = assistant.open(tab, sessionId, false);
+      try {
+        await assistant.artifactCreated(artifactId);
+        await assistant.artifactCreated(artifactId);
+        expect(ofType(tab, "artifact.created").map((frame) => frame.seq)).toEqual([2, 3]);
+        expect(log.replay(conversationId, turnId ?? artifactId, 0)).toHaveLength(retained);
+        expect(log.replay(conversationId, "unrelated-turn", 0)).toEqual(["unrelated"]);
+        expect(log.append(conversationId, "next-turn", (seq) => `next:${seq}`)).toBe("next:4");
+      } finally {
+        assistant.close(conn);
+      }
+    },
+  );
+
   it("completes a text turn with the turn's frames in order", async () => {
     const { userId, sessionId, assistant } = setup();
     const tab = socket();
