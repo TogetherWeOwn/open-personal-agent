@@ -112,7 +112,7 @@ describe("task Continue and Stop", () => {
     expect((await post("stop")).status).toBe(200);
     expect((await user.tasks.get(taskId))?.status).toBe("cancelled");
     expect(sendEvent).toHaveBeenCalledTimes(1);
-    expect((await post("stop")).status).toBe(409);
+    expect((await post("stop")).status).toBe(200); // cleanup is retryable after cancellation
   });
 
   it("finds no other user's task", async () => {

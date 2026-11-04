@@ -3,12 +3,12 @@ import { runInDurableObject } from "cloudflare:test";
 import { type CapabilityAudience, mintCapabilityToken } from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
-import type { SqlDatabase } from "@opa/db/system";
+import { type SqlDatabase, systemStore } from "@opa/db/system";
 import { SESSION_COOKIE } from "@opa/server/auth";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Assistant } from "../src/assistant";
 import { workerApp } from "../src/worker-app";
-import { claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
+import { claim, db, env, freshDatabase, ORIGIN, sessionHeaders } from "./helpers/app";
 
 freshDatabase();
 const MODEL = "gpt-4o-mini";
@@ -92,6 +92,102 @@ async function setup() {
 }
 
 describe("Worker model proxy capability route", () => {
+  it.each(["expiry", "compromise"])(
+    "aborts an admitted stalled stream after system %s cancels its task",
+    async (kind) => {
+      const f = await setup();
+      await runInDurableObject(f.stub, (instance: Assistant) => {
+        instance.proxyFetch = async () =>
+          new Response(new ReadableStream(), {
+            headers: { "content-type": "text/event-stream" },
+          });
+      });
+      const response = await f.send();
+      const reading = response.text().catch(() => "aborted");
+      await db
+        .prepare("UPDATE tasks SET status = 'waiting_for_approval' WHERE id = 'proxy-task'")
+        .run();
+      await db
+        .prepare(`INSERT INTO approvals
+      (batch_id, approval_id, position, user_id, conversation_id, task_id, tool, tool_call_id,
+       risk, rule, step_up, scopes, canonical, binding_hash, expires_at, status, nonce)
+      VALUES ('proxy-approval', 'proxy-approval', 0, ?, 'proxy-conversation', 'proxy-task',
+        'send', 'call', 'consequential', 'default_consequential', 0, '["once"]', '{}', 'h', ?, 'pending', 'n')`)
+        .bind(f.owner, Date.now() - 1)
+        .run();
+      if (kind === "expiry") await systemStore(env).approvals.expireDue(Date.now());
+      else await systemStore(env).sessions.revokeAll(f.owner, Date.now());
+      expect((await f.user.tasks.get("proxy-task"))?.status).toBe("cancelled");
+      await vi.waitFor(
+        async () => {
+          const totals = await runInDurableObject(f.stub, (instance: Assistant) =>
+            instance.limits.totals(),
+          );
+          expect(totals.heldMicroUsd).toBe(0);
+        },
+        { timeout: 3_000 },
+      );
+      expect(await reading).toBe("aborted");
+      expect(await f.user.usage.list()).toHaveLength(1);
+      expect((await f.send()).status).toBe(401);
+    },
+  );
+
+  it.each(["cancel", "stop"])(
+    "retries %s cleanup after a committed cancel and failed abort RPC",
+    async (path) => {
+      const f = await setup();
+      await f.user.chat.startTurn("proxy-conversation", "Continue", "proxy-reply", []);
+      await f.user.chat.checkpointReply("proxy-reply", "Partial reply.");
+      await db
+        .prepare(
+          "UPDATE tasks SET workflow_instance_id = 'proxy-workflow', state = ? WHERE id = 'proxy-task'",
+        )
+        .bind(
+          JSON.stringify({
+            replyId: "proxy-reply",
+            turnId: "proxy-turn",
+            turn: { messages: [{ role: "assistant", content: "Partial reply." }] },
+          }),
+        )
+        .run();
+      const reply = async () =>
+        (await f.user.chat.listMessages("proxy-conversation"))?.find(
+          (message) => message.id === "proxy-reply",
+        );
+      let first = true;
+      const abortModelProxyTask = async (taskId: string) => {
+        if (first) {
+          first = false;
+          throw new Error("abort acknowledgement lost");
+        }
+        await f.stub.abortModelProxyTask(taskId);
+      };
+      const terminate = vi.fn(async () => {});
+      const sendEvent = vi.fn(async () => {});
+      const bindings = {
+        ...env,
+        ASSISTANT: {
+          idFromName: (name: string) => env.ASSISTANT.idFromName(name),
+          get: () => ({ abortModelProxyTask }),
+        },
+        TASK_WORKFLOW: { get: async () => ({ terminate, sendEvent }) },
+      };
+      const headers = await sessionHeaders(f.owner);
+      const post = () =>
+        workerApp.request(
+          `${ORIGIN}/api/tasks/proxy-task/${path}`,
+          { method: "POST", headers },
+          bindings as never,
+        );
+      expect((await post()).status).toBe(500);
+      expect((await f.user.tasks.get("proxy-task"))?.status).toBe("cancelled");
+      expect(await reply()).toMatchObject({ status: "streaming" });
+      expect((await post()).status).toBe(200);
+      expect(path === "cancel" ? terminate : sendEvent).toHaveBeenCalledTimes(1);
+      expect(await reply()).toMatchObject({ status: "interrupted", content: "Partial reply." });
+    },
+  );
   it("cannot attribute a scoped proxy ledger row to another user's task", async () => {
     const f = await setup();
     await db

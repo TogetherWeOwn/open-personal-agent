@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { CapabilityScope } from "@opa/db/capability-tokens";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Limits } from "../src/limits";
-import { ModelProxy, proxyRequest } from "../src/model-proxy";
+import { ModelProxy, type ProxyProvider, proxyRequest } from "../src/model-proxy";
 
 const MODEL = "gpt-4o-mini";
 const SCOPE: CapabilityScope = {
@@ -17,7 +17,7 @@ const SCOPE: CapabilityScope = {
 };
 const BODY = { model: MODEL, messages: [{ role: "user", content: "hello" }] };
 
-function fixture() {
+function fixture(api: ProxyProvider["api"] = "openai-chat") {
   const stored = new Map<string, unknown>();
   const kv = {
     get: <T>(key: string) => structuredClone(stored.get(key)) as T | undefined,
@@ -68,7 +68,7 @@ function fixture() {
     },
     resolve: async () => {
       if (resolveError) throw new Error("vault down");
-      return configured ? { ...provider, billingId } : null;
+      return configured ? { ...provider, api, billingId } : null;
     },
     reserve: async (call: unknown) => {
       if (reserveError) throw new Error("ledger reserve failed");
@@ -85,8 +85,13 @@ function fixture() {
       return upstream(init ?? {});
     }) as typeof fetch,
   });
-  const send = (body = BODY) =>
-    proxy.call("opaque-token", "saved-provider", "/chat/completions", body);
+  const send = (body: unknown = BODY) =>
+    proxy.call(
+      "opaque-token",
+      "saved-provider",
+      api === "openai-responses" ? "/responses" : "/chat/completions",
+      body,
+    );
   return {
     proxy,
     send,
@@ -236,6 +241,160 @@ describe("atomic model proxy calls", () => {
     expect(f.limits.totals().todayMicroUsd).toBe(held);
   });
 
+  it.each(["revoked", "storage-failure"])(
+    "rechecks %s liveness without waiting for upstream bytes or client reads",
+    async (reason) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      try {
+        f.upstream(
+          async () =>
+            new Response(new ReadableStream(), {
+              headers: { "content-type": "text/event-stream" },
+            }),
+        );
+        const response = await f.send();
+        if (reason === "revoked") f.revoke();
+        else f.failVerify();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(f.calls[0]?.init.signal?.aborted).toBe(true);
+        await expect(response.text()).rejects.toThrow();
+        expect(f.limits.totals().heldMicroUsd).toBe(0);
+        expect(f.ledger).toHaveLength(1);
+      } finally {
+        await f.proxy.cancelTask("task");
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["json", "sse", "json-escaped", "sse-escaped"])(
+    "redacts credentials in chunked successful %s error bodies",
+    async (format) => {
+      const f = fixture();
+      const payload = JSON.stringify({ error: { message: `invalid key: ${provider.apiKey}` } });
+      const json = format.endsWith("escaped")
+        ? payload.replace("provider", "\\u0070rovider")
+        : payload;
+      const sse = format.startsWith("sse");
+      const wire = sse ? `event: error\ndata: ${json}\n\n` : json;
+      f.upstream(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                for (const byte of new TextEncoder().encode(wire))
+                  controller.enqueue(new Uint8Array([byte]));
+                controller.close();
+              },
+            }),
+            {
+              headers: {
+                "content-type": sse ? "text/event-stream" : "application/json",
+              },
+            },
+          ),
+      );
+      const text = await (await f.send()).text();
+      expect(text).not.toContain(provider.apiKey);
+      expect(text).toContain("[redacted]");
+      if (sse) expect(text).toContain("event: error");
+    },
+  );
+
+  it.each(["\n", "\r", "\r\n"])(
+    "settles only complete multiline SSE events with %j separators",
+    async (eol) => {
+      const f = fixture();
+      const wire = [
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":10,',
+        'data: "cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}',
+        "",
+        'data: {"type":"message_delta","usage":{"input_tokens":null,"output_tokens":20}}',
+        "",
+        'data: {"type":"message_stop"}',
+        "",
+        "",
+      ].join(eol);
+      f.upstream(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                for (const byte of new TextEncoder().encode(wire))
+                  controller.enqueue(new Uint8Array([byte]));
+                controller.close();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      );
+      await (await f.send()).text();
+      expect(f.ledger[0]?.usage).toEqual({
+        inputTokens: 16,
+        outputTokens: 20,
+        cachedInputTokens: 0,
+      });
+    },
+  );
+
+  it("retains independent cumulative input/cache fields across partial usage updates", async () => {
+    const f = fixture();
+    const wire = [
+      { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 0 } } },
+      { type: "message_delta", usage: { cache_read_input_tokens: 4, input_tokens: null } },
+      {
+        type: "message_delta",
+        usage: { cache_creation_input_tokens: 2, cache_read_input_tokens: null },
+      },
+      { type: "message_delta", usage: { input_tokens: 12, output_tokens: 20 } },
+      { type: "message_delta", usage: { input_tokens: 10, output_tokens: null } },
+      { type: "message_stop" },
+    ]
+      .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+      .join("");
+    f.upstream(
+      async () => new Response(wire, { headers: { "content-type": "text/event-stream" } }),
+    );
+    await (await f.send()).text();
+    expect(f.ledger[0]?.usage).toEqual({ inputTokens: 18, outputTokens: 20, cachedInputTokens: 0 });
+  });
+
+  it.each(["json", "sse"])(
+    "fails closed on oversized %s response frames and releases the hold",
+    async (format) => {
+      const f = fixture();
+      const large = JSON.stringify({ error: { message: "x".repeat(1024 * 1024) } });
+      f.upstream(
+        async () =>
+          new Response(format === "sse" ? `data: ${large}\n\n` : large, {
+            headers: {
+              "content-type": format === "sse" ? "text/event-stream" : "application/json",
+            },
+          }),
+      );
+      await expect((await f.send()).text()).rejects.toThrow();
+      expect(f.calls[0]?.init.signal?.aborted).toBe(true);
+      expect(f.limits.totals().heldMicroUsd).toBe(0);
+      expect(f.ledger).toHaveLength(1);
+    },
+  );
+
+  it("does not accept an unterminated terminal event at EOF", async () => {
+    const f = fixture();
+    f.upstream(
+      async () =>
+        new Response(
+          'data: {"usage":{"prompt_tokens":10,"completion_tokens":20}}\n\ndata: [DONE]',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await f.send();
+    const held = f.limits.totals().heldMicroUsd;
+    expect(await response.text()).not.toContain("[DONE]");
+    expect(f.limits.totals().todayMicroUsd).toBe(held);
+  });
+
   it("injects only provider credentials and settles a task-attributed call", async () => {
     const f = fixture();
     const response = await f.send();
@@ -368,6 +527,77 @@ const provider = {
 };
 
 describe("the model proxy inference surface", () => {
+  it.each([undefined, false, true])(
+    "forces Responses storage off when caller store is %j",
+    async (store) => {
+      const f = fixture("openai-responses");
+      const input = [
+        {
+          type: "function_call",
+          call_id: "call",
+          name: "lookup",
+          arguments: "{}",
+          status: "completed",
+        },
+        { type: "function_call_output", call_id: "call", output: "done" },
+        {
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "hi", annotations: [] }],
+        },
+      ];
+      const response = await f.send({
+        model: MODEL,
+        input,
+        ...(store === undefined ? {} : { store }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(f.calls).toHaveLength(1);
+      expect(f.calls[0]?.url).toBe("https://api.example/v1/responses");
+      expect(JSON.parse(String(f.calls[0]?.init.body))).toMatchObject({ store: false, input });
+      expect(f.ledger).toHaveLength(1);
+    },
+  );
+
+  it("accepts narrow inline Responses replay metadata only", () => {
+    const input = [
+      {
+        type: "function_call",
+        call_id: "call",
+        name: "lookup",
+        arguments: "{}",
+        status: "completed",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "hi", annotations: [] }],
+      },
+      { type: "function_call_output", call_id: "call", output: "done" },
+    ];
+    const request = (value: unknown) =>
+      proxyRequest(
+        { ...provider, api: "openai-responses" },
+        "/responses",
+        { model: MODEL, input: value },
+        300,
+      );
+    expect(request(input)).not.toBeNull();
+    expect(request([{ type: "function_call", status: "https://context.example" }])).toBeNull();
+    expect(
+      request([
+        {
+          type: "output_text",
+          text: "hi",
+          annotations: [{ type: "file_citation", file_id: "opaque" }],
+        },
+      ]),
+    ).toBeNull();
+    expect(request([{ type: "tool_use", status: "completed" }])).toBeNull();
+  });
   it("accepts bounded function schemas without interpreting JSON-schema types as content", () => {
     expect(
       proxyRequest(

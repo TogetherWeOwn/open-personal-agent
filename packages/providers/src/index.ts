@@ -24,6 +24,7 @@ export {
   resolveResponsesCompat,
   usesOpenAIResponses,
 } from "./openai-responses";
+export { SseParser } from "./sse";
 export {
   createWorkersAIProvider,
   STARTER_MODEL,

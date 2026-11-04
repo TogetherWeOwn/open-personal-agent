@@ -2,7 +2,7 @@
 import type { CapabilityScope } from "@opa/db/capability-tokens";
 import type { LedgerCall } from "@opa/db/repository";
 import { findPrice } from "@opa/pricing";
-import { resolveCompat } from "@opa/providers";
+import { resolveCompat, SseParser } from "@opa/providers";
 import type { Kv, Limits } from "./limits";
 
 interface ProxyDeps {
@@ -181,6 +181,7 @@ export class ModelProxy {
       let output: ReadableStreamDefaultController<Uint8Array> | undefined;
       let finished: Promise<void> | undefined;
       let timer: ReturnType<typeof setTimeout>;
+      let livenessTimer: ReturnType<typeof setTimeout>;
       let notifyAbort: () => void = () => {};
       const aborted = new Promise<null>((resolve) => {
         notifyAbort = () => resolve(null);
@@ -188,6 +189,7 @@ export class ModelProxy {
       const finish = (usage?: Usage) => {
         if (finished) return finished;
         clearTimeout(timer);
+        clearTimeout(livenessTimer);
         signal?.removeEventListener("abort", onAbort);
         finished = this.#settle(call, usage).finally(() => this.#active.delete(id));
         return finished;
@@ -207,6 +209,31 @@ export class ModelProxy {
       this.#active.set(id, { taskId: scope.taskId, abort });
       signal?.addEventListener("abort", onAbort, { once: true });
       timer = setTimeout(onAbort, Math.min(5 * 60_000, scope.expiresAt - Date.now()));
+      // System-store expiry/compromise writes bypass scoped task RPCs. Recheck even while
+      // fetch/read is stalled or the client applies backpressure. Storage failure fails closed;
+      // recursive timeouts prevent overlapping checks and stop with this call's settlement.
+      const checkLiveness = async () => {
+        try {
+          await this.deps.atomic(async () => {
+            if (finished) return;
+            const live = await this.deps.verify(token);
+            if (finished) return;
+            if (
+              !live ||
+              live.tokenId !== scope.tokenId ||
+              live.taskId !== scope.taskId ||
+              live.userId !== scope.userId ||
+              live.expiresAt <= Date.now()
+            )
+              await abort();
+          });
+        } catch {
+          await abort().catch(() => {});
+        } finally {
+          if (!finished) livenessTimer = setTimeout(() => void checkLiveness(), 1_000);
+        }
+      };
+      livenessTimer = setTimeout(() => void checkLiveness(), 1_000);
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (provider.api === "anthropic-messages") {
         headers["x-api-key"] = provider.apiKey;
@@ -229,6 +256,8 @@ export class ModelProxy {
       }
       return {
         opening: Promise.race([opening, aborted]),
+        redact: (text: string) =>
+          provider.apiKey ? text.split(provider.apiKey).join("[redacted]") : text,
         upstream,
         finish,
         abort,
@@ -256,7 +285,12 @@ export class ModelProxy {
     }
     const reader = response.body.getReader();
     admitted.setReader(reader);
-    const usage = new ProxyUsage(type === "text/event-stream", admitted.call.ceiling);
+    const sse = type === "text/event-stream";
+    const usage = new ProxyUsage(sse, admitted.call.ceiling);
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    const parser = new SseParser();
+    let json = "";
     const stream = new ReadableStream<Uint8Array>(
       {
         start(controller) {
@@ -264,14 +298,36 @@ export class ModelProxy {
         },
         async pull(controller) {
           try {
-            const next = await reader.read();
-            if (admitted.upstream.signal.aborted) return;
-            if (next.done) {
-              await admitted.finish(usage.finish());
-              controller.close();
-            } else {
-              usage.push(next.value);
-              controller.enqueue(next.value);
+            // No raw provider bytes escape: buffer one bounded JSON body or complete SSE
+            // event, redact decoded JSON strings (including escaped credentials), then emit.
+            while (true) {
+              const next = await reader.read();
+              if (admitted.upstream.signal.aborted) return;
+              const text = next.done
+                ? decoder.decode()
+                : decoder.decode(next.value, { stream: true });
+              let wire = "";
+              if (sse) {
+                for (const event of parser.push(text, next.done)) {
+                  usage.read(event.data);
+                  const data =
+                    event.data === "[DONE]" ? event.data : redactJson(event.data, admitted.redact);
+                  wire += `${event.event ? `event: ${admitted.redact(event.event)}\n` : ""}data: ${data}\n\n`;
+                }
+              } else {
+                json += text;
+                if (json.length > 1024 * 1024) throw new Error("provider response too large");
+                if (next.done) {
+                  usage.read(json);
+                  wire = redactJson(json, admitted.redact);
+                }
+              }
+              if (wire) controller.enqueue(encoder.encode(wire));
+              if (next.done) {
+                await admitted.finish(usage.finish());
+                controller.close();
+              }
+              if (next.done || wire) return;
             }
           } catch {
             await admitted.abort();
@@ -300,32 +356,34 @@ export class ModelProxy {
   }
 }
 
-/** Only usage frames are inspected, with bounded buffering; prompts/replies never persist. */
+/** Parse before redaction so usage is independent of diagnostic text. No response is persisted. */
+function redactJson(text: string, redact: (text: string) => string): string {
+  const value = JSON.parse(text);
+  // Walk decoded strings and member names, not JSON escape spellings.
+  const walk = (item: unknown): unknown => {
+    if (typeof item === "string") return redact(item);
+    if (Array.isArray(item)) return item.map(walk);
+    if (item && typeof item === "object")
+      return Object.fromEntries(
+        Object.entries(item).map(([key, child]) => [redact(key), walk(child)]),
+      );
+    return item;
+  };
+  return JSON.stringify(walk(value));
+}
+
+/** Only complete usage events are inspected; nullable cumulative fields mean unchanged. */
 class ProxyUsage {
-  readonly #decoder = new TextDecoder();
-  #buffer = "";
   #usage: Usage | undefined;
+  #counts: Record<string, number> = {};
   #disabled = false;
   #complete = false;
   constructor(
     private readonly sse: boolean,
     private readonly ceiling: Usage,
   ) {}
-  push(bytes: Uint8Array): void {
+  read(text: string): void {
     if (this.#disabled) return;
-    this.#buffer += this.#decoder.decode(bytes, { stream: true });
-    if (this.#buffer.length > 1024 * 1024) {
-      this.#buffer = "";
-      this.#disabled = true;
-      this.#usage = undefined;
-      return;
-    }
-    if (!this.sse) return;
-    const lines = this.#buffer.split("\n");
-    this.#buffer = lines.pop() ?? "";
-    for (const line of lines) if (line.startsWith("data:")) this.#read(line.slice(5).trim());
-  }
-  #read(text: string): void {
     if (text === "[DONE]") {
       this.#complete = true;
       return;
@@ -336,19 +394,35 @@ class ProxyUsage {
         this.#complete = true;
       const u = value.usage ?? value.response?.usage ?? value.message?.usage;
       if (!u) return;
+      for (const key of [
+        "prompt_tokens",
+        "input_tokens",
+        "completion_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+      ]) {
+        const count = u[key];
+        if (count == null) continue;
+        if (!Number.isSafeInteger(count) || count < 0) {
+          this.#disabled = true;
+          this.#usage = undefined;
+          return;
+        }
+        this.#counts[key] = Math.max(this.#counts[key] ?? 0, count);
+      }
+      const c = this.#counts;
       const input =
-        u.prompt_tokens ??
-        (u.input_tokens === undefined
-          ? this.#usage?.inputTokens
-          : u.input_tokens +
-            (u.cache_read_input_tokens ?? 0) +
-            (u.cache_creation_input_tokens ?? 0));
-      const output = u.completion_tokens ?? u.output_tokens ?? this.#usage?.outputTokens;
+        c.prompt_tokens ??
+        (c.input_tokens === undefined
+          ? undefined
+          : c.input_tokens +
+            (c.cache_read_input_tokens ?? 0) +
+            (c.cache_creation_input_tokens ?? 0));
+      const output = c.completion_tokens ?? c.output_tokens;
+      if (input === undefined || output === undefined) return;
       if (
         !Number.isSafeInteger(input) ||
-        !Number.isSafeInteger(output) ||
-        input < 0 ||
-        output < 0 ||
         input > this.ceiling.inputTokens ||
         output > this.ceiling.outputTokens
       ) {
@@ -361,10 +435,6 @@ class ProxyUsage {
     } catch {}
   }
   finish(): Usage | undefined {
-    if (this.#disabled) return undefined;
-    this.#buffer += this.#decoder.decode();
-    if (!this.sse) this.#read(this.#buffer);
-    else if (this.#buffer.startsWith("data:")) this.#read(this.#buffer.slice(5).trim());
     return !this.#disabled && (!this.sse || this.#complete) ? this.#usage : undefined;
   }
 }
@@ -399,6 +469,7 @@ const KEYS = new Set([
   "max_completion_tokens",
   "max_output_tokens",
   "parallel_tool_calls",
+  "store",
 ]);
 const CONTENT_TYPES = new Set([
   "text",
@@ -435,13 +506,20 @@ const CONTENT_KEYS = new Set([
 ]);
 
 /** Only inline text and function tools: schemas/arguments are inert JSON, not content blocks. */
-function boundedContent(value: unknown): boolean {
+function boundedContent(value: unknown, responses = false): boolean {
   if (value === undefined || value === null || typeof value === "string") return true;
-  if (Array.isArray(value)) return value.every(boundedContent);
+  if (Array.isArray(value)) return value.every((child) => boundedContent(child, responses));
   if (typeof value !== "object") return false;
   const object = value as Record<string, unknown>;
   if (typeof object.type === "string" && !CONTENT_TYPES.has(object.type)) return false;
   return Object.entries(object).every(([key, child]) => {
+    if (responses && key === "status")
+      return (
+        ["message", "function_call", "function_call_output"].includes(String(object.type)) &&
+        ["in_progress", "completed", "incomplete"].includes(String(child))
+      );
+    if (responses && key === "annotations")
+      return object.type === "output_text" && Array.isArray(child) && child.length === 0;
     if (!CONTENT_KEYS.has(key)) return false;
     if (
       key === "parameters" ||
@@ -452,7 +530,7 @@ function boundedContent(value: unknown): boolean {
       key === "strict"
     )
       return true;
-    return boundedContent(child);
+    return boundedContent(child, responses);
   });
 }
 
@@ -504,12 +582,17 @@ export function proxyRequest(
   if (typeof source.model !== "string" || !source.model || source.model.length > 256) return null;
   if (
     ![source.messages, source.input, source.tools, source.system, source.instructions].every(
-      boundedContent,
+      (content) => boundedContent(content, provider.api === "openai-responses"),
     ) ||
     !boundedToolChoice(source.tool_choice, provider.api)
   )
     return null;
   if (source.stream !== undefined && typeof source.stream !== "boolean") return null;
+  if (
+    source.store !== undefined &&
+    (provider.api !== "openai-responses" || typeof source.store !== "boolean")
+  )
+    return null;
   let base: URL;
   try {
     base = new URL(provider.baseUrl);
@@ -530,6 +613,7 @@ export function proxyRequest(
         ? "max_output_tokens"
         : resolveCompat(provider.baseUrl).maxTokensField;
   body[outputKey] = maxOutputTokens;
+  if (provider.api === "openai-responses") body.store = false;
   if (
     provider.api === "openai-chat" &&
     body.stream &&
