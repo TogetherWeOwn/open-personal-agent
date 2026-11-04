@@ -298,6 +298,77 @@ describe("Worker model proxy capability route", () => {
     expect(await f.user.usage.list()).toHaveLength(admitted.length);
   });
 
+  describe.each([
+    ["openai-chat", "/chat/completions", "max_tokens"],
+    ["openai-responses", "/responses", "max_output_tokens"],
+    ["anthropic-messages", "/messages", "max_tokens"],
+  ] as const)("%s small-cap DO accounting", (api, path, outputKey) => {
+    it.each(["missing", "final", "cancel"])(
+      "persists and settles %s usage at the actual cap",
+      async (kind) => {
+        const f = await setup();
+        let held = 0;
+        await runInDurableObject(f.stub, (instance: Assistant) => {
+          instance.limits.endTask("proxy-task");
+          instance.startTask("proxy-task", 240);
+          instance.resolveProxyProvider = async () => ({
+            baseUrl: "https://api.example/v1",
+            api,
+            apiKey: "test-provider-key",
+            billingId: "openai",
+          });
+          instance.proxyFetch = async (_url, init) => {
+            expect(JSON.parse(String(init?.body))[outputKey]).toBe(1);
+            const row = await db
+              .prepare("SELECT output_tokens FROM usage WHERE task_id = ?")
+              .bind("proxy-task")
+              .first<{ output_tokens: number }>();
+            expect(row?.output_tokens).toBe(1);
+            held = instance.limits.totals().heldMicroUsd;
+            if (kind === "cancel")
+              return new Response(new ReadableStream(), {
+                headers: { "content-type": "text/event-stream" },
+              });
+            return Response.json(
+              kind === "final" ? { usage: { input_tokens: 12, output_tokens: 1 } } : {},
+            );
+          };
+        });
+        const response = await f.send(
+          {},
+          {
+            path,
+            body: {
+              ...BODY.body,
+              max_tokens: 100,
+              max_completion_tokens: 16,
+              max_output_tokens: 1,
+            },
+          },
+        );
+        expect(response.status).toBe(200);
+        expect(held).toBeGreaterThan(0);
+        expect(held).toBeLessThanOrEqual(240);
+        const reading = response.text().catch(() => "aborted");
+        if (kind === "cancel") {
+          await f.user.tasks.cancel("proxy-task");
+          await f.user.tasks.cancel("proxy-task");
+          expect(await reading).toBe("aborted");
+        } else await reading;
+        const rows = await f.user.usage.list();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ taskId: "proxy-task", outputTokens: 1 });
+        expect(
+          await runInDurableObject(f.stub, (instance: Assistant) => instance.limits.totals()),
+        ).toEqual({
+          todayMicroUsd: kind === "final" ? 3 : held,
+          monthMicroUsd: kind === "final" ? 3 : held,
+          heldMicroUsd: 0,
+        });
+      },
+    );
+  });
+
   it("rejects oversized envelopes and non-allowlisted methods without making a call", async () => {
     const f = await setup();
     expect(

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { CapabilityScope } from "@opa/db/capability-tokens";
+import type { LedgerCall } from "@opa/db/repository";
 import { SseParser } from "@opa/providers";
 import { describe, expect, it, vi } from "vitest";
 import { Limits } from "../src/limits";
@@ -45,7 +46,7 @@ function fixture(
   let fetchError = false;
   let recordError = false;
   let reserveError = false;
-  const reservations: unknown[] = [];
+  const reservations: LedgerCall[] = [];
   let ceiling: CapabilityScope["modelAllowlist"] = SCOPE.modelAllowlist;
   const calls: { url: string; init: RequestInit }[] = [];
   const ledger: { taskId: string; usage: unknown }[] = [];
@@ -82,7 +83,7 @@ function fixture(
       if (resolveError) throw new Error("vault down");
       return configured ? { ...provider, api, billingId } : null;
     },
-    reserve: async (call: unknown) => {
+    reserve: async (call) => {
       if (reserveError) throw new Error("ledger reserve failed");
       reservations.push(call);
       if (revokeDuringReserve) live = false;
@@ -102,7 +103,11 @@ function fixture(
     proxy.call(
       "opaque-token",
       "saved-provider",
-      api === "openai-responses" ? "/responses" : "/chat/completions",
+      api === "anthropic-messages"
+        ? "/messages"
+        : api === "openai-responses"
+          ? "/responses"
+          : "/chat/completions",
       body,
     );
   return {
@@ -846,6 +851,175 @@ describe("atomic model proxy calls", () => {
     expect(f.calls).toHaveLength(1);
     expect(f.limits.totals().heldMicroUsd).toBe(0);
   });
+});
+
+describe.each([
+  ["openai-chat", "max_tokens"],
+  ["openai-responses", "max_output_tokens"],
+  ["anthropic-messages", "max_tokens"],
+] as const)("%s bounded reservations", (api, outputKey) => {
+  it.each([
+    [{ max_tokens: 1 }, 1],
+    [{ max_completion_tokens: 16 }, 16],
+    [{ max_output_tokens: 255 }, 255],
+    [{ max_tokens: 100, max_completion_tokens: 16, max_output_tokens: 50 }, 16],
+    [{ max_tokens: 1, max_completion_tokens: 500, max_output_tokens: 10 }, 1],
+    [{ max_tokens: 999999 }, 4096],
+    [{}, 4096],
+  ])("holds and journals the actual ceiling for %j", async (caps, expected) => {
+    const f = fixture(api);
+    f.upstream(async () => Response.json({}));
+    const response = await f.send({ ...BODY, ...caps });
+    try {
+      expect(response.status).toBe(200);
+      expect(JSON.parse(String(f.calls[0]?.init.body))[outputKey]).toBe(expected);
+      expect(f.reservations).toEqual([
+        expect.objectContaining({ usage: expect.objectContaining({ outputTokens: expected }) }),
+      ]);
+      const ceiling = f.reservations[0]?.usage;
+      expect(f.stored.get("model-proxy:pending")).toEqual({
+        [String(f.reservations[0]?.id)]: expect.objectContaining({ ceiling }),
+      });
+      // gpt-4o-mini: 0.15 micro-USD/input token, 0.60/output token.
+      const held = Math.ceil((ceiling?.inputTokens ?? 0) * 0.15 + Number(expected) * 0.6);
+      expect(f.limits.totals().heldMicroUsd).toBe(held);
+      await response.text();
+      expect(f.limits.totals()).toEqual({
+        todayMicroUsd: held,
+        monthMicroUsd: held,
+        heldMicroUsd: 0,
+      });
+      expect(f.ledger[0]?.usage).toEqual(ceiling);
+      expect(f.limits.task("task")?.spentMicroUsd).toBe(held);
+    } finally {
+      await f.proxy.cancelTask("task");
+    }
+  });
+
+  it.each(["task_budget", "daily", "monthly_hard"] as const)(
+    "admits an affordable one-token request under a tight %s limit",
+    async (limit) => {
+      const f = fixture(api);
+      // The bounded input costs < 220 micro-USD; 256 output tokens would cost another 154.
+      if (limit === "task_budget") {
+        f.limits.endTask("task");
+        f.limits.startTask("task", 240);
+      }
+      if (limit === "daily") f.limits.setSettings({ dailyCapMicroUsd: 240 });
+      if (limit === "monthly_hard") f.limits.setSettings({ hardCapMicroUsd: 240 });
+      f.upstream(async () => Response.json({}));
+      const response = await f.send({ ...BODY, max_output_tokens: 1 });
+      try {
+        expect(response.status).toBe(200);
+        expect(f.reservations[0]?.usage?.outputTokens).toBe(1);
+        expect(f.limits.totals().heldMicroUsd).toBeLessThanOrEqual(240);
+        await response.text();
+        expect(f.ledger[0]?.usage).toMatchObject({ outputTokens: 1 });
+      } finally {
+        await f.proxy.cancelTask("task");
+      }
+    },
+  );
+
+  it.each(["missing", "malformed", "over-cap", "valid"])(
+    "settles %s final usage against the small ceiling",
+    async (kind) => {
+      const f = fixture(api);
+      const usage =
+        kind === "missing"
+          ? undefined
+          : {
+              input_tokens: 10,
+              output_tokens: kind === "malformed" ? "1" : kind === "over-cap" ? 17 : 1,
+            };
+      const event =
+        api === "anthropic-messages"
+          ? { type: "message_delta", usage }
+          : api === "openai-responses"
+            ? { type: "response.completed", response: { usage } }
+            : { usage };
+      const terminal = api === "anthropic-messages" ? '{"type":"message_stop"}' : "[DONE]";
+      f.upstream(
+        async () =>
+          new Response(`data: ${JSON.stringify(event)}\n\ndata: ${terminal}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      const response = await f.send({ ...BODY, max_tokens: 16, stream: true });
+      const held = f.limits.totals().heldMicroUsd;
+      await response.text();
+      expect(f.reservations[0]?.usage?.outputTokens).toBe(16);
+      expect(f.ledger[0]?.usage).toEqual(
+        kind === "valid"
+          ? { inputTokens: 10, outputTokens: 1, cachedInputTokens: 0 }
+          : f.reservations[0]?.usage,
+      );
+      expect(f.limits.totals().todayMicroUsd).toBe(kind === "valid" ? 3 : held);
+      expect(f.limits.totals().heldMicroUsd).toBe(0);
+    },
+  );
+
+  it("recovers a failed small-cap cancellation settlement once", async () => {
+    const f = fixture(api);
+    f.upstream(
+      async () =>
+        new Response(new ReadableStream(), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const response = await f.send({ ...BODY, max_tokens: 1 });
+    const reading = response.text().catch(() => "aborted");
+    const held = f.limits.totals().heldMicroUsd;
+    f.failRecord(true);
+    await expect(f.proxy.cancelTask("task")).rejects.toThrow("ledger down");
+    expect(await reading).toBe("aborted");
+    f.failRecord(false);
+    await f.proxy.cancelTask("task");
+    await f.proxy.cancelTask("task");
+    expect(f.ledger).toHaveLength(1);
+    expect(f.ledger[0]?.usage).toMatchObject({ outputTokens: 1 });
+    expect(f.limits.totals().todayMicroUsd).toBe(held);
+    expect(f.limits.totals().heldMicroUsd).toBe(0);
+    expect(f.stored.get("model-proxy:pending")).toEqual({});
+  });
+
+  it("serializes concurrent small-cap admissions without reserving phantom output", async () => {
+    const f = fixture(api);
+    f.limits.endTask("task");
+    f.limits.startTask("task", 700);
+    f.upstream(
+      async () =>
+        new Response(new ReadableStream(), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () => f.send({ ...BODY, max_tokens: 1 })),
+    );
+    try {
+      expect(responses.filter((response) => response.status === 200)).toHaveLength(3);
+      expect(responses.filter((response) => response.status === 429)).toHaveLength(2);
+      expect(f.reservations).toHaveLength(3);
+      expect(f.reservations.every((call) => call.usage?.outputTokens === 1)).toBe(true);
+      expect(f.limits.totals().heldMicroUsd).toBeLessThanOrEqual(700);
+    } finally {
+      await f.proxy.cancelTask("task");
+    }
+    expect(f.ledger).toHaveLength(3);
+    expect(f.limits.totals().todayMicroUsd).toBeLessThanOrEqual(700);
+  });
+
+  it.each(["max_tokens", "max_completion_tokens", "max_output_tokens"])(
+    "rejects an invalid competing %s without any reservation",
+    async (alias) => {
+      const f = fixture(api);
+      const response = await f.send({ ...BODY, max_tokens: 1, max_output_tokens: 1, [alias]: 0 });
+      expect(response.status).toBe(400);
+      expect(f.reservations).toHaveLength(0);
+      expect(f.calls).toHaveLength(0);
+      expect(f.limits.heldIds()).toEqual([]);
+    },
+  );
 });
 
 const provider = {

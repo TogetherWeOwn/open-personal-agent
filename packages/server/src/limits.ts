@@ -112,6 +112,8 @@ export interface Refusal {
 export interface CallScope {
   taskId?: string;
   background?: boolean;
+  /** A validated caller ceiling; smaller replies need only this many affordable tokens. */
+  maxOutputTokens?: number;
 }
 
 /**
@@ -369,12 +371,13 @@ export class Limits {
     const [limit, left, cap] = room.reduce((a, b) => (b[1] < a[1] ? b : a));
     const refusal = { limit, detail: `${cap} ${LIMIT_NAMES[limit]}` };
     if (left <= 0) return refusal;
+    const outputCeiling = Math.min(MAX_OUTPUT_TOKENS, scope.maxOutputTokens ?? MAX_OUTPUT_TOKENS);
     const price = findPrice(providerId, model);
-    if (!price) return { maxOutputTokens: MAX_OUTPUT_TOKENS, reservedMicroUsd: 0 };
+    if (!price) return { maxOutputTokens: outputCeiling, reservedMicroUsd: 0 };
     const input = cost(price, inputTokens(chars) + fileTokens, 0);
     const affordable = Math.floor((left - input) / price.outputUsdPerMTok);
-    const maxOutputTokens = Math.min(MAX_OUTPUT_TOKENS, affordable);
-    if (maxOutputTokens < MIN_OUTPUT_TOKENS) return refusal;
+    const maxOutputTokens = Math.min(outputCeiling, affordable);
+    if (maxOutputTokens < Math.min(MIN_OUTPUT_TOKENS, outputCeiling)) return refusal;
     const reservedMicroUsd = cost(price, inputTokens(chars) + fileTokens, maxOutputTokens);
     const hold: Hold = {
       microUsd: reservedMicroUsd,
