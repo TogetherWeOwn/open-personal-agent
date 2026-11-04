@@ -17,7 +17,10 @@ const SCOPE: CapabilityScope = {
 };
 const BODY = { model: MODEL, messages: [{ role: "user", content: "hello" }] };
 
-function fixture(api: ProxyProvider["api"] = "openai-chat") {
+function fixture(
+  api: ProxyProvider["api"] = "openai-chat",
+  hooks: { verify?: () => Promise<void>; record?: () => Promise<void> } = {},
+) {
   const stored = new Map<string, unknown>();
   const kv = {
     get: <T>(key: string) => structuredClone(stored.get(key)) as T | undefined,
@@ -63,6 +66,7 @@ function fixture(api: ProxyProvider["api"] = "openai-chat") {
       return next;
     },
     verify: async () => {
+      await hooks.verify?.();
       if (verifyError) throw new Error("store down");
       return live ? { ...SCOPE, expiresAt, modelAllowlist: ceiling } : null;
     },
@@ -76,6 +80,7 @@ function fixture(api: ProxyProvider["api"] = "openai-chat") {
       if (revokeDuringReserve) live = false;
     },
     record: async (call) => {
+      await hooks.record?.();
       if (recordError) throw new Error("ledger down");
       ledger.push(call);
     },
@@ -267,6 +272,127 @@ describe("atomic model proxy calls", () => {
       }
     },
   );
+
+  it("ignores a failed liveness check once successful settlement has started", async () => {
+    vi.useFakeTimers();
+    let rejectVerify: (error: Error) => void = () => {};
+    let releaseRecord: () => void = () => {};
+    let enteredVerify: () => void = () => {};
+    let enteredRecord: () => void = () => {};
+    const verifyEntered = new Promise<void>((resolve) => {
+      enteredVerify = resolve;
+    });
+    const recordEntered = new Promise<void>((resolve) => {
+      enteredRecord = resolve;
+    });
+    const verifyPending = new Promise<void>((_resolve, reject) => {
+      rejectVerify = reject;
+    });
+    const recordPending = new Promise<void>((resolve) => {
+      releaseRecord = resolve;
+    });
+    let pause = false;
+    const f = fixture("openai-chat", {
+      verify: async () => {
+        if (!pause) return;
+        enteredVerify();
+        await verifyPending;
+      },
+      record: async () => {
+        enteredRecord();
+        await recordPending;
+      },
+    });
+    try {
+      let upstream: ReadableStreamDefaultController<Uint8Array> | undefined;
+      f.upstream(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                upstream = controller;
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+      );
+      const response = await f.send();
+      const reading = response.text().then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      pause = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await verifyEntered;
+      const payload = JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 20 } });
+      upstream?.enqueue(new TextEncoder().encode(payload));
+      upstream?.close();
+      await recordEntered;
+      rejectVerify(new Error("verification failed after EOF"));
+      await vi.advanceTimersByTimeAsync(0);
+      releaseRecord();
+      expect(await reading).toEqual({ value: payload });
+      expect(f.calls[0]?.init.signal?.aborted).toBe(false);
+      expect(f.ledger).toHaveLength(1);
+    } finally {
+      rejectVerify(new Error("test cleanup"));
+      releaseRecord();
+      await f.proxy.cancelTask("task");
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["\n", "\n\n", "\r\r", "\r\n\r\n"])(
+    "forwards sanitized SSE heartbeats with %j without waiting for data",
+    async (eol) => {
+      const f = fixture();
+      f.upstream(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(`: keepalive ${provider.apiKey}${eol}`),
+                );
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      );
+      const response = await f.send();
+      const reader = response.body?.getReader();
+      const reading = reader?.read();
+      let received = false;
+      void reading?.then(
+        () => {
+          received = true;
+        },
+        () => {},
+      );
+      try {
+        await vi.waitFor(() => expect(received).toBe(true), { timeout: 1_000, interval: 5 });
+        expect(new TextDecoder().decode((await reading)?.value)).toBe(": heartbeat\n\n");
+      } finally {
+        await reader?.cancel();
+        await reading?.catch(() => {});
+      }
+    },
+  );
+
+  it("preserves empty SSE data events without aborting inference", async () => {
+    const f = fixture();
+    f.upstream(
+      async () =>
+        new Response(
+          'data:\n\ndata: {"usage":{"prompt_tokens":10,"completion_tokens":20}}\n\ndata: [DONE]\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await f.send();
+    await expect(response.text()).resolves.toContain("data: [DONE]");
+    expect(f.calls[0]?.init.signal?.aborted).toBe(false);
+    expect(f.ledger[0]?.usage).toEqual({ inputTokens: 10, outputTokens: 20, cachedInputTokens: 0 });
+  });
 
   it.each(["json", "sse", "json-escaped", "sse-escaped"])(
     "redacts credentials in chunked successful %s error bodies",

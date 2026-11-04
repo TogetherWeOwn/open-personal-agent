@@ -228,7 +228,7 @@ export class ModelProxy {
               await abort();
           });
         } catch {
-          await abort().catch(() => {});
+          if (!finished) await abort().catch(() => {});
         } finally {
           if (!finished) livenessTimer = setTimeout(() => void checkLiveness(), 1_000);
         }
@@ -309,9 +309,15 @@ export class ModelProxy {
               let wire = "";
               if (sse) {
                 for (const event of parser.push(text, next.done)) {
+                  if (event.heartbeat) {
+                    wire += ": heartbeat\n\n";
+                    continue;
+                  }
                   usage.read(event.data);
                   const data =
-                    event.data === "[DONE]" ? event.data : redactJson(event.data, admitted.redact);
+                    event.data === "[DONE]" || event.data === ""
+                      ? event.data
+                      : redactJson(event.data, admitted.redact);
                   wire += `${event.event ? `event: ${admitted.redact(event.event)}\n` : ""}data: ${data}\n\n`;
                 }
               } else {

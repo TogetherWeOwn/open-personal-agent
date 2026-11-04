@@ -3,9 +3,10 @@
 export interface SseEvent {
   data: string;
   event: string;
+  heartbeat?: true;
 }
 
-/** Shared incremental framing; only a blank line dispatches an event, never EOF. */
+/** Shared framing; only blank lines dispatch data events, never EOF. Comments signal heartbeats. */
 export class SseParser {
   #buffer = "";
   #data: string[] = [];
@@ -28,6 +29,9 @@ export class SseParser {
         this.#data = [];
         this.#event = "";
         this.#size = 0;
+      } else if (line.startsWith(":")) {
+        // Comments keep the connection alive without exposing their provider diagnostics.
+        events.push({ data: "", event: "", heartbeat: true });
       } else if (line.startsWith("data:")) {
         this.#data.push(line.slice(line.startsWith("data: ") ? 6 : 5));
       } else if (line.startsWith("event:")) {
@@ -60,7 +64,7 @@ export async function* sseData(
       const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
       for (const event of parser.push(text, done)) {
         if (signal?.aborted) return;
-        yield event.data;
+        if (!event.heartbeat) yield event.data;
       }
       if (done) return;
     }

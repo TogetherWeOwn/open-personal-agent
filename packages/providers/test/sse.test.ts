@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { SseParser } from "../src/sse";
+import { SseParser, sseData } from "../src/sse";
 
 describe("bounded SSE framing", () => {
   it.each(["\n", "\r", "\r\n"])(
@@ -18,7 +18,10 @@ describe("bounded SSE framing", () => {
       ].join(eol);
       const events = [...wire].flatMap((byte) => parser.push(byte));
       events.push(...parser.push("", true));
-      expect(events).toEqual([{ data: "first\nsecond", event: "message" }]);
+      expect(events).toEqual([
+        { data: "", event: "", heartbeat: true },
+        { data: "first\nsecond", event: "message" },
+      ]);
     },
   );
 
@@ -29,6 +32,19 @@ describe("bounded SSE framing", () => {
       expect([...parser.push(wire), ...parser.push("", true)]).toEqual([]);
     },
   );
+
+  it("exposes comment heartbeats separately while data consumers ignore them", async () => {
+    const wire = ": keepalive\n\ndata:\n\ndata: hello\n\n";
+    expect(new SseParser().push(wire)).toEqual([
+      { data: "", event: "", heartbeat: true },
+      { data: "", event: "" },
+      { data: "hello", event: "" },
+    ]);
+    const body = new Response(wire).body;
+    const data = [];
+    if (body) for await (const item of sseData(body)) data.push(item);
+    expect(data).toEqual(["", "hello"]);
+  });
 
   it("bounds multiline events and partial lines, and resets its bound after dispatch", () => {
     const partial = new SseParser(20);
