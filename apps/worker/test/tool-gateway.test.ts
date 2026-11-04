@@ -537,6 +537,91 @@ it("enforces the per-token rolling-minute cap without charging retries again", a
   expect(await db.prepare("SELECT count(*) AS n FROM capability_calls").first("n")).toBe(10);
 });
 
+it("replays a completed large call after policy changes from auto to ask", async () => {
+  const fixture = await gatewayOwner();
+  await db
+    .prepare(
+      "INSERT INTO tool_overrides (user_id, tool, decision) VALUES (?, 'create_artifact', 'auto')",
+    )
+    .bind(fixture.owner)
+    .run();
+  const args = { name: "large.txt", content: "x".repeat(70 * 1024) };
+  const first = await fixture.call("stable", "create_artifact", args);
+  expect(first.status).toBe(200);
+  const saved = await first.json();
+  await db.prepare("DELETE FROM tool_overrides").run();
+  const retry = await fixture.call("stable", "create_artifact", args);
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toEqual(saved);
+  expect(await fixture.user.artifacts.list()).toHaveLength(1);
+  expect(await db.prepare("SELECT count(*) AS n FROM approvals").first("n")).toBe(0);
+  expect((await fixture.call("fresh", "create_artifact", args)).status).toBe(400);
+  expect(await db.prepare("SELECT count(*) AS n FROM capability_calls").first("n")).toBe(1);
+});
+
+it("retires a pending approval when current policy terminally denies its call", async () => {
+  const fixture = await gatewayOwner();
+  const args = { name: "answer.txt", content: "hello" };
+  const first = await fixture.call("waiting", "create_artifact", args);
+  expect(first.status).toBe(202);
+  const { batchId } = await first.json<{ batchId: string }>();
+  await db
+    .prepare(
+      "INSERT INTO tool_overrides (user_id, tool, decision) VALUES (?, 'create_artifact', 'never')",
+    )
+    .bind(fixture.owner)
+    .run();
+  const denied = await fixture.call("waiting", "create_artifact", args);
+  expect(denied.status).toBe(403);
+  expect(await denied.json()).toEqual({ error: "tool_denied" });
+  expect(await fixture.user.approvals.batch(batchId)).toMatchObject([{ status: "denied" }]);
+  expect(await (await fixture.browser.req("/api/approvals")).json()).toEqual({ batches: [] });
+  await db.prepare("DELETE FROM tool_overrides").run();
+  expect((await fixture.call("waiting", "create_artifact", args)).status).toBe(403);
+  expect(await fixture.user.artifacts.list()).toEqual([]);
+});
+
+it.each([
+  { approved: false, swept: false },
+  { approved: false, swept: true },
+  { approved: true, swept: false },
+  { approved: true, swept: true },
+])(
+  "gives fresh keys a new approval after expiry ($approved, $swept)",
+  async ({ approved, swept }) => {
+    const fixture = await gatewayOwner();
+    const args = { name: "answer.txt", content: "hello" };
+    const first = await fixture.call("expired-key", "create_artifact", args);
+    expect(first.status).toBe(202);
+    const old = await first.json<{ batchId: string; callId: string }>();
+    if (approved) {
+      const [row] = await fixture.user.approvals.batch(old.batchId);
+      expect(
+        (
+          await fixture.browser.req(`/api/approvals/${old.batchId}`, {
+            body: {
+              decisions: [{ approvalId: row?.approvalId, decision: "approve", scope: "once" }],
+            },
+          })
+        ).status,
+      ).toBe(200);
+    }
+    await db.prepare("UPDATE approvals SET expires_at = 1").run();
+    if (swept) await systemStore(env).approvals.expireDue(Date.now());
+    const fresh = await fixture.call("new-key", "create_artifact", args);
+    expect(fresh.status).toBe(202);
+    const next = await fresh.json<{ callId: string; batchId: string }>();
+    expect(next.callId).not.toBe(old.callId);
+    expect(await fixture.user.approvals.batch(next.batchId)).toMatchObject([{ status: "pending" }]);
+    const alias = await fixture.call("new-alias", "create_artifact", args);
+    expect(alias.status).toBe(202);
+    expect(await alias.json()).toMatchObject(next);
+    expect((await fixture.call("expired-key", "create_artifact", args)).status).toBe(403);
+    expect((await fixture.call("expired-key", "create_artifact", args)).status).toBe(403);
+    expect(await fixture.user.artifacts.list()).toEqual([]);
+  },
+);
+
 it("enforces the lifetime call cap after rate windows roll over", async () => {
   const { call } = await gatewayOwner();
   for (let round = 0; round < 6; round++) {

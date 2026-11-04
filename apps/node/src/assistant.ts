@@ -336,7 +336,8 @@ export class NodeAssistant {
     const artifact = await (await this.#repo).artifacts.get(artifactId);
     if (!artifact?.conversationId) return;
     await this.#sweepTabs();
-    const frameKey = artifact.turnId ?? artifact.taskId ?? artifact.id;
+    // A standalone Output must not replace the browser's active-turn replay cursor.
+    const frameKey = artifact.turnId ?? "";
     this.#send(artifact.conversationId, frameKey, "artifact.created", {
       artifactId: artifact.id,
       name: artifact.name,

@@ -102,8 +102,7 @@ capabilityAudiences.post(
       ...(target === undefined ? {} : { target }),
       now: Date.now(),
     });
-    if (policy.outcome === "ask" && !fitsApproval(input, target ?? null))
-      return c.json({ error: "invalid_input" }, 400);
+    const canPrepare = policy.outcome !== "ask" || fitsApproval(input, target ?? null);
     const requestHash = toBase64Url(
       await sha256(
         new TextEncoder().encode(
@@ -116,7 +115,9 @@ capabilityAudiences.post(
       ),
     );
     const store = repository.capabilityGateway(capability);
-    const begun = await store.begin(body.idempotencyKey, requestHash);
+    // Reject new oversized approvals without reserving a key, but still recover prior outcomes.
+    const begun = await store.begin(body.idempotencyKey, requestHash, canPrepare);
+    if (begun.kind === "not_started") return c.json({ error: "invalid_input" }, 400);
     if (begun.kind === "quota") return c.json({ error: "call_quota" }, 429);
     if (begun.kind === "conflict") return c.json({ error: "idempotency_conflict" }, 409);
     let call = begun.call;
@@ -137,6 +138,7 @@ capabilityAudiences.post(
     let approvalId: string | undefined;
     let executeInput = input;
     if (call.status === "new") {
+      if (!canPrepare) return c.json({ error: "invalid_input" }, 400);
       if (!(await store.transition(call, "new", "preparing"))) {
         call = (await store.load(call.id)) ?? call;
         return call.status === "completed"
@@ -180,23 +182,25 @@ capabilityAudiences.post(
       const rows = await user.approvals.batch(batchId);
       const row = rows[0];
       if (rows.length !== 1 || !row || row.toolCallId !== call.id) refusal = "approval_missing";
-      else if (row.status === "pending" && row.expiresAt > Date.now() && !refusal) return waiting();
-      else if (row.status !== "approved" || row.expiresAt <= Date.now())
-        refusal = "approval_denied";
       else {
-        refusal =
-          refusal ??
-          (await bindingProblem(row, {
-            userId: capability.userId,
-            context,
-            tools: composed.tools,
-          })) ??
-          undefined;
-        const envelope = await openApproval(row.canonical, row.bindingHash);
-        if (!envelope || canonical(envelope.args) !== canonical(input))
-          refusal = "binding_mismatch";
-        else executeInput = envelope.args;
         approvalId = row.approvalId;
+        if (row.status === "pending" && row.expiresAt > Date.now() && !refusal) return waiting();
+        if (row.status !== "approved" || row.expiresAt <= Date.now())
+          refusal = refusal ?? "approval_denied";
+        else {
+          refusal =
+            refusal ??
+            (await bindingProblem(row, {
+              userId: capability.userId,
+              context,
+              tools: composed.tools,
+            })) ??
+            undefined;
+          const envelope = await openApproval(row.canonical, row.bindingHash);
+          if (!envelope || canonical(envelope.args) !== canonical(input))
+            refusal = "binding_mismatch";
+          else executeInput = envelope.args;
+        }
       }
     }
     if (!(await store.transition(call, call.status, "executing"))) {

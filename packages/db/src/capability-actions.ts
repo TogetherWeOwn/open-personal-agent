@@ -90,18 +90,23 @@ export function gatewayCalls(db: SqlDatabase, scope: CapabilityScope) {
       .first<GatewayCall>();
   return {
     load,
-    begin: async (clientKey: string, requestHash: string) => {
+    begin: async (clientKey: string, requestHash: string, allowNew = true) => {
       const id = crypto.randomUUID();
       const now = Date.now();
       await db
         .prepare(`INSERT INTO capability_calls
         (id, user_id, task_id, token_id, computer_id, client_key, request_hash, master_id, status, created_at)
         SELECT ?, ct.user_id, ct.task_id, ct.id, ct.computer_id, ?, ?,
-          coalesce((SELECT id FROM capability_calls WHERE task_id = ct.task_id AND computer_id = ct.computer_id
-            AND token_id = ct.id AND user_id = ct.user_id
-            AND request_hash = ? AND master_id = id
-            AND (status = 'pending' OR (status IN ('new', 'preparing') AND created_at > ?)) LIMIT 1), ?), 'new', ?
+          coalesce((SELECT cc.id FROM capability_calls cc WHERE cc.task_id = ct.task_id AND cc.computer_id = ct.computer_id
+            AND cc.token_id = ct.id AND cc.user_id = ct.user_id
+            AND cc.request_hash = ? AND cc.master_id = cc.id
+            AND ((cc.status = 'pending' AND EXISTS (SELECT 1 FROM approvals a
+              WHERE a.batch_id = 'gateway_' || cc.id AND a.tool_call_id = cc.id
+                AND a.user_id = cc.user_id AND a.task_id = cc.task_id
+                AND a.status IN ('pending', 'approved') AND a.expires_at > ?))
+              OR (cc.status IN ('new', 'preparing') AND cc.created_at > ?)) LIMIT 1), ?), 'new', ?
         ${LIVE_CAPABILITY}
+        AND ?
         AND (SELECT count(*) FROM capability_calls WHERE token_id = ct.id) < 60
         AND (SELECT count(*) FROM capability_calls WHERE token_id = ct.id AND created_at > ?) < 10
         AND NOT EXISTS (SELECT 1 FROM capability_calls WHERE task_id = ct.task_id AND client_key = ?)
@@ -111,10 +116,12 @@ export function gatewayCalls(db: SqlDatabase, scope: CapabilityScope) {
           clientKey,
           requestHash,
           requestHash,
+          now,
           now - 30_000,
           id,
           now,
           ...capabilityParams(scope, now),
+          allowNew ? 1 : 0,
           now - 60_000,
           clientKey,
         )
@@ -124,7 +131,7 @@ export function gatewayCalls(db: SqlDatabase, scope: CapabilityScope) {
         WHERE task_id = ? AND user_id = ? AND computer_id = ? AND client_key = ?`)
         .bind(scope.taskId, scope.userId, scope.computerId, clientKey)
         .first<{ masterId: string; requestHash: string }>();
-      if (!key) return { kind: "quota" as const };
+      if (!key) return allowNew ? { kind: "quota" as const } : { kind: "not_started" as const };
       if (key.requestHash !== requestHash) return { kind: "conflict" as const };
       const call = await load(key.masterId);
       return call ? { kind: "call" as const, call } : { kind: "conflict" as const };

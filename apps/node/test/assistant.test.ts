@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { HarnessEvent, ModelEvent, ModelProvider } from "@opa/core";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { resumeAfterArtifact } from "../../../test/helpers/artifact-resume.mjs";
 import { NodeEventLog, SqliteKv } from "../src/assistant";
 import { createNodeApp } from "../src/compose";
 
@@ -314,15 +315,28 @@ describe("NodeAssistant", () => {
         .run(artifactId, userId, conversationId, turnId);
       const log = new NodeEventLog(app.db, userId);
       log.append(conversationId, "unrelated-turn", () => "unrelated");
+      for (let i = 0; i < 3; i++) log.append(conversationId, "chat-turn", () => "chat frame");
       const tab = socket();
       const conn = assistant.open(tab, sessionId, false);
       try {
         await assistant.artifactCreated(artifactId);
         await assistant.artifactCreated(artifactId);
-        expect(ofType(tab, "artifact.created").map((frame) => frame.seq)).toEqual([2, 3]);
-        expect(log.replay(conversationId, turnId ?? artifactId, 0)).toHaveLength(retained);
+        expect(ofType(tab, "artifact.created").map((frame) => frame.seq)).toEqual([5, 6]);
+        if (!turnId) {
+          const notification = ofType(tab, "artifact.created")[1];
+          if (!notification) throw new Error("missing artifact notification");
+          expect(await resumeAfterArtifact(notification)).toEqual([
+            { type: "resume", conversationId, turnId: "chat-turn", afterSeq: 4 },
+          ]);
+        }
+        expect(log.replay(conversationId, turnId ?? "", 0)).toHaveLength(retained);
         expect(log.replay(conversationId, "unrelated-turn", 0)).toEqual(["unrelated"]);
-        expect(log.append(conversationId, "next-turn", (seq) => `next:${seq}`)).toBe("next:4");
+        expect(log.replay(conversationId, "chat-turn", 0)).toEqual([
+          "chat frame",
+          "chat frame",
+          "chat frame",
+        ]);
+        expect(log.append(conversationId, "next-turn", (seq) => `next:${seq}`)).toBe("next:7");
       } finally {
         assistant.close(conn);
       }

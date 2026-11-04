@@ -1976,7 +1976,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
           },
           /**
            * Ends an approval's life: a claimed or dispatched call `executed` or `failed`; an
-           * approved call the re-check refused `denied` (AC12); an undecided one past its expiry
+           * pending or approved call the re-check refused `denied` (AC12); one past its expiry
            * `expired`. With its audit row; `false` (and nothing written) if the row wasn't in the
            * state that outcome ends.
            */
@@ -1985,7 +1985,7 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               outcome.status === "executed" || outcome.status === "failed"
                 ? ["executing", "dispatched"]
                 : outcome.status === "denied"
-                  ? ["approved"]
+                  ? ["pending", "approved"]
                   : ["pending"];
             const reason = "reason" in outcome ? outcome.reason : null;
             const result =

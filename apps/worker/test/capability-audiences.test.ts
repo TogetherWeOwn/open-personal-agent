@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { runInDurableObject } from "cloudflare:test";
+import type { HarnessEvent } from "@opa/core";
 import { mintCapabilityToken } from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import type { SqlDatabase } from "@opa/db/system";
 import { expect, it, vi } from "vitest";
+import { resumeAfterArtifact } from "../../../test/helpers/artifact-resume.mjs";
 import type { Assistant } from "../src/assistant";
 import { EventLog } from "../src/event-log";
 import { workerApp } from "../src/worker-app";
@@ -14,7 +16,14 @@ import { claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 freshDatabase();
 
 it("announces the saved Output to connected tabs without borrowing the Workflow sequence", async () => {
-  const { browser, upload } = await uploadOwner();
+  const { browser, upload, owner } = await uploadOwner();
+  await runInDurableObject(
+    env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${owner}`)),
+    async (_instance: Assistant, state) => {
+      const log = new EventLog(state.storage.sql);
+      for (let i = 0; i < 4; i++) log.append("upload-chat", "chat-turn", () => "chat frame");
+    },
+  );
   const cookie = [...browser.cookies].map(([key, value]) => `${key}=${value}`).join("; ");
   const connection = await workerApp.request(
     `${ORIGIN}/api/chat`,
@@ -27,7 +36,7 @@ it("announces the saved Output to connected tabs without borrowing the Workflow 
   expect(ws).toBeTruthy();
   if (!ws) return;
   ws.accept();
-  const events: { type: string; payload: unknown }[] = [];
+  const events: HarnessEvent[] = [];
   ws.addEventListener("message", (event) => {
     events.push(JSON.parse(String(event.data)));
   });
@@ -45,6 +54,12 @@ it("announces the saved Output to connected tabs without borrowing the Workflow 
         ),
       { timeout: 2000 },
     );
+    const notification = events.find((frame) => frame.type === "artifact.created");
+    if (!notification) throw new Error("missing artifact notification");
+    expect(notification.seq).toBe(5);
+    expect(await resumeAfterArtifact(notification)).toEqual([
+      { type: "resume", conversationId: "upload-chat", turnId: "chat-turn", afterSeq: 4 },
+    ]);
   } finally {
     ws.close();
   }
@@ -65,7 +80,7 @@ it.each([
       content: "hello",
       source: { conversationId: "upload-chat", taskId, turnId },
     });
-    const frameKey = turnId ?? taskId ?? "notified-artifact";
+    const frameKey = turnId ?? "";
     const frames = await runInDurableObject(
       env.ASSISTANT.get(env.ASSISTANT.idFromName(`u:${owner}`)),
       async (instance: Assistant, state) => {

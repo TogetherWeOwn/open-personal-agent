@@ -313,7 +313,8 @@ export class Assistant extends Agent<Bindings> {
         this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
       ),
     );
-    const frameKey = artifact.turnId ?? artifact.taskId ?? artifact.id;
+    // A standalone Output must not replace the browser's active-turn replay cursor.
+    const frameKey = artifact.turnId ?? "";
     this.#send(artifact.conversationId, frameKey, "artifact.created", {
       artifactId: artifact.id,
       name: artifact.name,
