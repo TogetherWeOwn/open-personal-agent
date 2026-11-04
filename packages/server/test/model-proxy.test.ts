@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { CapabilityScope } from "@opa/db/capability-tokens";
+import { SseParser } from "@opa/providers";
 import { describe, expect, it, vi } from "vitest";
 import { Limits } from "../src/limits";
 import { ModelProxy, type ProxyProvider, proxyRequest } from "../src/model-proxy";
@@ -19,7 +20,11 @@ const BODY = { model: MODEL, messages: [{ role: "user", content: "hello" }] };
 
 function fixture(
   api: ProxyProvider["api"] = "openai-chat",
-  hooks: { verify?: () => Promise<void>; record?: () => Promise<void> } = {},
+  hooks: {
+    verify?: () => Promise<undefined | false>;
+    record?: () => Promise<void>;
+    atomicError?: () => void;
+  } = {},
 ) {
   const stored = new Map<string, unknown>();
   const kv = {
@@ -58,7 +63,10 @@ function fixture(
     limits,
     journal: kv,
     atomic: <T>(fn: () => Promise<T>) => {
-      const next = queue.then(fn);
+      const next = queue.then(fn).catch((error: unknown) => {
+        hooks.atomicError?.();
+        throw error;
+      });
       queue = next.then(
         () => {},
         () => {},
@@ -66,9 +74,9 @@ function fixture(
       return next;
     },
     verify: async () => {
-      await hooks.verify?.();
+      const verified = await hooks.verify?.();
       if (verifyError) throw new Error("store down");
-      return live ? { ...SCOPE, expiresAt, modelAllowlist: ceiling } : null;
+      return live && verified !== false ? { ...SCOPE, expiresAt, modelAllowlist: ceiling } : null;
     },
     resolve: async () => {
       if (resolveError) throw new Error("vault down");
@@ -273,6 +281,50 @@ describe("atomic model proxy calls", () => {
     },
   );
 
+  it.each(["verify", "record"])(
+    "contains liveness %s failures inside the atomic boundary without interrupting another call",
+    async (failure) => {
+      vi.useFakeTimers();
+      let failNextVerify = false;
+      const atomicError = vi.fn();
+      const f = fixture("openai-chat", {
+        verify: async () => {
+          if (failNextVerify) {
+            failNextVerify = false;
+            if (failure === "record") return false;
+            throw new Error("transient verification failure");
+          }
+        },
+        atomicError,
+      });
+      try {
+        f.upstream(
+          async () =>
+            new Response(new ReadableStream(), {
+              headers: { "content-type": "text/event-stream" },
+            }),
+        );
+        const first = await f.send();
+        const second = await f.send();
+        failNextVerify = true;
+        f.failRecord(failure === "record");
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(atomicError).not.toHaveBeenCalled();
+        expect(f.calls[0]?.init.signal?.aborted).toBe(true);
+        expect(f.calls[1]?.init.signal?.aborted).toBe(false);
+        await expect(first.text()).rejects.toThrow();
+        f.failRecord(false);
+        await f.proxy.cancelTask("task");
+        await expect(second.text()).rejects.toThrow();
+        expect(f.limits.totals().heldMicroUsd).toBe(0);
+      } finally {
+        f.failRecord(false);
+        await f.proxy.cancelTask("task");
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("ignores a failed liveness check once successful settlement has started", async () => {
     vi.useFakeTimers();
     let rejectVerify: (error: Error) => void = () => {};
@@ -429,6 +481,40 @@ describe("atomic model proxy calls", () => {
   );
 
   it.each(["\n", "\r", "\r\n"])(
+    "keeps SSE event names on one line with %j separators and redacts literal keys",
+    async (eol) => {
+      const f = fixture();
+      const escapedKey = provider.apiKey.replace("provider", "\\u0070rovider");
+      const event = `message\\ndata: ${escapedKey}`;
+      const payload = {
+        text: "first\nsecond",
+        usage: { prompt_tokens: 10, completion_tokens: 20 },
+      };
+      const wire = [
+        `event: ${event}`,
+        `id: ${escapedKey}`,
+        `data: ${JSON.stringify(payload)}`,
+        "",
+        `event: ${provider.apiKey}`,
+        "data: [DONE]",
+        "",
+        "",
+      ].join(eol);
+      f.upstream(
+        async () => new Response(wire, { headers: { "content-type": "text/event-stream" } }),
+      );
+      const downstream = await (await f.send()).text();
+      expect(downstream).not.toContain(provider.apiKey);
+      const events = new SseParser().push(downstream, true);
+      expect(events).toEqual([
+        { event, data: JSON.stringify(payload) },
+        { event: "[redacted]", data: "[DONE]" },
+      ]);
+      expect(JSON.parse(events[0]?.data ?? "null")).toEqual(payload);
+    },
+  );
+
+  it.each(["\n", "\r", "\r\n"])(
     "settles only complete multiline SSE events with %j separators",
     async (eol) => {
       const f = fixture();
@@ -455,7 +541,23 @@ describe("atomic model proxy calls", () => {
             { headers: { "content-type": "text/event-stream" } },
           ),
       );
-      await (await f.send()).text();
+      const downstream = await (await f.send()).text();
+      const events = new SseParser().push(downstream, true);
+      expect(events.map((event) => JSON.parse(event.data))).toEqual([
+        {
+          type: "message_start",
+          message: {
+            usage: {
+              input_tokens: 10,
+              cache_read_input_tokens: 4,
+              cache_creation_input_tokens: 2,
+              output_tokens: 0,
+            },
+          },
+        },
+        { type: "message_delta", usage: { input_tokens: null, output_tokens: 20 } },
+        { type: "message_stop" },
+      ]);
       expect(f.ledger[0]?.usage).toEqual({
         inputTokens: 16,
         outputTokens: 20,
