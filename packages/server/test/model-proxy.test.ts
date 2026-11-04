@@ -632,6 +632,62 @@ describe("atomic model proxy calls", () => {
     expect(f.ledger[0]?.usage).toEqual({ inputTokens: 18, outputTokens: 20, cachedInputTokens: 0 });
   });
 
+  it.each([
+    ["response.completed", undefined],
+    ["response.incomplete", "content_filter"],
+    ["response.incomplete", "max_output_tokens"],
+  ])("settles final Responses usage for %s (%s)", async (type, reason) => {
+    const f = fixture("openai-responses");
+    const event = {
+      type,
+      response: {
+        status: type === "response.completed" ? "completed" : "incomplete",
+        incomplete_details: reason ? { reason } : null,
+        usage: { input_tokens: 10, output_tokens: 20 },
+      },
+    };
+    f.upstream(
+      async () =>
+        new Response(`data: ${JSON.stringify(event)}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    await (await f.send({ model: MODEL, input: "hello", stream: true })).text();
+    expect(f.ledger[0]?.usage).toEqual({ inputTokens: 10, outputTokens: 20, cachedInputTokens: 0 });
+    expect(f.limits.totals().heldMicroUsd).toBe(0);
+  });
+
+  it.each([
+    ["unterminated", { input_tokens: 10, output_tokens: 20 }],
+    ["nonterminal", { input_tokens: 10, output_tokens: 20 }],
+    ["missing output", { input_tokens: 10 }],
+    ["negative input", { input_tokens: -1, output_tokens: 20 }],
+    ["invalid output", { input_tokens: 10, output_tokens: "20" }],
+    ["over ceiling", { input_tokens: 10, output_tokens: 999999 }],
+    ["malformed", { input_tokens: 10, output_tokens: 20 }],
+  ])("charges the reservation for %s Responses usage", async (why, usage) => {
+    const f = fixture("openai-responses");
+    const event = {
+      type: why === "nonterminal" ? "response.in_progress" : "response.incomplete",
+      response: { usage },
+    };
+    const json = JSON.stringify(event);
+    const wire =
+      why === "malformed"
+        ? `data: ${json.slice(0, -1)}\n\n`
+        : `data: ${json}${why === "unterminated" ? "" : "\n\n"}`;
+    f.upstream(
+      async () => new Response(wire, { headers: { "content-type": "text/event-stream" } }),
+    );
+    const response = await f.send({ model: MODEL, input: "hello", stream: true });
+    const held = f.limits.totals().heldMicroUsd;
+    if (why === "malformed") await expect(response.text()).rejects.toThrow();
+    else await response.text();
+    expect(f.ledger[0]?.usage).toEqual(expect.objectContaining({ outputTokens: 4096 }));
+    expect(f.limits.totals().todayMicroUsd).toBe(held);
+    expect(f.limits.totals().heldMicroUsd).toBe(0);
+  });
+
   it.each(["json", "sse"])(
     "fails closed on oversized %s response frames and releases the hold",
     async (format) => {
@@ -958,6 +1014,55 @@ describe("the model proxy inference surface", () => {
     expect(request?.body[outputKey]).toBe(300);
     for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"])
       if (key !== outputKey) expect(request?.body[key]).toBeUndefined();
+  });
+
+  describe.each([
+    ["openai-chat", "https://api.openai.com/v1", "/chat/completions", "max_completion_tokens"],
+    ["openai-chat", "https://api.example/v1", "/chat/completions", "max_tokens"],
+    ["openai-responses", "https://api.openai.com/v1", "/responses", "max_output_tokens"],
+    ["anthropic-messages", "https://api.anthropic.com/v1", "/messages", "max_tokens"],
+  ] as const)("%s output ceilings at %s", (api, baseUrl, path, outputKey) => {
+    it.each([
+      [16, 16],
+      [999999, 300],
+      [undefined, 300],
+      [300, 300],
+      [1, 1],
+    ])("clamps caller cap %s to %s", (cap, expected) => {
+      const request = proxyRequest(
+        { ...provider, api, baseUrl },
+        path,
+        { ...BODY, ...(cap === undefined ? {} : { [outputKey]: cap }) },
+        300,
+      );
+      expect(request?.body[outputKey]).toBe(expected);
+      for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+        if (key !== outputKey) expect(request?.body[key]).toBeUndefined();
+    });
+
+    it.each(
+      [0, -1, 1.5, "16", null, true, {}, [], Number.MAX_SAFE_INTEGER + 1].map((cap) => ({ cap })),
+    )("rejects invalid caller cap $cap before dispatch", async ({ cap }) => {
+      const f = fixture(api);
+      const response = await f.proxy.call("opaque-token", "saved-provider", path, {
+        ...BODY,
+        [outputKey]: cap,
+      });
+      expect(response.status).toBe(400);
+      expect(f.calls).toHaveLength(0);
+      expect(f.reservations).toHaveLength(0);
+    });
+  });
+
+  it("preserves the smallest cap when normalizing competing output aliases", () => {
+    expect(
+      proxyRequest(
+        provider,
+        "/chat/completions",
+        { ...BODY, max_tokens: 100, max_completion_tokens: 16, max_output_tokens: 50 },
+        300,
+      )?.body.max_tokens,
+    ).toBe(16);
   });
 
   it.each([

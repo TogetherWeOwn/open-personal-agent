@@ -400,7 +400,11 @@ class ProxyUsage {
     }
     try {
       const value = JSON.parse(text);
-      if (value.type === "message_stop" || value.type === "response.completed")
+      if (
+        value.type === "message_stop" ||
+        value.type === "response.completed" ||
+        value.type === "response.incomplete"
+      )
         this.#complete = true;
       const u = value.usage ?? value.response?.usage ?? value.message?.usage;
       if (!u) return;
@@ -614,9 +618,16 @@ export function proxyRequest(
   if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash)
     return null;
   const body = { ...source };
-  delete body.max_tokens;
-  delete body.max_completion_tokens;
-  delete body.max_output_tokens;
+  let outputTokens = maxOutputTokens;
+  // Normalize aliases without ever raising a caller's ceiling, even if several are supplied.
+  for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) {
+    if (key in source) {
+      const cap = source[key];
+      if (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap <= 0) return null;
+      outputTokens = Math.min(outputTokens, cap);
+    }
+    delete body[key];
+  }
   delete body.stream_options;
   const outputKey =
     provider.api === "anthropic-messages"
@@ -624,7 +635,7 @@ export function proxyRequest(
       : provider.api === "openai-responses"
         ? "max_output_tokens"
         : resolveCompat(provider.baseUrl).maxTokensField;
-  body[outputKey] = maxOutputTokens;
+  body[outputKey] = outputTokens;
   if (provider.api === "openai-responses") body.store = false;
   if (
     provider.api === "openai-chat" &&
