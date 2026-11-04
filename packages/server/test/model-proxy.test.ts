@@ -282,7 +282,7 @@ describe("atomic model proxy calls", () => {
   );
 
   it.each(["verify", "record"])(
-    "contains liveness %s failures inside the atomic boundary without interrupting another call",
+    "contains liveness %s failures without interrupting another call or rejecting an atomic callback",
     async (failure) => {
       vi.useFakeTimers();
       let failNextVerify = false;
@@ -324,6 +324,50 @@ describe("atomic model proxy calls", () => {
       }
     },
   );
+
+  it("admits another call while a periodic liveness read is stalled", async () => {
+    vi.useFakeTimers();
+    let pauseNextVerify = false;
+    let releaseVerify: () => void = () => {};
+    const verifyPending = new Promise<void>((resolve) => {
+      releaseVerify = resolve;
+    });
+    const f = fixture("openai-chat", {
+      verify: async () => {
+        if (!pauseNextVerify) return;
+        pauseNextVerify = false;
+        await verifyPending;
+      },
+    });
+    let second: Promise<Response> | undefined;
+    try {
+      f.upstream(
+        async () =>
+          new Response(new ReadableStream(), {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      const first = await f.send();
+      pauseNextVerify = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      second = f.send();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.calls).toHaveLength(2);
+      expect(f.calls[0]?.init.signal?.aborted).toBe(false);
+      releaseVerify();
+      const response = await second;
+      await f.proxy.cancelTask("task");
+      await expect(first.text()).rejects.toThrow();
+      await expect(response.text()).rejects.toThrow();
+      expect(f.ledger).toHaveLength(2);
+      expect(f.limits.totals().heldMicroUsd).toBe(0);
+    } finally {
+      releaseVerify();
+      await second;
+      await f.proxy.cancelTask("task");
+      vi.useRealTimers();
+    }
+  });
 
   it("ignores a failed liveness check once successful settlement has started", async () => {
     vi.useFakeTimers();
@@ -789,6 +833,21 @@ describe("the model proxy inference surface", () => {
     },
   );
 
+  it.each([undefined, null, 7, "item_reference"])(
+    "rejects Responses item references with type %j before dispatch",
+    async (type) => {
+      const f = fixture("openai-responses");
+      const response = await f.send({
+        model: MODEL,
+        input: [{ id: "stored-context", ...(type === undefined ? {} : { type }) }],
+      });
+      expect(response.status).toBe(400);
+      expect(f.calls).toHaveLength(0);
+      expect(f.reservations).toHaveLength(0);
+      expect(f.limits.totals().heldMicroUsd).toBe(0);
+    },
+  );
+
   it("accepts narrow inline Responses replay metadata only", () => {
     const input = [
       {
@@ -814,6 +873,9 @@ describe("the model proxy inference surface", () => {
         300,
       );
     expect(request(input)).not.toBeNull();
+    expect(
+      request([{ type: "message", id: "inline-message", role: "user", content: "hello" }]),
+    ).not.toBeNull();
     expect(request([{ type: "function_call", status: "https://context.example" }])).toBeNull();
     expect(
       request([

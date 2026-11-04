@@ -214,25 +214,22 @@ export class ModelProxy {
       // recursive timeouts prevent overlapping checks and stop with this call's settlement.
       const checkLiveness = async () => {
         try {
-          const shouldAbort = await this.deps.atomic(async () => {
-            if (finished) return false;
-            let live: CapabilityScope | null;
-            // A rejection escaping blockConcurrencyWhile resets every call in the Worker DO.
-            try {
-              live = await this.deps.verify(token);
-            } catch {
-              live = null;
-            }
-            return (
-              !finished &&
-              (!live ||
-                live.tokenId !== scope.tokenId ||
-                live.taskId !== scope.taskId ||
-                live.userId !== scope.userId ||
-                live.expiresAt <= Date.now())
-            );
-          });
-          // Settlement can also fail; neither failure may escape the atomic callback.
+          if (finished) return;
+          let live: CapabilityScope | null;
+          // Periodic storage reads must not hold or reset the DO input gate on a stall.
+          try {
+            live = await this.deps.verify(token);
+          } catch {
+            live = null;
+          }
+          const shouldAbort =
+            !finished &&
+            (!live ||
+              live.tokenId !== scope.tokenId ||
+              live.taskId !== scope.taskId ||
+              live.userId !== scope.userId ||
+              live.expiresAt <= Date.now());
+          // Settlement can also fail; contain both failures within this call.
           if (shouldAbort && !finished) await abort().catch(() => {});
         } catch {
           if (!finished) await abort().catch(() => {});
@@ -525,6 +522,8 @@ function boundedContent(value: unknown, responses = false): boolean {
   if (typeof value !== "object") return false;
   const object = value as Record<string, unknown>;
   if (typeof object.type === "string" && !CONTENT_TYPES.has(object.type)) return false;
+  // Responses defaults an untyped ID to an opaque stored-item reference.
+  if (responses && "id" in object && typeof object.type !== "string") return false;
   return Object.entries(object).every(([key, child]) => {
     if (responses && key === "status")
       return (
