@@ -30,7 +30,7 @@ import {
 } from "@simplewebauthn/server";
 import { type Context, Hono } from "hono";
 import { CHALLENGE_TTL_MS } from "./auth";
-import type { AppEnv } from "./env";
+import type { AppEnv, GatewayApprovalNotifier } from "./env";
 import { verifyAssertion } from "./session";
 
 type Ctx = Context<AppEnv>;
@@ -244,6 +244,26 @@ function batchesOf(rows: readonly { row: ApprovalRow; conversationTitle: string 
   return [...batches.values()];
 }
 
+/** Live-only gateway notifications carry the same cards and receipts as the Inbox's rows. */
+export function approvalNotification(rows: readonly ApprovalRow[]) {
+  const batch = batchesOf(rows.map((row) => ({ row, conversationTitle: null })))[0];
+  if (!batch) return null;
+  const { batchId, conversationId } = batch;
+  if (rows.every((row) => row.status === "pending" && row.expiresAt > Date.now()))
+    return {
+      conversationId,
+      type: "approval.requested" as const,
+      payload: { batchId, items: batch.items },
+    };
+  if (rows.every((row) => row.decidedAt !== null) && batch.decisions)
+    return {
+      conversationId,
+      type: "approval.resolved" as const,
+      payload: { batchId, decisions: batch.decisions },
+    };
+  return null;
+}
+
 export function approvalRoutes(forward: ApprovalForward) {
   const forwardDecision: ApprovalForward = async (c, rows) => {
     const batchId = rows[0]?.batchId;
@@ -393,6 +413,15 @@ export function approvalRoutes(forward: ApprovalForward) {
           .catch(() => {});
       }
       return refuse("stale", 409);
+    }
+    if (await user.approvals.isGatewayBatch(batchId)) {
+      try {
+        await (user.assistant() as unknown as GatewayApprovalNotifier).gatewayApprovalChanged(
+          batchId,
+        );
+      } catch {
+        // The decision is durable; a missed live receipt must not undo it or wake the runner.
+      }
     }
     return c.json({ status: await forwardDecision(c, rows) });
   });

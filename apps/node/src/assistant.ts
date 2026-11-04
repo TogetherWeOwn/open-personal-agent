@@ -29,7 +29,7 @@ import {
   type TurnState,
 } from "@opa/harness-builtin";
 import type { ToolRegistry } from "@opa/policy";
-import { type ApprovalForward, approvalRoutes } from "@opa/server/approvals";
+import { type ApprovalForward, approvalNotification, approvalRoutes } from "@opa/server/approvals";
 import { resolveChatModel } from "@opa/server/chat-model";
 import {
   base64,
@@ -345,6 +345,17 @@ export class NodeAssistant {
       bytes: artifact.sizeBytes,
     });
     if (!artifact.turnId) this.#events.trim(artifact.conversationId, frameKey);
+  }
+
+  /** Reload scoped gateway rows without claiming the turn slot or resuming its runner. */
+  async gatewayApprovalChanged(batchId: string): Promise<void> {
+    const user = await this.#repo;
+    if (!(await user.approvals.isGatewayBatch(batchId))) return;
+    const notification = approvalNotification(await user.approvals.batch(batchId));
+    if (!notification) return;
+    await this.#sweepTabs();
+    this.#send(notification.conversationId, "", notification.type, notification.payload);
+    this.#events.trim(notification.conversationId, "");
   }
 
   /** Liveness check for `/api/health`. */

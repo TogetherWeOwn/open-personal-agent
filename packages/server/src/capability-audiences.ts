@@ -19,7 +19,7 @@ import {
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { attachmentMaxBytes, fileName, readAttachment, UploadError } from "./attachments";
-import type { AppEnv, ArtifactNotifier } from "./env";
+import type { AppEnv, ArtifactNotifier, GatewayApprovalNotifier } from "./env";
 import { composeTurnTools, parseOwnHosts } from "./turn-tools";
 
 export const capabilityAudiences = new Hono<AppEnv>();
@@ -170,6 +170,13 @@ capabilityAudiences.post(
         });
         if (!(await user.approvals.create(rows))) return unknown();
         if (!(await store.transition(call, "preparing", "pending"))) return unknown();
+        try {
+          await (user.assistant() as unknown as GatewayApprovalNotifier).gatewayApprovalChanged(
+            batchId,
+          );
+        } catch {
+          // The card is durable; retries still share it if its live notification is lost.
+        }
         return waiting();
       }
     } else if (call.status === "preparing") {

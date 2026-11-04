@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+
+import type { HarnessEvent } from "@opa/core";
 import { mintCapabilityToken, verifyCapabilityToken } from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { FORGET_MANIFEST } from "@opa/db/memory-tools";
@@ -7,7 +9,8 @@ import { DAY_MS, retentionStore } from "@opa/db/retention";
 import { type SqlDatabase, systemStore } from "@opa/db/system";
 import { toolDefinitionHash } from "@opa/policy";
 import { CREATE_ARTIFACT_MANIFEST, SEARCH_HISTORY_MANIFEST } from "@opa/tools-builtin";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
+import { resumeAfterArtifact } from "../../../test/helpers/artifact-resume.mjs";
 import { workerApp } from "../src/worker-app";
 import { claim, db, env, freshDatabase, ORIGIN } from "./helpers/app";
 
@@ -664,6 +667,180 @@ it.each([
     expect(await fixture.user.artifacts.list()).toEqual([]);
   },
 );
+
+async function qaConnectedTab(fixture: Awaited<ReturnType<typeof gatewayOwner>>) {
+  const cookie = [...fixture.browser.cookies].map(([key, value]) => `${key}=${value}`).join("; ");
+  const response = await workerApp.request(
+    `${ORIGIN}/api/chat`,
+    {
+      headers: { upgrade: "websocket", origin: ORIGIN, cookie },
+    },
+    env,
+  );
+  const ws = response.webSocket;
+  if (!ws) throw new Error("missing websocket");
+  ws.accept();
+  const events: HarnessEvent[] = [];
+  ws.addEventListener("message", (event) => {
+    events.push(JSON.parse(String(event.data)));
+  });
+  const barrier = async () => {
+    await fixture.user.artifacts.save({
+      id: "qa-barrier",
+      name: "barrier.txt",
+      mediaType: "text/plain",
+      content: "ok",
+      source: { conversationId: "gateway-chat", taskId: "gateway-task" },
+    });
+    await fixture.user.assistant().artifactCreated("qa-barrier");
+    await vi.waitFor(
+      () => expect(events.some((event) => event.type === "artifact.created")).toBe(true),
+      { timeout: 2000 },
+    );
+  };
+  return { ws, events, barrier };
+}
+
+it("QA announces a new gateway approval to an already connected tab", async () => {
+  const fixture = await gatewayOwner();
+  const tab = await qaConnectedTab(fixture);
+  try {
+    const response = await fixture.call("qa-notification", "create_artifact", {
+      name: "a.txt",
+      content: "hello",
+    });
+    expect(response.status).toBe(202);
+    const pending = await response.json<{ batchId: string }>();
+    expect(await fixture.user.approvals.batch(pending.batchId)).toMatchObject([
+      { status: "pending" },
+    ]);
+    for (const key of ["qa-notification", "notification-alias"]) {
+      const retry = await fixture.call(key, "create_artifact", { name: "a.txt", content: "hello" });
+      expect(retry.status).toBe(202);
+      expect(await retry.json()).toMatchObject({ batchId: pending.batchId });
+    }
+    await tab.barrier();
+    const requests = tab.events.filter((event) => event.type === "approval.requested");
+    expect(requests).toHaveLength(1);
+    const notification = requests[0];
+    if (!notification) throw new Error("missing approval request");
+    expect(notification).toMatchObject({
+      sessionId: "gateway-chat",
+      turnId: "",
+      payload: {
+        batchId: pending.batchId,
+        items: [
+          {
+            tool: "create_artifact",
+            args: '{"content":"hello","name":"a.txt"}',
+            scopes: ["once"],
+            taint: { kind: "tool", label: `Computer ${fixture.computer.id}` },
+          },
+        ],
+      },
+    });
+    expect(await resumeAfterArtifact({ ...notification, seq: 5 })).toEqual([
+      { type: "resume", conversationId: "gateway-chat", turnId: "chat-turn", afterSeq: 4 },
+    ]);
+    expect(await fixture.user.artifacts.list()).toHaveLength(1); // The control artifact only.
+  } finally {
+    tab.ws.close();
+  }
+});
+
+it.each(["approve", "deny"] as const)(
+  "QA announces a gateway %s decision to the other connected tab",
+  async (decision) => {
+    const fixture = await gatewayOwner();
+    const response = await fixture.call("qa-resolved", "create_artifact", {
+      name: "a.txt",
+      content: "hello",
+    });
+    expect(response.status).toBe(202);
+    const pending = await response.json<{ batchId: string }>();
+    const [row] = await fixture.user.approvals.batch(pending.batchId);
+    const tab = await qaConnectedTab(fixture);
+    try {
+      const decided = await fixture.browser.req(`/api/approvals/${pending.batchId}`, {
+        body: { decisions: [{ approvalId: row?.approvalId, decision, scope: "once" }] },
+      });
+      expect(decided.status).toBe(200);
+      expect(await (await fixture.browser.req("/api/approvals")).json()).toEqual({ batches: [] });
+      const retry = await fixture.browser.req(`/api/approvals/${pending.batchId}`, {
+        body: { decisions: [] },
+      });
+      expect(await retry.json()).toEqual({ status: "queued" });
+      await tab.barrier();
+      const resolutions = tab.events.filter((event) => event.type === "approval.resolved");
+      expect(resolutions).toHaveLength(1);
+      const notification = resolutions[0];
+      if (!notification) throw new Error("missing approval resolution");
+      expect(notification).toMatchObject({
+        sessionId: "gateway-chat",
+        turnId: "",
+        payload: {
+          batchId: pending.batchId,
+          decisions: [{ approvalId: row?.approvalId, decision, scope: "once" }],
+        },
+      });
+      expect(await resumeAfterArtifact({ ...notification, seq: 5 })).toEqual([
+        { type: "resume", conversationId: "gateway-chat", turnId: "chat-turn", afterSeq: 4 },
+      ]);
+      expect(await fixture.user.artifacts.list()).toHaveLength(1); // No runner dispatch.
+    } finally {
+      tab.ws.close();
+    }
+  },
+);
+
+it("closes a revoked tab before sending a gateway approval notification", async () => {
+  const fixture = await gatewayOwner();
+  const response = await fixture.call("notification-session", "create_artifact", {
+    name: "a.txt",
+    content: "hello",
+  });
+  const { batchId } = await response.json<{ batchId: string }>();
+  const tab = await qaConnectedTab(fixture);
+  try {
+    const closed = new Promise<number>((resolve) =>
+      tab.ws.addEventListener("close", (event) => resolve(event.code)),
+    );
+    await db
+      .prepare("UPDATE sessions SET revoked_at = 1 WHERE user_id = ?")
+      .bind(fixture.owner)
+      .run();
+    await fixture.user.assistant().gatewayApprovalChanged(batchId);
+    expect(await closed).toBe(4401);
+    expect(tab.events).toEqual([]);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+it("preserves a pending gateway card when its notification fails", async () => {
+  const fixture = await gatewayOwner({
+    ...env,
+    ASSISTANT: {
+      idFromName: (name: string) => env.ASSISTANT.idFromName(name),
+      get: () => ({
+        gatewayApprovalChanged: async () => {
+          throw new Error("notification unavailable");
+        },
+      }),
+    } as unknown as typeof env.ASSISTANT,
+  });
+  const args = { name: "a.txt", content: "hello" };
+  const response = await fixture.call("notification-failure", "create_artifact", args);
+  expect(response.status).toBe(202);
+  const pending = await response.json<{ batchId: string }>();
+  expect(await fixture.user.approvals.batch(pending.batchId)).toMatchObject([
+    { status: "pending" },
+  ]);
+  const retry = await fixture.call("notification-alias", "create_artifact", args);
+  expect(retry.status).toBe(202);
+  expect(await retry.json()).toMatchObject({ batchId: pending.batchId });
+  expect(await fixture.user.artifacts.list()).toEqual([]);
+});
 
 it("enforces the lifetime call cap after rate windows roll over", async () => {
   const { call } = await gatewayOwner();

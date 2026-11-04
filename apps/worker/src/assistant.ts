@@ -39,6 +39,7 @@ import {
 } from "@opa/harness-builtin";
 import type { ToolRegistry } from "@opa/policy";
 import type { AllowanceWarnings } from "@opa/server/allowances";
+import { approvalNotification } from "@opa/server/approvals";
 import { resolveChatModel } from "@opa/server/chat-model";
 import {
   base64,
@@ -322,6 +323,21 @@ export class Assistant extends Agent<Bindings> {
       bytes: artifact.sizeBytes,
     });
     if (!artifact.turnId) this.#events.trim(artifact.conversationId, frameKey);
+  }
+
+  /** Server-only RPC: reload scoped gateway rows, without resuming a turn or task runner. */
+  async gatewayApprovalChanged(batchId: string): Promise<void> {
+    const user = this.#repo;
+    if (!(await user.approvals.isGatewayBatch(batchId))) return;
+    const notification = approvalNotification(await user.approvals.batch(batchId));
+    if (!notification) return;
+    await Promise.all(
+      [...this.getConnections()].map((tab) =>
+        this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
+      ),
+    );
+    this.#send(notification.conversationId, "", notification.type, notification.payload);
+    this.#events.trim(notification.conversationId, "");
   }
 
   /** Liveness check for `/api/health`. */

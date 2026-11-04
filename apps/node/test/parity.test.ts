@@ -2,12 +2,12 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JsonValue, TaskBudget } from "@opa/core";
+import type { HarnessEvent, JsonValue, TaskBudget } from "@opa/core";
 import { mintCapabilityToken } from "@opa/db/capability-tokens";
 import { computerStore } from "@opa/db/computers";
 import { toolDefinitionHash } from "@opa/policy";
 import { SoftPasskey } from "@opa/server/test/softauthn";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { unstable_readConfig } from "wrangler";
 import { createRepository, scopeFromSession } from "../../../packages/db/src/repository";
 import {
@@ -29,6 +29,7 @@ import {
   taskContextContract,
   taskStoreContract,
 } from "../../../test/contract/tasks";
+import { resumeAfterArtifact } from "../../../test/helpers/artifact-resume.mjs";
 import { localBlobStore } from "../src/blobs";
 import { APP_ROUTES, createNodeApp, type NodeApp } from "../src/compose";
 import { openSqlite, sqliteD1 } from "../src/d1";
@@ -299,6 +300,198 @@ describe("Node capability audience routes (SQLite and local files)", () => {
     app?.db.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
+
+  function qaConnectedTab() {
+    const sessionId = (
+      app.db.prepare("SELECT id FROM sessions WHERE user_id = ?").get(owner) as { id: string }
+    ).id;
+    const frames: HarnessEvent[] = [];
+    const closed: (number | undefined)[] = [];
+    const assistant = app.assistantFor(owner);
+    const conn = assistant.open(
+      {
+        send: (frame) => {
+          frames.push(JSON.parse(frame));
+        },
+        close: (code) => closed.push(code),
+      },
+      sessionId,
+      false,
+    );
+    const barrier = async () => {
+      await user().artifacts.save({
+        id: "qa-barrier",
+        name: "barrier.txt",
+        mediaType: "text/plain",
+        content: "ok",
+        source: { conversationId: "audience-chat", taskId: "audience-task" },
+      });
+      await assistant.artifactCreated("qa-barrier");
+      expect(frames.some((frame) => frame.type === "artifact.created")).toBe(true);
+    };
+    return { frames, closed, barrier, close: () => assistant.close(conn) };
+  }
+
+  it("QA announces a new gateway approval to an already connected Node tab", async () => {
+    const tab = qaConnectedTab();
+    try {
+      const response = await call("qa-notification", "create_artifact", {
+        name: "a.txt",
+        content: "hello",
+      });
+      expect(response.status).toBe(202);
+      const pending = (await response.json()) as { batchId: string };
+      expect(await user().approvals.batch(pending.batchId)).toMatchObject([{ status: "pending" }]);
+      for (const key of ["qa-notification", "notification-alias"]) {
+        const retry = await call(key, "create_artifact", { name: "a.txt", content: "hello" });
+        expect(retry.status).toBe(202);
+        expect(await retry.json()).toMatchObject({ batchId: pending.batchId });
+      }
+      await tab.barrier();
+      const requests = tab.frames.filter((event) => event.type === "approval.requested");
+      expect(requests).toHaveLength(1);
+      const notification = requests[0];
+      if (!notification) throw new Error("missing approval request");
+      expect(notification).toMatchObject({
+        sessionId: "audience-chat",
+        turnId: "",
+        payload: {
+          batchId: pending.batchId,
+          items: [
+            {
+              tool: "create_artifact",
+              args: '{"content":"hello","name":"a.txt"}',
+              scopes: ["once"],
+              taint: { kind: "tool", label: `Computer ${computerId}` },
+            },
+          ],
+        },
+      });
+      expect(await resumeAfterArtifact({ ...notification, seq: 5 })).toEqual([
+        { type: "resume", conversationId: "audience-chat", turnId: "chat-turn", afterSeq: 4 },
+      ]);
+      expect(await user().artifacts.list()).toHaveLength(1); // The control artifact only.
+    } finally {
+      tab.close();
+    }
+  });
+
+  it.each(["approve", "deny"] as const)(
+    "QA announces a gateway %s decision to the other connected Node tab",
+    async (decision) => {
+      const response = await call("qa-resolved", "create_artifact", {
+        name: "a.txt",
+        content: "hello",
+      });
+      expect(response.status).toBe(202);
+      const pending = (await response.json()) as { batchId: string };
+      const [row] = await user().approvals.batch(pending.batchId);
+      const tab = qaConnectedTab();
+      try {
+        const decided = await session(`/api/approvals/${pending.batchId}`, {
+          decisions: [{ approvalId: row?.approvalId, decision, scope: "once" }],
+        });
+        expect(decided.status).toBe(200);
+        expect(await (await session("/api/approvals")).json()).toEqual({ batches: [] });
+        const retry = await session(`/api/approvals/${pending.batchId}`, { decisions: [] });
+        expect(await retry.json()).toEqual({ status: "queued" });
+        await tab.barrier();
+        const resolutions = tab.frames.filter((event) => event.type === "approval.resolved");
+        expect(resolutions).toHaveLength(1);
+        const notification = resolutions[0];
+        if (!notification) throw new Error("missing approval resolution");
+        expect(notification).toMatchObject({
+          sessionId: "audience-chat",
+          turnId: "",
+          payload: {
+            batchId: pending.batchId,
+            decisions: [{ approvalId: row?.approvalId, decision, scope: "once" }],
+          },
+        });
+        expect(await resumeAfterArtifact({ ...notification, seq: 5 })).toEqual([
+          { type: "resume", conversationId: "audience-chat", turnId: "chat-turn", afterSeq: 4 },
+        ]);
+        expect(await user().artifacts.list()).toHaveLength(1); // No runner dispatch.
+      } finally {
+        tab.close();
+      }
+    },
+  );
+
+  it("closes a revoked Node tab before sending a gateway approval notification", async () => {
+    const response = await call("notification-session", "create_artifact", {
+      name: "a.txt",
+      content: "hello",
+    });
+    const { batchId } = (await response.json()) as { batchId: string };
+    const tab = qaConnectedTab();
+    try {
+      app.db.prepare("UPDATE sessions SET revoked_at = 1 WHERE user_id = ?").run(owner);
+      await app.assistantFor(owner).gatewayApprovalChanged(batchId);
+      expect(tab.closed).toEqual([4401]);
+      expect(tab.frames).toEqual([]);
+    } finally {
+      tab.close();
+    }
+  });
+
+  it("never loads another user's gateway approval into a Node tab", async () => {
+    const now = Date.now();
+    app.db
+      .prepare("INSERT INTO users (id, display_name, role) VALUES ('other', 'Other', 'member')")
+      .run();
+    app.db
+      .prepare(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at, last_seen_at) VALUES ('other-session', 'other', 'other-hash', ?, ?)",
+      )
+      .run(now + 3_600_000, now);
+    const assistant = app.assistantFor("other");
+    const frames: HarnessEvent[] = [];
+    const conn = assistant.open(
+      { send: (frame) => frames.push(JSON.parse(frame)), close: () => {} },
+      "other-session",
+      false,
+    );
+    try {
+      const response = await call("notification-owner", "create_artifact", {
+        name: "a.txt",
+        content: "hello",
+      });
+      const { batchId } = (await response.json()) as { batchId: string };
+      await assistant.gatewayApprovalChanged(batchId);
+      expect(frames).toEqual([]);
+    } finally {
+      assistant.close(conn);
+    }
+  });
+
+  it.each(["approve", "deny"] as const)(
+    "keeps a Node gateway %s decision durable when notification fails",
+    async (decision) => {
+      const args = { name: "a.txt", content: "hello" };
+      const response = await call("notification-failure", "create_artifact", args);
+      const pending = (await response.json()) as { batchId: string };
+      const [row] = await user().approvals.batch(pending.batchId);
+      const notification = vi
+        .spyOn(app.assistantFor(owner), "gatewayApprovalChanged")
+        .mockRejectedValue(new Error("notification unavailable"));
+      try {
+        const decided = await session(`/api/approvals/${pending.batchId}`, {
+          decisions: [{ approvalId: row?.approvalId, decision, scope: "once" }],
+        });
+        expect(decided.status).toBe(200);
+        expect(await decided.json()).toEqual({ status: "queued" });
+        expect(await (await session("/api/approvals")).json()).toEqual({ batches: [] });
+        expect(await user().artifacts.list()).toEqual([]);
+        expect((await call("notification-failure", "create_artifact", args)).status).toBe(
+          decision === "approve" ? 200 : 403,
+        );
+        expect(await user().artifacts.list()).toHaveLength(decision === "approve" ? 1 : 0);
+      } finally {
+        notification.mockRestore();
+      }
+    },
+  );
 
   it("publishes a sniffed upload in session Outputs while its bearer remains write-only", async () => {
     const response = await request("/api/agent/tasks/audience-task/artifacts", {
