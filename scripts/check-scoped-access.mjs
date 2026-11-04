@@ -72,6 +72,12 @@ export const RULES = [
     "only the lifecycle module scopes a computer, from its D1 row (M4-02 AC1)",
   ],
   [
+    "scope-minting",
+    /^(?:packages\/db\/|packages\/server\/src\/capability-audiences\.ts$)/,
+    /\bscopeForCapability\b/g,
+    "only the audience handlers scope a verified, live capability from its persisted binding",
+  ],
+  [
     "master-key",
     /^(?:packages\/vault\/|(?:apps\/(?:worker|node)|packages\/server)\/src\/compose\.ts$)/,
     /OPA_MASTER_KEY/g,

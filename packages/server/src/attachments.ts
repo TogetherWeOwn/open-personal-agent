@@ -144,7 +144,7 @@ export function sniffAttachment(
 }
 
 /** The display name from the `x-file-name` header (percent-encoded by the client): no path, bounded. */
-function fileName(header: string | undefined): string {
+export function fileName(header: string | undefined): string {
   let name = "file";
   try {
     name = decodeURIComponent(header ?? "");
@@ -160,6 +160,88 @@ function fileName(header: string | undefined): string {
 
 /** How many first bytes decide the type. A signature needs 12; text gets a fuller look. */
 const SNIFF_BYTES = 512;
+
+export class UploadError extends Error {
+  constructor(
+    readonly status: 400 | 413 | 415 | 429,
+    readonly code: string,
+  ) {
+    super(code);
+  }
+}
+
+/** The same MIME and whole-text checks for session attachments and computer Outputs. */
+export async function readAttachment(
+  body: ReadableStream<Uint8Array> | null,
+  name: string,
+  maxBytes: number,
+  charge: (bytes: number) => Promise<void> = async () => {},
+) {
+  if (!body) throw new UploadError(400, "empty_file");
+  const reader = body.getReader();
+  const head: Uint8Array[] = [];
+  let size = 0;
+  let ended = false;
+  let failure: unknown;
+  const take = async () => {
+    const result = await reader.read();
+    if (!result.done) {
+      size += result.value.byteLength;
+      if (size > maxBytes) throw new UploadError(413, "too_large");
+      await charge(result.value.byteLength);
+    }
+    return result;
+  };
+  try {
+    while (size < SNIFF_BYTES && !ended) {
+      const result = await take();
+      ended = result.done;
+      if (!result.done) head.push(result.value);
+    }
+    if (!size) throw new UploadError(400, "empty_file");
+    const first = new Uint8Array(Math.min(size, SNIFF_BYTES));
+    let offset = 0;
+    for (const chunk of head) {
+      const part = chunk.subarray(0, first.length - offset);
+      first.set(part, offset);
+      offset += part.length;
+      if (offset === first.length) break;
+    }
+    const sniffed = sniffAttachment(first, name);
+    if (!sniffed) throw new UploadError(415, "unsupported_type");
+    const text = sniffed.kind === "text" ? textChecker() : null;
+    let next = 0;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          try {
+            const result =
+              next < head.length
+                ? { done: false, value: head[next++] as Uint8Array }
+                : await take();
+            if (result.done) {
+              if (text && !text.done()) throw new UploadError(415, "unsupported_type");
+              controller.close();
+            } else {
+              if (text && !text.chunk(result.value)) throw new UploadError(415, "unsupported_type");
+              controller.enqueue(result.value);
+            }
+          } catch (error) {
+            failure = error;
+            await reader.cancel().catch(() => {});
+            controller.error(error);
+          }
+        },
+        cancel: (reason) => reader.cancel(reason),
+      },
+      { highWaterMark: 0 },
+    );
+    return { stream, name, ...sniffed, sizeBytes: () => size, failure: () => failure };
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+}
 
 export const attachmentRoutes = new Hono<AppEnv>();
 
@@ -197,97 +279,36 @@ attachmentRoutes.post("/", async (c) => {
   const declared = Number(c.req.header("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes)
     return c.json({ error: "too_large", maxBytes }, 413);
-  const body = c.req.raw.body;
-  if (!body) return c.json({ error: "empty_file" }, 400);
-  const name = fileName(c.req.header("x-file-name"));
-
-  const reader = body.getReader();
-  const head: Uint8Array[] = [];
-  let headBytes = 0;
-  let ended = false;
-  while (headBytes < SNIFF_BYTES && !ended) {
-    const { done, value } = await reader.read();
-    if (done) ended = true;
-    else if (value) {
-      head.push(value);
-      headBytes += value.byteLength;
-    }
-  }
-  if (!headBytes) return c.json({ error: "empty_file" }, 400);
-  const first = new Uint8Array(Math.min(headBytes, SNIFF_BYTES));
-  let at = 0;
-  for (const chunk of head) {
-    const part = chunk.subarray(0, first.length - at);
-    first.set(part, at);
-    at += part.byteLength;
-    if (at >= first.length) break;
-  }
-  const sniffed = sniffAttachment(first, name);
-  if (!sniffed) {
-    await reader.cancel().catch(() => {});
-    return c.json({ error: "unsupported_type" }, 415);
-  }
-
   const id = crypto.randomUUID();
-  let size = 0;
-  let tooLarge = false;
-  // The sniff saw only the first bytes; a text file must be text to its end, or it isn't stored.
-  const text = sniffed.kind === "text" ? textChecker() : null;
-  let notText = false;
-  let next = 0;
-  const counted = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const chunk = next < head.length ? head[next++] : (await reader.read()).value;
-      if (!chunk) {
-        if (text && !text.done()) {
-          notText = true;
-          return controller.error(new TypeError("attachment is not text"));
-        }
-        return controller.close();
-      }
-      size += chunk.byteLength;
-      if (size > maxBytes) {
-        tooLarge = true;
-        await reader.cancel().catch(() => {});
-        return controller.error(new RangeError("attachment too large"));
-      }
-      if (text && !text.chunk(chunk)) {
-        notText = true;
-        await reader.cancel().catch(() => {});
-        return controller.error(new TypeError("attachment is not text"));
-      }
-      controller.enqueue(chunk);
-    },
-    cancel: (reason) => reader.cancel(reason),
-  });
+  let upload: Awaited<ReturnType<typeof readAttachment>> | undefined;
   try {
+    upload = await readAttachment(c.req.raw.body, fileName(c.req.header("x-file-name")), maxBytes);
     await user.attachments.putObject(
       id,
-      counted,
-      sniffed.mediaType,
+      upload.stream,
+      upload.mediaType,
       Number.isFinite(declared) ? declared : undefined,
     );
-  } catch (err) {
-    await user.attachments.removeObject(id).catch(() => {});
-    if (tooLarge) return c.json({ error: "too_large", maxBytes }, 413);
-    if (notText) return c.json({ error: "unsupported_type" }, 415);
-    throw err;
-  }
-  if (tooLarge || notText) {
-    await user.attachments.removeObject(id).catch(() => {});
-    return tooLarge
-      ? c.json({ error: "too_large", maxBytes }, 413)
-      : c.json({ error: "unsupported_type" }, 415);
-  }
-  const row = { id, name, mediaType: sniffed.mediaType, kind: sniffed.kind, sizeBytes: size };
-  try {
+    const row = {
+      id,
+      name: upload.name,
+      mediaType: upload.mediaType,
+      kind: upload.kind,
+      sizeBytes: upload.sizeBytes(),
+    };
     await user.attachments.create(row);
-  } catch (err) {
+    c.header("Cache-Control", "no-store");
+    return c.json(row, 201);
+  } catch (error) {
     await user.attachments.removeObject(id).catch(() => {});
-    throw err;
+    const failure = upload?.failure() ?? error;
+    if (failure instanceof UploadError)
+      return c.json(
+        { error: failure.code, ...(failure.status === 413 ? { maxBytes } : {}) },
+        failure.status,
+      );
+    throw error;
   }
-  c.header("Cache-Control", "no-store");
-  return c.json(row, 201);
 });
 
 /** The file itself, to its owner only: previewable types inline behind the sandbox, the rest a download. */

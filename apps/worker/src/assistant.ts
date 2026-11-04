@@ -39,6 +39,7 @@ import {
 } from "@opa/harness-builtin";
 import type { ToolRegistry } from "@opa/policy";
 import type { AllowanceWarnings } from "@opa/server/allowances";
+import { approvalNotification } from "@opa/server/approvals";
 import { resolveChatModel } from "@opa/server/chat-model";
 import {
   base64,
@@ -302,6 +303,41 @@ export class Assistant extends Agent<Bindings> {
     // The queue is mirrored to storage on every change; a new instance settles whatever the
     // evicted one left waiting, so no admitted pair reads `streaming` forever (M3-09 AC4).
     this.ctx.blockConcurrencyWhile(() => this.#recoverQueues());
+  }
+
+  /** Server-only RPC: allocate through the conversation log, never the Workflow's sequence. */
+  async artifactCreated(artifactId: string): Promise<void> {
+    const artifact = await this.#repo.artifacts.get(artifactId);
+    if (!artifact?.conversationId) return;
+    await Promise.all(
+      [...this.getConnections()].map((tab) =>
+        this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
+      ),
+    );
+    // A standalone Output must not replace the browser's active-turn replay cursor.
+    const frameKey = artifact.turnId ?? "";
+    this.#send(artifact.conversationId, frameKey, "artifact.created", {
+      artifactId: artifact.id,
+      name: artifact.name,
+      type: artifact.mediaType,
+      bytes: artifact.sizeBytes,
+    });
+    if (!artifact.turnId) this.#events.trim(artifact.conversationId, frameKey);
+  }
+
+  /** Server-only RPC: reload scoped gateway rows, without resuming a turn or task runner. */
+  async gatewayApprovalChanged(batchId: string): Promise<void> {
+    const user = this.#repo;
+    if (!(await user.approvals.isGatewayBatch(batchId))) return;
+    const notification = approvalNotification(await user.approvals.batch(batchId));
+    if (!notification) return;
+    await Promise.all(
+      [...this.getConnections()].map((tab) =>
+        this.#sessionLive(tab).catch(() => tab.close(1011, "session check failed")),
+      ),
+    );
+    this.#send(notification.conversationId, "", notification.type, notification.payload);
+    this.#events.trim(notification.conversationId, "");
   }
 
   /** Liveness check for `/api/health`. */

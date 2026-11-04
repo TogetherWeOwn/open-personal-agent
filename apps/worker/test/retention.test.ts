@@ -316,6 +316,49 @@ describe("the daily sweep", () => {
     expect((await store().sweep(NOW + DAY_MS)).toolOutputs).toBe(0);
   });
 
+  it("applies gateway-output retention only to old ended tasks under that user's setting", async () => {
+    await user("u1");
+    await user("u2");
+    await setRetention("u1", 0, 7);
+    await setRetention("u2", 0, 0);
+    const response = JSON.stringify({ ok: true, content: "private output" });
+    for (const [userId, id, status] of [
+      ["u1", "old", "succeeded"],
+      ["u1", "live", "running"],
+      ["u1", "recent", "succeeded"],
+      ["u2", "forever", "succeeded"],
+    ] as const) {
+      await chat(userId, `c-${id}`, NOW);
+      await task(userId, id, `c-${id}`, status);
+      await db
+        .prepare(`INSERT INTO capability_calls
+        (id, user_id, task_id, token_id, computer_id, client_key, request_hash, master_id, status, response, status_code)
+        VALUES (?, ?, ?, 'token', 'computer', 'key', 'hash', ?, 'completed', ?, 200)`)
+        .bind(id, userId, id, id, response)
+        .run();
+    }
+    await db
+      .prepare("UPDATE tasks SET finished_at = ? WHERE id = 'recent'")
+      .bind(NOW - DAY_MS)
+      .run();
+    expect(await store().sweep(NOW)).toMatchObject({ toolOutputs: 1, failed: 0 });
+    const rows = (
+      await db
+        .prepare("SELECT id, response, status_code AS code FROM capability_calls ORDER BY id")
+        .all<{ id: string; response: string; code: number }>()
+    ).results;
+    expect(rows).toEqual([
+      { id: "forever", response, code: 200 },
+      { id: "live", response, code: 200 },
+      { id: "old", response: JSON.stringify({ error: "output_expired" }), code: 410 },
+      { id: "recent", response, code: 200 },
+    ]);
+    expect((await sweepRows()).find((row) => row.userId === "u1")).toMatchObject({
+      toolOutputs: 1,
+    });
+    expect((await store().sweep(NOW + DAY_MS)).toolOutputs).toBe(0);
+  });
+
   it("expires memory suggestions past the inbox setting to rejected", async () => {
     const u1 = await user("u1");
     await setRetention("u1", 0, 30, 2);

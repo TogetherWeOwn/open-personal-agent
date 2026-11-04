@@ -13,6 +13,16 @@ export interface AssistantStub {
   ping(): Promise<string> | string;
 }
 
+/** A saved Output notification; the assistant reloads the row through its own user scope. */
+export interface ArtifactNotifier {
+  artifactCreated(artifactId: string): Promise<void>;
+}
+
+/** A gateway card changed; the assistant reloads it through its own user scope. */
+export interface GatewayApprovalNotifier {
+  gatewayApprovalChanged(batchId: string): Promise<void>;
+}
+
 /** The database, files and assistants, as the repository and the system store read them. */
 type DataPorts = DataBindings<AssistantStub, unknown> & Parameters<typeof systemStore>[0];
 

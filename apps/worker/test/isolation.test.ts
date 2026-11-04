@@ -7,8 +7,12 @@
 // conversation ID in frames: chat.test.ts "refuses another user's conversation…" covers it.
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env as workerEnv } from "cloudflare:workers";
-import { PUBLIC_ROUTES } from "@opa/server/session";
+import { mintCapabilityToken } from "@opa/db/capability-tokens";
+import type { SqlDatabase } from "@opa/db/system";
+import { toolDefinitionHash } from "@opa/policy";
+import { PUBLIC_ROUTES, routeCredential } from "@opa/server/session";
 import { builtinTools } from "@opa/server/tools";
+import { SEARCH_HISTORY_MANIFEST } from "@opa/tools-builtin";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { workerApp as app } from "../src/worker-app";
 import { db } from "./helpers/app";
@@ -22,6 +26,7 @@ interface Case {
   params: (victim: Seeded) => Record<string, string>;
   /** A body the route would accept from the item's owner, so a 404 isn't a 400 in disguise. */
   body?: (victim: Seeded, attacker: Seeded) => unknown;
+  raw?: string;
   /** The attacker's status: 404 unless the param names something no user owns. */
   status?: number;
   /** The owner's own status: proof the route found the item, so the attacker's 404 means "not yours". */
@@ -30,6 +35,23 @@ interface Case {
 
 /** One case per protected route that takes a param, as `METHOD /path`. */
 const CASES: Record<string, Case> = {
+  "POST /api/agent/tasks/:taskId/artifacts": {
+    params: (v) => ({ taskId: v.task }),
+    raw: "isolation upload",
+    status: 401,
+    own: 201,
+  },
+  "POST /api/agent/tasks/:taskId/tools": {
+    params: (v) => ({ taskId: v.task }),
+    body: (v) => ({
+      task_id: v.task,
+      idempotencyKey: "isolation",
+      tool: "search_history",
+      arguments: { query: "isolation" },
+    }),
+    status: 401,
+    own: 200,
+  },
   "GET /api/conversations/:id/messages": { params: (v) => ({ id: v.conversation }), own: 200 },
   "PUT /api/conversations/:id/model": {
     params: (v) => ({ id: v.conversation }),
@@ -137,7 +159,28 @@ const fill = (route: string, params: Record<string, string>) => {
 async function send(route: string, user: Seeded, owner: Seeded, other: Seeded) {
   const spec = CASES[route] as Case;
   const [method, path] = fill(route, spec.params(owner));
-  const res = await as(user, method, path, { body: spec.body?.(owner, other) });
+  const audience = routeCredential(route);
+  const token = audience
+    ? await mintCapabilityToken(db as unknown as SqlDatabase, {
+        userId: user.id,
+        taskId: user.task,
+        computerId: user.computer,
+        aud: audience,
+        toolAllowlist: [
+          {
+            tool: "search_history",
+            manifestHash: await toolDefinitionHash(SEARCH_HISTORY_MANIFEST),
+          },
+        ],
+      })
+    : null;
+  const res = await as(token ? null : user, method, path, {
+    body: spec.body?.(owner, other),
+    ...(spec.raw === undefined ? {} : { raw: spec.raw }),
+    ...(token
+      ? { headers: { authorization: `Bearer ${token.token}`, "x-file-name": "isolation.txt" } }
+      : {}),
+  });
   return { status: res.status, text: await res.text() };
 }
 

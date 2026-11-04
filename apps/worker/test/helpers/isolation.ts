@@ -360,6 +360,26 @@ export async function seed(name: string, role: "owner" | "member"): Promise<Seed
     ),
   ]);
 
+  await db.batch([
+    run(
+      "INSERT INTO capability_uploads (id, user_id, task_id, token_id, bytes) VALUES (?, ?, ?, ?, 1)",
+      `upload-${tag}`,
+      id,
+      task,
+      capabilityToken,
+    ),
+    run(
+      `INSERT INTO capability_calls (id, user_id, task_id, token_id, computer_id, client_key, request_hash, master_id, status)
+      VALUES (?, ?, ?, ?, ?, 'seed', 'seed-hash', ?, 'new')`,
+      `call-${tag}`,
+      id,
+      task,
+      capabilityToken,
+      computer,
+      `call-${tag}`,
+    ),
+  ]);
+
   const items = {
     session,
     conversation,

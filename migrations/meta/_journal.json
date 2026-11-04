@@ -225,6 +225,20 @@
       "when": 1793729701860,
       "tag": "0031_capability_token_owner",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1793744355148,
+      "tag": "0032_little_hex",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1793745101183,
+      "tag": "0033_cynical_leopardon",
+      "breakpoints": true
     }
   ]
 }
