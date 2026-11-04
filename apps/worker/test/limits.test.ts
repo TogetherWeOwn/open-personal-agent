@@ -157,6 +157,33 @@ describe("daily spend", () => {
 
 describe("caller-bounded spend reservations", () => {
   it.each([
+    [1, 164, 1],
+    [16, 173, 16],
+    [500, 344, 301],
+  ])("rounds the combined fractional-price hold once for cap %i", (cap, budget, output) => {
+    const { limits: l } = limits();
+    l.startTask("task", budget);
+    // 1,087 input tokens at 0.15 micro-USD; output at 0.60 micro-USD.
+    expect(
+      l.reserveFor("fractional", "openai", "gpt-4o-mini", 2174, 0, {
+        taskId: "task",
+        background: true,
+        maxOutputTokens: cap,
+      }),
+    ).toEqual({ maxOutputTokens: output, reservedMicroUsd: budget });
+    expect(l.totals().heldMicroUsd).toBe(budget);
+    l.settle("fractional", "openai", "gpt-4o-mini", null);
+    expect(l.totals().todayMicroUsd).toBe(budget);
+  });
+
+  it("preserves the legacy uncapped fractional-price admission boundary", () => {
+    const { limits: l } = limits();
+    l.startTask("task", 317);
+    expect(l.reserve("chat", "openai", "gpt-4o-mini", 2174, 0, { taskId: "task" })).toBeNull();
+    expect(l.heldIds()).toEqual([]);
+  });
+
+  it.each([
     [1, 2008, 1, 2008],
     [16, 2128, 16, 2128],
     [255, 4040, 255, 4040],

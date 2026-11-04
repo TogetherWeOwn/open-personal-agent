@@ -858,6 +858,73 @@ describe.each([
   ["openai-responses", "max_output_tokens"],
   ["anthropic-messages", "max_tokens"],
 ] as const)("%s bounded reservations", (api, outputKey) => {
+  it.each([0, -1])(
+    "checks the combined one-token rounding boundary at budget offset %i",
+    async (offset) => {
+      const f = fixture(api);
+      const body =
+        api === "openai-responses"
+          ? { model: MODEL, input: "xxxxxxx", max_output_tokens: 1 }
+          : { ...BODY, messages: [{ role: "user", content: "hello!!" }], max_tokens: 1 };
+      // Responses: ceil(1087 * .15 + .60) = 164; Messages/Chat: ceil(1367 * .15 + .60) = 206.
+      const cost = api === "openai-responses" ? 164 : 206;
+      f.limits.endTask("task");
+      f.limits.startTask("task", cost + offset);
+      f.upstream(async () => Response.json({}));
+      const response = await f.send(body);
+      try {
+        expect(response.status).toBe(offset === 0 ? 200 : 429);
+        if (offset === 0) {
+          expect(f.limits.totals().heldMicroUsd).toBe(cost);
+          expect(f.reservations[0]?.usage?.outputTokens).toBe(1);
+          await response.text();
+          expect(f.limits.totals().todayMicroUsd).toBe(cost);
+        } else {
+          expect(f.reservations).toHaveLength(0);
+          expect(f.calls).toHaveLength(0);
+          expect(f.limits.heldIds()).toEqual([]);
+        }
+      } finally {
+        await f.proxy.cancelTask("task");
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "uses the live budget ceiling with an existing hold: %s",
+    async (active) => {
+      const f = fixture(api);
+      const body =
+        api === "openai-responses"
+          ? { model: MODEL, input: [{ role: "user", content: "hello!!!!!!" }] }
+          : { ...BODY, messages: [{ role: "user", content: "hello!!!" }] };
+      f.limits.endTask("task");
+      f.limits.startTask("task", active ? 592 : 386);
+      f.upstream(async () => Response.json({}));
+      const first = active ? await f.send({ ...body, max_tokens: 1 }) : undefined;
+      const response = await f.send({ ...body, max_tokens: 500 });
+      try {
+        expect(response.status).toBe(200);
+        if (first) expect(first.status).toBe(200);
+        const index = active ? 1 : 0;
+        const ceiling = { inputTokens: 1370, outputTokens: 300, cachedInputTokens: 0 };
+        expect(JSON.parse(String(f.calls[index]?.init.body))[outputKey]).toBe(300);
+        expect(f.reservations[index]?.usage).toEqual(ceiling);
+        expect(f.stored.get("model-proxy:pending")).toMatchObject({
+          [String(f.reservations[index]?.id)]: { ceiling },
+        });
+        expect(f.limits.totals().heldMicroUsd).toBe(active ? 592 : 386);
+        await response.text();
+        expect(f.ledger[0]?.usage).toEqual(ceiling);
+        expect(f.limits.totals().todayMicroUsd).toBe(386);
+        expect(f.limits.totals().heldMicroUsd).toBe(active ? 206 : 0);
+        if (first) await first.text();
+      } finally {
+        await f.proxy.cancelTask("task");
+      }
+    },
+  );
+
   it.each([
     [{ max_tokens: 1 }, 1],
     [{ max_completion_tokens: 16 }, 16],
