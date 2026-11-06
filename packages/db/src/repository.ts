@@ -25,7 +25,7 @@ import type { BatchItem } from "drizzle-orm/batch";
 import type { AnyD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 // A separate entry point (`@opa/db/repository`), so this import is not a cycle.
-import { revokeProviderTokens, revokeTaskTokens } from "./capability-tokens";
+import { revokeProviderTokens, revokeTaskTokens, verifyCapabilityToken } from "./capability-tokens";
 import type { ComputerRow } from "./computers";
 import { openD1, readSchemaVersion } from "./index";
 import { memoryService } from "./memory";
@@ -535,6 +535,11 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
    */
   const rawDb = DB as unknown as SqlDatabase;
   return {
+    /** Narrow bearer adapter: neither a caller-supplied user ID nor a forged scope names a DO. */
+    assistantForModelProxy: async (token: string): Promise<Stub | null> => {
+      const scope = await verifyCapabilityToken(rawDb, { token, expectedAud: "model_proxy" });
+      return scope ? ASSISTANT.get(ASSISTANT.idFromName(`u:${scope.userId}`)) : null;
+    },
     /**
      * For the Workflow entrypoint only (the lint enforces it): the scope of the user whose task
      * row names this Workflow instance, with the row itself (M3-12 AC9). The Workflow's instance
@@ -707,6 +712,25 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
     forUser(scope: UserScope) {
       if (!issued.has(scope)) throw new Error("scope was not issued by the session layer");
       const { userId } = scope;
+      const endTaskTokens = async (id: string, reason: string, now: number) => {
+        await revokeTaskTokens(rawDb, id, userId, reason, now);
+        // Ordinary tasks cannot have an in-flight proxy call. Do not start a DO for them.
+        // Include revoked/expired rows: a retry still has to notify after a lost abort RPC.
+        const proxy = await rawDb
+          .prepare(
+            "SELECT 1 FROM capability_tokens WHERE user_id = ? AND task_id = ? AND aud = 'model_proxy' LIMIT 1",
+          )
+          .bind(userId, id)
+          .first();
+        if (!proxy) return;
+        const assistant = ASSISTANT.get(ASSISTANT.idFromName(`u:${userId}`)) as {
+          abortModelProxyTask?: (taskId: string) => Promise<void>;
+        };
+        // Node does not host this audience yet. On Workers, failures propagate so a retry can
+        // notify again after the terminal write; no later bearer is honored in the meantime.
+        if (typeof assistant.abortModelProxyTask === "function")
+          await assistant.abortModelProxyTask(id);
+      };
       const fileKey = (id: string) => `u/${userId}/files/${checkId(id)}`;
       const memory = memoryService(db, userId);
       const attachmentKey = (id: string) => `u/${userId}/attachments/${checkId(id)}`;
@@ -2066,6 +2090,31 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
               })
               .onConflictDoNothing({ target: usage.id });
           },
+          /** Proxy calls insert a worst-case reservation before dispatch, then replace only
+           * that same owned task/pair's counts at settlement. Recovery replays the same ID. */
+          recordProxy: async (call: LedgerCall & { id: string; taskId: string }) => {
+            const { id: _generated, ...values } = ledgerValues(call);
+            const changed = await db
+              .insert(usage)
+              .values({
+                ...values,
+                id: checkId(call.id),
+                userId,
+                taskId: checkId(call.taskId),
+              })
+              .onConflictDoUpdate({
+                target: usage.id,
+                set: values,
+                setWhere: and(
+                  eq(usage.userId, userId),
+                  eq(usage.taskId, call.taskId),
+                  eq(usage.providerId, call.providerId),
+                  eq(usage.model, call.model),
+                ) as SQL,
+              })
+              .returning({ id: usage.id });
+            if (changed.length !== 1) throw new Error("usage reservation conflict");
+          },
           /** Every ledger row, oldest first, for the data export (M3-20 AC1). */
           list: () =>
             db.select().from(usage).where(eq(usage.userId, userId)).orderBy(usage.createdAt),
@@ -2992,8 +3041,12 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
             // An ended task's tokens die through the one revocation code path (M4-00a AC2a).
             // A `budget_limited` pause is not an ending: the task may be continued, so its
             // tokens stay live under the task deadline.
-            if (ended && status !== "budget_limited")
-              await revokeTaskTokens(rawDb, id, userId, `task_${status}`, now);
+            if (
+              status !== "budget_limited" &&
+              (ended ||
+                (current && (TASK_TERMINAL_STATUSES as readonly string[]).includes(current.status)))
+            )
+              await endTaskTokens(id, `task_${status}`, now);
             return ended;
           },
           /**
@@ -3037,7 +3090,17 @@ export function createRepository<Stub, Id>({ DB, FILES, ASSISTANT }: DataBinding
                   .returning({ id: tasks.id })
               ).length > 0;
             // A cancelled task's tokens die through the one revocation code path (M4-00a AC2a).
-            if (cancelled) await revokeTaskTokens(rawDb, id, userId, "task_cancelled", now);
+            const current = !cancelled
+              ? (
+                  await db
+                    .select({ status: tasks.status })
+                    .from(tasks)
+                    .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
+                    .limit(1)
+                )[0]
+              : undefined;
+            if (cancelled || current?.status === "cancelled")
+              await endTaskTokens(id, "task_cancelled", now);
             return cancelled;
           },
           /**

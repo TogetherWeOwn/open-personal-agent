@@ -127,7 +127,10 @@ taskRoutes.post("/:id/cancel", async (c) => {
   const user = createRepository(c.env).forUser(c.var.session.scope);
   const row = await user.tasks.get(id);
   if (!row) return c.json({ error: "not_found" }, 404);
-  if (!(await user.tasks.cancel(id))) return c.json({ error: "already_ended" }, 409);
+  // A previous attempt may have committed cancellation before an abort RPC failed. The
+  // remaining Workflow/reply cleanup is idempotent and must still run on that retry.
+  if (!(await user.tasks.cancel(id)) && row.status !== "cancelled")
+    return c.json({ error: "already_ended" }, 409);
   const binding = c.env.TASK_WORKFLOW;
   if (row.workflowInstanceId && typeof binding?.get === "function") {
     await binding
@@ -248,7 +251,8 @@ taskRoutes.post("/:id/stop", async (c) => {
   const found = await pausedTask(c);
   if (!found) return c.json({ error: "not_found" }, 404);
   const { user, task } = found;
-  if (!(await user.tasks.cancel(task.id))) return c.json({ error: "not_active" }, 409);
+  if (!(await user.tasks.cancel(task.id)) && task.status !== "cancelled")
+    return c.json({ error: "not_active" }, 409);
   await wake(c, task.workflowInstanceId);
   // A run that never wakes (its wait already ended it) can't cut its reply; this is a no-op
   // once the woken run has cut it itself.

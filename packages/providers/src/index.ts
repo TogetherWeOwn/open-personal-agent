@@ -9,6 +9,7 @@ export {
   DEFAULT_OPENAI_CHAT_COMPAT,
   OPENAI_CHAT_HOST_PRESETS,
   type OpenAIChatCompat,
+  resolveCompat,
 } from "./compat";
 export { canonicalOrigin, credentialBinding } from "./credential-binding";
 export { isLoopbackHost } from "./http";
@@ -23,6 +24,7 @@ export {
   resolveResponsesCompat,
   usesOpenAIResponses,
 } from "./openai-responses";
+export { SseParser } from "./sse";
 export {
   createWorkersAIProvider,
   STARTER_MODEL,

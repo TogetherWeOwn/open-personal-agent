@@ -50,7 +50,7 @@ export function capabilityTokenContract(name: string, migrated: () => Promise<Sq
       const repo = createRepository({
         DB: DB as never,
         FILES: stub,
-        ASSISTANT: stub,
+        ASSISTANT: { idFromName: (name: string) => name, get: () => ({}) },
       });
       const alice = repo.forUser(scopeFromSession({ userId: a }));
       expect(await alice.chat.open(`ca-${tag}`, "A's")).toBe(true);

@@ -68,9 +68,11 @@ describe("a bearer token", () => {
     const files = Object.keys(sources);
     expect(files.some((f) => f.endsWith("server/src/session.ts"))).toBe(true);
     expect(files.some((f) => f.endsWith("src/worker-app.ts"))).toBe(true);
-    const readers = files.filter((f) => /authorization|bearer/i.test(sources[f] as string));
-    // `session.ts` owns both guards: `tokenGuard` reads the bearer on token routes, and
-    // `sessionGuard` rejects one on session routes. Nothing else may touch the header.
+    const readers = files.filter((f) =>
+      /parseBearerToken|(?:header|get)\(\s*["']authorization["']/i.test(sources[f] as string),
+    );
+    // Incoming credentials are parsed only in `session.ts`, including DO RPC requests.
+    // A provider's outbound Authorization header is not an incoming credential reader.
     expect(readers).toEqual([files.find((f) => f.endsWith("server/src/session.ts"))]);
   });
 });

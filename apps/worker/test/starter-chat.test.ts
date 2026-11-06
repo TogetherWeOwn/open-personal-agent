@@ -24,7 +24,7 @@ function starterBinding(seen: { model: unknown; inputs: Record<string, unknown> 
   const text =
     'data: {"response":"Hi from the starter.","p":"x"}\n\n' +
     'data: {"response":"","usage":{"prompt_tokens":25,"completion_tokens":6,"total_tokens":31}}\n\n' +
-    "data: [DONE]\n";
+    "data: [DONE]\n\n";
   const ai: WorkersAIBinding = {
     run: async (model, inputs) => {
       seen.push({ model, inputs: inputs as Record<string, unknown> });

@@ -51,10 +51,11 @@ export const sameOrigin = (c: Context) => c.req.header("Origin") === new URL(c.r
 
 /**
  * Every state change must come from this exact origin, or none is accepted (D2). Same-site isn't
- * enough: `evil.example.workers.dev` is same-site with `opa.example.workers.dev`. There is no
- * exemption: a future webhook route must verify its signature before it is exempted here.
+ * enough: `evil.example.workers.dev` is same-site with `opa.example.workers.dev`. Only an
+ * already verified token-audience request is exempt; a header or path alone is not proof.
  */
-export const exactOrigin: MiddlewareHandler = async (c, next) => {
+export const exactOrigin: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (c.get("capability")) return next();
   if (SAFE_METHODS.has(c.req.method)) return next();
   const site = c.req.header("Sec-Fetch-Site") ?? "same-origin";
   if (sameOrigin(c) && site === "same-origin") return next();

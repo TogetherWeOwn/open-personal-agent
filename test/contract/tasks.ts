@@ -34,7 +34,14 @@ export function taskStoreContract(
       )
         .bind(a, b)
         .run();
-      const stub = {} as never;
+      const names: string[] = [];
+      const stub = {
+        idFromName: (name: string) => {
+          names.push(name);
+          return name;
+        },
+        get: () => ({}),
+      };
       const repo = createRepository({ DB, FILES: files() as never, ASSISTANT: stub });
       const alice = repo.forUser(scopeFromSession({ userId: a }));
       const bob = repo.forUser(scopeFromSession({ userId: b }));
@@ -47,7 +54,7 @@ export function taskStoreContract(
         kind: "turn",
         mode: "background" as const,
       });
-      return { DB, repo, alice, bob, a, b, tag, make };
+      return { DB, repo, alice, bob, a, b, tag, make, names };
     }
 
     it("creates a queued task for the user's own conversation only", async () => {
@@ -79,6 +86,14 @@ export function taskStoreContract(
         }),
       ).rejects.toThrow(/invalid instance id/);
       expect(await alice.tasks.get(`t9-${tag}`)).toBeUndefined();
+    });
+
+    it("does not wake a model proxy DO for a task that never had a proxy credential", async () => {
+      const { alice, tag, make, names } = await setup();
+      const id = `no-proxy-${tag}`;
+      await alice.tasks.create(make(id, `ca-${tag}`));
+      expect(await alice.tasks.cancel(id)).toBe(true);
+      expect(names).toEqual([]);
     });
 
     it("runs, saves state and finishes; a terminal row doesn't move again", async () => {

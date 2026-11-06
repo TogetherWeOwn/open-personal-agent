@@ -39,14 +39,15 @@ const TOUCH_MS = 60 * 60_000;
  * The routes a capability token opens, as `METHOD /path` to the audience the route serves —
  * the credential partition (M4-00a AC3). Session cookies never open these routes and capability
  * tokens never open any other, so a bearer presented anywhere else is a 401, not a session.
- * Empty in M4-00a: the audience routes that consume these tokens land in M4-00b
- * (`model_proxy`) and M4-00c (`artifact_upload`, `tool_gateway`). Each of those adds its
- * route here with its expected audience, plus an M3-21a isolation case for the new `:id` route.
+ * Each audience route registers its expected audience here, plus an M3-21a isolation case
+ * for every new `:id` route. Artifact-upload and tool-gateway routes are not mounted yet.
  * A token pattern must not match any other route's path: `matchRoute` cannot tell which route
  * Hono would serve, so an overlap would let a bearer open a session route. `routes.test.ts`
  * enforces this for every entry.
  */
-export const TOKEN_ROUTES: ReadonlyMap<string, CapabilityAudience> = new Map([]);
+export const TOKEN_ROUTES: ReadonlyMap<string, CapabilityAudience> = new Map([
+  ["POST /api/model-proxy/:providerId", "model_proxy"],
+]);
 
 /** The audience a route expects a bearer for, or `null` when the route takes a session. */
 export function routeCredential(route: string): CapabilityAudience | null {
@@ -80,6 +81,11 @@ function matchRoute(
   return undefined;
 }
 
+/** The single incoming credential parser, shared by the HTTP guard and DO RPC boundary. */
+export function readCapabilityToken(request: Request): string | null {
+  return parseBearerToken(request.headers.get("authorization"));
+}
+
 /**
  * Verifies bearers for `routeTable` before the session guard runs. A route outside the table
  * passes through untouched; on a table route only a live token for the expected audience
@@ -97,7 +103,7 @@ export function tokenGuardFor(
     const denied = () => c.json({ error: "unauthenticated" }, 401);
     // Both credentials at once is ambiguous: neither may win by accident.
     if (getCookie(c, auth.SESSION_COOKIE) !== undefined) return denied();
-    const token = parseBearerToken(c.req.header("authorization"));
+    const token = readCapabilityToken(c.req.raw);
     if (!token) return denied();
     const scope = await systemStore(c.env).capability.verify({ token, expectedAud });
     if (!scope) return denied();
@@ -114,14 +120,14 @@ export const tokenGuard = tokenGuardFor(TOKEN_ROUTES);
  * same-site is never enough. Then every route not on the public list needs a live session.
  */
 export const sessionGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
+  // Only an already verified, cookie-free audience route is exempt from browser CSRF checks.
+  if (c.get("capability")) return next();
   if (!SAFE_METHODS.has(c.req.method) && !sameOrigin(c)) {
     return c.json({ error: "bad_origin" }, 403);
   }
   // Hono answers HEAD with the GET handler, so the list's GET entries cover HEAD too.
   const method = c.req.method === "HEAD" ? "GET" : c.req.method;
   if (PUBLIC_ROUTES.has(`${method} ${c.req.path}`)) return next();
-  // A bearer-verified token route already passed `tokenGuard`, which runs first.
-  if (c.get("capability")) return next();
   // A bearer on a session route is never a session: fail closed rather than ignore it, so a
   // capability token presented to the wrong credential partition still answers 401 (M4-00a AC3).
   // Bearer-scheme only: a self-hosted deployment behind a Basic-auth reverse proxy forwards

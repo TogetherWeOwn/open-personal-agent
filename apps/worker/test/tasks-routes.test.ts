@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Tasks API (M3-13 AC1-2): the list with its conversation and spend, one task, and cancel.
 // Cancelling writes the row first and terminates the Workflow best-effort; a missing or foreign
-// id is 404, and cancelling an ended task is 409.
+// id is 404, and an already-cancelled task permits idempotent cleanup retries.
 import { createRepository, scopeFromSession } from "@opa/db/repository";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../src/env";
@@ -110,7 +110,7 @@ describe("tasks routes", () => {
     expect(((await res.json()) as { tasks: unknown[] }).tasks).toHaveLength(2);
   });
 
-  it("cancels the row first, then terminates the Workflow; an ended task is a 409", async () => {
+  it("cancels the row first, then terminates the Workflow; cancelled cleanup is retryable", async () => {
     const { browser, owner } = await claim();
     const { taskId, instanceId } = await makeTask(owner);
     const terminated: string[] = [];
@@ -132,7 +132,8 @@ describe("tasks routes", () => {
     expect(terminated).toEqual([instanceId]);
     expect(((await res.json()) as { task: { status: string } }).task.status).toBe("cancelled");
 
-    expect((await bound.req(`/api/tasks/${taskId}/cancel`, { method: "POST" })).status).toBe(409);
+    expect((await bound.req(`/api/tasks/${taskId}/cancel`, { method: "POST" })).status).toBe(200);
+    expect(terminated).toEqual([instanceId, instanceId]);
     expect((await bound.req("/api/tasks/missing/cancel", { method: "POST" })).status).toBe(404);
     const stranger = await strangerBrowser("u2");
     expect((await stranger.req(`/api/tasks/${taskId}/cancel`, { method: "POST" })).status).toBe(

@@ -30,6 +30,14 @@ interface Case {
 
 /** One case per protected route that takes a param, as `METHOD /path`. */
 const CASES: Record<string, Case> = {
+  // Neither user's session can enter the bearer-only audience. Real bearer/DO isolation and
+  // zero-upstream denials are exercised in model-proxy.test.ts and model-proxy-config.test.ts.
+  "POST /api/model-proxy/:providerId": {
+    params: (v) => ({ providerId: v.provider }),
+    body: () => ({}),
+    status: 401,
+    own: 401,
+  },
   "GET /api/conversations/:id/messages": { params: (v) => ({ id: v.conversation }), own: 200 },
   "PUT /api/conversations/:id/model": {
     params: (v) => ({ id: v.conversation }),
@@ -76,9 +84,9 @@ const CASES: Record<string, Case> = {
   "POST /api/tasks/:id/cancel": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
   // The task is resumed, then put back: no Workflow instance runs in the test to wake ("ended").
   "POST /api/tasks/:id/continue": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
-  // The owner's loop cancels first (routes run sorted), so by Stop the task has ended: 409
-  // still proves the row was found, since a foreign id answers 404 before the write.
-  "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 409 },
+  // The owner's loop cancels first (routes run sorted); Stop retries the idempotent cleanup.
+  // A foreign id still answers 404 before the write.
+  "POST /api/tasks/:id/stop": { params: (v) => ({ id: v.task }), body: () => ({}), own: 200 },
   // Clearing the computer override validates without a registry: another user's task is a 404.
   "PUT /api/tasks/:id/computer": {
     params: (v) => ({ id: v.task }),
