@@ -133,6 +133,7 @@ export class ModelProxy {
         {
           taskId: scope.taskId,
           background: true,
+          maxOutputTokens: request.maxOutputTokens,
         },
       );
       if ("limit" in reserved) return failure(429, reserved.limit);
@@ -590,7 +591,12 @@ export function proxyRequest(
   path: string,
   value: unknown,
   maxOutputTokens: number,
-): { url: string; body: Record<string, unknown>; inputTokens: number } | null {
+): {
+  url: string;
+  body: Record<string, unknown>;
+  inputTokens: number;
+  maxOutputTokens: number;
+} | null {
   if (path !== PATHS[provider.api]) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const source = value as Record<string, unknown>;
@@ -656,5 +662,6 @@ export function proxyRequest(
     url: base.href.replace(/\/$/, "") + path,
     body,
     inputTokens: bytes + 1024 + frames * 256,
+    maxOutputTokens: outputTokens,
   };
 }

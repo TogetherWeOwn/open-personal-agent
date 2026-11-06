@@ -155,6 +155,110 @@ describe("daily spend", () => {
   });
 });
 
+describe("caller-bounded spend reservations", () => {
+  it.each([
+    [1, 164, 1],
+    [16, 173, 16],
+    [500, 344, 301],
+  ])("rounds the combined fractional-price hold once for cap %i", (cap, budget, output) => {
+    const { limits: l } = limits();
+    l.startTask("task", budget);
+    // 1,087 input tokens at 0.15 micro-USD; output at 0.60 micro-USD.
+    expect(
+      l.reserveFor("fractional", "openai", "gpt-4o-mini", 2174, 0, {
+        taskId: "task",
+        background: true,
+        maxOutputTokens: cap,
+      }),
+    ).toEqual({ maxOutputTokens: output, reservedMicroUsd: budget });
+    expect(l.totals().heldMicroUsd).toBe(budget);
+    l.settle("fractional", "openai", "gpt-4o-mini", null);
+    expect(l.totals().todayMicroUsd).toBe(budget);
+  });
+
+  it("preserves the legacy uncapped fractional-price admission boundary", () => {
+    const { limits: l } = limits();
+    l.startTask("task", 317);
+    expect(l.reserve("chat", "openai", "gpt-4o-mini", 2174, 0, { taskId: "task" })).toBeNull();
+    expect(l.heldIds()).toEqual([]);
+  });
+
+  it.each([
+    [1, 2008, 1, 2008],
+    [16, 2128, 16, 2128],
+    [255, 4040, 255, 4040],
+    [500, 4400, 300, 4400],
+    [999999, 50000, 4096, 34768],
+  ])("reserves cap %i within %i micro-USD", (cap, budget, output, charge) => {
+    const { limits: l } = limits();
+    l.startTask("task", budget);
+    expect(
+      l.reserveFor("bounded", PROVIDER, MODEL, 2000, 0, {
+        taskId: "task",
+        background: true,
+        maxOutputTokens: cap,
+      }),
+    ).toEqual({ maxOutputTokens: output, reservedMicroUsd: charge });
+    expect(l.totals().heldMicroUsd).toBe(charge);
+    l.settle("bounded", PROVIDER, MODEL, null);
+    l.settle("bounded", PROVIDER, MODEL, null);
+    expect(l.task("task")?.spentMicroUsd).toBe(charge);
+    expect(l.totals()).toEqual({ todayMicroUsd: charge, monthMicroUsd: charge, heldMicroUsd: 0 });
+  });
+
+  it.each([1999, 2000, 2007])(
+    "refuses %i micro-USD when input plus one output token is unaffordable",
+    (budget) => {
+      const { limits: l } = limits();
+      l.startTask("task", budget);
+      expect(
+        l.reserveFor("bounded", PROVIDER, MODEL, 2000, 0, {
+          taskId: "task",
+          background: true,
+          maxOutputTokens: 1,
+        }),
+      ).toHaveProperty("limit", "task_budget");
+      expect(l.heldIds()).toEqual([]);
+    },
+  );
+
+  it("keeps the uncapped minimum while permitting the caller's smaller useful reply", () => {
+    const { limits: l } = limits();
+    l.setSettings({ dailyCapMicroUsd: 2128, hardCapMicroUsd: 1 });
+    expect(l.reserve("chat", PROVIDER, MODEL, 2000)).toBeNull();
+    expect(l.reserveFor("bounded", PROVIDER, MODEL, 2000, 0, { maxOutputTokens: 16 })).toEqual({
+      maxOutputTokens: 16,
+      reservedMicroUsd: 2128,
+    });
+    l.release("bounded");
+    expect(l.totals().todayMicroUsd).toBe(0);
+  });
+
+  it.each(["daily", "monthly_hard"] as const)(
+    "enforces the live %s room around a small hold",
+    (limit) => {
+      const { limits: l } = limits();
+      l.startTask("task", 100000);
+      l.setSettings(limit === "daily" ? { dailyCapMicroUsd: 4015 } : { hardCapMicroUsd: 4015 });
+      const scope = { taskId: "task", background: true, maxOutputTokens: 1 };
+      expect(l.reserveFor("first", PROVIDER, MODEL, 2000, 0, scope)).toEqual({
+        maxOutputTokens: 1,
+        reservedMicroUsd: 2008,
+      });
+      expect(l.reserveFor("second", PROVIDER, MODEL, 2000, 0, scope)).toHaveProperty(
+        "limit",
+        limit,
+      );
+      expect(l.heldIds()).toEqual(["first"]);
+      l.release("first");
+      expect(l.reserveFor("retry", PROVIDER, MODEL, 2000, 0, scope)).toHaveProperty(
+        "maxOutputTokens",
+        1,
+      );
+    },
+  );
+});
+
 describe("tool call rate (COST-2)", () => {
   it("allows 60 tool calls in any minute, then refuses without counting", () => {
     const { limits: l, clock } = limits();
